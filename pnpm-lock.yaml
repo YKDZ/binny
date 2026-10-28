@@ -196,9 +196,6 @@ importers:
 
   .:
     devDependencies:
-      '@binny/api':
-        specifier: workspace:*
-        version: link:packages/api
       '@binny/tooling-config':
         specifier: workspace:./packages/tooling-config
         version: link:packages/tooling-config

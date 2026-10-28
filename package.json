@@ -20,7 +20,6 @@
     "test:runtime-connections": "node --conditions=source scripts/test-runtime-connections.ts"
   },
   "devDependencies": {
-    "@binny/api": "workspace:*",
     "@binny/tooling-config": "workspace:./packages/tooling-config",
     "@changesets/cli": "catalog:",
     "@types/node": "catalog:",

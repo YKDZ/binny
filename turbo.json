@@ -38,10 +38,13 @@
     },
     "//#test:binny:e2e": {
       "dependsOn": ["@binny/binny#build"],
+      "passThroughEnv": ["BINNY_E2E_HOST", "BINNY_E2E_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
         "scripts/binny-e2e.ts",
+        "packages/api/package.json",
+        "packages/api/scripts/**",
         "packages/api/src/**",
         "packages/binny/src/**",
         "packages/contracts/src/**",
