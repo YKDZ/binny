@@ -5,6 +5,7 @@ import {
   archiveSequenceSchema,
   archiveSnapshotSchema,
   archiveSnapshotSequenceSchema,
+  archiveRelationStateSchema,
   type ArchiveCommit,
   type ArchiveOperation,
   type ArchiveReadOptions,
@@ -33,27 +34,65 @@ export const archiveItemReadQuerySchema = z
   })
   .strict();
 
-export const archiveTimelineObservationSchema = z
+const archiveTimelineMetadata = {
+  commitId: archiveIdentifierSchema,
+  archiveSeq: archiveSequenceSchema,
+  ordinal: z.number().int().nonnegative(),
+  binId: binIdSchema,
+  runId: nonEmptyText.max(128).optional(),
+  collectorVersion: nonEmptyText.max(256).optional(),
+  observedAt: timestampSchema,
+  recordedAt: timestampSchema,
+};
+
+export const archiveTimelineItemEventSchema = z
   .object({
-    commitId: archiveIdentifierSchema,
-    archiveSeq: archiveSequenceSchema,
-    ordinal: z.number().int().nonnegative(),
-    binId: binIdSchema,
-    runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    ...archiveTimelineMetadata,
+    kind: z.literal("item"),
+    itemId: archiveIdentifierSchema,
     revisionId: archiveIdentifierSchema,
     sourceModifiedAt: timestampSchema.optional(),
-    observedAt: timestampSchema,
-    recordedAt: timestampSchema,
   })
   .strict();
 
-/** 时间线固定按归档序号、批内序号和 commit ID 升序分页。 */
+const archiveTimelineRelationEventFields = {
+  ...archiveTimelineMetadata,
+  kind: z.literal("relation"),
+  relationId: nonEmptyText.max(256),
+};
+
+export const archiveTimelineRelationObservedEventSchema = z
+  .object({
+    ...archiveTimelineRelationEventFields,
+    status: z.literal("observed"),
+    revisionId: archiveIdentifierSchema,
+    state: archiveRelationStateSchema,
+  })
+  .strict();
+
+export const archiveTimelineRelationWithdrawnEventSchema = z
+  .object({
+    ...archiveTimelineRelationEventFields,
+    status: z.literal("withdrawn"),
+  })
+  .strict();
+
+export const archiveTimelineRelationEventSchema = z.union([
+  archiveTimelineRelationObservedEventSchema,
+  archiveTimelineRelationWithdrawnEventSchema,
+]);
+
+export const archiveTimelineEventSchema = z.union([
+  archiveTimelineItemEventSchema,
+  archiveTimelineRelationEventSchema,
+]);
+
+/** 混合条目与关系事件，并按归档序号、批内序号和 commit ID 升序分页。 */
 export const archiveTimelinePageSchema = z
   .object({
     itemId: archiveIdentifierSchema,
     snapshot: archiveSnapshotSchema,
-    observations: z.array(archiveTimelineObservationSchema),
+    events: z.array(archiveTimelineEventSchema),
     nextCursor: z.string().min(1).max(4096).optional(),
   })
   .strict();
@@ -74,9 +113,13 @@ export const archiveTimelineCursorSchema = z
   })
   .strict();
 
-export type ArchiveTimelineObservation = z.infer<
-  typeof archiveTimelineObservationSchema
+export type ArchiveTimelineItemEvent = z.infer<
+  typeof archiveTimelineItemEventSchema
 >;
+export type ArchiveTimelineRelationEvent = z.infer<
+  typeof archiveTimelineRelationEventSchema
+>;
+export type ArchiveTimelineEvent = z.infer<typeof archiveTimelineEventSchema>;
 export type ArchiveTimelinePage = z.infer<typeof archiveTimelinePageSchema>;
 export type ArchiveTimelineOptions = ArchiveReadOptions & {
   readonly limit?: number;

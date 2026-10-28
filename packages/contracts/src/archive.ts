@@ -1,6 +1,7 @@
 import * as z from "zod";
 
 import type { ArchiveHistoryOperations } from "./archive-history.ts";
+import type { ArchiveRelationsOperations } from "./archive-relations.ts";
 import { binIdSchema } from "./bin-configuration.ts";
 
 const nonEmptyText = z
@@ -99,6 +100,45 @@ const jsonObjectSchema = z
       validateJsonValue(value, context, [key], ancestors);
     }
   });
+
+const archiveRelationTargetInputSchema = z.union([
+  z.object({ sourceKey: sourceKeySchema }).strict(),
+  z
+    .object({
+      sourceRef: nonEmptyText.max(4096, "外部来源引用不能超过 4096 个字符。"),
+    })
+    .strict(),
+]);
+
+/** 关系端点引用已归档对象，或显式标记为尚未归档的外部来源。 */
+export const archiveRelationStateSchema = z
+  .object({
+    from: sourceKeySchema,
+    to: archiveRelationTargetInputSchema,
+    name: nonEmptyText.max(256, "关系名称不能超过 256 个字符。"),
+    properties: jsonObjectSchema.optional(),
+    // true 表示删除 from 时沿 from -> to 级联；名称本身没有删除语义。
+    cascade: z.boolean(),
+  })
+  .strict()
+  .superRefine((relation, context) => {
+    if ("sourceRef" in relation.to && relation.cascade) {
+      context.addIssue({
+        code: "custom",
+        path: ["cascade"],
+        message: "外部来源引用不能声明内部对象级联。",
+      });
+    }
+  });
+
+export type ArchiveRelationState = z.infer<typeof archiveRelationStateSchema>;
+
+const archiveRelationInputSchema = z
+  .object({
+    relationId: nonEmptyText.max(256, "关系标识不能超过 256 个字符。"),
+    value: archiveRelationStateSchema.nullable(),
+  })
+  .strict();
 
 const archiveBodySchema = z
   .object({
@@ -215,10 +255,18 @@ export const archiveSubmissionInputSchema = z
       .max(256, "采集器版本不能超过 256 个字符。")
       .optional(),
     observedAt: timestampSchema.optional(),
-    items: z.array(archiveItemInputSchema).min(1).max(100),
+    items: z.array(archiveItemInputSchema).max(100),
+    relations: z.array(archiveRelationInputSchema).max(100).default([]),
   })
   .strict()
   .superRefine((submission, context) => {
+    if (submission.items.length === 0 && submission.relations.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["items"],
+        message: "归档提交至少需要包含一个条目或关系观察。",
+      });
+    }
     const sourceKeys = new Set<string>();
     for (const [index, item] of submission.items.entries()) {
       const identity = JSON.stringify([
@@ -233,6 +281,17 @@ export const archiveSubmissionInputSchema = z
         });
       }
       sourceKeys.add(identity);
+    }
+    const relationIds = new Set<string>();
+    for (const [index, relation] of submission.relations.entries()) {
+      if (relationIds.has(relation.relationId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["relations", index, "relationId"],
+          message: "同一批资料不能重复声明相同关系标识。",
+        });
+      }
+      relationIds.add(relation.relationId);
     }
   });
 
@@ -263,6 +322,28 @@ const archiveCommitItemSchema = z
     sourceKey: sourceKeySchema,
   })
   .strict();
+
+const archiveCommitRelationFields = {
+  relationId: nonEmptyText.max(256),
+  ordinal: z.number().int().nonnegative(),
+};
+
+const archiveCommitRelationSchema = z.union([
+  z
+    .object({
+      ...archiveCommitRelationFields,
+      status: z.literal("observed"),
+      revisionId: archiveIdSchema,
+      state: archiveRelationStateSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...archiveCommitRelationFields,
+      status: z.literal("withdrawn"),
+    })
+    .strict(),
+]);
 
 export const archiveObservationSchema = z
   .object({
@@ -312,6 +393,7 @@ export const archiveCommitSchema = z
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     items: z.array(archiveCommitItemSchema),
+    relations: z.array(archiveCommitRelationSchema),
   })
   .strict();
 
@@ -348,6 +430,8 @@ export const archiveErrorSchema = z
           "item_not_found",
           "revision_not_found",
           "commit_not_found",
+          "relation_not_found",
+          "relation_endpoint_conflict",
         ]),
         message: z.string(),
         path: z.array(z.union([z.string(), z.number()])).optional(),
@@ -357,6 +441,7 @@ export const archiveErrorSchema = z
   .strict();
 
 export type ArchiveCommit = z.infer<typeof archiveCommitSchema>;
+export type ArchiveCommitRelation = z.infer<typeof archiveCommitRelationSchema>;
 export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
 export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
@@ -382,4 +467,5 @@ export type ArchiveOperations = {
   getArchiveRevision(
     revisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionRead>>;
-} & ArchiveHistoryOperations;
+} & ArchiveHistoryOperations &
+  ArchiveRelationsOperations;

@@ -4,6 +4,8 @@ import {
   archiveIdentifierSchema,
   archiveItemReadSchema,
   archiveItemReadQuerySchema,
+  archiveRelationPageSchema,
+  archiveRelationReadQuerySchema,
   archiveRevisionReadSchema,
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
@@ -87,6 +89,49 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
           {
             ...(query.binId === undefined ? {} : { binId: query.binId }),
             ...(query.asOf === undefined ? {} : { asOf: query.asOf }),
+          },
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
+      "/archives/items/:itemId/relations",
+      zValidator(
+        "param",
+        z.object({ itemId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("query", archiveRelationReadQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const query = c.req.valid("query");
+        const result = await operations.getArchiveRelations(
+          c.req.valid("param").itemId,
+          {
+            binId: query.binId,
+            direction: query.direction,
+            ...(query.asOf === undefined ? {} : { asOf: query.asOf }),
+            ...(query.limit === undefined
+              ? {}
+              : { limit: Number(query.limit) }),
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
           },
         );
         if (!result.ok) {
@@ -211,8 +256,10 @@ export const archiveApiSchemas: {
   readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
   readonly timelineQuery: Record<string, unknown>;
+  readonly relationQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
+  readonly relationPage: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
   submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
@@ -220,8 +267,10 @@ export const archiveApiSchemas: {
   itemQuery: toInputJsonSchema(archiveItemReadQuerySchema),
   item: z.toJSONSchema(archiveItemReadSchema),
   timelineQuery: toInputJsonSchema(archiveTimelineQuerySchema),
+  relationQuery: toInputJsonSchema(archiveRelationReadQuerySchema),
   revision: z.toJSONSchema(archiveRevisionReadSchema),
   timeline: z.toJSONSchema(archiveTimelinePageSchema),
+  relationPage: z.toJSONSchema(archiveRelationPageSchema),
   error: z.toJSONSchema(archiveErrorSchema),
 };
 

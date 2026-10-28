@@ -185,23 +185,33 @@ async function archiveHttpStep(
 
 function archiveIds(state: string): {
   readonly itemId: string;
+  readonly relationItemId: string;
   readonly revisionId: string;
   readonly commitId: string;
   readonly historicalAsOf: string;
+  readonly relationAsOf: string;
 } {
   const parsed: unknown = JSON.parse(state);
   assert.ok(typeof parsed === "object" && parsed !== null);
   assert.ok("itemId" in parsed && typeof parsed.itemId === "string");
+  assert.ok(
+    "relationItemId" in parsed && typeof parsed.relationItemId === "string",
+  );
   assert.ok("revisionId" in parsed && typeof parsed.revisionId === "string");
   assert.ok("commitId" in parsed && typeof parsed.commitId === "string");
   assert.ok(
     "historicalAsOf" in parsed && typeof parsed.historicalAsOf === "string",
   );
+  assert.ok(
+    "relationAsOf" in parsed && typeof parsed.relationAsOf === "string",
+  );
   return {
     itemId: parsed.itemId,
+    relationItemId: parsed.relationItemId,
     revisionId: parsed.revisionId,
     commitId: parsed.commitId,
     historicalAsOf: parsed.historicalAsOf,
+    relationAsOf: parsed.relationAsOf,
   };
 }
 
@@ -212,6 +222,7 @@ function archiveResponses(response: string): {
   readonly firstTimelinePage: unknown;
   readonly secondTimelinePage: unknown;
   readonly commit: unknown;
+  readonly relationPage: unknown;
 } {
   const parsed: unknown = JSON.parse(response);
   assert.ok(typeof parsed === "object" && parsed !== null);
@@ -221,7 +232,8 @@ function archiveResponses(response: string): {
       "revision" in parsed &&
       "firstTimelinePage" in parsed &&
       "secondTimelinePage" in parsed &&
-      "commit" in parsed,
+      "commit" in parsed &&
+      "relationPage" in parsed,
   );
   return {
     item: parsed.item,
@@ -230,6 +242,7 @@ function archiveResponses(response: string): {
     firstTimelinePage: parsed.firstTimelinePage,
     secondTimelinePage: parsed.secondTimelinePage,
     commit: parsed.commit,
+    relationPage: parsed.relationPage,
   };
 }
 
@@ -623,7 +636,14 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(empty.bins, []);
   const archiveState = await archiveHttpStep("after-restart", baseUrl, archive);
-  const { itemId, revisionId, commitId, historicalAsOf } = archiveIds(archive);
+  const {
+    itemId,
+    relationItemId,
+    revisionId,
+    commitId,
+    historicalAsOf,
+    relationAsOf,
+  } = archiveIds(archive);
   const expectedArchive = archiveResponses(archiveState);
   const cliArchiveItem = cliData<unknown>(
     await cli(baseUrl, ["archive", "item", itemId]),
@@ -675,6 +695,23 @@ async function verifyRestartAndRemoval(
     "found",
   );
   assert.deepEqual(cliSecondTimelinePage, expectedArchive.secondTimelinePage);
+  const cliRelationPage = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "relations",
+      relationItemId,
+      "--bin",
+      "rss-main",
+      "--direction",
+      "outgoing",
+      "--as-of",
+      relationAsOf,
+      "--limit",
+      "10",
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliRelationPage, expectedArchive.relationPage);
   const cliArchiveCommit = cliData<unknown>(
     await cli(baseUrl, ["archive", "commit", commitId]),
     "found",
