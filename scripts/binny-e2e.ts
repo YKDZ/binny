@@ -210,33 +210,41 @@ async function validateApiInput(): Promise<void> {
   assert.match(malformedJson.body.error.message, /JSON|格式/u);
 }
 
+async function createSdkManifest(): Promise<unknown> {
+  const program = [
+    'import { z } from "zod";',
+    'import { collectorManifest, defineCollector } from "./dist/index.js";',
+    "const collector = defineCollector({",
+    '  id: "rss",',
+    '  version: "1.0.0",',
+    "  configSchema: z.object({",
+    "    userAgent: z.string().min(1),",
+    "    key: z.string().regex(/^a/).regex(/z$/),",
+    "  }),",
+    "  actions: {",
+    '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
+    "  },",
+    "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
+    "});",
+    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+  ].join("\n");
+  const result = await run("pnpm", [
+    "--filter",
+    "@binny/collector-sdk",
+    "exec",
+    "node",
+    "--input-type=module",
+    "-e",
+    program,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return JSON.parse(result.stdout) as unknown;
+}
+
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
-  const manifest = {
-    id: "rss",
-    version: "1.0.0",
-    configSchema: {
-      type: "object",
-      properties: { userAgent: { type: "string", minLength: 1 } },
-      required: ["userAgent"],
-      additionalProperties: false,
-    },
-    actions: {
-      collect: {
-        description: "读取并归档订阅源。",
-        params: {
-          type: "object",
-          properties: { limit: { type: "integer", minimum: 1 } },
-          required: ["limit"],
-          additionalProperties: false,
-        },
-      },
-    },
-    environment: {
-      browser: { required: false, profileReuseAfterRestart: false },
-    },
-  };
+  const manifest = await createSdkManifest();
   const manifestJson = JSON.stringify(manifest);
-  const initialConfig = JSON.stringify({ userAgent: "Binny E2E" });
+  const initialConfig = JSON.stringify({ userAgent: "Binny E2E", key: "az" });
   const initialTargets = JSON.stringify([
     { url: "https://example.test/one.xml" },
   ]);
@@ -322,6 +330,84 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   assert.deepEqual(invalidConfiguration.path, ["config", "userAgent"]);
   assert.match(invalidConfiguration.message, /长期配置/u);
 
+  const invalidRegexCreate = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "rss-regex-invalid",
+      collector: manifest,
+      identityId: "account-regex-invalid",
+      config: { userAgent: "Binny E2E", key: "ab" },
+      targets: [],
+    }),
+  });
+  assert.equal(invalidRegexCreate.status, 400);
+  const invalidRegexCreateBody = (await invalidRegexCreate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(invalidRegexCreateBody.error.code, "invalid_configuration");
+  assert.deepEqual(invalidRegexCreateBody.error.path, ["config", "key"]);
+  assert.match(invalidRegexCreateBody.error.message, /长期配置/u);
+
+  const validRegexCreate = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "rss-regex",
+      collector: manifest,
+      identityId: "account-regex",
+      config: { userAgent: "Binny E2E", key: "az" },
+      targets: [],
+    }),
+  });
+  assert.equal(validRegexCreate.status, 201);
+  const validRegexCreateBody = (await validRegexCreate.json()) as {
+    readonly config: { readonly key: string };
+  };
+  assert.equal(validRegexCreateBody.config.key, "az");
+
+  const invalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      config: { userAgent: "Binny E2E", key: "bz" },
+    }),
+  });
+  assert.equal(invalidRegexUpdate.status, 400);
+  const invalidRegexUpdateBody = (await invalidRegexUpdate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(invalidRegexUpdateBody.error.code, "invalid_configuration");
+  assert.deepEqual(invalidRegexUpdateBody.error.path, ["config", "key"]);
+
+  const afterInvalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex");
+  assert.equal(afterInvalidRegexUpdate.status, 200);
+  const afterInvalidRegexUpdateBody =
+    (await afterInvalidRegexUpdate.json()) as {
+      readonly config: { readonly key: string };
+    };
+  assert.equal(afterInvalidRegexUpdateBody.config.key, "az");
+
+  const validRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      config: { userAgent: "Binny E2E updated", key: "aaz" },
+    }),
+  });
+  assert.equal(validRegexUpdate.status, 200);
+  const validRegexUpdateBody = (await validRegexUpdate.json()) as {
+    readonly config: { readonly key: string };
+  };
+  assert.equal(validRegexUpdateBody.config.key, "aaz");
+
   const secondary = cliData<{
     readonly id: string;
     readonly identityId: string;
@@ -350,13 +436,17 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       readonly identityId: string;
     }[];
   }>(await cli(baseUrl, ["bin", "list"]), "listed");
-  assert.equal(listed.bins.length, 2);
+  assert.equal(listed.bins.length, 3);
   assert.deepEqual(listed.bins.map(({ identityId }) => identityId).toSorted(), [
     "account-one",
+    "account-regex",
     "account-two",
   ]);
 
-  const updatedConfig = JSON.stringify({ userAgent: "Binny E2E updated" });
+  const updatedConfig = JSON.stringify({
+    userAgent: "Binny E2E updated",
+    key: "aaz",
+  });
   const updatedTargets = JSON.stringify([
     { url: "https://example.test/one.xml" },
     { url: "https://example.test/extra.xml" },
@@ -423,6 +513,15 @@ async function verifyRestartAndRemoval(
   assert.equal(persisted.config.userAgent, "Binny E2E updated");
   assert.equal(persisted.targets.length, 2);
 
+  const persistedRegexConfiguration = cliData<{
+    readonly config: { readonly userAgent: string; readonly key: string };
+  }>(await cli(baseUrl, ["bin", "get", "rss-regex"]), "found");
+  assert.equal(
+    persistedRegexConfiguration.config.userAgent,
+    "Binny E2E updated",
+  );
+  assert.equal(persistedRegexConfiguration.config.key, "aaz");
+
   const enabled = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["bin", "enable", "rss-main"]),
     "enabled",
@@ -435,7 +534,10 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(removed, { removed: true, id: "rss-main" });
 
+  cliData(await cli(baseUrl, ["bin", "remove", "rss-regex"]), "removed");
+
   cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
+  cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
   cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
   const empty = cliData<{ readonly bins: readonly unknown[] }>(
     await cli(baseUrl, ["bin", "list"]),
@@ -459,7 +561,8 @@ async function main(): Promise<void> {
   );
   const port = await reservePort();
   composePort = port;
-  const baseUrl = "http://127.0.0.1:" + port;
+  const baseUrl =
+    "http://" + (process.env.BINNY_E2E_HOST ?? "172.17.0.1") + ":" + port;
   let cleanupError: Error | undefined;
   try {
     await compose(

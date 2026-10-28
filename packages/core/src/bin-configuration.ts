@@ -10,7 +10,13 @@ import {
   type CollectorManifest,
   type JsonObject,
 } from "@binny/contracts";
-import * as z from "zod";
+import * as formats from "ajv-formats";
+import {
+  Ajv2020,
+  type ErrorObject,
+  type Schema,
+  type ValidateFunction,
+} from "ajv/dist/2020.js";
 
 import type { CoreDatabase } from "./database.ts";
 
@@ -32,6 +38,31 @@ const tableName = "bin_configurations";
 const jsonbType = 3802;
 const selectColumns =
   "id, collector, identity_id, config, targets, status, created_at, updated_at";
+const addFormats = formats.default.default;
+const dynamicSchemaValidator = new Ajv2020({ strictTypes: false });
+addFormats(dynamicSchemaValidator);
+
+function dynamicSchemaPath(issue: ErrorObject): (string | number)[] {
+  const path = issue.instancePath
+    .split("/")
+    .slice(1)
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  if (
+    issue.keyword === "required" &&
+    "missingProperty" in issue.params &&
+    typeof issue.params.missingProperty === "string"
+  ) {
+    path.push(issue.params.missingProperty);
+  }
+  if (
+    issue.keyword === "additionalProperties" &&
+    "additionalProperty" in issue.params &&
+    typeof issue.params.additionalProperty === "string"
+  ) {
+    path.push(issue.params.additionalProperty);
+  }
+  return path;
+}
 
 function jsonbParameter(database: CoreDatabase, value: unknown) {
   return database.typed(value, jsonbType);
@@ -100,17 +131,17 @@ function createDynamicSchema(
   document: Record<string, unknown>,
   path: readonly (string | number)[],
 ): {
-  readonly schema: z.ZodType | undefined;
+  readonly validator: ValidateFunction | undefined;
   readonly error: BinError | undefined;
 } {
   try {
     return {
-      schema: z.fromJSONSchema(document),
+      validator: dynamicSchemaValidator.compile(document as Schema),
       error: undefined,
     };
   } catch {
     return {
-      schema: undefined,
+      validator: undefined,
       error: {
         code: "invalid_manifest",
         message: "采集器声明的 JSON Schema 无效或包含不支持的关键字。",
@@ -159,19 +190,18 @@ function validateDynamicValue(
 ): BinError | undefined {
   const built = createDynamicSchema(document, prefix);
   if (built.error !== undefined) return built.error;
-  const parsed = built.schema!.safeParse(value);
-  if (parsed.success) return undefined;
-  const issue = parsed.error.issues[0];
+  if (built.validator!(value)) return undefined;
+  const issue = built.validator!.errors?.[0];
   return {
     code: errorCode,
     message,
     ...(issue === undefined
       ? {}
-      : { path: [...schemaIssuePath(prefix, issue.path)] }),
+      : { path: [...prefix, ...dynamicSchemaPath(issue)] }),
   };
 }
 
-function validateConfiguration(
+export function validateCollectorConfiguration(
   collector: CollectorManifest,
   config: JsonObject,
 ): BinError | undefined {
@@ -246,7 +276,7 @@ export function createBinConfigurationStore(
           issue === undefined ? undefined : issue.path.map(String),
         );
       }
-      const invalid = validateConfiguration(
+      const invalid = validateCollectorConfiguration(
         checked.data.collector,
         checked.data.config,
       );
@@ -306,7 +336,7 @@ export function createBinConfigurationStore(
         const collector = checked.data.collector ?? previous.collector;
         const config = checked.data.config ?? previous.config;
         const targets = checked.data.targets ?? previous.targets;
-        const invalid = validateConfiguration(collector, config);
+        const invalid = validateCollectorConfiguration(collector, config);
         if (invalid !== undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
 
