@@ -15,7 +15,8 @@
     "fix": "node --conditions=source scripts/task-gates.ts fix",
     "boundaries": "turbo boundaries",
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",
-    "publication:publish": "changeset publish --from-pack-dir .changeset/packed"
+    "publication:publish": "changeset publish --from-pack-dir .changeset/packed",
+    "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:./packages/tooling-config",

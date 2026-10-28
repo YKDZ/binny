@@ -31,7 +31,8 @@
   },
   "dependencies": {
     "@binny/api": "workspace:*",
-    "@binny/contracts": "workspace:*"
+    "@binny/contracts": "workspace:*",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",

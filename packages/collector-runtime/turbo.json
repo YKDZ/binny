@@ -9,6 +9,16 @@
       "cache": false,
       "tags": ["work:preparation"]
     },
+    "build:fixture": {
+      "dependsOn": ["^build"],
+      "inputs": [
+        "test/fixtures/**/*.ts",
+        "tsconfig.fixture.json",
+        "tsconfig.node.json"
+      ],
+      "outputs": ["fixture-dist/**"],
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],

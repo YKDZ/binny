@@ -1,6 +1,7 @@
 node_modules/
 .pnpm-store/
 dist/
+fixture-dist/
 target/
 .turbo/
 coverage/
