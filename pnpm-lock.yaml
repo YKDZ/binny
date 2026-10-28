@@ -276,6 +276,15 @@ importers:
       '@binny/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@hono/zod-validator':
+        specifier: ^0.9.1
+        version: 0.9.1(hono@4.13.14)(zod@4.6.7)
+      hono:
+        specifier: ^4.13.14
+        version: 4.13.14
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -301,6 +310,9 @@ importers:
       '@binny/api':
         specifier: workspace:*
         version: link:../api
+      '@binny/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@ykdz/cli-contract':
         specifier: 'catalog:'
         version: 0.3.0
@@ -393,6 +405,10 @@ importers:
         version: typescript@7.0.2
 
   packages/contracts:
+    dependencies:
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -418,6 +434,12 @@ importers:
       '@binny/contracts':
         specifier: workspace:*
         version: link:../contracts
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -446,6 +468,9 @@ importers:
       '@binny/core':
         specifier: workspace:*
         version: link:../core
+      '@hono/node-server':
+        specifier: ^2.1.5
+        version: 2.1.5(hono@4.13.14)
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -554,6 +579,18 @@ packages:
   '@clack/prompts@1.8.1':
     resolution: {integrity: sha512-dlT1m5e/0yUL0kRNcQn7yGLVThkgbB0Ga/1AmfDDC/8ik6AIiSf2QLQO2zPYvefsHP0aFgxO93cVLCCfDp7kzQ==}
     engines: {node: '>= 20.12.0'}
+
+  '@hono/node-server@2.1.5':
+    resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      hono: ^4 || ^5.0.0-0
+
+  '@hono/zod-validator@0.9.1':
+    resolution: {integrity: sha512-iiv6w0qrIc0arfvCtUqBWsvl4fXjzaTcQcCJTTtCnkawF9HHGE+KjEl0ox3gQJ6rKZEgE3mLExlQCF72M+mNuw==}
+    peerDependencies:
+      hono: '>=4.11.2'
+      zod: ^3.25.0 || ^4.0.0
 
   '@manypkg/find-root@3.1.0':
     resolution: {integrity: sha512-BcSqCyKhBVZ5YkSzOiheMCV41kqAFptW6xGqYSTjkVTl9XQpr+pqHhwgGCOHQtjDCv7Is6EFyA14Sm5GVbVABA==}
@@ -1027,6 +1064,10 @@ packages:
       picomatch:
         optional: true
 
+  hono@4.13.14:
+    resolution: {integrity: sha512-yhRLQ21U6qa9Hsu2N7Qcbh8tE+WKEcoErjIo56LeSGiGXGp9sA7UpE86Ui9uexb61KakiGwuHMn2QdV7w6i6kQ==}
+    engines: {node: '>=16.9.0'}
+
   human-id@4.2.2:
     resolution: {integrity: sha512-Z+8unD6em/MJwyrkWQ2M3wygRGI1+MztbutiNwk1DCuEPXOZRWGjtcMPZYP1exY9iNZMhd7ZOSMQSo9WYtiQRw==}
     hasBin: true
@@ -1081,6 +1122,10 @@ packages:
 
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
+    engines: {node: '>=12'}
+
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
     engines: {node: '>=12'}
 
   semver@7.8.5:
@@ -1244,6 +1289,15 @@ snapshots:
       fast-string-width: 3.0.2
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
+
+  '@hono/node-server@2.1.5(hono@4.13.14)':
+    dependencies:
+      hono: 4.13.14
+
+  '@hono/zod-validator@0.9.1(hono@4.13.14)(zod@4.6.7)':
+    dependencies:
+      hono: 4.13.14
+      zod: 4.6.7
 
   '@manypkg/find-root@3.1.0':
     dependencies:
@@ -1499,6 +1553,8 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.7
 
+  hono@4.13.14: {}
+
   human-id@4.2.2: {}
 
   import-meta-resolve@4.2.0: {}
@@ -1573,6 +1629,8 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
+
+  postgres@3.4.9: {}
 
   semver@7.8.5: {}
 

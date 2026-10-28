@@ -32,10 +32,14 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "test:client-types": "tsc -p test-consumer/tsconfig.json --noEmit --pretty false",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
   },
   "dependencies": {
-    "@binny/contracts": "workspace:*"
+    "@binny/contracts": "workspace:*",
+    "@hono/zod-validator": "^0.9.1",
+    "hono": "^4.13.14",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
