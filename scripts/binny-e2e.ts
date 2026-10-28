@@ -41,7 +41,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny18-e2e-" + process.pid.toString(10);
+const projectName = "binny18fix-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -2149,11 +2149,86 @@ async function verifyRestartAndRemoval(
     ),
   );
 
+  const cliJsonSearch = cliData<{
+    readonly unit: string;
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly json?: readonly {
+          readonly field: string;
+          readonly path: readonly (string | number)[];
+          readonly exists: boolean;
+          readonly value?: unknown;
+        }[];
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "json-number-high",
+            },
+            {
+              type: "json",
+              field: "properties",
+              path: ["profile", "score"],
+              valueType: "number",
+              operator: "eq",
+              value: 10,
+            },
+          ],
+        },
+        select: [
+          "sourceKey",
+          {
+            type: "json",
+            field: "properties",
+            path: ["profile", "score"],
+          },
+        ],
+        orderBy: [
+          {
+            field: "properties",
+            path: ["profile", "score"],
+            valueType: "number",
+            direction: "desc",
+          },
+          { field: "sourceKey.key", direction: "asc" },
+        ],
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(cliJsonSearch.unit, "item");
+  assert.deepEqual(
+    cliJsonSearch.results.map((result) => result.sourceKey?.key),
+    ["json-number-high"],
+  );
+  assert.deepEqual(cliJsonSearch.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["profile", "score"],
+      exists: true,
+      value: 10,
+    },
+  ]);
+
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny15fix-resource-cli-"),
+    path.join(tmpdir(), "binny09-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny15fix-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny09-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -2272,12 +2347,12 @@ async function verifyRestartAndRemoval(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny18-e2e-compose-"),
+    path.join(tmpdir(), "binny18fix-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.18.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
   const runtimeSubnet =
-    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.134.0/24";
+    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.14.0/24";
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
