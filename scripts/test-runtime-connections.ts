@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -48,11 +47,8 @@ let composeOverlayFile: string | undefined;
 
 function environment(): Readonly<Record<string, string>> {
   return {
-    BINNY_PORT: String(serverPort),
     BINNY_IMAGE: imageName,
     BINNY14_RUNTIME_IMAGE: runtimeImage,
-    BINNY14_RUNTIME_ONE_PORT: String(runtimeOnePort),
-    BINNY14_RUNTIME_TWO_PORT: String(runtimeTwoPort),
   };
 }
 
@@ -118,6 +114,16 @@ async function createNetworkOverlay(): Promise<void> {
   await writeFile(
     composeOverlayFile,
     [
+      "services:",
+      "  server:",
+      "    ports: !override",
+      '      - "3000"',
+      "  runtime-one:",
+      "    ports: !override",
+      '      - "8080"',
+      "  runtime-two:",
+      "    ports: !override",
+      '      - "8080"',
       "networks:",
       "  default:",
       "    ipam:",
@@ -138,23 +144,6 @@ async function compose(args: readonly string[]): Promise<ProcessResult> {
   return result;
 }
 
-async function reservePort(): Promise<number> {
-  const listener = createServer();
-  await new Promise<void>((resolveListen, reject) => {
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = listener.address();
-  assert.ok(address !== null && typeof address !== "string");
-  const port = address.port;
-  await new Promise<void>((resolveClose, reject) => {
-    listener.close((error) =>
-      error === undefined ? resolveClose() : reject(error),
-    );
-  });
-  return port;
-}
-
 async function cli(args: readonly string[]): Promise<ProcessResult> {
   return await run("docker", [
     ...composePrefix(),
@@ -165,6 +154,25 @@ async function cli(args: readonly string[]): Promise<ProcessResult> {
     "packages/binny/dist/cli.js",
     ...args,
   ]);
+}
+
+async function publishedPort(
+  service: string,
+  containerPort: number,
+): Promise<number> {
+  const mapping = (
+    await compose(["port", service, String(containerPort)])
+  ).stdout.trim();
+  const portText = /:(\d+)$/u.exec(mapping)?.[1];
+  const port = Number(portText);
+  assert.ok(
+    portText !== undefined &&
+      Number.isInteger(port) &&
+      port > 0 &&
+      port <= 65_535,
+    `Compose 没有为 ${service}:${String(containerPort)} 返回有效宿主端口：${mapping}`,
+  );
+  return port;
 }
 
 function cliData<T>(result: ProcessResult, variant: string): T {
@@ -320,16 +328,15 @@ async function containerImage(service: string): Promise<string> {
 }
 
 try {
-  [serverPort, runtimeOnePort, runtimeTwoPort] = await Promise.all([
-    reservePort(),
-    reservePort(),
-    reservePort(),
-  ]);
-  assert.equal(new Set([serverPort, runtimeOnePort, runtimeTwoPort]).size, 3);
   await createNetworkOverlay();
 
   await compose(["build", "server", "runtime-one"]);
   await compose(["up", "--detach", "--no-build"]);
+  [serverPort, runtimeOnePort, runtimeTwoPort] = await Promise.all([
+    publishedPort("server", 3000),
+    publishedPort("runtime-one", 8080),
+    publishedPort("runtime-two", 8080),
+  ]);
   await waitForApi();
 
   const [runtimeOneManifest, runtimeTwoManifest] = await Promise.all([
