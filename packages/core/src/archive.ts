@@ -407,9 +407,12 @@ export function createArchiveStore(
           const archiveSequence = BigInt(archiveSeq);
           const commitId = randomUUID();
           // PostgreSQL 的 now() 固定为事务开始时刻；归档记录时间沿用墙钟时间。
+          // 该 SQL 表达式没有时间列 codec，复用 recorded_at 列解码为 Date。
           const recordedRows = await transaction
             .select({
-              recordedAt: sql`clock_timestamp()`,
+              recordedAt: sql`clock_timestamp()`.mapWith(
+                archiveCommits.recordedAt,
+              ),
             })
             .from(archiveWriteClock);
           const recordedAt = recordedRows[0]?.recordedAt;
