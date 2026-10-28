@@ -210,7 +210,10 @@ function contentFingerprint(
       image: item.image,
       media: item.media,
     },
-    body: body === undefined ? null : { source: body.source, html: body.html },
+    body:
+      body === undefined
+        ? null
+        : { source: body.source, type: body.type, html: body.html },
   });
   return createHash("sha256").update(snapshot).digest("hex");
 }
@@ -219,6 +222,7 @@ function entryMetadata(
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
+  body: ReturnType<typeof prepareBody>,
   media: readonly MediaCandidate[],
 ): Record<string, unknown> {
   return {
@@ -238,6 +242,7 @@ function entryMetadata(
       title: item.title,
       published: item.published,
       updated: item.updated,
+      bodyType: body.type,
       authors: item.authors,
       categories: item.categories,
       image: item.image,
@@ -254,6 +259,13 @@ function markdownText(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("]", "\\]");
 }
 
+function markdownPlainText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function markdownParts(
   body: ReturnType<typeof prepareBody>,
   uploaded: ReadonlyMap<string, ArchiveResourceMetadata>,
@@ -264,7 +276,7 @@ function markdownParts(
   if (body !== undefined) {
     for (const part of body.parts) {
       if (typeof part === "string") {
-        parts.push(part);
+        parts.push(markdownPlainText(part));
         continue;
       }
       inlineUrls.add(part.url);
@@ -382,7 +394,7 @@ async function submitEntry(
     sourceKey: { namespace: `rss:${feed.id}`, key },
     sourceRef: sourceRef(feed, item),
     ...(sourceModifiedAt === undefined ? {} : { sourceModifiedAt }),
-    metadata: entryMetadata(feed, parsedFeed, item, [...media.values()]),
+    metadata: entryMetadata(feed, parsedFeed, item, body, [...media.values()]),
     ...(body === undefined && bodyWithResources.content.length === 0
       ? {}
       : {

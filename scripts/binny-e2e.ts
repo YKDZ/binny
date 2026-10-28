@@ -28,7 +28,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny22-rss-e2e-" + process.pid.toString(10);
+const projectName = "binny22fix-rss-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
@@ -843,6 +843,7 @@ type RssControlSource = {
   }>;
   readonly setRssVersion: (version: number) => Promise<void>;
   readonly setAtomVersion: (version: number) => Promise<void>;
+  readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
   readonly setPhotoAvailable: (available: boolean) => Promise<void>;
 };
@@ -910,6 +911,9 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     },
     async setAtomVersion(version) {
       await updateState({ atomVersion: version });
+    },
+    async setAtomTextMode(mode) {
+      await updateState({ atomTextMode: mode });
     },
     async setTemporaryAvailable(available) {
       await updateState({ temporaryAvailable: available });
@@ -1067,10 +1071,13 @@ type RssArchiveRead = {
     readonly state: {
       readonly body?: {
         readonly html?: string;
-        readonly text?: string;
         readonly markdown?: string;
+        readonly text?: string;
+        readonly searchText?: string;
       };
-      readonly metadata?: Record<string, unknown>;
+      readonly metadata?: Record<string, unknown> & {
+        readonly item?: { readonly bodyType?: string } | null;
+      };
       readonly resources?: readonly { readonly resourceId: string }[];
       readonly capture: {
         readonly completeness: "complete" | "partial";
@@ -2219,8 +2226,150 @@ async function runRssAcceptance(
     sourceMediaBytes.photoBytes,
   );
 
+  const literalWidgetMatches = await searchRssArchive(
+    baseUrl,
+    "binny22-one",
+    "<widget>",
+  );
+  assert.equal(
+    literalWidgetMatches.length,
+    6,
+    "RSS HTML 与 Atom text、HTML、XHTML 正文中的代码文字应能按字面标签搜索。",
+  );
+  const literalWidgetItems = await Promise.all(
+    literalWidgetMatches.map(async ({ itemId }) =>
+      cliData<RssArchiveRead>(
+        await cli(baseUrl, ["archive", "item", itemId, "--bin", "binny22-one"]),
+        "found",
+      ),
+    ),
+  );
+  assert.deepEqual(
+    new Set(literalWidgetItems.map(({ sourceKey }) => sourceKey.key)),
+    new Set([
+      "id:urn:binny:22:rss-item",
+      "id:urn:binny:22:rss-item-escaped",
+      "id:tag:example.test,2026:binny-22-atom",
+      "id:tag:example.test,2026:atom-text-explicit",
+      "id:tag:example.test,2026:atom-text-default",
+      "id:tag:example.test,2026:atom-html-literal",
+    ]),
+  );
+  const literalWidgetItemsByKey = new Map(
+    literalWidgetItems.map((item) => [item.sourceKey.key, item]),
+  );
+  for (const key of [
+    "id:tag:example.test,2026:atom-text-explicit",
+    "id:tag:example.test,2026:atom-text-default",
+  ]) {
+    const atomTextItem = literalWidgetItemsByKey.get(key);
+    assert.ok(atomTextItem !== undefined);
+    const state = rssArchiveView(atomTextItem, "binny22-one");
+    assert.equal(state.capture.completeness, "complete");
+    assert.equal(state.body?.text, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.searchText, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.html, "代码 &lt;widget&gt; 与 A &amp; B");
+    assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
+    assert.ok(
+      typeof state.metadata?.item === "object" && state.metadata.item !== null,
+    );
+    assert.equal(state.metadata?.item?.bodyType, "text");
+  }
+  const rssLiteralItem = literalWidgetItemsByKey.get(
+    "id:urn:binny:22:rss-item",
+  );
+  assert.ok(rssLiteralItem !== undefined);
+  const rssLiteralState = rssArchiveView(rssLiteralItem, "binny22-one");
+  assert.equal(rssLiteralState.capture.completeness, "complete");
+  assert.match(rssLiteralState.body?.text ?? "", /代码 <widget> 与 A & B/u);
+  assert.match(
+    rssLiteralState.body?.searchText ?? "",
+    /代码 <widget> 与 A & B/u,
+  );
+  assert.match(rssLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
+  const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
+    "id:urn:binny:22:rss-item-escaped",
+  );
+  assert.ok(rssEscapedLiteralItem !== undefined);
+  const rssEscapedLiteralState = rssArchiveView(
+    rssEscapedLiteralItem,
+    "binny22-one",
+  );
+  assert.equal(rssEscapedLiteralState.capture.completeness, "complete");
+  assert.equal(rssEscapedLiteralState.body?.text, "代码 <widget> 与 A & B");
+  assert.equal(
+    rssEscapedLiteralState.body?.searchText,
+    "代码 <widget> 与 A & B",
+  );
+  assert.match(rssEscapedLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
+  for (const [key, bodyType] of [
+    ["id:tag:example.test,2026:binny-22-atom", "xhtml"],
+    ["id:tag:example.test,2026:atom-html-literal", "html"],
+  ] as const) {
+    const atomMarkupItem = literalWidgetItemsByKey.get(key);
+    assert.ok(atomMarkupItem !== undefined);
+    const state = rssArchiveView(atomMarkupItem, "binny22-one");
+    assert.equal(state.capture.completeness, "complete");
+    assert.match(state.body?.text ?? "", /代码 <widget> 与 A & B/u);
+    assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
+    assert.match(state.body?.html ?? "", /&lt;widget&gt;/u);
+    assert.match(state.body?.markdown ?? "", /&lt;widget&gt;/u);
+    assert.equal(state.metadata?.item?.bodyType, bodyType);
+  }
+  const atomEntityTextMatches = await searchRssArchive(
+    baseUrl,
+    "binny22-one",
+    "&lt;widget&gt;",
+  );
+  assert.equal(atomEntityTextMatches.length, 1);
+  const atomEntityTextMatch = atomEntityTextMatches[0];
+  assert.ok(atomEntityTextMatch !== undefined);
+  const atomEntityTextItem = cliData<RssArchiveRead>(
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      atomEntityTextMatch.itemId,
+      "--bin",
+      "binny22-one",
+    ]),
+    "found",
+  );
+  const atomEntityTextState = rssArchiveView(atomEntityTextItem, "binny22-one");
+  assert.equal(
+    atomEntityTextItem.sourceKey.key,
+    "id:tag:example.test,2026:atom-text-entities",
+  );
+  assert.equal(atomEntityTextState.body?.text, "A &lt;widget&gt; &amp; B");
+  assert.equal(
+    atomEntityTextState.body?.searchText,
+    "A &lt;widget&gt; &amp; B",
+  );
+  assert.equal(
+    atomEntityTextState.body?.html,
+    "A &amp;lt;widget&amp;gt; &amp;amp; B",
+  );
+  assert.equal(
+    atomEntityTextState.body?.markdown,
+    "A &amp;lt;widget&amp;gt; &amp;amp; B",
+  );
+  const atomModeTextV1 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "语义固定内容",
+  );
+  assert.equal(atomModeTextV1.revisions.length, 1);
+  assert.equal(
+    rssArchiveView(atomModeTextV1, "binny22-one").metadata?.item?.bodyType,
+    "text",
+  );
+
   await source.setRssVersion(2);
   await source.setAtomVersion(2);
+  await source.setAtomTextMode("html");
   await source.setTemporaryAvailable(true);
   await compose([
     "up",
@@ -2260,6 +2409,21 @@ async function runRssAcceptance(
   assert.equal(rssItemV2.itemId, rssItemV1.itemId);
   assert.deepEqual(rssItemV2.sourceKey, rssItemV1.sourceKey);
   assert.equal(rssItemV2.revisions.length, 2);
+  const atomModeHtmlV2 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "语义固定内容",
+  );
+  assert.equal(atomModeHtmlV2.itemId, atomModeTextV1.itemId);
+  assert.equal(
+    atomModeHtmlV2.revisions.length,
+    2,
+    "Atom 正文同值从 text 切换到 html 时应形成新的归档状态。",
+  );
+  assert.equal(
+    rssArchiveView(atomModeHtmlV2, "binny22-one").metadata?.item?.bodyType,
+    "html",
+  );
   const stableItem = await readRssArchive(
     baseUrl,
     "binny22-one",
@@ -2575,7 +2739,7 @@ async function runRssAcceptance(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny22-rss-e2e-compose-"),
+    path.join(tmpdir(), "binny22fix-rss-e2e-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";

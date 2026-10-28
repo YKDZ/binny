@@ -1,8 +1,17 @@
 import { parseFeed } from "@rowanmanning/feed-parser";
 import { parseFragment, serialize, type DefaultTreeAdapterMap } from "parse5";
 
-export type ParsedFeed = ReturnType<ReturnType<typeof parseFeed>["toJSON"]>;
-export type ParsedFeedItem = ParsedFeed["items"][number];
+type FeedParserJson = ReturnType<ReturnType<typeof parseFeed>["toJSON"]>;
+type FeedParserItem = ReturnType<typeof parseFeed>["items"][number];
+type FeedParserElement = FeedParserItem["element"];
+
+export type ParsedFeedItem = FeedParserJson["items"][number] & {
+  readonly contentType?: string;
+  readonly descriptionType?: string;
+};
+export type ParsedFeed = Omit<FeedParserJson, "items"> & {
+  readonly items: ParsedFeedItem[];
+};
 
 export interface FeedDefinition {
   readonly id: string;
@@ -54,6 +63,7 @@ export interface MediaCandidate {
 export interface PreparedBody {
   readonly html: string;
   readonly text: string;
+  readonly type: string;
   readonly source: "content" | "summary";
   readonly parts: readonly BodyPart[];
   readonly media: readonly MediaCandidate[];
@@ -66,6 +76,97 @@ const maximumMediaBytes = 32 * 1024 * 1024;
 const fetchTimeoutMs = 20_000;
 const feedAccept =
   "application/atom+xml, application/rss+xml, application/xml, text/xml, application/*+xml;q=0.9, */*;q=0.8";
+
+function atomTextConstructType(
+  item: FeedParserItem,
+  name: "content" | "summary",
+): string | undefined {
+  const construct = item.element.findElementWithName(name);
+  if (construct === null) return undefined;
+  return construct.getAttribute("type")?.trim().toLowerCase() || "text";
+}
+
+function atomTextConstructValue(
+  item: FeedParserItem,
+  name: "content" | "summary",
+): string | null {
+  const construct = item.element.findElementWithName(name);
+  if (construct === null) return null;
+  if (atomTextConstructType(item, name) === "xhtml") {
+    const div = construct.findElementWithName("div");
+    if (div !== null) return div.children.map(serializeXhtmlChild).join("");
+  }
+  return construct.textContent;
+}
+
+function parsedRssItem(item: FeedParserItem): ParsedFeedItem {
+  const value = item.toJSON();
+  const encodedContent = item.element.findElementWithName("encoded");
+  const description = item.element.findElementWithName("description");
+  return {
+    ...value,
+    content:
+      encodedContent?.namespace === "content" &&
+      encodedContent.textContent.length > 0
+        ? encodedContent.textContent
+        : value.content,
+    description: description?.textContent || value.description,
+  };
+}
+
+function serializeXhtmlChild(child: string | FeedParserElement): string {
+  if (typeof child === "string") return htmlText(child);
+  const attributes = Object.entries(child.attributes)
+    .map(
+      ([name, value]) =>
+        ` ${name}="${htmlText(value).replaceAll('"', "&quot;")}"`,
+    )
+    .join("");
+  const content = child.children.map(serializeXhtmlChild).join("");
+  return `<${child.name}${attributes}>${content}</${child.name}>`;
+}
+
+function parsedFeedWithBodyTypes(source: string): ParsedFeed {
+  const parsed = parseFeed(source);
+  const json = parsed.toJSON();
+  if (parsed.meta.type === "rss") {
+    return { ...json, items: parsed.items.map(parsedRssItem) };
+  }
+  if (parsed.meta.type !== "atom") return json;
+  return {
+    ...json,
+    items: parsed.items.map((item) => {
+      const value = item.toJSON();
+      const contentType = atomTextConstructType(item, "content");
+      const descriptionType = atomTextConstructType(item, "summary");
+      return {
+        ...value,
+        content: atomTextConstructValue(item, "content"),
+        description:
+          atomTextConstructValue(item, "summary") ?? value.description,
+        ...(contentType === undefined ? {} : { contentType }),
+        ...(descriptionType === undefined ? {} : { descriptionType }),
+      };
+    }),
+  };
+}
+
+function htmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function isHtmlTextConstruct(type: string | undefined): boolean {
+  return (
+    type === undefined ||
+    type === "html" ||
+    type === "xhtml" ||
+    type === "text/html" ||
+    type === "application/xhtml+xml"
+  );
+}
 
 function responseValidators(response: Response): FeedValidators {
   const etag = response.headers.get("etag") ?? undefined;
@@ -175,7 +276,7 @@ export async function requestFeed(
   try {
     return {
       status: "ok",
-      feed: parseFeed(source).toJSON(),
+      feed: parsedFeedWithBodyTypes(source),
       validators: responseHeaders,
     };
   } catch (error) {
@@ -368,7 +469,9 @@ export function prepareBody(
   baseUrl: string,
 ): PreparedBody {
   const hasContent = (item.content?.trim().length ?? 0) > 0;
-  const html = hasContent ? (item.content ?? "") : (item.description ?? "");
+  const bodyText = hasContent ? (item.content ?? "") : (item.description ?? "");
+  const type = hasContent ? item.contentType : item.descriptionType;
+  const html = isHtmlTextConstruct(type) ? bodyText : htmlText(bodyText);
   const source = hasContent ? "content" : "summary";
 
   const fragment = parseFragment(html);
@@ -487,6 +590,7 @@ export function prepareBody(
   return {
     html,
     text,
+    type: type ?? "html",
     source,
     parts,
     media: [...media.values()],

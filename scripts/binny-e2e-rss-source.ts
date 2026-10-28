@@ -14,6 +14,7 @@ const requests: {
 }[] = [];
 let rssVersion = 1;
 let atomVersion = 1;
+let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
 let photoAvailable = true;
 
@@ -66,6 +67,13 @@ function updateState(value: unknown): boolean {
     return false;
   }
   if (
+    "atomTextMode" in updates &&
+    updates.atomTextMode !== "text" &&
+    updates.atomTextMode !== "html"
+  ) {
+    return false;
+  }
+  if (
     "temporaryAvailable" in updates &&
     typeof updates.temporaryAvailable !== "boolean"
   ) {
@@ -80,6 +88,9 @@ function updateState(value: unknown): boolean {
   if (updates.rssVersion !== undefined) rssVersion = Number(updates.rssVersion);
   if (updates.atomVersion !== undefined)
     atomVersion = Number(updates.atomVersion);
+  if (updates.atomTextMode === "text" || updates.atomTextMode === "html") {
+    atomTextMode = updates.atomTextMode;
+  }
   if (typeof updates.temporaryAvailable === "boolean") {
     temporaryAvailable = updates.temporaryAvailable;
   }
@@ -169,7 +180,7 @@ const server = createServer((request, response) => {
         response,
         { etag },
         "application/rss+xml; charset=utf-8",
-        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>票 22 RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:22:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>票 22 作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:22:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item></channel></rss>`,
+        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>票 22 RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:22:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>票 22 作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:22:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:22:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item></channel></rss>`,
       );
       return;
     }
@@ -183,7 +194,7 @@ const server = createServer((request, response) => {
         response,
         { lastModified },
         "application/atom+xml; charset=utf-8",
-        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:22:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-22-atom</id><title>Atom 全文测试文章</title><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>票 22 作者乙</name></author><category term="测试" /></entry></feed>`,
+        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:22:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-22-atom</id><title>Atom 全文测试文章</title><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}；代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>票 22 作者乙</name></author><category term="测试" /></entry><entry><id>tag:example.test,2026:atom-text-explicit</id><title>Atom 显式纯文本</title><content type="text">代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-default</id><title>Atom 默认纯文本</title><content>代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-html-literal</id><title>Atom HTML 中的代码文字</title><content type="html">&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content></entry><entry><id>tag:example.test,2026:atom-text-entities</id><title>Atom 纯文本中的实体字面值</title><content type="text">A &amp;lt;widget&amp;gt; &amp;amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-kind-switch</id><title>Atom 正文类型切换</title><content type="${atomTextMode}">语义固定内容</content></entry></feed>`,
       );
       return;
     }
