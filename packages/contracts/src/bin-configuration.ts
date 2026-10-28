@@ -2,6 +2,10 @@
 import * as z from "zod";
 
 import {
+  runtimeHumanSessionControlSchema,
+  runtimeHumanSessionEventSchema,
+} from "./runtime-human-session.ts";
+import {
   postgresTextSchema,
   registerPostgresJsonSchemaProjection,
   toPostgresJsonSchema,
@@ -159,6 +163,7 @@ export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
     activeRunId: z.string().uuid().nullable(),
     claimInFlight: z.boolean(),
     stoppedRunId: z.string().uuid().optional(),
+    humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
     collector: collectorManifestSchema,
     environment: runtimeEnvironmentSchema,
   }),
@@ -273,12 +278,20 @@ export type RuntimeConnectionOperations = {
   heartbeat(
     binId: string,
     input: RuntimeHeartbeatInput,
-  ): Promise<BinOperation<RuntimeExecution>>;
+  ): Promise<BinOperation<RuntimeHeartbeatResult>>;
   disconnect(
     binId: string,
     input: RuntimeDisconnectInput,
   ): Promise<BinOperation<RuntimeExecution>>;
 };
+
+export const runtimeHeartbeatResultSchema = runtimeExecutionSchema.and(
+  z.object({ humanSession: runtimeHumanSessionControlSchema.optional() }),
+);
+
+export type RuntimeHeartbeatResult = z.infer<
+  typeof runtimeHeartbeatResultSchema
+>;
 
 /** 使用与运行时校验相同的 Zod 4 原生接口生成输入 JSON Schema。 */
 export function toInputJsonSchema(schema: z.ZodType): Record<string, unknown> {

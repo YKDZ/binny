@@ -1,0 +1,531 @@
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+
+import {
+  collectorManifestSchema,
+  humanSessionFailureSchema,
+  humanSessionSchema,
+  type HumanSession,
+  type HumanSessionApiError,
+  type HumanSessionCreated,
+  type HumanSessionFailure,
+  type HumanSessionOperation,
+  type HumanSessionOperations,
+  type HumanSessionStatus,
+  type RuntimeHumanSessionControl,
+  type RuntimeHumanSessionEvent,
+} from "@binny/contracts";
+import { and, eq, inArray, sql } from "drizzle-orm";
+
+import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { binConfigurations, humanSessions, manualRuns } from "./schema.ts";
+
+const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
+
+const sessionSelection = {
+  sessionId: humanSessions.sessionId,
+  binId: humanSessions.binId,
+  status: humanSessions.status,
+  requestedAt: humanSessions.requestedAt,
+  updatedAt: humanSessions.updatedAt,
+  readyAt: humanSessions.readyAt,
+  closedAt: humanSessions.closedAt,
+  failure: humanSessions.failure,
+};
+
+type SessionRow = typeof humanSessions.$inferSelect;
+
+export type HumanSessionStore = HumanSessionOperations & {
+  authorizeHumanTunnel(
+    sessionId: string,
+    runtimeId: string,
+    ownerGeneration: string,
+  ): Promise<boolean>;
+  authorizeHumanViewer(sessionId: string, token: string): Promise<boolean>;
+  markHumanGatewayClosed(sessionId: string): Promise<void>;
+  reconcileHumanSessionsAfterGatewayRestart(): Promise<void>;
+};
+
+function failure<T>(
+  status: 400 | 404 | 409,
+  code: HumanSessionApiError["code"],
+  message: string,
+  path?: readonly (string | number)[],
+): HumanSessionOperation<T> {
+  return {
+    ok: false,
+    status,
+    error: {
+      code,
+      message,
+      ...(path === undefined ? {} : { path: [...path] }),
+    },
+  };
+}
+
+function tokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function rowToSession(row: SessionRow): HumanSession {
+  const failure =
+    row.failure === null
+      ? undefined
+      : humanSessionFailureSchema.parse(row.failure);
+  return humanSessionSchema.parse({
+    sessionId: row.sessionId,
+    binId: row.binId,
+    status: row.status,
+    requestedAt: row.requestedAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    ...(row.readyAt === null ? {} : { readyAt: row.readyAt.toISOString() }),
+    ...(row.closedAt === null ? {} : { closedAt: row.closedAt.toISOString() }),
+    ...(failure === undefined ? {} : { failure }),
+  });
+}
+
+function closingStatus(
+  status: HumanSessionStatus,
+  gatewayClosed: boolean,
+  runtimeClosed: boolean,
+): HumanSessionStatus {
+  if (!gatewayClosed || !runtimeClosed) return "closing";
+  return status === "failed" ? "failed" : "closed";
+}
+
+async function readActiveSession(
+  database: CoreDatabase | CoreTransaction,
+  binId: string,
+): Promise<SessionRow | undefined> {
+  const [row] = await database
+    .select()
+    .from(humanSessions)
+    .where(
+      and(
+        eq(humanSessions.binId, binId),
+        inArray(humanSessions.status, activeStatuses),
+      ),
+    )
+    .limit(1);
+  return row;
+}
+
+export async function hasActiveHumanSession(
+  database: CoreDatabase | CoreTransaction,
+  binId: string,
+): Promise<boolean> {
+  return (await readActiveSession(database, binId)) !== undefined;
+}
+
+export async function applyRuntimeHumanSessionHeartbeat(
+  transaction: CoreTransaction,
+  options: {
+    readonly binId: string;
+    readonly runtimeId: string;
+    readonly ownerGeneration: string;
+    readonly ownerConfirmed: boolean;
+    readonly event?: RuntimeHumanSessionEvent;
+  },
+): Promise<RuntimeHumanSessionControl | undefined> {
+  let session = await readActiveSession(transaction, options.binId);
+  if (session === undefined) return undefined;
+
+  const generation = BigInt(options.ownerGeneration);
+  const ownsSession =
+    session.runtimeId === options.runtimeId &&
+    session.ownerGeneration === generation;
+  const event = options.event;
+  if (event !== undefined && event.sessionId === session.sessionId) {
+    if (
+      event.event === "ready" &&
+      session.status === "opening" &&
+      ownsSession
+    ) {
+      await transaction
+        .update(humanSessions)
+        .set({ status: "ready", readyAt: sql`clock_timestamp()`, updatedAt: sql`clock_timestamp()` })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+    } else if (
+      event.event === "expired" &&
+      session.status === "ready" &&
+      ownsSession
+    ) {
+      await transaction
+        .update(humanSessions)
+        .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+    } else if (
+      event.event === "failed" &&
+      (session.status === "opening" || session.status === "ready") &&
+      ownsSession
+    ) {
+      const failure = humanSessionFailureSchema.parse(
+        event.failure ?? {
+          code: "browser_session_failed",
+          message: "浏览器人工会话没有完成启动。",
+        },
+      );
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: closingStatus(
+            "failed",
+            session.gatewayClosed,
+            true,
+          ),
+          runtimeClosed: true,
+          failure,
+          updatedAt: sql`clock_timestamp()`,
+          ...(session.gatewayClosed ? { closedAt: sql`clock_timestamp()` } : {}),
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+    } else if (
+      event.event === "closed" &&
+      session.status === "closing" &&
+      (ownsSession || options.ownerConfirmed)
+    ) {
+      const nextStatus = closingStatus(
+        session.status,
+        session.gatewayClosed,
+        true,
+      );
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: nextStatus,
+          runtimeClosed: true,
+          updatedAt: sql`clock_timestamp()`,
+          ...(nextStatus === "closed" ? { closedAt: sql`clock_timestamp()` } : {}),
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+    }
+    session = (await readActiveSession(transaction, options.binId)) ?? session;
+  }
+
+  if (
+    session.status === "opening" &&
+    (session.runtimeId !== options.runtimeId ||
+      session.ownerGeneration !== generation)
+  ) {
+    await transaction
+      .update(humanSessions)
+      .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+      .where(eq(humanSessions.sessionId, session.sessionId));
+    session = (await readActiveSession(transaction, options.binId)) ?? session;
+  } else if (
+    session.status === "ready" &&
+    (session.runtimeId !== options.runtimeId ||
+      session.ownerGeneration !== generation)
+  ) {
+    await transaction
+      .update(humanSessions)
+      .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+      .where(eq(humanSessions.sessionId, session.sessionId));
+    session = (await readActiveSession(transaction, options.binId)) ?? session;
+  }
+
+  if (session.status === "pending" && options.ownerConfirmed) {
+    const [activeRun] = await transaction
+      .select({ runId: manualRuns.runId })
+      .from(manualRuns)
+      .where(
+        and(
+          eq(manualRuns.binId, options.binId),
+          inArray(manualRuns.status, ["executing", "cancelling"]),
+        ),
+      )
+      .limit(1);
+    if (activeRun === undefined) {
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: "opening",
+          runtimeId: options.runtimeId,
+          ownerGeneration: generation,
+          gatewayClosed: false,
+          runtimeClosed: false,
+          failure: null,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+      session = (await readActiveSession(transaction, options.binId)) ?? session;
+    }
+  }
+
+  if (session.status === "opening") {
+    return {
+      sessionId: session.sessionId,
+      action: "open",
+    };
+  }
+  if (session.status === "closing") {
+    return {
+      sessionId: session.sessionId,
+      action: "close",
+    };
+  }
+  return undefined;
+}
+
+export function createHumanSessionStore(
+  database: CoreDatabase,
+): HumanSessionStore {
+  return {
+    async requestHumanSession(binId) {
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id, collector: binConfigurations.collector })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined)
+          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+
+        const manifest = collectorManifestSchema.parse(bin.collector);
+        if (!manifest.environment.browser.required)
+          return failure(
+            409,
+            "browser_not_required",
+            "这个采集器没有声明需要浏览器环境。",
+            ["binId"],
+          );
+
+        if (await readActiveSession(transaction, binId))
+          return failure(
+            409,
+            "human_session_active",
+            "这个 bin 已有待处理或正在使用的浏览器人工会话。",
+            ["binId"],
+          );
+
+        const sessionId = randomUUID();
+        const accessToken = randomBytes(32).toString("base64url");
+        const [row] = await transaction
+          .insert(humanSessions)
+          .values({
+            sessionId,
+            binId,
+            accessTokenHash: tokenHash(accessToken),
+          })
+          .returning();
+        if (row === undefined)
+          throw new Error("浏览器人工会话创建后没有返回记录。");
+        return {
+          ok: true,
+          value: {
+            ...rowToSession(row),
+            viewerPath:
+              "/human-sessions/" +
+              sessionId +
+              "?token=" +
+              encodeURIComponent(accessToken),
+          },
+        };
+      });
+    },
+
+    async getHumanSession(binId, sessionId) {
+      const [row] = await database
+        .select()
+        .from(humanSessions)
+        .where(
+          and(
+            eq(humanSessions.binId, binId),
+            eq(humanSessions.sessionId, sessionId),
+          ),
+        );
+      return row === undefined
+        ? failure(
+            404,
+            "human_session_not_found",
+            "没有找到这个浏览器人工会话。",
+            ["sessionId"],
+          )
+        : { ok: true, value: rowToSession(row) };
+    },
+
+    async closeHumanSession(binId, sessionId) {
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined)
+          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+        const [row] = await transaction
+          .select()
+          .from(humanSessions)
+          .where(
+            and(
+              eq(humanSessions.binId, binId),
+              eq(humanSessions.sessionId, sessionId),
+            ),
+          )
+          .for("update");
+        if (row === undefined)
+          return failure(
+            404,
+            "human_session_not_found",
+            "没有找到这个浏览器人工会话。",
+            ["sessionId"],
+          );
+        if (row.status === "pending") {
+          const [closed] = await transaction
+            .update(humanSessions)
+            .set({
+              status: "closed",
+              gatewayClosed: true,
+              runtimeClosed: true,
+              updatedAt: sql`clock_timestamp()`,
+              closedAt: sql`clock_timestamp()`,
+            })
+            .where(eq(humanSessions.sessionId, sessionId))
+            .returning();
+          if (closed === undefined)
+            throw new Error("待处理的浏览器人工会话没有关闭记录。");
+          return { ok: true, value: rowToSession(closed) };
+        }
+        const [updated] = await transaction
+          .update(humanSessions)
+          .set({
+            status:
+              row.status === "closed" || row.status === "failed"
+                ? row.status
+                : "closing",
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(humanSessions.sessionId, sessionId))
+          .returning();
+        if (updated === undefined)
+          throw new Error("浏览器人工会话关闭请求没有返回记录。");
+        return { ok: true, value: rowToSession(updated) };
+      });
+    },
+
+    async authorizeHumanTunnel(sessionId, runtimeId, ownerGeneration) {
+      const [row] = await database
+        .select({
+          status: humanSessions.status,
+          runtimeId: humanSessions.runtimeId,
+          ownerGeneration: humanSessions.ownerGeneration,
+        })
+        .from(humanSessions)
+        .where(eq(humanSessions.sessionId, sessionId));
+      return (
+        row?.status === "opening" &&
+        row.runtimeId === runtimeId &&
+        row.ownerGeneration === BigInt(ownerGeneration)
+      );
+    },
+
+    async authorizeHumanViewer(sessionId, token) {
+      const [row] = await database
+        .select({
+          status: humanSessions.status,
+          accessTokenHash: humanSessions.accessTokenHash,
+        })
+        .from(humanSessions)
+        .where(eq(humanSessions.sessionId, sessionId));
+      if (row?.status !== "ready") return false;
+      const stored = Buffer.from(row.accessTokenHash, "hex");
+      const supplied = Buffer.from(tokenHash(token), "hex");
+      return stored.length === supplied.length && timingSafeEqual(stored, supplied);
+    },
+
+    async markHumanGatewayClosed(sessionId) {
+      await database.transaction(async (transaction) => {
+        const [row] = await transaction
+          .select({
+            status: humanSessions.status,
+            gatewayClosed: humanSessions.gatewayClosed,
+            runtimeClosed: humanSessions.runtimeClosed,
+          })
+          .from(humanSessions)
+          .where(eq(humanSessions.sessionId, sessionId))
+          .for("update");
+        if (row === undefined || row.status === "closed") return;
+        if (row.status !== "closing" && row.status !== "failed") return;
+        const status = closingStatus(
+          row.status,
+          true,
+          row.runtimeClosed,
+        );
+        await transaction
+          .update(humanSessions)
+          .set({
+            status,
+            gatewayClosed: true,
+            updatedAt: sql`clock_timestamp()`,
+            ...(status === "closed" || status === "failed"
+              ? { closedAt: sql`clock_timestamp()` }
+              : {}),
+          })
+          .where(eq(humanSessions.sessionId, sessionId));
+      });
+    },
+
+    async reconcileHumanSessionsAfterGatewayRestart() {
+      await database.transaction(async (transaction) => {
+        const bins = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .innerJoin(
+            humanSessions,
+            eq(humanSessions.binId, binConfigurations.id),
+          )
+          .where(inArray(humanSessions.status, activeStatuses))
+          .orderBy(binConfigurations.id)
+          .for("update");
+        for (const bin of bins) {
+          await transaction
+            .update(humanSessions)
+            .set({
+              status: "closing",
+              gatewayClosed: true,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(humanSessions.binId, bin.id),
+                inArray(humanSessions.status, activeStatuses),
+              ),
+            );
+        }
+      });
+    },
+  };
+}
+
+export async function applyHumanGatewayClosed(
+  transaction: CoreTransaction,
+  sessionId: string,
+): Promise<void> {
+  const [row] = await transaction
+    .select({
+      status: humanSessions.status,
+      runtimeClosed: humanSessions.runtimeClosed,
+    })
+    .from(humanSessions)
+    .where(eq(humanSessions.sessionId, sessionId))
+    .for("update");
+  if (row === undefined || row.status === "closed") return;
+  if (row.status !== "closing" && row.status !== "failed") return;
+  const status = closingStatus(row.status, true, row.runtimeClosed);
+  await transaction
+    .update(humanSessions)
+    .set({
+      status,
+      gatewayClosed: true,
+      updatedAt: sql`clock_timestamp()`,
+      ...(status === "closed" || status === "failed"
+        ? { closedAt: sql`clock_timestamp()` }
+        : {}),
+    })
+    .where(eq(humanSessions.sessionId, sessionId));
+}
+
+export function normalizeHumanSessionFailure(
+  failure: HumanSessionFailure,
+): HumanSessionFailure {
+  return humanSessionFailureSchema.parse(failure);
+}
