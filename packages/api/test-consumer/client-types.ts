@@ -87,7 +87,7 @@ async function checkPublicManualRunContract(): Promise<void> {
     const status: "queued" | "executing" | "completed" | "failed" = run.status;
     void returnedRunId;
     void status;
-    // @ts-expect-error The trigger response is a run, not the API error envelope.
+    // @ts-expect-error 触发成功响应不包含错误封装。
     void run.error;
   } else if (
     triggered.status === 400 ||
@@ -96,7 +96,7 @@ async function checkPublicManualRunContract(): Promise<void> {
   ) {
     const failure = await triggered.json();
     void failure.error.code;
-    // @ts-expect-error Error responses do not contain a run identifier.
+    // @ts-expect-error 错误响应不包含运行标识。
     void failure.runId;
   }
 
@@ -123,16 +123,16 @@ async function checkPublicManualRunContract(): Promise<void> {
 
   void client.bins[":binId"].runtime.runs.claim.$post({
     param: { binId },
-    // @ts-expect-error A claim requires a runtimeId even when its other fields are valid.
+    // @ts-expect-error 其他字段合法时，领取请求仍必须提供 runtimeId。
     json: {},
   });
   void client.bins[":binId"].runs.$post({
     param: { binId },
-    // @ts-expect-error Run params must be a JSON object; action is otherwise valid.
+    // @ts-expect-error 动作合法时，params 仍必须为 JSON 对象。
     json: { action: "collect", params: ["invalid"] },
   });
   void client.bins[":binId"].runs.$post({
-    // @ts-expect-error binId is a required path parameter for triggering a run.
+    // @ts-expect-error 触发运行必须提供 binId 路径参数。
     param: {},
     json: { action: "collect", params: { limit: 20 } },
   });
@@ -232,7 +232,7 @@ async function checkPublicArchiveContract(): Promise<void> {
     if (event?.kind === "item") void event.sourceModifiedAt;
     if (event?.kind === "relation" && event.status === "observed")
       void event.state.cascade;
-    // @ts-expect-error Timeline events do not invent state hash fields.
+    // @ts-expect-error 时间线事件不提供状态哈希字段。
     void event?.stateHash;
   } else if (
     timeline.status === 400 ||
@@ -342,7 +342,7 @@ async function checkPublicArchiveContract(): Promise<void> {
   });
   void client.archives.items[":itemId"].relations.$get({
     param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
-    // @ts-expect-error Relation direction and page size use declared query strings.
+    // @ts-expect-error 关系方向与页大小必须使用声明的查询字符串。
     query: { direction: "outgoing", binId: "rss-main", limit: 20 },
   });
   void client.archives.$post({
@@ -355,7 +355,7 @@ async function checkPublicArchiveContract(): Promise<void> {
           relationId: "rss:bad-relation",
           value: {
             from: { namespace: "rss.example", key: "entry/7" },
-            // @ts-expect-error Endpoints must be a source key or explicit source reference.
+            // @ts-expect-error 端点必须为信源键或显式源引用。
             to: "entry/8",
             name: "reply",
             cascade: false,
