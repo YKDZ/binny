@@ -2963,6 +2963,116 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
 
 async function verifySearchPagination(baseUrl: string): Promise<void> {
   const client = createApiClient(baseUrl);
+  const resultIdOrderNeedle = "隐式resultId分页顺序needle";
+  const firstOrderKey = "search-result-id-order-first";
+  const secondOrderKey = "search-result-id-order-second";
+  const firstOrderItem = await submitArchive(client, {
+    requestId: "e2e:archive:search-result-id-order-first",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: firstOrderKey },
+        body: { searchText: resultIdOrderNeedle + " initial" },
+        capture: {
+          scope: { case: "search-result-id-order" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const secondOrderItem = await submitArchive(client, {
+    requestId: "e2e:archive:search-result-id-order-second",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: secondOrderKey },
+        body: { searchText: resultIdOrderNeedle + " initial" },
+        capture: {
+          scope: { case: "search-result-id-order" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const firstOrderItemId = firstOrderItem.items[0]?.itemId;
+  const secondOrderItemId = secondOrderItem.items[0]?.itemId;
+  assert.ok(firstOrderItemId);
+  assert.ok(secondOrderItemId);
+  // UUID 只含 ASCII 字符，默认字符串序与 SQL C 序一致。
+  const resultIdOrder = [firstOrderItemId, secondOrderItemId].toSorted();
+  const smallerResultId = resultIdOrder[0]!;
+  const smallerResultKey =
+    firstOrderItemId === smallerResultId ? firstOrderKey : secondOrderKey;
+  // 正文变化但保留命中词，确保小 ID 项的最新观察序号更大。
+  await submitArchive(client, {
+    requestId: "e2e:archive:search-result-id-order-later-observation",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: smallerResultKey },
+        body: { searchText: resultIdOrderNeedle + " later" },
+        capture: {
+          scope: { case: "search-result-id-order" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const resultIdOrderQuery = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    text: { kind: "literal" as const, value: resultIdOrderNeedle },
+    orderBy: [
+      { field: "sourceKey.namespace" as const, direction: "asc" as const },
+    ],
+  };
+  const completeOrderResponse = await client.archives.search.$post({
+    json: { ...resultIdOrderQuery, limit: 10 },
+  });
+  if (completeOrderResponse.status !== 200) {
+    throw new Error(
+      "隐式 resultId 顺序完整搜索失败：" + (await completeOrderResponse.text()),
+    );
+  }
+  const completeOrderPage = await completeOrderResponse.json();
+  assert.deepEqual(
+    completeOrderPage.results.map(({ itemId }) => itemId),
+    resultIdOrder,
+  );
+
+  const pagedResultIds: string[] = [];
+  let resultIdCursor: string | undefined;
+  for (let pageIndex = 0; pageIndex < resultIdOrder.length; pageIndex += 1) {
+    const pageResponse = await client.archives.search.$post({
+      json:
+        resultIdCursor === undefined
+          ? { ...resultIdOrderQuery, limit: 1 }
+          : { ...resultIdOrderQuery, limit: 1, cursor: resultIdCursor },
+    });
+    if (pageResponse.status !== 200) {
+      throw new Error(
+        "隐式 resultId 顺序分页失败：" + (await pageResponse.text()),
+      );
+    }
+    const page = await pageResponse.json();
+    assert.equal(page.results.length, 1);
+    assert.equal(page.results[0]?.itemId, resultIdOrder[pageIndex]);
+    pagedResultIds.push(page.results[0]!.itemId);
+    resultIdCursor = page.nextCursor;
+    if (pageIndex + 1 < resultIdOrder.length) {
+      assert.ok(resultIdCursor);
+    } else {
+      assert.equal(resultIdCursor, undefined);
+    }
+  }
+  assert.equal(new Set(pagedResultIds).size, resultIdOrder.length);
+  assert.deepEqual(
+    pagedResultIds,
+    completeOrderPage.results.map(({ itemId }) => itemId),
+  );
+
   const pageA = await submitArchive(client, {
     requestId: "e2e:archive:search-page-a",
     binId: "rss-main",

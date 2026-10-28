@@ -1275,6 +1275,8 @@ async function readCurrentSearchPage(
     .innerJoin(contextual, eq(contextual.resultId, limitedPage.resultId))
     .orderBy(
       ...pageOrdering,
+      // 与分页锚点使用相同的同值根顺序，避免 join 后按观察序号重排 Map。
+      asc(sql`${limitedPage.resultId} COLLATE "C"`),
       asc(sql`${contextual.binId} COLLATE "C"`),
       asc(contextual.archiveSequence),
       asc(contextual.ordinal),
@@ -1369,15 +1371,17 @@ async function readCurrentSearchPage(
   const hasMore = orderedResults.length > input.limit;
   const pageResults = orderedResults.slice(0, input.limit);
   const expansions = input.expand ?? [];
-  for (const result of pageResults) {
-    for (const match of result.matches) {
-      match.expansions = expansions.map(({ key, direction, name }) => ({
-        key,
-        direction,
-        ...(name === undefined ? {} : { name }),
-        relations: [],
-        hasMore: false,
-      }));
+  if (expansions.length > 0) {
+    for (const result of pageResults) {
+      for (const match of result.matches) {
+        match.expansions = expansions.map(({ key, direction, name }) => ({
+          key,
+          direction,
+          ...(name === undefined ? {} : { name }),
+          relations: [],
+          hasMore: false,
+        }));
+      }
     }
   }
   if (expansions.length > 0) {
