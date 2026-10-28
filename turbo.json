@@ -84,6 +84,25 @@
       "outputs": [],
       "cache": false,
       "tags": ["quality:heavy"]
+    },
+    "//#test:runtime-connections": {
+      "dependsOn": ["@binny/binny#build"],
+      "inputs": [
+        "compose.yaml",
+        "Dockerfile",
+        "packages/collector-runtime/Dockerfile.lightweight",
+        "scripts/test-runtime-connections.ts",
+        "packages/api/src/**",
+        "packages/binny/src/**",
+        "packages/collector-runtime/src/**",
+        "packages/collector-runtime/test/fixtures/**",
+        "packages/contracts/src/**",
+        "packages/core/src/**",
+        "packages/server/src/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
     }
   },
   "boundaries": {
