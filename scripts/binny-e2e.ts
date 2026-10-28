@@ -523,6 +523,93 @@ async function seedUpgradeRun(
   return triggered.runId;
 }
 
+type UpgradeArchiveObservation = {
+  readonly archiveSeq: string;
+  readonly itemId: string;
+  readonly revisionId: string;
+};
+
+async function submitUpgradeArchiveObservation(
+  baseUrl: string,
+  requestId: string,
+  title: string,
+  markdown: string,
+  phase: string,
+  resourceId?: string,
+): Promise<UpgradeArchiveObservation> {
+  const response = await fetch(baseUrl + "/archives", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId,
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "database-package-upgrade" },
+          metadata: { title },
+          body: { markdown },
+          ...(resourceId === undefined ? {} : { resources: [{ resourceId }] }),
+          capture: {
+            scope: { phase },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    }),
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+  const commit = (await response.json()) as {
+    readonly archiveSeq: string;
+    readonly items: readonly {
+      readonly itemId: string;
+      readonly revisionId: string;
+    }[];
+  };
+  const item = commit.items[0];
+  assert.ok(item);
+  return {
+    archiveSeq: commit.archiveSeq,
+    itemId: item.itemId,
+    revisionId: item.revisionId,
+  };
+}
+
+async function readUpgradeArchive(
+  baseUrl: string,
+  itemId: string,
+  asOf?: string,
+): Promise<{
+  readonly views: readonly {
+    readonly state: { readonly body?: { readonly markdown?: string } };
+  }[];
+  readonly revisions: readonly unknown[];
+  readonly observations: readonly unknown[];
+}> {
+  const query = new URLSearchParams({ binId: "rss-main" });
+  if (asOf !== undefined) query.set("asOf", asOf);
+  const response = await fetch(
+    `${baseUrl}/archives/items/${itemId}?${query.toString()}`,
+  );
+  assert.equal(response.status, 200, await response.clone().text());
+  return (await response.json()) as {
+    readonly views: readonly {
+      readonly state: { readonly body?: { readonly markdown?: string } };
+    }[];
+    readonly revisions: readonly unknown[];
+    readonly observations: readonly unknown[];
+  };
+}
+
+async function readUpgradeResource(
+  baseUrl: string,
+  resourceId: string,
+): Promise<Uint8Array> {
+  const response = await fetch(`${baseUrl}/resources/${resourceId}`);
+  assert.equal(response.status, 200);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 async function verifyDatabasePackageUpgrade(): Promise<void> {
   const baselineImage = process.env.BINNY_E2E_BASELINE_IMAGE;
   if (baselineImage === undefined || baselineImage.length === 0) return;
@@ -559,19 +646,73 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     userAgent: "Binny E2E",
     key: "az",
   });
-  await createRssBin(baseUrl, "rss-secondary", manifest, {
-    userAgent: "Binny E2E",
-    key: "az",
+  const resourceBytes = new TextEncoder().encode("binny media bytes v1");
+  const resourceResponse = await fetch(baseUrl + "/resources", {
+    method: "POST",
+    headers: { "content-type": "application/octet-stream" },
+    body: new Blob([resourceBytes]),
   });
-  const archive = await archiveHttpStep("submit", baseUrl);
-  const sdkResource = await sdkResourceStep(baseUrl);
+  assert.equal(
+    resourceResponse.status,
+    201,
+    await resourceResponse.clone().text(),
+  );
+  const resourceMetadata = (await resourceResponse.json()) as {
+    readonly resourceId: string;
+  };
+  const resourceId = resourceMetadata.resourceId;
+  const aMarkdown = `正文 A，媒体 binny://resource/${resourceId}`;
+  const baselineStates = [
+    { title: "版本 A", markdown: aMarkdown, phase: "A", resourceId },
+    { title: "版本 B", markdown: "正文 B", phase: "B", resourceId: undefined },
+    { title: "版本 A", markdown: aMarkdown, phase: "A", resourceId },
+  ] as const;
+  const baselineObservations: UpgradeArchiveObservation[] = [];
+  for (const [index, state] of baselineStates.entries()) {
+    baselineObservations.push(
+      await submitUpgradeArchiveObservation(
+        baseUrl,
+        `binny36:database-package-upgrade:observation-${String(index + 1)}`,
+        state.title,
+        state.markdown,
+        state.phase,
+        state.resourceId,
+      ),
+    );
+  }
+  const firstObservation = baselineObservations[0];
+  const middleObservation = baselineObservations[1];
+  const lastObservation = baselineObservations[2];
+  assert.ok(firstObservation);
+  assert.ok(middleObservation);
+  assert.ok(lastObservation);
+  assert.equal(firstObservation.itemId, middleObservation.itemId);
+  assert.equal(firstObservation.itemId, lastObservation.itemId);
+  assert.notEqual(firstObservation.revisionId, middleObservation.revisionId);
+  assert.equal(firstObservation.revisionId, lastObservation.revisionId);
+  const archiveItemId = firstObservation.itemId;
+  const middleArchiveSeq = middleObservation.archiveSeq;
+  const oldArchive = await readUpgradeArchive(baseUrl, archiveItemId);
+  assert.equal(oldArchive.revisions.length, 2);
+  assert.equal(oldArchive.observations.length, 3);
+  assert.equal(oldArchive.views[0]?.state.body?.markdown, aMarkdown);
+  const oldHistoricalArchive = await readUpgradeArchive(
+    baseUrl,
+    archiveItemId,
+    middleArchiveSeq,
+  );
+  assert.equal(oldHistoricalArchive.views[0]?.state.body?.markdown, "正文 B");
+  assert.deepEqual(
+    await readUpgradeResource(baseUrl, resourceId),
+    resourceBytes,
+  );
+
   const runId = await seedUpgradeRun(baseUrl, manifest);
   const oldRun = cliData<{
     readonly status: string;
     readonly result?: { readonly stopReason?: { readonly code?: string } };
   }>(await cli(baseUrl, ["run", "get", "rss-main", runId]), "found");
   assert.equal(oldRun.status, "completed");
-  baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
   assert.equal(await containerImageId("server"), expectedBaselineId);
   const baselineHistory = await migrationHistory();
 
@@ -595,57 +736,49 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   await waitForApiAndDatabase(baseUrl);
   assert.equal(await migrationHistory(), baselineHistory);
 
-  const archivePersistence = await archiveHttpStep(
-    "after-restart",
+  const candidateArchive = await readUpgradeArchive(baseUrl, archiveItemId);
+  assert.equal(candidateArchive.revisions.length, 2);
+  assert.equal(candidateArchive.observations.length, 3);
+  assert.equal(candidateArchive.views[0]?.state.body?.markdown, aMarkdown);
+  const candidateHistoricalArchive = await readUpgradeArchive(
     baseUrl,
-    archive,
-    sdkResource,
+    archiveItemId,
+    middleArchiveSeq,
   );
-  assert.ok(archivePersistence.length > 0);
-
-  const ids = archiveIds(archive);
-  const continuation = await fetch(baseUrl + "/archives", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      requestId: "binny36:database-package-upgrade:" + randomUUID(),
-      binId: "rss-main",
-      items: [
-        {
-          sourceKey: { namespace: "e2e", key: "aba-item" },
-          metadata: { title: "候选数据库包追加版本" },
-          body: { markdown: "候选数据库包写入的新正文" },
-          capture: {
-            scope: { case: "database-package-upgrade" },
-            completeness: "complete",
-            missing: [],
-          },
-        },
-      ],
-    }),
-  });
-  assert.equal(continuation.status, 201, await continuation.clone().text());
-  const continuationCommit = (await continuation.json()) as {
-    readonly items: readonly {
-      readonly itemId: string;
-      readonly revisionId: string;
-    }[];
-  };
-  const continuedItem = continuationCommit.items[0];
-  assert.ok(continuedItem);
-  assert.equal(continuedItem.itemId, ids.itemId);
-  assert.notEqual(continuedItem.revisionId, ids.revisionId);
-
-  const oldHistoricalView = await fetch(
-    `${baseUrl}/archives/items/${ids.itemId}?binId=rss-main&asOf=${encodeURIComponent(ids.historicalAsOf)}`,
+  assert.equal(
+    candidateHistoricalArchive.views[0]?.state.body?.markdown,
+    "正文 B",
   );
-  assert.equal(oldHistoricalView.status, 200);
-  const oldHistoricalItem = (await oldHistoricalView.json()) as {
-    readonly views: readonly {
-      readonly state: { readonly body?: { readonly markdown?: string } };
-    }[];
-  };
-  assert.equal(oldHistoricalItem.views[0]?.state.body?.markdown, "正文 B");
+  assert.deepEqual(
+    await readUpgradeResource(baseUrl, resourceId),
+    resourceBytes,
+  );
+
+  const continuedItem = await submitUpgradeArchiveObservation(
+    baseUrl,
+    "binny36:database-package-upgrade:candidate",
+    "候选数据库包追加版本",
+    "候选数据库包写入的新正文",
+    "candidate",
+  );
+  assert.equal(continuedItem.itemId, archiveItemId);
+  assert.notEqual(continuedItem.revisionId, lastObservation.revisionId);
+  const continuedArchive = await readUpgradeArchive(baseUrl, archiveItemId);
+  assert.equal(
+    continuedArchive.views[0]?.state.body?.markdown,
+    "候选数据库包写入的新正文",
+  );
+  assert.equal(continuedArchive.revisions.length, 3);
+  assert.equal(continuedArchive.observations.length, 4);
+  const continuedHistoricalArchive = await readUpgradeArchive(
+    baseUrl,
+    archiveItemId,
+    middleArchiveSeq,
+  );
+  assert.equal(
+    continuedHistoricalArchive.views[0]?.state.body?.markdown,
+    "正文 B",
+  );
 
   const candidateRun = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["run", "get", "rss-main", runId]),
@@ -665,41 +798,25 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
   assert.equal(restartedRun.status, "completed");
 
-  const persistedArchiveResponse = await fetch(
-    `${baseUrl}/archives/items/${ids.itemId}`,
-  );
-  assert.equal(persistedArchiveResponse.status, 200);
-  const persistedArchive = (await persistedArchiveResponse.json()) as {
-    readonly views: readonly {
-      readonly state: { readonly body?: { readonly markdown?: string } };
-    }[];
-    readonly revisions: readonly unknown[];
-  };
+  const persistedArchive = await readUpgradeArchive(baseUrl, archiveItemId);
   assert.equal(
     persistedArchive.views[0]?.state.body?.markdown,
     "候选数据库包写入的新正文",
   );
   assert.equal(persistedArchive.revisions.length, 3);
-  const restartedHistoricalView = await fetch(
-    `${baseUrl}/archives/items/${ids.itemId}?binId=rss-main&asOf=${encodeURIComponent(ids.historicalAsOf)}`,
+  assert.equal(persistedArchive.observations.length, 4);
+  const restartedHistoricalArchive = await readUpgradeArchive(
+    baseUrl,
+    archiveItemId,
+    middleArchiveSeq,
   );
-  assert.equal(restartedHistoricalView.status, 200);
-  const restartedHistoricalItem = (await restartedHistoricalView.json()) as {
-    readonly views: readonly {
-      readonly state: { readonly body?: { readonly markdown?: string } };
-    }[];
-  };
   assert.equal(
-    restartedHistoricalItem.views[0]?.state.body?.markdown,
+    restartedHistoricalArchive.views[0]?.state.body?.markdown,
     "正文 B",
   );
-  const persistedResource = await fetch(
-    `${baseUrl}/resources/${ids.resourceId}`,
-  );
-  assert.equal(persistedResource.status, 200);
   assert.deepEqual(
-    new Uint8Array(await persistedResource.arrayBuffer()),
-    new TextEncoder().encode("binny media bytes v1"),
+    await readUpgradeResource(baseUrl, resourceId),
+    resourceBytes,
   );
 
   process.stdout.write(
@@ -710,9 +827,10 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         candidateImage: imageName,
         candidateImageId: runningCandidateId,
         runId,
-        archiveItemId: ids.itemId,
+        archiveItemId,
         candidateRevisionId: continuedItem.revisionId,
-        resourceId: ids.resourceId,
+        previousRevisionId: lastObservation.revisionId,
+        resourceId,
         migrationHistory: JSON.parse(baselineHistory) as unknown,
         candidateRestarted: true,
       }) +

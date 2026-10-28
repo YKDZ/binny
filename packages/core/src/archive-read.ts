@@ -1651,6 +1651,9 @@ export function createArchiveReadOperations(
           })),
         );
       }
+      // UUID 输入大小写等价；PostgreSQL 返回的小写规范形式用于内存键查询。
+      const normalizedFirstId = checkedFirstId.data.toLowerCase();
+      const normalizedSecondId = checkedSecondId.data.toLowerCase();
       return await withArchiveReadTransaction(database, async (transaction) => {
         const rows = await transaction
           .select({
@@ -1668,8 +1671,8 @@ export function createArchiveReadOperations(
           )
           .where(
             inArray(archiveRevisions.revisionId, [
-              checkedFirstId.data,
-              checkedSecondId.data,
+              normalizedFirstId,
+              normalizedSecondId,
             ]),
           );
         const revisionsById = new Map(
@@ -1684,7 +1687,7 @@ export function createArchiveReadOperations(
             }),
           ]),
         );
-        const first = revisionsById.get(checkedFirstId.data);
+        const first = revisionsById.get(normalizedFirstId);
         if (first === undefined) {
           return failure(
             404,
@@ -1693,7 +1696,7 @@ export function createArchiveReadOperations(
             ["firstRevisionId"],
           );
         }
-        const second = revisionsById.get(checkedSecondId.data);
+        const second = revisionsById.get(normalizedSecondId);
         if (second === undefined) {
           return failure(
             404,

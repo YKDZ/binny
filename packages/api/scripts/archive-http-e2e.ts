@@ -503,7 +503,13 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     before: { present: true, value: originalState.body },
     after: { present: true, value: { markdown: "补齐后的正文" } },
   });
-  assert.deepEqual(firstToRepairedDiff.fields.capture, { status: "changed" });
+  const repairedState = repairedRead.views[0]?.state;
+  assert.ok(repairedState);
+  assert.deepEqual(firstToRepairedDiff.fields.capture, {
+    status: "changed",
+    before: { present: true, value: originalState.capture },
+    after: { present: true, value: repairedState.capture },
+  });
   const partialToRepairedDiff = await readArchiveRevisionDiff(
     client,
     partialItem.revisionId,
@@ -524,6 +530,24 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   assert.deepEqual(sameRevisionDiff.resources, { added: [], removed: [] });
   assert.equal(sameRevisionDiff.fields.metadata.status, "unchanged");
   assert.equal(sameRevisionDiff.fields.properties.status, "unchanged");
+  const mixedCaseSameRevisionDiff = await readArchiveRevisionDiff(
+    client,
+    firstItem.revisionId.toUpperCase(),
+    firstItem.revisionId,
+  );
+  assert.equal(mixedCaseSameRevisionDiff.hasChanges, false);
+  assert.equal(mixedCaseSameRevisionDiff.firstRevisionId, firstItem.revisionId);
+  assert.equal(
+    mixedCaseSameRevisionDiff.secondRevisionId,
+    firstItem.revisionId,
+  );
+  const uppercaseRevisionDiff = await readArchiveRevisionDiff(
+    client,
+    firstItem.revisionId.toUpperCase(),
+    partialItem.revisionId.toUpperCase(),
+  );
+  assert.equal(uppercaseRevisionDiff.hasChanges, true);
+  assert.equal(uppercaseRevisionDiff.fields.body.status, "changed");
 
   const invalidRevisionDiff = await client.archives.revisions[
     ":firstRevisionId"
