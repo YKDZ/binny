@@ -9,12 +9,12 @@ import {
   collectorManifest,
   type CollectorDefinition,
 } from "@binny/collector-sdk";
+import { runtimeProtocolVersion } from "@binny/contracts";
 
-export type RuntimeEnvironmentKind = "lightweight" | "browser";
+export type { RuntimeEnvironmentKind } from "@binny/contracts";
 
 export interface RuntimeServerOptions {
   readonly collector: CollectorDefinition;
-  readonly environment: RuntimeEnvironmentKind;
 }
 
 function sendJson(
@@ -28,21 +28,9 @@ function sendJson(
   response.end(JSON.stringify(value));
 }
 
-export function assertCollectorEnvironment(
-  collector: CollectorDefinition,
-  environment: RuntimeEnvironmentKind,
-): void {
-  if (collector.environment.browser.required && environment !== "browser") {
-    throw new Error(
-      `采集器 ${collector.id} 声明需要浏览器，当前运行环境为 ${environment}`,
-    );
-  }
-}
-
 export function createRuntimeServer(options: RuntimeServerOptions): Server {
-  assertCollectorEnvironment(options.collector, options.environment);
   const manifest = {
-    protocolVersion: 1,
+    protocolVersion: runtimeProtocolVersion,
     collector: collectorManifest(options.collector),
   };
 

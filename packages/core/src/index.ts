@@ -4,4 +4,8 @@ export {
   createBinConfigurationStore,
   initializeBinConfigurationSchema,
 } from "./bin-configuration.ts";
+export {
+  createRuntimeConnectionStore,
+  initializeRuntimeConnectionSchema,
+} from "./runtime-connection.ts";
 export { connectCoreDatabase, type CoreDatabase } from "./database.ts";

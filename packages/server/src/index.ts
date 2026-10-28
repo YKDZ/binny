@@ -6,8 +6,10 @@ import {
   createArchiveStore,
   connectCoreDatabase,
   createBinConfigurationStore,
+  createRuntimeConnectionStore,
   initializeArchiveSchema,
   initializeBinConfigurationSchema,
+  initializeRuntimeConnectionSchema,
 } from "@binny/core";
 // 核心与 HTTP 的组装、配置及服务启动。
 import { serve } from "@hono/node-server";
@@ -25,6 +27,7 @@ export async function createServerRuntime(options: {
   try {
     await initializeBinConfigurationSchema(database);
     await initializeArchiveSchema(database);
+    await initializeRuntimeConnectionSchema(database);
   } catch (error) {
     await database.end();
     throw error;
@@ -32,6 +35,7 @@ export async function createServerRuntime(options: {
   return {
     app: createApiRoutes({
       bins: createBinConfigurationStore(database),
+      runtime: createRuntimeConnectionStore(database),
       archives: createArchiveStore(database),
     }),
     close: () => database.end(),

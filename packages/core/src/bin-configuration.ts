@@ -76,7 +76,7 @@ function rowToConfiguration(row: BinRow): BinConfiguration {
     targets: row.targets,
     status: row.status,
     execution: {
-      status: "unavailable",
+      status: "offline",
       reason: "runtime_not_connected",
     },
     createdAt: row.created_at.toISOString(),

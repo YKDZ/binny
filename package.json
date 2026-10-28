@@ -16,7 +16,8 @@
     "boundaries": "turbo boundaries",
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",
     "publication:publish": "changeset publish --from-pack-dir .changeset/packed",
-    "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts"
+    "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts",
+    "test:runtime-connections": "node --conditions=source scripts/test-runtime-connections.ts"
   },
   "devDependencies": {
     "@binny/api": "workspace:*",

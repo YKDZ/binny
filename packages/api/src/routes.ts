@@ -4,9 +4,13 @@ import {
   binErrorSchema,
   binIdSchema,
   binUpdateInputSchema,
-  toInputJsonSchema,
+  runtimeDisconnectInputSchema,
+  runtimeHeartbeatInputSchema,
   type ArchiveOperations,
+  type BinConfiguration,
   type BinConfigurationOperations,
+  type RuntimeConnectionOperations,
+  toInputJsonSchema,
 } from "@binny/contracts";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -17,10 +21,12 @@ import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
 export type {
   ArchiveOperations,
   BinConfigurationOperations,
+  RuntimeConnectionOperations,
 } from "@binny/contracts";
 
 export type ApiOperations = {
   readonly bins: BinConfigurationOperations;
+  readonly runtime: RuntimeConnectionOperations;
   readonly archives: ArchiveOperations;
 };
 
@@ -47,10 +53,18 @@ function validationFailure(issues: readonly z.core.$ZodIssue[]) {
 }
 
 function makeApp(operations: ApiOperations) {
+  async function withExecution(configuration: BinConfiguration) {
+    const result = await operations.runtime.getExecution(configuration.id);
+    if (!result.ok)
+      throw new Error("已读取的 bin 无法读取运行状态：" + result.error.message);
+    return { ...configuration, execution: result.value };
+  }
+
   return new Hono()
     .get("/health", (c) => c.json({ status: "ok" as const }, 200))
     .get("/bins", async (c) => {
-      return c.json({ bins: await operations.bins.listBins() }, 200);
+      const bins = await operations.bins.listBins();
+      return c.json({ bins: await Promise.all(bins.map(withExecution)) }, 200);
     })
     .post(
       "/bins",
@@ -71,7 +85,7 @@ function makeApp(operations: ApiOperations) {
               return c.json({ error: result.error }, 409);
           }
         }
-        return c.json(result.value, 201);
+        return c.json(await withExecution(result.value), 201);
       },
     )
     .get(
@@ -84,7 +98,7 @@ function makeApp(operations: ApiOperations) {
       async (c) => {
         const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(result.value, 200);
+        return c.json(await withExecution(result.value), 200);
       },
     )
     .get(
@@ -97,11 +111,12 @@ function makeApp(operations: ApiOperations) {
       async (c) => {
         const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
+        const configuration = await withExecution(result.value);
         return c.json(
           {
-            actions: result.value.collector.actions,
-            environment: result.value.collector.environment,
-            execution: result.value.execution,
+            actions: configuration.collector.actions,
+            environment: configuration.collector.environment,
+            execution: configuration.execution,
           },
           200,
         );
@@ -135,7 +150,7 @@ function makeApp(operations: ApiOperations) {
               return c.json({ error: result.error }, 409);
           }
         }
-        return c.json(result.value, 200);
+        return c.json(await withExecution(result.value), 200);
       },
     )
     .post(
@@ -151,7 +166,7 @@ function makeApp(operations: ApiOperations) {
           "disabled",
         );
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(result.value, 200);
+        return c.json(await withExecution(result.value), 200);
       },
     )
     .post(
@@ -167,7 +182,7 @@ function makeApp(operations: ApiOperations) {
           "active",
         );
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(result.value, 200);
+        return c.json(await withExecution(result.value), 200);
       },
     )
     .delete(
@@ -185,6 +200,48 @@ function makeApp(operations: ApiOperations) {
         return c.json({ removed: true as const, ...result.value }, 200);
       },
     )
+    .post(
+      "/bins/:binId/runtime/heartbeat",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", runtimeHeartbeatInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runtime.heartbeat(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/runtime/disconnect",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", runtimeDisconnectInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runtime.disconnect(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
     .route("/", createArchiveRoutes(operations.archives));
 }
 
@@ -194,6 +251,8 @@ export type ApiRoutes = ReturnType<typeof makeApp>;
 export const binApiSchemas = {
   create: toInputJsonSchema(binCreateInputSchema),
   update: toInputJsonSchema(binUpdateInputSchema),
+  runtimeHeartbeat: toInputJsonSchema(runtimeHeartbeatInputSchema),
+  runtimeDisconnect: toInputJsonSchema(runtimeDisconnectInputSchema),
   output: z.toJSONSchema(binConfigurationSchema),
   error: z.toJSONSchema(binErrorSchema),
 };
