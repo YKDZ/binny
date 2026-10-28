@@ -3,8 +3,10 @@ import { pathToFileURL } from "node:url";
 
 import { createApiRoutes } from "@binny/api/routes";
 import {
+  createArchiveStore,
   connectCoreDatabase,
   createBinConfigurationStore,
+  initializeArchiveSchema,
   initializeBinConfigurationSchema,
 } from "@binny/core";
 // 核心与 HTTP 的组装、配置及服务启动。
@@ -22,12 +24,16 @@ export async function createServerRuntime(options: {
   const database = connectCoreDatabase(options.databaseUrl);
   try {
     await initializeBinConfigurationSchema(database);
+    await initializeArchiveSchema(database);
   } catch (error) {
     await database.end();
     throw error;
   }
   return {
-    app: createApiRoutes(createBinConfigurationStore(database)),
+    app: createApiRoutes({
+      bins: createBinConfigurationStore(database),
+      archives: createArchiveStore(database),
+    }),
     close: () => database.end(),
   };
 }

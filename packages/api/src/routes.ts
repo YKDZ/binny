@@ -5,13 +5,24 @@ import {
   binIdSchema,
   binUpdateInputSchema,
   toInputJsonSchema,
+  type ArchiveOperations,
   type BinConfigurationOperations,
 } from "@binny/contracts";
-// 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import * as z from "zod";
-export type { BinConfigurationOperations } from "@binny/contracts";
+
+// 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
+import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
+export type {
+  ArchiveOperations,
+  BinConfigurationOperations,
+} from "@binny/contracts";
+
+export type ApiOperations = {
+  readonly bins: BinConfigurationOperations;
+  readonly archives: ArchiveOperations;
+};
 
 function validationFailure(issues: readonly z.core.$ZodIssue[]) {
   const firstIssue = issues[0];
@@ -35,11 +46,11 @@ function validationFailure(issues: readonly z.core.$ZodIssue[]) {
   };
 }
 
-function makeApp(operations: BinConfigurationOperations) {
+function makeApp(operations: ApiOperations) {
   return new Hono()
     .get("/health", (c) => c.json({ status: "ok" as const }, 200))
     .get("/bins", async (c) => {
-      return c.json({ bins: await operations.listBins() }, 200);
+      return c.json({ bins: await operations.bins.listBins() }, 200);
     })
     .post(
       "/bins",
@@ -49,7 +60,7 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.createBin(c.req.valid("json"));
+        const result = await operations.bins.createBin(c.req.valid("json"));
         if (!result.ok) {
           switch (result.status) {
             case 400:
@@ -71,7 +82,7 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.getBin(c.req.valid("param").binId);
+        const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
         return c.json(result.value, 200);
       },
@@ -84,7 +95,7 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.getBin(c.req.valid("param").binId);
+        const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
         return c.json(
           {
@@ -110,7 +121,10 @@ function makeApp(operations: BinConfigurationOperations) {
       }),
       async (c) => {
         const { binId } = c.req.valid("param");
-        const result = await operations.updateBin(binId, c.req.valid("json"));
+        const result = await operations.bins.updateBin(
+          binId,
+          c.req.valid("json"),
+        );
         if (!result.ok) {
           switch (result.status) {
             case 400:
@@ -132,7 +146,7 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.setBinStatus(
+        const result = await operations.bins.setBinStatus(
           c.req.valid("param").binId,
           "disabled",
         );
@@ -148,7 +162,7 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.setBinStatus(
+        const result = await operations.bins.setBinStatus(
           c.req.valid("param").binId,
           "active",
         );
@@ -164,11 +178,14 @@ function makeApp(operations: BinConfigurationOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.removeBin(c.req.valid("param").binId);
+        const result = await operations.bins.removeBin(
+          c.req.valid("param").binId,
+        );
         if (!result.ok) return c.json({ error: result.error }, 404);
         return c.json({ removed: true as const, ...result.value }, 200);
       },
-    );
+    )
+    .route("/", createArchiveRoutes(operations.archives));
 }
 
 export type ApiRoutes = ReturnType<typeof makeApp>;
@@ -181,8 +198,8 @@ export const binApiSchemas = {
   error: z.toJSONSchema(binErrorSchema),
 };
 
-export function createApiRoutes(
-  operations: BinConfigurationOperations,
-): ApiRoutes {
+export { archiveApiSchemas };
+
+export function createApiRoutes(operations: ApiOperations): ApiRoutes {
   return makeApp(operations);
 }

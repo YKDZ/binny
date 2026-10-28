@@ -1,5 +1,7 @@
 import * as z from "zod";
 
+import { binIdSchema } from "./bin-configuration.ts";
+
 const nonEmptyText = z
   .string()
   .min(1, "字段不能为空。")
@@ -22,26 +24,80 @@ const jsonNumberSchema = z
     "JSON 整数必须处于 JavaScript 安全整数范围内。",
   );
 
-export type ArchiveJsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | readonly ArchiveJsonValue[]
-  | { readonly [key: string]: ArchiveJsonValue };
+function validateJsonValue(
+  value: unknown,
+  context: z.RefinementCtx,
+  path: readonly (string | number)[],
+  ancestors: WeakSet<object>,
+): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return;
+  if (typeof value === "number") {
+    const checked = jsonNumberSchema.safeParse(value);
+    if (!checked.success) {
+      context.addIssue({
+        code: "custom",
+        path: [...path],
+        message: checked.error.issues[0]?.message ?? "JSON 数字无效。",
+      });
+    }
+    return;
+  }
+  if (typeof value !== "object") {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "字段值必须是 JSON 数据。",
+    });
+    return;
+  }
+  if (ancestors.has(value)) {
+    context.addIssue({
+      code: "custom",
+      path: [...path],
+      message: "JSON 数据不能包含循环引用。",
+    });
+    return;
+  }
 
-const jsonValueSchema: z.ZodType<ArchiveJsonValue> = z.lazy(() =>
-  z.union([
-    z.string(),
-    jsonNumberSchema,
-    z.boolean(),
-    z.null(),
-    z.array(jsonValueSchema),
-    z.record(z.string(), jsonValueSchema),
-  ]),
-);
+  ancestors.add(value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (!(index in value)) {
+        context.addIssue({
+          code: "custom",
+          path: [...path, index],
+          message: "JSON 数组不能包含空位。",
+        });
+      } else {
+        validateJsonValue(value[index], context, [...path, index], ancestors);
+      }
+    }
+  } else {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      context.addIssue({
+        code: "custom",
+        path: [...path],
+        message: "字段值必须是 JSON 对象。",
+      });
+    } else {
+      for (const [key, nestedValue] of Object.entries(value)) {
+        validateJsonValue(nestedValue, context, [...path, key], ancestors);
+      }
+    }
+  }
+  ancestors.delete(value);
+}
 
-const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
+const jsonObjectSchema = z
+  .record(z.string(), z.unknown())
+  .superRefine((object, context) => {
+    const ancestors = new WeakSet<object>([object]);
+    for (const [key, value] of Object.entries(object)) {
+      validateJsonValue(value, context, [key], ancestors);
+    }
+  });
 
 const archiveBodySchema = z
   .object({
@@ -95,19 +151,10 @@ const archiveDiagnosticSchema = z
   })
   .strict();
 
-const binIdentifierSchema = z
-  .string()
-  .min(1, "bin 标识不能为空。")
-  .max(128, "bin 标识不能超过 128 个字符。")
-  .regex(
-    /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u,
-    "bin 标识只能包含字母、数字、点、下划线和连字符。",
-  );
-
 // 将显式来源时刻规范为 UTC；字段缺省时不代造来源时间。
 const timestampSchema = z.iso
   .datetime({ offset: true })
-  .transform((value) => new Date(value).toISOString());
+  .overwrite((value) => new Date(value).toISOString());
 
 const archiveItemFieldsSchema = z
   .object({
@@ -161,7 +208,7 @@ export type ArchiveItemInput = z.infer<typeof archiveItemInputSchema>;
 export const archiveSubmissionInputSchema = z
   .object({
     requestId: nonEmptyText.max(256, "请求标识不能超过 256 个字符。"),
-    binId: binIdentifierSchema,
+    binId: binIdSchema,
     runId: nonEmptyText.max(128, "run 标识不能超过 128 个字符。").optional(),
     collectorVersion: nonEmptyText
       .max(256, "采集器版本不能超过 256 个字符。")
@@ -210,7 +257,7 @@ const archiveObservationSchema = z
   .object({
     commitId: archiveIdSchema,
     archiveSeq: archiveSequenceSchema,
-    binId: binIdentifierSchema,
+    binId: binIdSchema,
     runId: nonEmptyText.max(128).optional(),
     collectorVersion: nonEmptyText.max(256).optional(),
     revisionId: archiveIdSchema,
@@ -222,7 +269,7 @@ const archiveObservationSchema = z
 
 const archiveViewSchema = z
   .object({
-    binId: binIdentifierSchema,
+    binId: binIdSchema,
     archiveSeq: archiveSequenceSchema,
     revisionId: archiveIdSchema,
     observedAt: timestampSchema,
@@ -246,7 +293,7 @@ export const archiveCommitSchema = z
   .object({
     commitId: archiveIdSchema,
     archiveSeq: archiveSequenceSchema,
-    binId: binIdentifierSchema,
+    binId: binIdSchema,
     runId: nonEmptyText.max(128).optional(),
     collectorVersion: nonEmptyText.max(256).optional(),
     observedAt: timestampSchema,

@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   archiveCommitSchema,
   archiveIdentifierSchema,
-  archiveItemInputSchema,
   archiveItemReadSchema,
   archiveItemStateSchema,
   archiveRevisionReadSchema,
@@ -13,7 +12,6 @@ import {
   type ArchiveItemRead,
   type ArchiveOperation,
   type ArchiveOperations,
-  type ArchiveRevisionRead,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
 import type postgres from "postgres";
@@ -57,13 +55,13 @@ type RevisionRow = {
 
 type ViewRow = CommitRow & {
   readonly revision_id: string;
-  readonly diagnostics: unknown | null;
+  readonly diagnostics: unknown;
   readonly state_data: unknown;
 };
 
 type ObservationRow = CommitRow & {
   readonly revision_id: string;
-  readonly diagnostics: unknown | null;
+  readonly diagnostics: unknown;
 };
 
 type RevisionReadRow = RevisionRow & ItemRow;
@@ -73,9 +71,7 @@ type PreparedItem = {
   readonly revisionId: string;
   readonly sourceKey: ArchiveSubmissionInput["items"][number]["sourceKey"];
   readonly state: ReturnType<typeof archiveItemStateSchema.parse>;
-  readonly diagnostics:
-    | ArchiveSubmissionInput["items"][number]["diagnostics"]
-    | undefined;
+  readonly diagnostics: ArchiveSubmissionInput["items"][number]["diagnostics"];
 };
 
 function failure<T>(
@@ -132,6 +128,30 @@ function canonicalJson(value: unknown): string {
   throw new TypeError("归档状态必须是 JSON 值。");
 }
 
+function postgresJsonValue(value: unknown): postgres.JSONValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return value;
+  if (typeof value === "number") {
+    if (
+      !Number.isFinite(value) ||
+      (Number.isInteger(value) && !Number.isSafeInteger(value))
+    ) {
+      throw new TypeError("归档 JSON 数字超出支持范围。");
+    }
+    return value;
+  }
+  if (Array.isArray(value))
+    return value.map((entry) => postgresJsonValue(entry));
+  if (typeof value === "object") {
+    const fields: Record<string, postgres.JSONValue> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      fields[key] = postgresJsonValue(entry);
+    }
+    return fields;
+  }
+  throw new TypeError("归档状态必须是 JSON 值。");
+}
+
 function hashJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
@@ -140,14 +160,15 @@ function isoTimestamp(value: Date): string {
   return value.toISOString();
 }
 
-function optionalText<Name extends "runId" | "collectorVersion">(
-  name: Name,
+function optionalText(
+  name: "runId" | "collectorVersion",
   value: string | null,
-): Partial<Record<Name, string>> {
-  return value === null ? {} : { [name]: value };
+): { readonly runId?: string; readonly collectorVersion?: string } {
+  if (value === null) return {};
+  return name === "runId" ? { runId: value } : { collectorVersion: value };
 }
 
-function optionalDiagnostics(value: unknown | null): {
+function optionalDiagnostics(value: unknown): {
   readonly diagnostics?: unknown;
 } {
   return value === null ? {} : { diagnostics: value };
@@ -171,7 +192,7 @@ export async function withArchiveWriteLock<T>(
     currentSequence: bigint,
   ) => Promise<T>,
 ): Promise<T> {
-  return await database.begin(async (transaction) => {
+  const result = await database.begin(async (transaction) => {
     const clocks = await transaction<ClockRow[]>`
       SELECT last_seq::text AS last_seq
       FROM archive_write_clock
@@ -182,8 +203,11 @@ export async function withArchiveWriteLock<T>(
     if (clock === undefined) {
       throw new Error("归档写入时钟尚未初始化。");
     }
-    return await operation(transaction, BigInt(clock.last_seq));
+    return {
+      value: await operation(transaction, BigInt(clock.last_seq)),
+    };
   });
+  return result.value;
 }
 
 /** 仅在同一写事务中提交新的归档观察时推进全局序号。 */
@@ -523,7 +547,7 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
                   ${revisionId},
                   ${itemId},
                   ${stateHash},
-                  ${transaction.json(state)}
+                  ${transaction.json(postgresJsonValue(state))}
                 )
               `;
             } else {
@@ -591,7 +615,7 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
                 ${
                   item.diagnostics === undefined
                     ? null
-                    : transaction.json(item.diagnostics)
+                    : transaction.json(postgresJsonValue(item.diagnostics))
                 }
               )
             `;

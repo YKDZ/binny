@@ -38,12 +38,6 @@
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
-    },
-    "test": {
-      "dependsOn": [],
-      "inputs": ["$TURBO_DEFAULT$"],
-      "outputs": [],
-      "tags": ["quality:light"]
     }
   }
 }

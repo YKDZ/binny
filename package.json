@@ -19,6 +19,7 @@
     "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts"
   },
   "devDependencies": {
+    "@binny/api": "workspace:*",
     "@binny/tooling-config": "workspace:./packages/tooling-config",
     "@changesets/cli": "catalog:",
     "@types/node": "catalog:",
