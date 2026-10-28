@@ -9,13 +9,18 @@ import {
   archiveSearchPageSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
+  archiveItemDeletionResultSchema,
   archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
 import type { AnySchema } from "ajv/dist/2020.js";
 import * as z from "zod";
 
-import { archiveApiSchemas, binApiSchemas } from "../src/routes.ts";
+import {
+  archiveApiSchemas,
+  binApiSchemas,
+  manualRunApiSchemas,
+} from "../src/routes.ts";
 
 const require = createRequire(import.meta.url);
 const Ajv2020 =
@@ -65,10 +70,11 @@ function compileJsonSchema(document: unknown) {
   return ajv.compile(document as AnySchema);
 }
 
-function compilePublishedSearchSchemas() {
+function compilePublishedSchemas() {
   for (const document of [
     ...Object.values(binApiSchemas),
     ...Object.values(archiveApiSchemas),
+    ...Object.values(manualRunApiSchemas),
   ]) {
     compileJsonSchema(document);
   }
@@ -772,7 +778,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     assert.equal(firstForward.to.status, "observed");
     assert.deepEqual(firstForward.state.properties, firstState.properties);
   }
-  const externalTarget = firstOutgoingPage.relations[1]?.to;
+  const externalRelation = firstOutgoingPage.relations[1];
+  assert.equal(externalRelation?.status, "observed");
+  const externalTarget =
+    externalRelation?.status === "observed" ? externalRelation.to : undefined;
   assert.equal(externalTarget?.kind, "sourceRef");
   if (externalTarget?.kind === "sourceRef") {
     assert.equal(
@@ -780,8 +789,6 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
       "https://example.test/external-target",
     );
   }
-  const externalRelation = firstOutgoingPage.relations[1];
-  assert.equal(externalRelation?.status, "observed");
   if (externalRelation?.status === "observed") {
     assert.equal(
       externalRelation.state.properties?.sourceRef,
@@ -879,7 +886,11 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     incomingLoop.relations.map(({ relationId }) => relationId),
     ["e2e:relation:04-loop-reverse"],
   );
-  assert.equal(incomingLoop.relations[0]?.from.itemId, toItem.itemId);
+  const incomingLoopRelation = incomingLoop.relations[0];
+  assert.equal(incomingLoopRelation?.status, "observed");
+  if (incomingLoopRelation?.status === "observed") {
+    assert.equal(incomingLoopRelation.from.itemId, toItem.itemId);
+  }
 
   const relationOnlyCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:only-update",
@@ -2181,7 +2192,7 @@ async function verifySearchRoute(
   historicalAsOf: string,
 ): Promise<void> {
   const client = createApiClient(baseUrl);
-  const searchSchemas = compilePublishedSearchSchemas();
+  const searchSchemas = compilePublishedSchemas();
   const unicodeCommit = await submitArchive(client, {
     requestId: "e2e:archive:search-unicode",
     binId: "rss-main",
@@ -3095,6 +3106,519 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal((await overBudget.json()).error.code, "query_budget_exceeded");
 }
 
+async function verifyHardDeleteEntryPoint(
+  client: ArchiveClient,
+  baseUrl: string,
+): Promise<void> {
+  const runId = randomUUID();
+  const targetKey = { namespace: "e2e", key: "hard-delete-target:" + runId };
+  const ownerKey = { namespace: "e2e", key: "hard-delete-owner:" + runId };
+  const unrelatedKey = {
+    namespace: "e2e",
+    key: "hard-delete-unrelated:" + runId,
+  };
+  const sharedBytes = new TextEncoder().encode("binny06 shared delete media");
+  const exclusiveBytes = new TextEncoder().encode(
+    "binny06 exclusive delete media",
+  );
+  const upload = async (bytes: Uint8Array) => {
+    const body = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(body).set(bytes);
+    const response = await client.resources.$post(
+      { header: { "content-type": "image/png" } },
+      { init: { body: new Blob([body]) } },
+    );
+    assert.equal(response.status, 201);
+    if (response.status !== 201) {
+      throw new Error("硬删除资源上传失败。");
+    }
+    return await response.json();
+  };
+  const sharedResource = await upload(sharedBytes);
+  const exclusiveResource = await upload(exclusiveBytes);
+  const relationIds = [
+    "e2e:hard-delete:" + runId + ":target-owner",
+    "e2e:hard-delete:" + runId + ":owner-target",
+    "e2e:hard-delete:" + runId + ":target-unrelated",
+  ];
+  const firstRequest: ArchiveSubmission = {
+    requestId: "e2e:archive:hard-delete:first:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: targetKey,
+        metadata: { title: "应删除的正文状态" },
+        body: { text: "hard delete target first revision secret" },
+        resources: [
+          { resourceId: sharedResource.resourceId },
+          { resourceId: exclusiveResource.resourceId },
+        ],
+        diagnostics: [
+          { code: "e2e-hard-delete", message: "应清除的专属观察诊断" },
+        ],
+        capture: {
+          scope: { case: "hard-delete-first" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: ownerKey,
+        metadata: {
+          note: "未登记标记 binny://resource/" + exclusiveResource.resourceId,
+        },
+        body: {
+          text: "未登记标记 binny://resource/" + exclusiveResource.resourceId,
+        },
+        resources: [{ resourceId: sharedResource.resourceId }],
+        capture: {
+          scope: { case: "hard-delete-owner" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: unrelatedKey,
+        body: { text: "普通关系不扩大删除集合" },
+        capture: {
+          scope: { case: "hard-delete-unrelated" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [
+      {
+        relationId: relationIds[0]!,
+        value: {
+          from: targetKey,
+          to: { sourceKey: ownerKey },
+          name: "ordinary-target-owner",
+          cascade: false,
+        },
+      },
+      {
+        relationId: relationIds[1]!,
+        value: {
+          from: ownerKey,
+          to: { sourceKey: targetKey },
+          name: "ordinary-owner-target",
+          cascade: false,
+        },
+      },
+      {
+        relationId: relationIds[2]!,
+        value: {
+          from: targetKey,
+          to: { sourceKey: unrelatedKey },
+          name: "ordinary-target-unrelated",
+          cascade: false,
+        },
+      },
+    ],
+  };
+  const firstCommit = await submitArchive(client, firstRequest);
+  const target = firstCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === targetKey.key,
+  );
+  const owner = firstCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === ownerKey.key,
+  );
+  const unrelated = firstCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === unrelatedKey.key,
+  );
+  assert.ok(target && owner && unrelated);
+
+  const secondCommit = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:secondary:" + runId,
+    binId: "rss-secondary",
+    items: [
+      {
+        sourceKey: targetKey,
+        metadata: { title: "第二个 bin 的内容状态" },
+        body: { text: "hard delete target second revision secret" },
+        resources: [
+          { resourceId: sharedResource.resourceId },
+          { resourceId: exclusiveResource.resourceId },
+        ],
+        capture: {
+          scope: { case: "hard-delete-secondary" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const secondTarget = secondCommit.items[0];
+  assert.ok(secondTarget);
+  assert.equal(secondTarget.itemId, target.itemId);
+  assert.notEqual(secondTarget.revisionId, target.revisionId);
+
+  const beforeDeleteResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId: target.itemId },
+    query: {},
+  });
+  assert.equal(beforeDeleteResponse.status, 200);
+  if (beforeDeleteResponse.status !== 200) {
+    throw new Error("删除前读取跨 bin 视图失败。");
+  }
+  const beforeDelete = await beforeDeleteResponse.json();
+  assert.deepEqual(beforeDelete.views.map(({ binId }) => binId).toSorted(), [
+    "rss-main",
+    "rss-secondary",
+  ]);
+  assert.equal(beforeDelete.revisions.length, 2);
+
+  const response = await fetch(baseUrl + "/archives/items/" + target.itemId, {
+    method: "DELETE",
+  });
+  if (response.status !== 200) {
+    throw new Error("HTTP 硬删除失败：" + (await response.text()));
+  }
+  const deletion = archiveItemDeletionResultSchema.parse(await response.json());
+  assert.equal(deletion.itemId, target.itemId);
+  assert.equal(deletion.deleted, true);
+  assert.ok(BigInt(deletion.deletionSeq) > BigInt(secondCommit.archiveSeq));
+
+  for (const query of [{}, { asOf: firstCommit.archiveSeq }] as const) {
+    const deletedRead = await client.archives.items[":itemId"].$get({
+      param: { itemId: target.itemId },
+      query,
+    });
+    assert.equal(deletedRead.status, 404);
+    if (deletedRead.status === 404) {
+      assert.equal((await deletedRead.json()).error.code, "item_deleted");
+    }
+  }
+  for (const revisionId of [target.revisionId, secondTarget.revisionId]) {
+    const deletedRevision = await client.archives.revisions[":revisionId"].$get(
+      { param: { revisionId } },
+    );
+    assert.equal(deletedRevision.status, 404);
+    if (deletedRevision.status === 404) {
+      assert.equal(
+        (await deletedRevision.json()).error.code,
+        "revision_not_found",
+      );
+    }
+  }
+
+  const mixedCommit = await readArchiveCommit(client, firstCommit.commitId);
+  assert.deepEqual(
+    mixedCommit.items.map(({ itemId }) => itemId).toSorted(),
+    [owner.itemId, unrelated.itemId].toSorted(),
+  );
+  assert.deepEqual(
+    mixedCommit.gaps?.items.map(({ itemId }) => itemId),
+    [target.itemId],
+  );
+  assert.deepEqual(
+    mixedCommit.gaps?.relations.map(({ relationId }) => relationId).toSorted(),
+    relationIds.toSorted(),
+  );
+  assert.doesNotMatch(
+    JSON.stringify(mixedCommit),
+    /hard delete target|应删除的正文状态|应清除的专属观察诊断/u,
+  );
+  const secondaryCommit = await readArchiveCommit(
+    client,
+    secondCommit.commitId,
+  );
+  assert.deepEqual(
+    secondaryCommit.gaps?.items.map(({ itemId }) => itemId),
+    [target.itemId],
+  );
+
+  const targetTimeline = await readArchiveTimeline(client, target.itemId, {
+    asOf: firstCommit.archiveSeq,
+    limit: "100",
+  });
+  assert.ok(
+    targetTimeline.events.some(
+      (event) => event.kind === "gap" && event.subject.kind === "item",
+    ),
+  );
+  assert.ok(
+    targetTimeline.events.some(
+      (event) =>
+        event.kind === "gap" &&
+        event.subject.kind === "relation" &&
+        event.subject.relationId === relationIds[0],
+    ),
+  );
+  assert.equal(
+    targetTimeline.events.some((event) => event.kind === "item"),
+    false,
+  );
+  const ownerTimeline = await readArchiveTimeline(client, owner.itemId, {
+    asOf: firstCommit.archiveSeq,
+    limit: "100",
+  });
+  assert.ok(
+    ownerTimeline.events.some(
+      (event) =>
+        event.kind === "gap" &&
+        event.subject.kind === "relation" &&
+        event.subject.relationId === relationIds[1],
+    ),
+  );
+
+  for (const [direction, expectedRelationId] of [
+    ["outgoing", relationIds[1]],
+    ["incoming", relationIds[0]],
+  ] as const) {
+    const page = await readArchiveRelations(client, owner.itemId, {
+      binId: "rss-main",
+      direction,
+      asOf: firstCommit.archiveSeq,
+      limit: "100",
+    });
+    const deletedRelation = page.relations.find(
+      ({ relationId }) => relationId === expectedRelationId,
+    );
+    assert.equal(deletedRelation?.status, "deleted");
+  }
+  const unrelatedRead = await client.archives.items[":itemId"].$get({
+    param: { itemId: unrelated.itemId },
+    query: {},
+  });
+  assert.equal(unrelatedRead.status, 200);
+
+  const replayedRequest = await submitArchive(client, firstRequest);
+  assert.equal(replayedRequest.commitId, firstCommit.commitId);
+  assert.equal(
+    replayedRequest.items.some(({ itemId }) => itemId === target.itemId),
+    false,
+  );
+  assert.deepEqual(
+    replayedRequest.gaps?.items.map(({ itemId }) => itemId),
+    [target.itemId],
+  );
+  const afterReplay = await client.archives.items[":itemId"].$get({
+    param: { itemId: target.itemId },
+    query: {},
+  });
+  assert.equal(afterReplay.status, 404);
+  if (afterReplay.status === 404) {
+    assert.equal((await afterReplay.json()).error.code, "item_deleted");
+  }
+
+  const ownerRead = await client.archives.items[":itemId"].$get({
+    param: { itemId: owner.itemId },
+    query: {},
+  });
+  assert.equal(ownerRead.status, 200);
+  if (ownerRead.status !== 200) {
+    throw new Error("删除后共享资源持有条目不可读。");
+  }
+  const retainedOwner = await ownerRead.json();
+  assert.ok(
+    retainedOwner.views[0]?.state.body?.text?.includes(
+      exclusiveResource.resourceId,
+    ),
+  );
+  const sharedRead = await client.resources[":resourceId"].$get({
+    param: { resourceId: sharedResource.resourceId },
+  });
+  assert.equal(sharedRead.status, 200);
+  if (sharedRead.status === 200) {
+    assert.deepEqual(
+      new Uint8Array(await sharedRead.arrayBuffer()),
+      sharedBytes,
+    );
+  }
+  const exclusiveRead = await client.resources[":resourceId"].$get({
+    param: { resourceId: exclusiveResource.resourceId },
+  });
+  assert.equal(exclusiveRead.status, 404);
+  if (exclusiveRead.status === 404) {
+    assert.equal((await exclusiveRead.json()).error.code, "resource_not_found");
+  }
+
+  const freshCommit = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:fresh:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: targetKey,
+        body: { text: "真实新采集允许重新归档" },
+        capture: {
+          scope: { case: "hard-delete-fresh-capture" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const freshItem = freshCommit.items[0];
+  assert.ok(freshItem);
+  assert.notEqual(freshItem.itemId, target.itemId);
+  const freshRead = await client.archives.items[":itemId"].$get({
+    param: { itemId: freshItem.itemId },
+    query: {},
+  });
+  assert.equal(freshRead.status, 200);
+
+  const reusedRelationId = relationIds[1]!;
+  const secondaryRelationCommit = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:secondary-relation:" + runId,
+    binId: "rss-secondary",
+    items: [],
+    relations: [
+      {
+        relationId: reusedRelationId,
+        value: {
+          from: ownerKey,
+          to: { sourceKey: targetKey },
+          name: "ordinary-owner-target",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const relationBeforeMainReobservation = await readArchiveRelations(
+    client,
+    owner.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      limit: "10",
+    },
+  );
+  const retainedDeletionGap = relationBeforeMainReobservation.relations.filter(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(retainedDeletionGap.length, 1);
+  assert.equal(retainedDeletionGap[0]?.status, "deleted");
+  assert.equal("from" in retainedDeletionGap[0]!, false);
+  assert.equal("to" in retainedDeletionGap[0]!, false);
+
+  const secondaryRelation = await readArchiveRelations(client, owner.itemId, {
+    direction: "outgoing",
+    binId: "rss-secondary",
+    limit: "10",
+  });
+  const secondaryObservedRelation = secondaryRelation.relations.find(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(secondaryObservedRelation?.status, "observed");
+  if (secondaryObservedRelation?.status === "observed") {
+    assert.equal(
+      secondaryObservedRelation.observation.commitId,
+      secondaryRelationCommit.commitId,
+    );
+    assert.equal(secondaryObservedRelation.to.kind, "item");
+    if (secondaryObservedRelation.to.kind === "item") {
+      assert.equal(secondaryObservedRelation.to.itemId, freshItem.itemId);
+    }
+  }
+
+  const oldMainSnapshot = await readArchiveRelations(client, owner.itemId, {
+    direction: "outgoing",
+    binId: "rss-main",
+    asOf: firstCommit.archiveSeq,
+    limit: "10",
+  });
+  const oldSnapshotGap = oldMainSnapshot.relations.find(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(oldSnapshotGap?.status, "deleted");
+
+  const mainReobservation = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:main-reobservation:" + runId,
+    binId: "rss-main",
+    items: [],
+    relations: [
+      {
+        relationId: reusedRelationId,
+        value: {
+          from: ownerKey,
+          to: { sourceKey: targetKey },
+          name: "ordinary-owner-target",
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:hard-delete:" + runId + ":a-before",
+        value: {
+          from: ownerKey,
+          to: { sourceRef: "https://example.test/a-before" },
+          name: "page-boundary",
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:hard-delete:" + runId + ":z-after",
+        value: {
+          from: ownerKey,
+          to: { sourceRef: "https://example.test/z-after" },
+          name: "page-boundary",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  assert.equal(mainReobservation.relations.length, 3);
+  const currentMainRelationIds: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await readArchiveRelations(client, owner.itemId, {
+      direction: "outgoing",
+      binId: "rss-main",
+      ...(cursor === undefined ? {} : { cursor }),
+      limit: "1",
+    });
+    currentMainRelationIds.push(
+      ...page.relations.map(({ relationId }) => relationId),
+    );
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  assert.deepEqual(currentMainRelationIds, [
+    "e2e:hard-delete:" + runId + ":a-before",
+    reusedRelationId,
+    "e2e:hard-delete:" + runId + ":z-after",
+  ]);
+  assert.equal(
+    new Set(currentMainRelationIds).size,
+    currentMainRelationIds.length,
+  );
+  const restoredMainRelation = (
+    await readArchiveRelations(client, owner.itemId, {
+      direction: "outgoing",
+      binId: "rss-main",
+      limit: "10",
+    })
+  ).relations.find(({ relationId }) => relationId === reusedRelationId);
+  assert.equal(restoredMainRelation?.status, "observed");
+  if (restoredMainRelation?.status === "observed") {
+    assert.equal(
+      restoredMainRelation.observation.commitId,
+      mainReobservation.commitId,
+    );
+    assert.equal(restoredMainRelation.to.kind, "item");
+    if (restoredMainRelation.to.kind === "item") {
+      assert.equal(restoredMainRelation.to.itemId, freshItem.itemId);
+      assert.equal(restoredMainRelation.to.status, "observed");
+    }
+  }
+  const gapAfterMainReobservation = await readArchiveRelations(
+    client,
+    owner.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      asOf: firstCommit.archiveSeq,
+      limit: "10",
+    },
+  );
+  assert.equal(
+    gapAfterMainReobservation.relations.find(
+      ({ relationId }) => relationId === reusedRelationId,
+    )?.status,
+    "deleted",
+  );
+}
+
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   const client = createApiClient(baseUrl);
   await verifyArchiveAtomicity(client);
@@ -3114,6 +3638,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifySearchPagination(baseUrl);
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);
+  await verifyHardDeleteEntryPoint(client, baseUrl);
   return {
     ...aba,
     ...relations,

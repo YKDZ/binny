@@ -4,6 +4,7 @@ import {
   archiveCommitSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveItemDeletionResultSchema,
   archiveItemStateSchema,
   archiveRevisionReadSchema,
   archiveRelationEntrySchema,
@@ -64,6 +65,18 @@ type CommitItemRow = {
   readonly source_key: string;
 };
 
+type CommitItemGapRow = {
+  readonly item_id: string;
+  readonly ordinal: number;
+  readonly namespace: string;
+  readonly source_key: string;
+};
+
+type CommitRelationGapRow = {
+  readonly relation_id: string;
+  readonly ordinal: number;
+};
+
 type ItemRow = {
   readonly item_id: string;
   readonly namespace: string;
@@ -90,7 +103,7 @@ type ObservationRow = CommitRow & {
 };
 
 type TimelineRow = CommitRow & {
-  readonly kind: "item" | "relation";
+  readonly kind: "item" | "relation" | "gap";
   readonly item_id: string | null;
   readonly relation_id: string | null;
   readonly relation_revision_id: string | null;
@@ -98,6 +111,9 @@ type TimelineRow = CommitRow & {
   readonly revision_id: string | null;
   readonly ordinal: number;
   readonly source_modified_at: string | null;
+  readonly gap_subject_kind: "item" | "relation" | null;
+  readonly gap_namespace: string | null;
+  readonly gap_source_key: string | null;
 };
 
 type SearchRow = {
@@ -142,7 +158,7 @@ type RelationRevisionRow = {
 };
 
 type RelationReadRow = RelationIdentityRow & {
-  readonly state_status: "observed" | "withdrawn" | "unknown";
+  readonly state_status: "observed" | "withdrawn" | "unknown" | "deleted";
   readonly relation_revision_id: string | null;
   readonly state_data: unknown;
   readonly relation_commit_id: string | null;
@@ -477,6 +493,14 @@ export async function initializeArchiveSchema(
         ")",
     );
     await transaction.unsafe(
+      "CREATE TABLE IF NOT EXISTS archive_item_deletion (" +
+        "item_id uuid PRIMARY KEY, " +
+        "namespace text NOT NULL, " +
+        "source_key text NOT NULL, " +
+        "deletion_seq bigint NOT NULL CHECK (deletion_seq > 0)" +
+        ")",
+    );
+    await transaction.unsafe(
       "CREATE TABLE IF NOT EXISTS archive_resource (" +
         "resource_id uuid PRIMARY KEY, " +
         "sha256 text NOT NULL CHECK (length(sha256) = 64), " +
@@ -558,6 +582,18 @@ export async function initializeArchiveSchema(
         "ON archive_observation (item_id, commit_id)",
     );
     await transaction.unsafe(
+      "CREATE TABLE IF NOT EXISTS archive_item_observation_gap (" +
+        "commit_id uuid NOT NULL REFERENCES archive_commit(commit_id) ON DELETE RESTRICT, " +
+        "ordinal integer NOT NULL CHECK (ordinal >= 0), " +
+        "item_id uuid NOT NULL REFERENCES archive_item_deletion(item_id) ON DELETE RESTRICT, " +
+        "PRIMARY KEY (commit_id, ordinal)" +
+        ")",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_item_observation_gap_item_commit_idx " +
+        "ON archive_item_observation_gap (item_id, commit_id)",
+    );
+    await transaction.unsafe(
       "CREATE INDEX IF NOT EXISTS archive_commit_bin_sequence_idx " +
         "ON archive_commit (bin_id, archive_seq DESC)",
     );
@@ -619,6 +655,29 @@ export async function initializeArchiveSchema(
         "ON archive_relation_observation " +
         "(relation_id, bin_id, archive_seq DESC, ordinal DESC, commit_id DESC)",
     );
+    await transaction.unsafe(
+      "CREATE TABLE IF NOT EXISTS archive_relation_observation_gap (" +
+        "commit_id uuid NOT NULL REFERENCES archive_commit(commit_id) ON DELETE RESTRICT, " +
+        "ordinal integer NOT NULL CHECK (ordinal >= 0), " +
+        "relation_id text NOT NULL, " +
+        "from_item_id uuid NOT NULL, " +
+        "target_item_id uuid, " +
+        "PRIMARY KEY (commit_id, ordinal)" +
+        ")",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_relation_observation_gap_from_idx " +
+        "ON archive_relation_observation_gap (from_item_id, relation_id)",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_relation_observation_gap_to_idx " +
+        "ON archive_relation_observation_gap (target_item_id, relation_id) " +
+        "WHERE target_item_id IS NOT NULL",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_relation_observation_gap_id_commit_idx " +
+        "ON archive_relation_observation_gap (relation_id, commit_id)",
+    );
   });
 }
 
@@ -674,6 +733,23 @@ async function readCommit(
     WHERE observation.commit_id = ${commitId}
     ORDER BY observation.ordinal
   `;
+  const itemGaps = await transaction<CommitItemGapRow[]>`
+    SELECT
+      gap.item_id,
+      gap.ordinal,
+      deletion.namespace,
+      deletion.source_key
+    FROM archive_item_observation_gap AS gap
+    JOIN archive_item_deletion AS deletion ON deletion.item_id = gap.item_id
+    WHERE gap.commit_id = ${commitId}
+    ORDER BY gap.ordinal
+  `;
+  const relationGaps = await transaction<CommitRelationGapRow[]>`
+    SELECT relation_id, ordinal
+    FROM archive_relation_observation_gap
+    WHERE commit_id = ${commitId}
+    ORDER BY ordinal
+  `;
 
   return archiveCommitSchema.parse({
     commitId: row.commit_id,
@@ -703,6 +779,21 @@ async function readCommit(
             state: relation.state_data,
           },
     ),
+    ...(itemGaps.length === 0 && relationGaps.length === 0
+      ? {}
+      : {
+          gaps: {
+            items: itemGaps.map((item) => ({
+              itemId: item.item_id,
+              ordinal: item.ordinal,
+              sourceKey: { namespace: item.namespace, key: item.source_key },
+            })),
+            relations: relationGaps.map((relation) => ({
+              relationId: relation.relation_id,
+              ordinal: relation.ordinal,
+            })),
+          },
+        }),
   });
 }
 
@@ -719,6 +810,19 @@ async function readItem(
   `;
   const item = items[0];
   if (item === undefined) {
+    const deletions = await transaction<{ readonly item_id: string }[]>`
+      SELECT item_id
+      FROM archive_item_deletion
+      WHERE item_id = ${itemId}
+    `;
+    if (deletions[0] !== undefined) {
+      return failure(
+        404,
+        "item_deleted",
+        "这个条目已硬删除；历史只保留删除缺口，原资料不再可读。",
+        ["itemId"],
+      );
+    }
     return failure(404, "item_not_found", "没有找到这个归档条目。", ["itemId"]);
   }
 
@@ -872,6 +976,21 @@ async function readTimelinePage(
       OR relation.target_item_id = ${itemId}
     )
       AND observation.archive_seq <= ${snapshot.asOf}::bigint
+    UNION ALL
+    SELECT ${itemId}::uuid AS item_id
+    FROM archive_item_observation_gap AS gap
+    JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+    WHERE gap.item_id = ${itemId}
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+    UNION ALL
+    SELECT ${itemId}::uuid AS item_id
+    FROM archive_relation_observation_gap AS gap
+    JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+    WHERE (
+      gap.from_item_id = ${itemId}
+      OR gap.target_item_id = ${itemId}
+    )
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
     LIMIT 1
   `;
   if (visibleRows[0] === undefined) {
@@ -898,7 +1017,10 @@ async function readTimelinePage(
         NULL::jsonb AS relation_state_data,
         observation.revision_id,
         observation.ordinal,
-        revision.state_data->>'sourceModifiedAt' AS source_modified_at
+        revision.state_data->>'sourceModifiedAt' AS source_modified_at,
+        NULL::text AS gap_subject_kind,
+        NULL::text AS gap_namespace,
+        NULL::text AS gap_source_key
       FROM archive_observation AS observation
       JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
       JOIN archive_revision AS revision
@@ -925,7 +1047,10 @@ async function readTimelinePage(
         relation_revision.state_data AS relation_state_data,
         observation.relation_revision_id AS revision_id,
         observation.ordinal,
-        NULL::text AS source_modified_at
+        NULL::text AS source_modified_at,
+        NULL::text AS gap_subject_kind,
+        NULL::text AS gap_namespace,
+        NULL::text AS gap_source_key
       FROM archive_relation_observation AS observation
       JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
       JOIN archive_relation AS relation
@@ -939,6 +1064,64 @@ async function readTimelinePage(
       )
         AND observation.archive_seq <= ${snapshot.asOf}::bigint
         AND (${binId ?? null}::text IS NULL OR observation.bin_id = ${binId ?? null})
+
+      UNION ALL
+
+      SELECT
+        'gap'::text AS kind,
+        commit.commit_id,
+        commit.archive_seq::text AS archive_seq,
+        commit.bin_id,
+        commit.run_id,
+        commit.collector_version,
+        commit.observed_at,
+        commit.recorded_at,
+        gap.item_id AS item_id,
+        NULL::text AS relation_id,
+        NULL::uuid AS relation_revision_id,
+        NULL::jsonb AS relation_state_data,
+        NULL::uuid AS revision_id,
+        gap.ordinal,
+        NULL::text AS source_modified_at,
+        'item'::text AS gap_subject_kind,
+        deletion.namespace AS gap_namespace,
+        deletion.source_key AS gap_source_key
+      FROM archive_item_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      JOIN archive_item_deletion AS deletion ON deletion.item_id = gap.item_id
+      WHERE gap.item_id = ${itemId}
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+        AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
+
+      UNION ALL
+
+      SELECT
+        'gap'::text AS kind,
+        commit.commit_id,
+        commit.archive_seq::text AS archive_seq,
+        commit.bin_id,
+        commit.run_id,
+        commit.collector_version,
+        commit.observed_at,
+        commit.recorded_at,
+        NULL::uuid AS item_id,
+        gap.relation_id,
+        NULL::uuid AS relation_revision_id,
+        NULL::jsonb AS relation_state_data,
+        NULL::uuid AS revision_id,
+        gap.ordinal,
+        NULL::text AS source_modified_at,
+        'relation'::text AS gap_subject_kind,
+        NULL::text AS gap_namespace,
+        NULL::text AS gap_source_key
+      FROM archive_relation_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      WHERE (
+        gap.from_item_id = ${itemId}
+        OR gap.target_item_id = ${itemId}
+      )
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+        AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
     ) AS event
     WHERE (
       ${after?.archiveSeq ?? null}::bigint IS NULL
@@ -974,54 +1157,62 @@ async function readTimelinePage(
     value: archiveTimelinePageSchema.parse({
       itemId,
       snapshot,
-      events: pageRows.map((row) =>
-        row.kind === "item"
-          ? {
-              kind: "item" as const,
-              commitId: row.commit_id,
-              archiveSeq: row.archive_seq,
-              ordinal: row.ordinal,
-              binId: row.bin_id,
-              ...optionalText("runId", row.run_id),
-              ...optionalText("collectorVersion", row.collector_version),
-              itemId: row.item_id,
-              revisionId: row.revision_id,
-              ...(row.source_modified_at === null
-                ? {}
-                : { sourceModifiedAt: row.source_modified_at }),
-              observedAt: isoTimestamp(row.observed_at),
-              recordedAt: isoTimestamp(row.recorded_at),
-            }
-          : row.relation_revision_id === null
-            ? {
-                kind: "relation" as const,
-                commitId: row.commit_id,
-                archiveSeq: row.archive_seq,
-                ordinal: row.ordinal,
-                binId: row.bin_id,
-                ...optionalText("runId", row.run_id),
-                ...optionalText("collectorVersion", row.collector_version),
-                relationId: row.relation_id,
-                status: "withdrawn" as const,
-                observedAt: isoTimestamp(row.observed_at),
-                recordedAt: isoTimestamp(row.recorded_at),
-              }
-            : {
-                kind: "relation" as const,
-                commitId: row.commit_id,
-                archiveSeq: row.archive_seq,
-                ordinal: row.ordinal,
-                binId: row.bin_id,
-                ...optionalText("runId", row.run_id),
-                ...optionalText("collectorVersion", row.collector_version),
-                relationId: row.relation_id,
-                status: "observed" as const,
-                revisionId: row.relation_revision_id,
-                state: row.relation_state_data,
-                observedAt: isoTimestamp(row.observed_at),
-                recordedAt: isoTimestamp(row.recorded_at),
-              },
-      ),
+      events: pageRows.map((row) => {
+        const metadata = {
+          commitId: row.commit_id,
+          archiveSeq: row.archive_seq,
+          ordinal: row.ordinal,
+          binId: row.bin_id,
+          ...optionalText("runId", row.run_id),
+          ...optionalText("collectorVersion", row.collector_version),
+          observedAt: isoTimestamp(row.observed_at),
+          recordedAt: isoTimestamp(row.recorded_at),
+        };
+        if (row.kind === "item") {
+          return {
+            ...metadata,
+            kind: "item" as const,
+            itemId: row.item_id!,
+            revisionId: row.revision_id!,
+            ...(row.source_modified_at === null
+              ? {}
+              : { sourceModifiedAt: row.source_modified_at }),
+          };
+        }
+        if (row.kind === "gap") {
+          const subject =
+            row.gap_subject_kind === "item"
+              ? {
+                  kind: "item" as const,
+                  itemId: row.item_id!,
+                  sourceKey: {
+                    namespace: row.gap_namespace!,
+                    key: row.gap_source_key!,
+                  },
+                }
+              : {
+                  kind: "relation" as const,
+                  relationId: row.relation_id!,
+                };
+          return { ...metadata, kind: "gap" as const, subject };
+        }
+        if (row.relation_revision_id === null) {
+          return {
+            ...metadata,
+            kind: "relation" as const,
+            relationId: row.relation_id!,
+            status: "withdrawn" as const,
+          };
+        }
+        return {
+          ...metadata,
+          kind: "relation" as const,
+          relationId: row.relation_id!,
+          status: "observed" as const,
+          revisionId: row.relation_revision_id,
+          state: row.relation_state_data,
+        };
+      }),
       ...(nextCursor === undefined ? {} : { nextCursor }),
     }),
   };
@@ -1038,114 +1229,134 @@ async function readRelationsPage(
 ): Promise<
   ArchiveOperation<ReturnType<typeof archiveRelationPageSchema.parse>>
 > {
-  const rows =
-    direction === "outgoing"
-      ? await transaction<RelationReadRow[]>`
-          SELECT
-            relation.relation_id,
-            relation.from_item_id,
-            relation.target_item_id,
-            relation.target_source_ref,
-            relation.created_seq::text AS created_seq,
-            CASE
-              WHEN latest.commit_id IS NULL THEN 'unknown'
-              WHEN latest.relation_revision_id IS NULL THEN 'withdrawn'
-              ELSE 'observed'
-            END AS state_status,
-            latest.relation_revision_id,
-            revision.state_data,
-            latest.commit_id AS relation_commit_id,
-            latest.archive_seq::text AS relation_archive_seq,
-            latest.ordinal AS relation_ordinal,
-            latest.observed_at AS relation_observed_at,
-            latest.recorded_at AS relation_recorded_at,
-            latest.run_id AS relation_run_id,
-            latest.collector_version AS relation_collector_version
-          FROM archive_relation AS relation
-          LEFT JOIN LATERAL (
-            SELECT
-              observation.commit_id,
-              observation.archive_seq,
-              observation.ordinal,
-              observation.relation_revision_id,
-              commit.observed_at,
-              commit.recorded_at,
-              commit.run_id,
-              commit.collector_version
-            FROM archive_relation_observation AS observation
-            JOIN archive_commit AS commit
-              ON commit.commit_id = observation.commit_id
-            WHERE observation.relation_id = relation.relation_id
-              AND observation.bin_id = ${binId}
-              AND observation.archive_seq <= ${snapshot.asOf}::bigint
-            ORDER BY
-              observation.archive_seq DESC,
-              observation.ordinal DESC,
-              observation.commit_id DESC
-            LIMIT 1
-          ) AS latest ON TRUE
-          LEFT JOIN archive_relation_revision AS revision
-            ON revision.relation_id = relation.relation_id
-            AND revision.relation_revision_id = latest.relation_revision_id
-          WHERE relation.from_item_id = ${itemId}
-            AND relation.created_seq <= ${snapshot.asOf}::bigint
-            AND (${after ?? null}::text IS NULL OR relation.relation_id > ${after ?? null})
-          ORDER BY relation.relation_id
-          LIMIT ${limit + 1}
-        `
-      : await transaction<RelationReadRow[]>`
-          SELECT
-            relation.relation_id,
-            relation.from_item_id,
-            relation.target_item_id,
-            relation.target_source_ref,
-            relation.created_seq::text AS created_seq,
-            CASE
-              WHEN latest.commit_id IS NULL THEN 'unknown'
-              WHEN latest.relation_revision_id IS NULL THEN 'withdrawn'
-              ELSE 'observed'
-            END AS state_status,
-            latest.relation_revision_id,
-            revision.state_data,
-            latest.commit_id AS relation_commit_id,
-            latest.archive_seq::text AS relation_archive_seq,
-            latest.ordinal AS relation_ordinal,
-            latest.observed_at AS relation_observed_at,
-            latest.recorded_at AS relation_recorded_at,
-            latest.run_id AS relation_run_id,
-            latest.collector_version AS relation_collector_version
-          FROM archive_relation AS relation
-          LEFT JOIN LATERAL (
-            SELECT
-              observation.commit_id,
-              observation.archive_seq,
-              observation.ordinal,
-              observation.relation_revision_id,
-              commit.observed_at,
-              commit.recorded_at,
-              commit.run_id,
-              commit.collector_version
-            FROM archive_relation_observation AS observation
-            JOIN archive_commit AS commit
-              ON commit.commit_id = observation.commit_id
-            WHERE observation.relation_id = relation.relation_id
-              AND observation.bin_id = ${binId}
-              AND observation.archive_seq <= ${snapshot.asOf}::bigint
-            ORDER BY
-              observation.archive_seq DESC,
-              observation.ordinal DESC,
-              observation.commit_id DESC
-            LIMIT 1
-          ) AS latest ON TRUE
-          LEFT JOIN archive_relation_revision AS revision
-            ON revision.relation_id = relation.relation_id
-            AND revision.relation_revision_id = latest.relation_revision_id
-          WHERE relation.target_item_id = ${itemId}
-            AND relation.created_seq <= ${snapshot.asOf}::bigint
-            AND (${after ?? null}::text IS NULL OR relation.relation_id > ${after ?? null})
-          ORDER BY relation.relation_id
-          LIMIT ${limit + 1}
-        `;
+  const rows = await transaction<RelationReadRow[]>`
+    WITH relevant_relation_ids AS (
+      SELECT relation.relation_id
+      FROM archive_relation AS relation
+      WHERE (
+        (${direction}::text = 'outgoing' AND relation.from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
+      )
+        AND relation.created_seq <= ${snapshot.asOf}::bigint
+      UNION ALL
+      SELECT gap.relation_id
+      FROM archive_relation_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      WHERE (
+        (${direction}::text = 'outgoing' AND gap.from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND gap.target_item_id = ${itemId})
+      )
+        AND commit.bin_id = ${binId}
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+    ), gaps AS (
+      SELECT DISTINCT ON (gap.relation_id)
+        gap.relation_id,
+        gap.from_item_id,
+        gap.target_item_id,
+        NULL::text AS target_source_ref,
+        commit.archive_seq::text AS created_seq,
+        'deleted'::text AS state_status,
+        NULL::uuid AS relation_revision_id,
+        NULL::jsonb AS state_data,
+        commit.commit_id AS relation_commit_id,
+        commit.archive_seq::text AS relation_archive_seq,
+        gap.ordinal AS relation_ordinal,
+        commit.observed_at AS relation_observed_at,
+        commit.recorded_at AS relation_recorded_at,
+        commit.run_id AS relation_run_id,
+        commit.collector_version AS relation_collector_version
+      FROM archive_relation_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      WHERE gap.relation_id IN (
+        SELECT relation_id FROM relevant_relation_ids
+      )
+        AND commit.bin_id = ${binId}
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+        AND NOT EXISTS (
+          SELECT 1
+          FROM archive_relation_observation AS later
+          WHERE later.relation_id = gap.relation_id
+            AND later.bin_id = ${binId}
+            AND later.archive_seq > commit.archive_seq
+            AND later.archive_seq <= ${snapshot.asOf}::bigint
+        )
+      ORDER BY
+        gap.relation_id,
+        commit.archive_seq DESC,
+        gap.ordinal DESC,
+        gap.commit_id DESC
+    ), active AS (
+      SELECT
+        relation.relation_id,
+        relation.from_item_id,
+        relation.target_item_id,
+        relation.target_source_ref,
+        relation.created_seq::text AS created_seq,
+        CASE
+          WHEN latest.commit_id IS NULL THEN 'unknown'
+          WHEN latest.relation_revision_id IS NULL THEN 'withdrawn'
+          ELSE 'observed'
+        END AS state_status,
+        latest.relation_revision_id,
+        revision.state_data,
+        latest.commit_id AS relation_commit_id,
+        latest.archive_seq::text AS relation_archive_seq,
+        latest.ordinal AS relation_ordinal,
+        latest.observed_at AS relation_observed_at,
+        latest.recorded_at AS relation_recorded_at,
+        latest.run_id AS relation_run_id,
+        latest.collector_version AS relation_collector_version
+      FROM archive_relation AS relation
+      LEFT JOIN LATERAL (
+        SELECT
+          observation.commit_id,
+          observation.archive_seq,
+          observation.ordinal,
+          observation.relation_revision_id,
+          commit.observed_at,
+          commit.recorded_at,
+          commit.run_id,
+          commit.collector_version
+        FROM archive_relation_observation AS observation
+        JOIN archive_commit AS commit
+          ON commit.commit_id = observation.commit_id
+        WHERE observation.relation_id = relation.relation_id
+          AND observation.bin_id = ${binId}
+          AND observation.archive_seq <= ${snapshot.asOf}::bigint
+        ORDER BY
+          observation.archive_seq DESC,
+          observation.ordinal DESC,
+          observation.commit_id DESC
+        LIMIT 1
+      ) AS latest ON TRUE
+      LEFT JOIN archive_relation_revision AS revision
+        ON revision.relation_id = relation.relation_id
+        AND revision.relation_revision_id = latest.relation_revision_id
+      WHERE (
+        (${direction}::text = 'outgoing' AND relation.from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
+      )
+        AND relation.created_seq <= ${snapshot.asOf}::bigint
+        AND NOT EXISTS (
+          SELECT 1
+          FROM gaps
+          WHERE gaps.relation_id = relation.relation_id
+        )
+    ), candidates AS (
+      SELECT * FROM active
+      UNION ALL
+      SELECT * FROM gaps
+      WHERE (
+        (${direction}::text = 'outgoing' AND from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND target_item_id = ${itemId})
+      )
+    )
+    SELECT *
+    FROM candidates
+    WHERE ${after ?? null}::text IS NULL OR relation_id > ${after ?? null}
+    ORDER BY relation_id
+    LIMIT ${limit + 1}
+  `;
 
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
@@ -1165,9 +1376,11 @@ async function readRelationsPage(
   const endpointIds = [
     ...new Set(
       pageRows.flatMap((row) =>
-        row.target_item_id === null
-          ? [row.from_item_id]
-          : [row.from_item_id, row.target_item_id],
+        row.state_status === "deleted"
+          ? []
+          : row.target_item_id === null
+            ? [row.from_item_id]
+            : [row.from_item_id, row.target_item_id],
       ),
     ),
   ];
@@ -1202,6 +1415,39 @@ async function readRelationsPage(
   );
 
   const relations: ArchiveRelationEntry[] = pageRows.map((row) => {
+    const stateStatus = row.state_status;
+    const relationObservation = () => {
+      const relationCommitId = row.relation_commit_id;
+      const relationArchiveSeq = row.relation_archive_seq;
+      const relationOrdinal = row.relation_ordinal;
+      const relationObservedAt = row.relation_observed_at;
+      const relationRecordedAt = row.relation_recorded_at;
+      if (
+        relationCommitId === null ||
+        relationArchiveSeq === null ||
+        relationOrdinal === null ||
+        relationObservedAt === null ||
+        relationRecordedAt === null
+      ) {
+        throw new Error("关系观察缺少提交溯源信息。");
+      }
+      return {
+        commitId: relationCommitId,
+        archiveSeq: relationArchiveSeq,
+        ordinal: relationOrdinal,
+        observedAt: isoTimestamp(relationObservedAt),
+        recordedAt: isoTimestamp(relationRecordedAt),
+        ...optionalText("runId", row.relation_run_id),
+        ...optionalText("collectorVersion", row.relation_collector_version),
+      };
+    };
+    if (row.state_status === "deleted") {
+      return archiveRelationEntrySchema.parse({
+        relationId: row.relation_id,
+        status: "deleted",
+        observation: relationObservation(),
+      });
+    }
     const fromRow = endpoints.get(row.from_item_id);
     if (fromRow === undefined) {
       throw new Error("关系来源端点在读取期间消失。");
@@ -1229,7 +1475,6 @@ async function readRelationsPage(
             }
             return endpoint(targetRow);
           })();
-    const stateStatus = row.state_status;
     if (stateStatus === "unknown") {
       return archiveRelationEntrySchema.parse({
         relationId: row.relation_id,
@@ -1238,36 +1483,13 @@ async function readRelationsPage(
         to,
       });
     }
-    const relationCommitId = row.relation_commit_id;
-    const relationArchiveSeq = row.relation_archive_seq;
-    const relationOrdinal = row.relation_ordinal;
-    const relationObservedAt = row.relation_observed_at;
-    const relationRecordedAt = row.relation_recorded_at;
-    if (
-      relationCommitId === null ||
-      relationArchiveSeq === null ||
-      relationOrdinal === null ||
-      relationObservedAt === null ||
-      relationRecordedAt === null
-    ) {
-      throw new Error("关系观察缺少提交溯源信息。");
-    }
-    const observation = {
-      commitId: relationCommitId,
-      archiveSeq: relationArchiveSeq,
-      ordinal: relationOrdinal,
-      observedAt: isoTimestamp(relationObservedAt),
-      recordedAt: isoTimestamp(relationRecordedAt),
-      ...optionalText("runId", row.relation_run_id),
-      ...optionalText("collectorVersion", row.relation_collector_version),
-    };
     if (stateStatus === "withdrawn") {
       return archiveRelationEntrySchema.parse({
         relationId: row.relation_id,
         status: stateStatus,
         from: endpoint(fromRow),
         to,
-        observation,
+        observation: relationObservation(),
       });
     }
     const revisionId = row.relation_revision_id;
@@ -1281,7 +1503,7 @@ async function readRelationsPage(
       to,
       revisionId,
       state: archiveRelationStateSchema.parse(row.state_data),
-      observation,
+      observation: relationObservation(),
     });
   });
 
@@ -2338,6 +2560,206 @@ export function createArchiveStore(
       );
     },
 
+    async deleteArchiveItem(itemId) {
+      const checkedId = archiveIdentifierSchema.safeParse(itemId);
+      if (!checkedId.success) {
+        return validationFailure(
+          checkedId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["itemId", ...issue.path],
+          })),
+        );
+      }
+
+      const deletion = await withArchiveWriteLock(
+        database,
+        async (transaction, currentSequence) => {
+          const items = await transaction<ItemRow[]>`
+            SELECT item_id, namespace, source_key
+            FROM archive_item
+            WHERE item_id = ${checkedId.data}
+            FOR UPDATE
+          `;
+          const item = items[0];
+          if (item === undefined) {
+            const previousDeletions = await transaction<
+              { readonly item_id: string }[]
+            >`
+              SELECT item_id
+              FROM archive_item_deletion
+              WHERE item_id = ${checkedId.data}
+            `;
+            return {
+              ok: false as const,
+              operation:
+                previousDeletions[0] === undefined
+                  ? failure<never>(
+                      404,
+                      "item_not_found",
+                      "没有找到要删除的归档条目。",
+                      ["itemId"],
+                    )
+                  : failure<never>(
+                      404,
+                      "item_deleted",
+                      "这个条目已经硬删除；历史只保留删除缺口。",
+                      ["itemId"],
+                    ),
+            };
+          }
+
+          const relations = await transaction<
+            {
+              readonly relation_id: string;
+              readonly from_item_id: string;
+              readonly target_item_id: string | null;
+            }[]
+          >`
+            SELECT relation_id, from_item_id, target_item_id
+            FROM archive_relation
+            WHERE from_item_id = ${item.item_id}
+              OR target_item_id = ${item.item_id}
+            FOR UPDATE
+          `;
+          const relationIds = relations.map(({ relation_id }) => relation_id);
+          const resourceRows = await transaction<
+            { readonly resource_id: string }[]
+          >`
+            SELECT DISTINCT reference.resource_id
+            FROM archive_revision AS revision
+            JOIN archive_revision_resource AS reference
+              ON reference.revision_id = revision.revision_id
+            WHERE revision.item_id = ${item.item_id}
+          `;
+          const resourceIds = resourceRows.map(
+            ({ resource_id }) => resource_id,
+          );
+          const deletionSeq = await advanceArchiveSequence(
+            transaction,
+            currentSequence,
+          );
+
+          await transaction`
+            INSERT INTO archive_item_deletion (
+              item_id,
+              namespace,
+              source_key,
+              deletion_seq
+            ) VALUES (
+              ${item.item_id},
+              ${item.namespace},
+              ${item.source_key},
+              ${deletionSeq}::bigint
+            )
+          `;
+          await transaction`
+            INSERT INTO archive_item_observation_gap (
+              commit_id,
+              ordinal,
+              item_id
+            )
+            SELECT commit_id, ordinal, item_id
+            FROM archive_observation
+            WHERE item_id = ${item.item_id}
+          `;
+          if (relationIds.length > 0) {
+            await transaction`
+              INSERT INTO archive_relation_observation_gap (
+                commit_id,
+                ordinal,
+                relation_id,
+                from_item_id,
+                target_item_id
+              )
+              SELECT
+                observation.commit_id,
+                observation.ordinal,
+                relation.relation_id,
+                relation.from_item_id,
+                relation.target_item_id
+              FROM archive_relation_observation AS observation
+              JOIN archive_relation AS relation
+                ON relation.relation_id = observation.relation_id
+              WHERE relation.relation_id = ANY(
+                ${transaction.array(relationIds, 25)}
+              )
+            `;
+            await transaction`
+              DELETE FROM archive_relation_observation AS observation
+              USING archive_relation AS relation
+              WHERE relation.relation_id = observation.relation_id
+                AND relation.relation_id = ANY(
+                  ${transaction.array(relationIds, 25)}
+                )
+            `;
+            await transaction`
+              DELETE FROM archive_relation_revision
+              WHERE relation_id = ANY(${transaction.array(relationIds, 25)})
+            `;
+            await transaction`
+              DELETE FROM archive_relation
+              WHERE relation_id = ANY(${transaction.array(relationIds, 25)})
+            `;
+          }
+          await transaction`
+            DELETE FROM archive_observation
+            WHERE item_id = ${item.item_id}
+          `;
+          await transaction`
+            DELETE FROM archive_revision_resource
+            WHERE revision_id IN (
+              SELECT revision_id
+              FROM archive_revision
+              WHERE item_id = ${item.item_id}
+            )
+          `;
+          await transaction`
+            DELETE FROM archive_revision
+            WHERE item_id = ${item.item_id}
+          `;
+          await transaction`
+            DELETE FROM archive_item
+            WHERE item_id = ${item.item_id}
+          `;
+          if (resourceIds.length > 0) {
+            await transaction`
+              UPDATE archive_resource
+              SET status = 'deleting'
+              WHERE resource_id = ANY(
+                ${transaction.array(resourceIds, 2950)}
+              )
+                AND status = 'ready'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM archive_revision_resource AS reference
+                  WHERE reference.resource_id = archive_resource.resource_id
+                )
+            `;
+          }
+
+          return {
+            ok: true as const,
+            value: archiveItemDeletionResultSchema.parse({
+              itemId: item.item_id,
+              deletionSeq,
+              deleted: true,
+            }),
+            resourceIds,
+          };
+        },
+      );
+
+      if (!deletion.ok) return deletion.operation;
+      try {
+        await resourceStorage.collectUnreferencedResources(
+          deletion.resourceIds,
+        );
+      } catch (error) {
+        console.error("硬删除后的归档资源回收失败：", error);
+      }
+      return { ok: true, value: deletion.value };
+    },
+
     async searchArchive(
       input: ArchiveSearchRequest,
     ): Promise<
@@ -2571,6 +2993,10 @@ export function createArchiveStore(
         const items = await transaction<{ readonly item_id: string }[]>`
           SELECT item_id
           FROM archive_item
+          WHERE item_id = ${checkedId.data}
+          UNION ALL
+          SELECT item_id
+          FROM archive_item_deletion
           WHERE item_id = ${checkedId.data}
         `;
         if (items[0] === undefined) {

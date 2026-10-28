@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny15fix-" + process.pid.toString(10);
+const projectName = "binny-v1-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -1684,8 +1684,6 @@ async function main(): Promise<void> {
         "--profile",
         "binny15",
         "down",
-        "--rmi",
-        "all",
         "--volumes",
         "--remove-orphans",
       ],
@@ -1695,6 +1693,19 @@ async function main(): Promise<void> {
       cleanupError = new Error(
         "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
       );
+    } else {
+      const imageCleanup = await run(
+        "docker",
+        ["image", "rm", imageName, runtimeImageName],
+        { env: composeEnvironment() },
+      );
+      if (imageCleanup.code !== 0) {
+        cleanupError = new Error(
+          "清理本次 Compose 构建镜像失败：\n" +
+            imageCleanup.stdout +
+            imageCleanup.stderr,
+        );
+      }
     }
     await rm(overrideDirectory, { recursive: true, force: true });
   }

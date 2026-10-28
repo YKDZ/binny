@@ -107,6 +107,13 @@ export const archiveRelationEntrySchema = withArchiveJsonSchemaProjection(
       .strict(),
     z
       .object({
+        relationId: nonEmptyText.max(256),
+        status: z.literal("deleted"),
+        observation: archiveRelationObservationProvenanceSchema,
+      })
+      .strict(),
+    z
+      .object({
         ...archiveRelationEntryFields,
         status: z.literal("unknown"),
       })

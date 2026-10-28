@@ -3,6 +3,7 @@ import {
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveItemDeletionResultSchema,
   archiveResourceMetadataSchema,
   archiveItemReadQuerySchema,
   archiveRelationPageSchema,
@@ -214,6 +215,36 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
         return c.json(result.value, 200);
       },
     )
+    .delete(
+      "/archives/items/:itemId",
+      zValidator(
+        "param",
+        z.object({ itemId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.deleteArchiveItem(
+          c.req.valid("param").itemId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
     .get(
       "/archives/items/:itemId/relations",
       zValidator(
@@ -379,6 +410,7 @@ export const archiveApiSchemas: {
   readonly relationQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
   readonly resource: Record<string, unknown>;
+  readonly deletionResult: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
   readonly relationPage: Record<string, unknown>;
   readonly error: Record<string, unknown>;
@@ -393,6 +425,10 @@ export const archiveApiSchemas: {
   relationQuery: toArchiveJsonSchema(archiveRelationReadQuerySchema, "input"),
   revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
   resource: toArchiveJsonSchema(archiveResourceMetadataSchema, "output"),
+  deletionResult: toArchiveJsonSchema(
+    archiveItemDeletionResultSchema,
+    "output",
+  ),
   timeline: toArchiveJsonSchema(archiveTimelinePageSchema, "output"),
   relationPage: toArchiveJsonSchema(archiveRelationPageSchema, "output"),
   error: toArchiveJsonSchema(archiveErrorSchema, "output"),

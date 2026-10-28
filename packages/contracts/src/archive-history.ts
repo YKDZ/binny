@@ -82,6 +82,32 @@ export const archiveTimelineRelationWithdrawnEventSchema = z
   })
   .strict();
 
+const archiveTimelineGapSubjectSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("item"),
+      itemId: archiveIdentifierSchema,
+      sourceKey: z
+        .object({
+          namespace: postgresTextSchema.min(1).max(256),
+          key: postgresTextSchema.min(1).max(1024),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({ kind: z.literal("relation"), relationId: nonEmptyText.max(256) })
+    .strict(),
+]);
+
+export const archiveTimelineGapEventSchema = z
+  .object({
+    ...archiveTimelineMetadata,
+    kind: z.literal("gap"),
+    subject: archiveTimelineGapSubjectSchema,
+  })
+  .strict();
+
 export const archiveTimelineRelationEventSchema =
   withArchiveJsonSchemaProjection(
     z.union([
@@ -91,7 +117,11 @@ export const archiveTimelineRelationEventSchema =
   );
 
 export const archiveTimelineEventSchema = withArchiveJsonSchemaProjection(
-  z.union([archiveTimelineItemEventSchema, archiveTimelineRelationEventSchema]),
+  z.union([
+    archiveTimelineItemEventSchema,
+    archiveTimelineRelationEventSchema,
+    archiveTimelineGapEventSchema,
+  ]),
 );
 
 /** 混合条目与关系事件，并按归档序号、批内序号和 commit ID 升序分页。 */
@@ -127,6 +157,9 @@ export type ArchiveTimelineItemEvent = z.infer<
 >;
 export type ArchiveTimelineRelationEvent = z.infer<
   typeof archiveTimelineRelationEventSchema
+>;
+export type ArchiveTimelineGapEvent = z.infer<
+  typeof archiveTimelineGapEventSchema
 >;
 export type ArchiveTimelineEvent = z.infer<typeof archiveTimelineEventSchema>;
 export type ArchiveTimelinePage = z.infer<typeof archiveTimelinePageSchema>;

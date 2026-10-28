@@ -442,6 +442,28 @@ const archiveCommitRelationSchema = z.union([
     .strict(),
 ]);
 
+const archiveCommitItemGapSchema = z
+  .object({
+    itemId: archiveIdSchema,
+    ordinal: z.number().int().nonnegative(),
+    sourceKey: sourceKeySchema,
+  })
+  .strict();
+
+const archiveCommitRelationGapSchema = z
+  .object({
+    relationId: nonEmptyText.max(256),
+    ordinal: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const archiveCommitGapsSchema = z
+  .object({
+    items: z.array(archiveCommitItemGapSchema),
+    relations: z.array(archiveCommitRelationGapSchema),
+  })
+  .strict();
+
 export const archiveObservationSchema = z
   .object({
     commitId: archiveIdSchema,
@@ -492,9 +514,18 @@ export const archiveCommitSchema = withArchiveJsonSchemaProjection(
       recordedAt: timestampSchema,
       items: z.array(archiveCommitItemSchema),
       relations: z.array(archiveCommitRelationSchema),
+      gaps: archiveCommitGapsSchema.optional(),
     })
     .strict(),
 );
+
+export const archiveItemDeletionResultSchema = z
+  .object({
+    itemId: archiveIdSchema,
+    deletionSeq: archiveSnapshotSequenceSchema,
+    deleted: z.literal(true),
+  })
+  .strict();
 
 /** 条目读取固定归档截点，并返回该点各 bin 的 current、版本与观察。 */
 export const archiveItemReadSchema = withArchiveJsonSchemaProjection(
@@ -531,6 +562,7 @@ export const archiveErrorSchema = z
           "bin_not_found",
           "archive_request_conflict",
           "item_not_found",
+          "item_deleted",
           "revision_not_found",
           "resource_not_found",
           "resource_storage_unavailable",
@@ -548,6 +580,9 @@ export const archiveErrorSchema = z
 
 export type ArchiveCommit = z.infer<typeof archiveCommitSchema>;
 export type ArchiveCommitRelation = z.infer<typeof archiveCommitRelationSchema>;
+export type ArchiveItemDeletionResult = z.infer<
+  typeof archiveItemDeletionResultSchema
+>;
 export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
 export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
@@ -1038,6 +1073,9 @@ export type ArchiveOperations = {
   submitArchive(
     input: ArchiveSubmissionInput,
   ): Promise<ArchiveOperation<ArchiveCommit>>;
+  deleteArchiveItem(
+    itemId: string,
+  ): Promise<ArchiveOperation<ArchiveItemDeletionResult>>;
   uploadArchiveResource(
     body: ReadableStream<Uint8Array>,
     mediaType: string,

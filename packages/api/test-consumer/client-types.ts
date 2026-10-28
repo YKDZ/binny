@@ -72,6 +72,95 @@ async function checkPublicBinContract(): Promise<void> {
 
 void checkPublicBinContract;
 
+async function checkPublicManualRunContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "rss-main";
+  const runId = "750e8400-e29b-41d4-a716-446655440000";
+
+  const triggered = await client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: { action: "collect", params: { limit: 20 } },
+  });
+  if (triggered.status === 202) {
+    const run = await triggered.json();
+    const returnedRunId: string = run.runId;
+    const status: "queued" | "executing" | "completed" | "failed" = run.status;
+    void returnedRunId;
+    void status;
+    // @ts-expect-error The trigger response is a run, not the API error envelope.
+    void run.error;
+  } else if (
+    triggered.status === 400 ||
+    triggered.status === 404 ||
+    triggered.status === 409
+  ) {
+    const failure = await triggered.json();
+    void failure.error.code;
+    // @ts-expect-error Error responses do not contain a run identifier.
+    void failure.runId;
+  }
+
+  const claimed = await client.bins[":binId"].runtime.runs.claim.$post({
+    param: { binId },
+    json: { runtimeId: "runtime-one" },
+  });
+  if (claimed.status === 200) {
+    const result = await claimed.json();
+    if (result.run !== null) {
+      const claimedRunId: string = result.run.runId;
+      const params: object = result.run.params;
+      void claimedRunId;
+      void params;
+    }
+  } else if (
+    claimed.status === 400 ||
+    claimed.status === 404 ||
+    claimed.status === 409
+  ) {
+    const failure = await claimed.json();
+    void failure.error.message;
+  }
+
+  void client.bins[":binId"].runtime.runs.claim.$post({
+    param: { binId },
+    // @ts-expect-error A claim requires a runtimeId even when its other fields are valid.
+    json: {},
+  });
+  void client.bins[":binId"].runs.$post({
+    param: { binId },
+    // @ts-expect-error Run params must be a JSON object; action is otherwise valid.
+    json: { action: "collect", params: ["invalid"] },
+  });
+  void client.bins[":binId"].runs.$post({
+    // @ts-expect-error binId is a required path parameter for triggering a run.
+    param: {},
+    json: { action: "collect", params: { limit: 20 } },
+  });
+
+  const completed = await client.bins[":binId"].runtime.runs[
+    ":runId"
+  ].complete.$post({
+    param: { binId, runId },
+    json: {
+      runtimeId: "runtime-one",
+      completion: { status: "completed", completedScopes: ["main"] },
+    },
+  });
+  if (completed.status === 200) {
+    const run = await completed.json();
+    const completedRunId: string = run.runId;
+    void completedRunId;
+  } else if (
+    completed.status === 400 ||
+    completed.status === 404 ||
+    completed.status === 409
+  ) {
+    void (await completed.json()).error.code;
+  }
+}
+
+void checkPublicManualRunContract;
+
 async function checkPublicArchiveContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
   const submission = await client.archives.$post({
@@ -196,7 +285,9 @@ async function checkPublicArchiveContract(): Promise<void> {
     }
     if (relation?.status === "withdrawn") void relation.observation.commitId;
     if (relation?.status === "unknown") void relation.from.status;
-    if (relation?.to.kind === "sourceRef") void relation.to.sourceRef;
+    if (relation !== undefined && relation.status !== "deleted") {
+      if (relation.to.kind === "sourceRef") void relation.to.sourceRef;
+    }
   } else if (
     relations.status === 400 ||
     relations.status === 404 ||
