@@ -1,0 +1,41 @@
+FROM node:24.21.0-bookworm-slim AS build
+
+WORKDIR /workspace
+RUN corepack enable && corepack prepare pnpm@12.9.1 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/api/package.json packages/api/
+COPY packages/binny/package.json packages/binny/
+COPY packages/collector-runtime/package.json packages/collector-runtime/
+COPY packages/collector-sdk/package.json packages/collector-sdk/
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/core/package.json packages/core/
+COPY packages/server/package.json packages/server/
+COPY packages/tooling-config/package.json packages/tooling-config/
+COPY collectors/linuxdo/package.json collectors/linuxdo/
+COPY collectors/rss/package.json collectors/rss/
+RUN pnpm install --frozen-lockfile
+COPY . .
+
+ARG BINNY_COLLECTOR_PACKAGE
+ARG BINNY_COLLECTOR_PATH
+ARG BINNY_COLLECTOR_ENTRY=dist/index.js
+ARG BINNY_BUILD_FIXTURE=0
+
+RUN test -n "$BINNY_COLLECTOR_PACKAGE" \
+  && test -n "$BINNY_COLLECTOR_PATH" \
+  && pnpm --filter "${BINNY_COLLECTOR_PACKAGE}..." build \
+  && pnpm --filter @binny/collector-runtime build \
+  && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then pnpm --filter @binny/collector-runtime build:fixture; fi \
+  && pnpm --filter "$BINNY_COLLECTOR_PACKAGE" --prod deploy --legacy /deploy \
+  && mkdir -p /deploy/collector \
+  && cp "${BINNY_COLLECTOR_PATH}/${BINNY_COLLECTOR_ENTRY}" /deploy/collector/collector.js \
+  && cp -r packages/collector-runtime/dist /deploy/binny-runtime
+
+FROM node:24.21.0-bookworm-slim AS lightweight
+
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build --chown=node:node /deploy /app
+USER node
+EXPOSE 8080
+ENTRYPOINT ["node", "/app/binny-runtime/entry.js"]
