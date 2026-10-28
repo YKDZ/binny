@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny-v1-e2e-" + process.pid.toString(10);
+const projectName = "binny16-v1-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -756,7 +756,7 @@ async function validateApiInput(): Promise<void> {
 async function createSdkManifest(): Promise<unknown> {
   const program = [
     'import { z } from "zod";',
-    'import { collectorManifest, defineCollector } from "./dist/index.js";',
+    'import { collectorManifest, defineCollector, defineCollectorCheckAction } from "./dist/index.js";',
     "const collector = defineCollector({",
     '  id: "rss",',
     '  version: "1.0.0",',
@@ -765,6 +765,7 @@ async function createSdkManifest(): Promise<unknown> {
     "    key: z.string().regex(/^a/).regex(/z$/),",
     "  }),",
     "  actions: {",
+    '    check: defineCollectorCheckAction({ description: "检查测试信源配置。", params: z.object({}), execute: async () => ({ availability: "unknown", scope: ["test-source"], basis: "验收用 RSS 清单没有连接真实信源。", problems: [{ code: "test_source_unconfigured", message: "验收用 RSS 清单没有连接真实信源。", impact: "无法判断真实订阅源是否可用。", suggestion: "配置真实订阅源后重新触发 check。", requiresHuman: false }] }) }),',
     '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
     "  },",
     "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
@@ -869,11 +870,16 @@ async function waitForSourceArrival(
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
+  disposition:
+    | "material"
+    | "available"
+    | "unavailable"
+    | "unknown" = "material",
 ): Promise<void> {
   const response = await fetch(sourceUrl + "/control/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ gateKey, disposition: "material" }),
+    body: JSON.stringify({ gateKey, disposition }),
     signal: AbortSignal.timeout(3_000),
   });
   assert.equal(response.status, 200);
@@ -916,6 +922,16 @@ type ManualRunCliState = {
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
+    readonly check?: {
+      readonly availability: "available" | "unavailable" | "unknown";
+      readonly checkedAt: string;
+      readonly scope: readonly string[];
+      readonly basis: string;
+      readonly problems: readonly {
+        readonly suggestion: string;
+        readonly requiresHuman: boolean;
+      }[];
+    };
   };
 };
 
@@ -1030,6 +1046,105 @@ async function manualRunsCliStep(
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
+
+  const checkGateKey = "16-cli-check-unknown";
+  const checkTriggered = cliData<{
+    readonly runId: string;
+    readonly status: string;
+    readonly binId: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "check",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: checkGateKey,
+        sourceKey: "cli-check-scope",
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(checkTriggered.status, "queued");
+  await waitForSourceArrival(
+    sourceControlUrl,
+    checkGateKey,
+    checkTriggered.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, checkGateKey, "unknown");
+
+  const checkDeadline = Date.now() + 30_000;
+  let checkedRun: ManualRunCliState | undefined;
+  while (Date.now() < checkDeadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", "binny15-one", checkTriggered.runId]),
+      "found",
+    );
+    if (current.status === "completed" || current.status === "failed") {
+      checkedRun = current;
+      break;
+    }
+    await wait(100);
+  }
+  assert.ok(checkedRun !== undefined, "CLI 没有读取到 check 终结结果。");
+  assert.equal(checkedRun.status, "completed");
+  assert.equal(checkedRun.result?.check?.availability, "unknown");
+  assert.deepEqual(checkedRun.result?.commits, []);
+  assert.ok(
+    (checkedRun.result?.check?.problems[0]?.suggestion.length ?? 0) > 0,
+  );
+  assert.equal(checkedRun.result?.stopReason.code, "completed");
+
+  const followUpGateKey = "16-cli-collect-after-check";
+  const followUp = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: followUpGateKey,
+        sourceKey: "cli-after-check",
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    followUpGateKey,
+    followUp.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, followUpGateKey);
+  const followUpDeadline = Date.now() + 30_000;
+  let collectedAfterCheck: ManualRunCliState | undefined;
+  while (Date.now() < followUpDeadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", "binny15-one", followUp.runId]),
+      "found",
+    );
+    if (current.status === "completed" || current.status === "failed") {
+      collectedAfterCheck = current;
+      break;
+    }
+    await wait(100);
+  }
+  assert.ok(
+    collectedAfterCheck !== undefined,
+    "最近 check 结果之后没有产生新的 collect 运行结果。",
+  );
+  assert.equal(collectedAfterCheck.status, "completed");
+  assert.deepEqual(collectedAfterCheck.result?.completedScopes, [
+    "source/cli-after-check",
+  ]);
 }
 
 async function manualRunsHttpStep(
@@ -1104,7 +1219,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
     readonly environment: { readonly browser: { readonly required: boolean } };
     readonly execution: { readonly status: string };
   }>(await cli(baseUrl, ["bin", "actions", "rss-main"]), "discovered");
-  assert.deepEqual(Object.keys(discovered.actions), ["collect"]);
+  assert.deepEqual(Object.keys(discovered.actions), ["check", "collect"]);
   assert.equal(discovered.environment.browser.required, false);
   assert.equal(discovered.execution.status, "offline");
 

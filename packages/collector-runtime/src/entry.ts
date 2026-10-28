@@ -10,6 +10,7 @@ import {
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
+  manualRunCheckInputSchema,
   runtimeHeartbeatIntervalMs,
   runtimeProtocolVersion,
   type ManualRunCompletion,
@@ -212,25 +213,53 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       };
     } else {
       try {
-        const result = await action.execute(
-          createCollectorContext(client, {
-            binId: run.binId,
-            identityId: run.identityId,
-            runId: run.runId,
-            collectorVersion: run.collectorVersion,
-            config: run.config,
-            targets: run.targets,
-            signal: new AbortController().signal,
-          }),
-          parsed.data,
-        );
-        const actionResult = collectorActionResultSchema.safeParse(result);
-        completion = {
-          status: "completed",
-          completedScopes: actionResult.success
-            ? actionResult.data.completedScopes
-            : [],
+        const context = {
+          binId: run.binId,
+          identityId: run.identityId,
+          runId: run.runId,
+          collectorVersion: run.collectorVersion,
+          config: run.config,
+          targets: run.targets,
+          signal: new AbortController().signal,
         };
+        if (run.action === "check") {
+          const result = await activeCollector.actions.check.execute(
+            context,
+            parsed.data,
+          );
+          const checked = manualRunCheckInputSchema.safeParse(result);
+          if (!checked.success) {
+            completion = {
+              status: "failed",
+              completedScopes: [],
+              error: {
+                code: "check_result_invalid",
+                message: "可用性检查没有返回有效诊断结果。",
+                impact: "本次检查没有完成。",
+                suggestion: "修正检查结果后重新触发 check。",
+                requiresHuman: false,
+              },
+            };
+          } else {
+            completion = {
+              status: "completed",
+              completedScopes: [],
+              check: checked.data,
+            };
+          }
+        } else {
+          const result = await action.execute(
+            createCollectorContext(client, context),
+            parsed.data,
+          );
+          const actionResult = collectorActionResultSchema.safeParse(result);
+          completion = {
+            status: "completed",
+            completedScopes: actionResult.success
+              ? actionResult.data.completedScopes
+              : [],
+          };
+        }
       } catch (error) {
         completion = {
           status: "failed",

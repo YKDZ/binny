@@ -2176,6 +2176,24 @@ export function createArchiveStore(
             };
           }
 
+          if (submission.runId !== undefined) {
+            const matchingRuns = await transaction<
+              { readonly action: string }[]
+            >`
+              SELECT action
+              FROM manual_runs
+              WHERE run_id::text = ${submission.runId}
+            `;
+            if (matchingRuns[0]?.action === "check") {
+              return failure(
+                409,
+                "check_run_archive_forbidden",
+                "可用性检查运行不能提交归档资料。",
+                ["runId"],
+              );
+            }
+          }
+
           const bins = await transaction<{ readonly id: string }[]>`
             SELECT id
             FROM bin_configurations

@@ -560,6 +560,7 @@ export const archiveErrorSchema = z
         code: z.enum([
           "invalid_input",
           "bin_not_found",
+          "check_run_archive_forbidden",
           "archive_request_conflict",
           "item_not_found",
           "item_deleted",
