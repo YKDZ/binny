@@ -76,6 +76,7 @@ export async function interruptReplacedManualRuns(
   binId: string,
   previousRuntimeId: string,
 ): Promise<void> {
+  // 先锁定运行行，再读取取消时间，避免覆盖并发接受的取消或完成。
   const activeRunsForOwner = await transaction
     .select({
       runId: manualRuns.runId,
@@ -88,7 +89,8 @@ export async function interruptReplacedManualRuns(
         eq(manualRuns.runtimeId, previousRuntimeId),
         inArray(manualRuns.status, activeStatuses),
       ),
-    );
+    )
+    .for("update");
   for (const run of activeRunsForOwner) {
     await transaction
       .update(manualRuns)

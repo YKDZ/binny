@@ -525,6 +525,11 @@ type HeldTableLock = {
   readonly release: () => Promise<void>;
 };
 
+type ManualRunLockWaiter = {
+  readonly pid: number;
+  readonly blockers: readonly number[];
+};
+
 function postgresExecArgs(args: readonly string[]): readonly string[] {
   return [
     ...composePrefix(),
@@ -561,6 +566,73 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
       assert.equal(result.code, 0, result.stderr);
     },
   };
+}
+
+async function holdManualRunRowLock(runId: string): Promise<{
+  readonly backendPid: number;
+  readonly release: () => Promise<void>;
+}> {
+  assert.match(runId, /^[0-9a-f-]{36}$/u);
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    `BEGIN;\nSELECT pg_backend_pid();\nSELECT run_id FROM manual_runs WHERE run_id = '${runId}'::uuid FOR UPDATE;\nSELECT 'BINNY18_MANUAL_RUN_ROW_LOCK_HELD';\n`,
+  );
+  await lock.waitForMarker("BINNY18_MANUAL_RUN_ROW_LOCK_HELD");
+  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
+  let released = false;
+  return {
+    backendPid,
+    async release() {
+      if (released) return;
+      released = true;
+      lock.write("COMMIT;\n\\q\n");
+      const result = await lock.waitForClose();
+      assert.equal(result.code, 0, result.stderr);
+    },
+  };
+}
+
+async function readManualRunLockWaiters(): Promise<
+  readonly ManualRunLockWaiter[]
+> {
+  const result = await compose(
+    postgresExecArgs([
+      "-c",
+      "SELECT json_build_object('pid', activity.pid, 'blockers', pg_blocking_pids(activity.pid)) FROM pg_stat_activity AS activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock';",
+    ]).slice(composePrefix().length),
+  );
+  const output = result.stdout.trim();
+  if (output.length === 0) return [];
+  return output.split("\n").map((line) => {
+    const value: unknown = JSON.parse(line);
+    assert.ok(typeof value === "object" && value !== null);
+    assert.ok("pid" in value && typeof value.pid === "number");
+    assert.ok("blockers" in value && Array.isArray(value.blockers));
+    assert.ok(value.blockers.every((pid: unknown) => typeof pid === "number"));
+    return {
+      pid: value.pid,
+      blockers: value.blockers,
+    };
+  });
+}
+
+async function waitForManualRunLockWaiterBlockedBy(
+  blockerPid: number,
+  excludingPids: readonly number[] = [],
+): Promise<number> {
+  const waiter = await waitFor(
+    async () =>
+      (await readManualRunLockWaiters()).find(
+        (candidate) =>
+          !excludingPids.includes(candidate.pid) &&
+          candidate.blockers.includes(blockerPid),
+      ),
+    (candidate) => candidate !== undefined,
+    `PostgreSQL 行锁等待方被进程 ${String(blockerPid)} 阻塞`,
+  );
+  assert.ok(waiter !== undefined);
+  return waiter.pid;
 }
 
 async function resourceFiles(): Promise<readonly string[]> {
@@ -1708,6 +1780,103 @@ async function ownerGenerationOverlapStep(
   );
 }
 
+async function replacementPreservesAcceptedCancellationStep(
+  baseUrl: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(initialOwner.status, "online");
+  assert.ok(initialOwner.runtimeId !== undefined);
+
+  const gateKey = `18-replacement-cancel-race-${randomUUID()}`;
+  const run = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey,
+        sourceKey: gateKey,
+        waitAfterCommitMs: 60_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(sourceControlUrl, gateKey, run.runId, binId);
+  await releaseSource(sourceControlUrl, gateKey, "slow");
+  await waitForSourceMarker(sourceControlUrl, run.runId, gateKey, "committed");
+
+  const rowLock = await holdManualRunRowLock(run.runId);
+  let cancellationRequest:
+    | Promise<
+        | { readonly status: number; readonly body: unknown }
+        | { readonly error: unknown }
+      >
+    | undefined;
+  try {
+    cancellationRequest = fetch(
+      `${baseUrl}/bins/${encodeURIComponent(binId)}/runs/${encodeURIComponent(run.runId)}/cancel`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(60_000),
+      },
+    )
+      .then(async (response) => ({
+        status: response.status,
+        body: (await response.json()) as unknown,
+      }))
+      .catch((error: unknown) => ({ error }));
+    const cancellationWaiterPid = await waitForManualRunLockWaiterBlockedBy(
+      rowLock.backendPid,
+      [rowLock.backendPid],
+    );
+
+    await compose(["kill", "--signal", "SIGKILL", service]);
+    await compose([
+      "up",
+      "--detach",
+      "--no-build",
+      "--force-recreate",
+      service,
+    ]);
+    await waitForManualRunLockWaiterBlockedBy(cancellationWaiterPid, [
+      rowLock.backendPid,
+      cancellationWaiterPid,
+    ]);
+  } finally {
+    await rowLock.release();
+  }
+
+  assert.ok(cancellationRequest !== undefined);
+  const acceptedResponse = await cancellationRequest;
+  if ("error" in acceptedResponse)
+    assert.fail(`取消请求失败：${String(acceptedResponse.error)}`);
+  assert.equal(acceptedResponse.status, 200);
+  const acceptedCancellation = acceptedResponse.body as ManualRunCliState;
+  assert.equal(acceptedCancellation.status, "cancelling");
+  assert.ok(acceptedCancellation.cancellationRequestedAt);
+
+  const replacementRuntimeId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    initialOwner.runtimeId,
+  );
+  const cancelled = await waitForCliManualRunState(baseUrl, binId, run.runId, [
+    "cancelled",
+  ]);
+  assert.ok(cancelled.stopConfirmedAt);
+  assert.equal(cancelled.result?.stopReason.code, "cancelled");
+  assert.equal(
+    (await readRuntimeExecutionState(baseUrl, binId)).runtimeId,
+    replacementRuntimeId,
+  );
+}
+
 async function manualRunsCliStep(
   baseUrl: string,
   manifest: unknown,
@@ -1921,6 +2090,7 @@ async function manualRunsCliStep(
   ]);
 
   await ownerGenerationOverlapStep(baseUrl, heartbeatProxy, followUp.runId);
+  await replacementPreservesAcceptedCancellationStep(baseUrl);
 
   const slowGateKey = "18-cli-slow-stop";
   const slowRun = cliData<ManualRunCliState>(
