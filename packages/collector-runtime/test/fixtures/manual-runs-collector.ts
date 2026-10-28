@@ -4,8 +4,10 @@ import {
   collectorActionError,
   defineCollector,
   defineCollectorAction,
+  defineCollectorCheckAction,
   type CollectorArchiveSubmission,
 } from "@binny/collector-sdk";
+import { manualRunCheckInputSchema } from "@binny/contracts";
 import { z } from "zod";
 
 const configurationSchema = z.object({ section: z.string() });
@@ -24,6 +26,42 @@ export default defineCollector({
   },
   configSchema: configurationSchema,
   actions: {
+    check: defineCollectorCheckAction({
+      description: "检查受控信源并返回当前可用性诊断。",
+      params: z.object({
+        sourceUrl: z.url(),
+        gateKey: z.string().min(1),
+        sourceKey: z.string().min(1),
+      }),
+      async execute(context, params) {
+        // @ts-expect-error 可用性检查动作不能提交归档。
+        void context.archive;
+        const response = await fetch(
+          new URL("/source/check", params.sourceUrl),
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              runId: context.runId,
+              binId: context.binId,
+              gateKey: params.gateKey,
+              sourceKey: params.sourceKey,
+            }),
+            signal: context.signal,
+          },
+        );
+        if (!response.ok) {
+          throw collectorActionError({
+            code: "source_check_failed",
+            message: "信源没有完成可用性检查。",
+            impact: "本次检查未得出诊断结果。",
+            suggestion: "检查信源连接后重新触发 check。",
+            requiresHuman: false,
+          });
+        }
+        return manualRunCheckInputSchema.parse(await response.json());
+      },
+    }),
     collect: defineCollectorAction({
       description: "从受控信源解析并提交资料。",
       params: z.object({

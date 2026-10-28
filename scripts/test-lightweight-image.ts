@@ -112,6 +112,14 @@ try {
         type: "object",
       },
       actions: {
+        check: {
+          description: "说明轻量测试环境未配置真实信源。",
+          params: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            properties: {},
+            type: "object",
+          },
+        },
         sample: {
           description: "验证轻量执行链路。",
           params: {

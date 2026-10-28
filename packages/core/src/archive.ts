@@ -2177,16 +2177,35 @@ export function createArchiveStore(
             };
           }
 
-          if (
-            submission.runId !== undefined &&
-            !(await lockManualRunForArchiveWrite(transaction, submission.runId))
-          ) {
-            return failure(
-              409,
-              "run_not_writable",
-              "对应运行已终结或正在取消，不能再写入新的归档资料。",
-              ["runId"],
-            );
+          if (submission.runId !== undefined) {
+            const matchingRuns = await transaction<
+              { readonly action: string }[]
+            >`
+              SELECT action
+              FROM manual_runs
+              WHERE run_id::text = ${submission.runId}
+            `;
+            if (matchingRuns[0]?.action === "check") {
+              return failure(
+                409,
+                "check_run_archive_forbidden",
+                "可用性检查运行不能提交归档资料。",
+                ["runId"],
+              );
+            }
+            if (
+              !(await lockManualRunForArchiveWrite(
+                transaction,
+                submission.runId,
+              ))
+            ) {
+              return failure(
+                409,
+                "run_not_writable",
+                "对应运行已终结或正在取消，不能再写入新的归档资料。",
+                ["runId"],
+              );
+            }
           }
 
           const bins = await transaction<{ readonly id: string }[]>`

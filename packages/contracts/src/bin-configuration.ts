@@ -78,13 +78,17 @@ export const collectorActionSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
+const collectorActionsSchema = z
+  .record(collectorActionNameSchema, collectorActionSchema)
+  .and(z.object({ check: collectorActionSchema }));
+
 export const collectorManifestSchema = withPostgresJsonSchemaProjection(
   z.object({
     id: collectorIdSchema,
     version: postgresTextSchema.min(1, "采集器版本不能为空。"),
     description: postgresTextSchema.optional(),
     configSchema: jsonSchemaDocumentSchema,
-    actions: z.record(collectorActionNameSchema, collectorActionSchema),
+    actions: collectorActionsSchema,
     environment: z.object({
       browser: z.object({
         required: z.boolean(),

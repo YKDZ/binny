@@ -3,12 +3,16 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  binErrorSchema,
   collectorManifestSchema,
   type ArchiveSubmissionInput,
   type ManualRun,
 } from "@binny/contracts";
 
-import { sourceControlStatusSchema } from "./manual-runs-source.ts";
+import {
+  sourceControlStatusSchema,
+  type SourceDisposition,
+} from "./manual-runs-source.ts";
 
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
 const sourceRuntimeUrl = "http://manual-runs-source:8081";
@@ -52,6 +56,24 @@ async function triggerRun(
   if (response.status === 202) return await response.json();
   const result = await response.json();
   assert.fail(`运行触发失败：${result.error.code} ${result.error.message}`);
+}
+
+async function triggerCheckRun(
+  binId: string,
+  sourceUrl: string,
+  gateKey: string,
+  sourceKey: string,
+): Promise<ManualRun> {
+  const response = await client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: {
+      action: "check",
+      params: { sourceUrl, gateKey, sourceKey },
+    },
+  });
+  if (response.status === 202) return await response.json();
+  const result = await response.json();
+  assert.fail(`check 触发失败：${result.error.code} ${result.error.message}`);
 }
 
 async function readRun(binId: string, runId: string): Promise<ManualRun> {
@@ -375,7 +397,7 @@ async function sourceStatus(sourceUrl: string) {
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
-  disposition: "material" | "manual" | "empty" | "partial" = "material",
+  disposition: SourceDisposition = "material",
 ): Promise<void> {
   const response = await fetch(sourceUrl + "/control/release", {
     method: "POST",
@@ -411,6 +433,110 @@ async function waitForRun(
     await delay(50);
   }
   assert.fail(`运行没有进入 ${status} 状态：${runId}`);
+}
+
+async function verifyAvailabilityChecks(): Promise<void> {
+  const cases = [
+    { disposition: "available", availability: "available" },
+    { disposition: "unavailable", availability: "unavailable" },
+    { disposition: "unknown", availability: "unknown" },
+  ] as const;
+  let completedCheck: ManualRun | undefined;
+  for (const [index, current] of cases.entries()) {
+    const gateKey = `16-check-${current.disposition}`;
+    const sourceKey = `16-check-scope-${String(index)}`;
+    const queued = await triggerCheckRun(
+      "binny15-one",
+      sourceRuntimeUrl,
+      gateKey,
+      sourceKey,
+    );
+    assert.equal(queued.action, "check");
+    assert.equal(queued.status, "queued");
+    await waitForArrival(sourceControlUrl, gateKey);
+    await releaseSource(sourceControlUrl, gateKey, current.disposition);
+
+    const finished = await waitForRun("binny15-one", queued.runId, "completed");
+    assert.equal(finished.status, "completed");
+    assert.equal(finished.result?.error, undefined);
+    assert.deepEqual(finished.result?.commits, []);
+    assert.equal(finished.result?.stopReason.code, "completed");
+    const diagnostic = finished.result?.check;
+    assert.ok(diagnostic !== undefined);
+    assert.equal(diagnostic.availability, current.availability);
+    assert.deepEqual(diagnostic.scope, ["source/" + sourceKey]);
+    assert.ok(diagnostic.basis.length > 0);
+    assert.equal(diagnostic.checkedAt, finished.finishedAt);
+    assert.ok(Number.isFinite(Date.parse(diagnostic.checkedAt)));
+    if (current.availability === "available") {
+      assert.deepEqual(diagnostic.problems, []);
+    } else {
+      assert.ok(diagnostic.problems.length > 0);
+      const problem = diagnostic.problems[0];
+      assert.ok(problem !== undefined);
+      assert.ok(problem.suggestion.length > 0);
+      assert.equal(problem.requiresHuman, true);
+    }
+    completedCheck = finished;
+  }
+
+  const failedKey = "16-check-execution-error";
+  const failedSourceKey = "16-check-execution-error-scope";
+  const queuedFailure = await triggerCheckRun(
+    "binny15-one",
+    sourceRuntimeUrl,
+    failedKey,
+    failedSourceKey,
+  );
+  await waitForArrival(sourceControlUrl, failedKey);
+  await releaseSource(sourceControlUrl, failedKey, "execution-error");
+  const executionFailure = await waitForRun(
+    "binny15-one",
+    queuedFailure.runId,
+    "failed",
+  );
+  assert.equal(executionFailure.result?.check, undefined);
+  assert.equal(executionFailure.result?.error?.code, "source_check_failed");
+  assert.equal(executionFailure.result?.stopReason.code, "source_check_failed");
+
+  assert.ok(completedCheck !== undefined);
+  const marker = "16-check-archive-marker-" + completedCheck.runId;
+  const forbidden = await client.archives.$post({
+    json: {
+      requestId: "binny16-check-archive-" + completedCheck.runId,
+      binId: "binny15-one",
+      runId: completedCheck.runId,
+      collectorVersion: manifest.version,
+      items: [
+        {
+          sourceKey: {
+            namespace: "binny16.check-guard",
+            key: completedCheck.runId,
+          },
+          body: { text: marker },
+          capture: { scope: {}, completeness: "complete", missing: [] },
+        },
+      ],
+      relations: [],
+    },
+  });
+  assert.equal(forbidden.status, 409);
+  if (forbidden.status === 409) {
+    const result = await forbidden.json();
+    assert.equal(result.error.code, "check_run_archive_forbidden");
+    assert.deepEqual(result.error.path, ["runId"]);
+  }
+
+  const search = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "binny15-one" },
+      text: { kind: "literal", value: marker },
+      limit: 10,
+    },
+  });
+  assert.equal(search.status, 200);
+  if (search.status === 200)
+    assert.deepEqual((await search.json()).results, []);
 }
 
 async function verifyRunCommit(run: ManualRun): Promise<{
@@ -452,6 +578,51 @@ async function verifyArchivedSection(
 }
 
 async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
+  const missingRequiredCheck = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "binny16-missing-check",
+      collector: {
+        id: "binny16.missing-check",
+        version: "1.0.0",
+        configSchema: { type: "object" },
+        actions: {
+          collect: {
+            description: "仅用于验证必需动作声明。",
+            params: { type: "object" },
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+      },
+      identityId: "binny16-missing-check",
+      config: {},
+      targets: [],
+    }),
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  assert.equal(missingRequiredCheck.status, 400);
+  const missingCheckBody = binErrorSchema.parse(
+    await missingRequiredCheck.json(),
+  );
+  assert.equal(missingCheckBody.error.code, "invalid_input");
+
+  const incompleteCheck = await client.bins[":binId"].runs.$post({
+    param: { binId: "binny15-one" },
+    json: {
+      action: "check",
+      params: { sourceUrl, gateKey: "16-check-invalid-params" },
+    },
+  });
+  assert.equal(incompleteCheck.status, 400);
+  if (incompleteCheck.status === 400) {
+    const error = (await incompleteCheck.json()).error;
+    assert.equal(error.code, "invalid_action_parameters");
+    assert.deepEqual(error.path, ["params", "sourceKey"]);
+  }
+
   const invalidParams = await client.bins[":binId"].runs.$post({
     param: { binId: "binny15-one" },
     json: {
@@ -729,8 +900,9 @@ async function main(): Promise<void> {
     existingItemId,
   );
   await verifyDisabledQueueBoundary(sourceRuntimeUrl, sourceControlUrl);
+  await verifyAvailabilityChecks();
   process.stdout.write(
-    "手动运行 HTTP 领取、串行与并行、快照、归档提交和错误结果旅程通过。\n",
+    "运行 HTTP 队列、check 诊断、串行并行、归档约束和错误结果旅程通过。\n",
   );
 }
 

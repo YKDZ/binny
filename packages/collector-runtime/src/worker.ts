@@ -9,6 +9,7 @@ import {
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
+  manualRunCheckInputSchema,
   manualRunExecutionSchema,
   type ManualRunCompletion,
   type ManualRunExecution,
@@ -105,16 +106,42 @@ async function executeRun(
   actionAbort = new AbortController();
   if (cancelled) actionAbort.abort();
   try {
+    const context = {
+      binId: run.binId,
+      identityId: run.identityId,
+      runId: run.runId,
+      collectorVersion: run.collectorVersion,
+      config: run.config,
+      targets: run.targets,
+      signal: actionAbort.signal,
+    };
+    if (run.action === "check") {
+      const result = await activeCollector.actions.check.execute(
+        context,
+        parsed.data,
+      );
+      const checked = manualRunCheckInputSchema.safeParse(result);
+      if (!checked.success) {
+        return {
+          status: "failed",
+          completedScopes: [],
+          error: {
+            code: "check_result_invalid",
+            message: "可用性检查没有返回有效诊断结果。",
+            impact: "本次检查没有完成。",
+            suggestion: "修正检查结果后重新触发 check。",
+            requiresHuman: false,
+          },
+        };
+      }
+      return {
+        status: "completed",
+        completedScopes: [],
+        check: checked.data,
+      };
+    }
     const result = await action.execute(
-      createCollectorContext(client, {
-        binId: run.binId,
-        identityId: run.identityId,
-        runId: run.runId,
-        collectorVersion: run.collectorVersion,
-        config: run.config,
-        targets: run.targets,
-        signal: actionAbort.signal,
-      }),
+      createCollectorContext(client, context),
       parsed.data,
     );
     const checked = collectorActionResultSchema.safeParse(result);
