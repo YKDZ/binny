@@ -61,8 +61,6 @@ try {
     "--build-arg",
     "BINNY_COLLECTOR_PACKAGE=@binny/collector-runtime",
     "--build-arg",
-    "BINNY_COLLECTOR_PATH=packages/collector-runtime",
-    "--build-arg",
     "BINNY_COLLECTOR_ENTRY=fixture-dist/collector.js",
     "--build-arg",
     "BINNY_BUILD_FIXTURE=1",

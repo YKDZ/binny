@@ -7,8 +7,7 @@ import {
   type RuntimeEnvironmentKind,
 } from "./runtime-server.ts";
 
-const collectorPath =
-  process.env.BINNY_COLLECTOR_ENTRY ?? "/app/collector/collector.js";
+const collectorPath = process.env.BINNY_COLLECTOR_ENTRY ?? "/app/dist/index.js";
 const binId = process.env.BINNY_BIN_ID;
 const runtimePort = Number(process.env.BINNY_RUNTIME_PORT ?? "8080");
 const environment = process.env.BINNY_RUNTIME_ENVIRONMENT ?? "lightweight";
