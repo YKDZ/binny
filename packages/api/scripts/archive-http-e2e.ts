@@ -13,7 +13,11 @@ import {
   archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
-import type { ArchiveSearchFilter, ArchiveSearchInput } from "@binny/contracts";
+import type {
+  ArchiveSearchFilter,
+  ArchiveSearchInput,
+  ArchiveSearchRequest,
+} from "@binny/contracts";
 import type { AnySchema } from "ajv/dist/2020.js";
 import * as z from "zod";
 
@@ -3972,6 +3976,1136 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     assert.ok(invalidTextKeyError.error.path?.includes("\u0000"));
   }
 }
+
+async function verifyRelationSearch(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const rootSplit = { namespace: "e2e-relation-query", key: "split-root" };
+  const rootEmpty = { namespace: "e2e-relation-query", key: "empty-root" };
+  const targetAuthor = {
+    namespace: "e2e-relation-query",
+    key: "split-author-target",
+  };
+  const targetText = {
+    namespace: "e2e-relation-query",
+    key: "split-text-target",
+  };
+  const rootMatch = { namespace: "e2e-relation-query", key: "match-root" };
+  const targetMatch = {
+    namespace: "e2e-relation-query",
+    key: "match-target",
+  };
+  const directionRoot = {
+    namespace: "e2e-relation-query",
+    key: "direction-root",
+  };
+  const directionSourceA = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-a",
+  };
+  const directionSourceB = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-b",
+  };
+  const directionSourceC = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-c",
+  };
+  const directionTargetD = {
+    namespace: "e2e-relation-query",
+    key: "direction-target-d",
+  };
+  const fixtureCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:same-target",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: rootSplit,
+        body: { searchText: "关联筛选根对象" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: rootEmpty,
+        body: { searchText: "没有关联的根对象" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: targetAuthor,
+        properties: { author: "甲" },
+        body: { searchText: "没有这个词" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: targetText,
+        properties: { author: "乙" },
+        body: { searchText: "目标词在另一个目标" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: rootMatch,
+        body: { searchText: "另一个关联筛选根对象" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: targetMatch,
+        properties: { author: "甲" },
+        body: { searchText: "目标词和作者同在此目标" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionRoot,
+        properties: { rank: 0 },
+        body: { searchText: "root text" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceA,
+        properties: { rank: 2 },
+        body: { searchText: "source a" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceB,
+        properties: { rank: "2" },
+        body: { searchText: "source b" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceC,
+        properties: { rank: 3 },
+        body: { searchText: "source c" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionTargetD,
+        properties: { rank: 4 },
+        body: { searchText: "target d" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [
+      {
+        relationId: "e2e:relation-query:split-author",
+        value: {
+          from: rootSplit,
+          to: { sourceKey: targetAuthor },
+          name: "mentions",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation-query:split-text",
+        value: {
+          from: rootSplit,
+          to: { sourceKey: targetText },
+          name: "mentions",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation-query:zz-duplicate-target-edge",
+        value: {
+          from: rootSplit,
+          to: { sourceKey: targetText },
+          name: "mentions",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation-query:matching-target",
+        value: {
+          from: rootMatch,
+          to: { sourceKey: targetMatch },
+          name: "mentions",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation-query:incoming-authorship",
+        value: {
+          from: targetAuthor,
+          to: { sourceKey: rootSplit },
+          name: "authored-by",
+          properties: { role: "author" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation-query:withdrawn-edge",
+        value: {
+          from: rootEmpty,
+          to: { sourceRef: "https://example.test/withdrawn" },
+          name: "retired",
+          properties: { reason: "no-longer-current" },
+          cascade: false,
+        },
+      },
+      ...[
+        {
+          from: directionSourceA,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceA,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceB,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceC,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionRoot,
+          to: { sourceKey: directionTargetD },
+        },
+      ].map(({ from, to }, index) => ({
+        relationId: `e2e:relation-query:direction-${index}`,
+        value: {
+          from,
+          to,
+          name: "links",
+          properties: { kind: "direction" },
+          cascade: false,
+        },
+      })),
+    ],
+  });
+
+  const query: ArchiveSearchRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "relation",
+      direction: "outgoing",
+      name: "mentions",
+      properties: {
+        type: "json",
+        field: "properties",
+        path: ["kind"],
+        operator: "eq",
+        valueType: "string",
+        value: "profile",
+      },
+      target: {
+        type: "and",
+        conditions: [
+          { type: "text", text: { kind: "literal", value: "目标词" } },
+          {
+            type: "json",
+            field: "properties",
+            path: ["author"],
+            valueType: "string",
+            operator: "eq",
+            value: "甲",
+          },
+        ],
+      },
+      operator: "exists",
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  };
+  const search = async (input: ArchiveSearchRequest) => {
+    const response = await client.archives.search.$post({ json: input });
+    if (response.status !== 200) {
+      throw new Error("关系条件搜索失败：" + (await response.text()));
+    }
+    return response.json();
+  };
+  const searchDirectionRoot = (filter: ArchiveSearchFilter) =>
+    search({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "eq",
+            value: "direction-root",
+          },
+          filter,
+        ],
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    });
+  const page = await search(query);
+  assert.deepEqual(
+    page.results.map(({ sourceKey }) => sourceKey?.key),
+    ["match-root"],
+  );
+
+  const incomingRelation = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "split-root",
+        },
+        {
+          type: "relation",
+          direction: "incoming",
+          name: "authored-by",
+          operator: "exists",
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    incomingRelation.results.map(({ sourceKey }) => sourceKey?.key),
+    ["split-root"],
+  );
+  const eitherRelation = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "split-root",
+        },
+        {
+          type: "relation",
+          direction: "either",
+          name: "authored-by",
+          operator: "exists",
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    eitherRelation.results.map(({ sourceKey }) => sourceKey?.key),
+    ["split-root"],
+  );
+
+  const independentExists = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["split-root", "match-root", "empty-root"],
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "mentions",
+          target: {
+            type: "json",
+            field: "properties",
+            path: ["author"],
+            valueType: "string",
+            operator: "eq",
+            value: "甲",
+          },
+          operator: "exists",
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "mentions",
+          target: {
+            type: "text",
+            text: { kind: "literal", value: "目标词" },
+          },
+          operator: "exists",
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    independentExists.results.map(({ sourceKey }) => sourceKey?.key),
+    ["match-root", "split-root"],
+  );
+
+  const countMatches = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["split-root", "match-root", "empty-root"],
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "mentions",
+          properties: {
+            type: "json",
+            field: "properties",
+            path: ["kind"],
+            valueType: "string",
+            operator: "eq",
+            value: "profile",
+          },
+          operator: "count",
+          count: { operator: "eq", value: 2 },
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    countMatches.results.map(({ sourceKey }) => sourceKey?.key),
+    ["split-root"],
+  );
+
+  const incomingCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    operator: "count",
+    count: { operator: "gte", value: 3 },
+  });
+  assert.deepEqual(
+    incomingCount.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingSingleCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  });
+  assert.deepEqual(incomingSingleCount.results, []);
+  const eitherCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "either",
+    name: "links",
+    operator: "count",
+    count: { operator: "eq", value: 4 },
+  });
+  assert.deepEqual(
+    eitherCount.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const eitherIncomingTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "either",
+    name: "links",
+    target: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "direction-source-a",
+        },
+        {
+          type: "text",
+          text: { kind: "literal", value: "source a" },
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["rank"],
+          valueType: "number",
+          operator: "eq",
+          value: 2,
+        },
+      ],
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    eitherIncomingTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTargetKey = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "direction-source-a",
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingTargetKey.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTextTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "text",
+      text: { kind: "literal", value: "source a" },
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingTextTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingRootAsTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "direction-root",
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(incomingRootAsTarget.results, []);
+  const incomingNumericTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "json",
+      field: "properties",
+      path: ["rank"],
+      valueType: "number",
+      operator: "eq",
+      value: 2,
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingNumericTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTextNotExists = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "text",
+      text: { kind: "literal", value: "source a" },
+    },
+    operator: "notExists",
+  });
+  assert.deepEqual(incomingTextNotExists.results, []);
+
+  const notExists = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["split-root", "match-root", "empty-root"],
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "mentions",
+          operator: "notExists",
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    notExists.results.map(({ sourceKey }) => sourceKey?.key),
+    ["empty-root"],
+  );
+
+  const historicalPredicate: ArchiveSearchFilter = {
+    type: "relation",
+    direction: "outgoing",
+    name: "mentions",
+    target: {
+      type: "json",
+      field: "properties",
+      path: ["author"],
+      valueType: "string",
+      operator: "eq",
+      value: "甲",
+    },
+    operator: "exists",
+  };
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:rename-edge",
+    binId: "rss-main",
+    items: [],
+    relations: [
+      {
+        relationId: "e2e:relation-query:split-author",
+        value: {
+          from: rootSplit,
+          to: { sourceKey: targetAuthor },
+          name: "cites",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const currentRenamedRelation = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "split-root",
+        },
+        historicalPredicate,
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(currentRenamedRelation.results, []);
+
+  const historicalRelation = await search({
+    scope: { kind: "asOf", binId: "rss-main", asOf: fixtureCommit.archiveSeq },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "split-root",
+        },
+        historicalPredicate,
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    historicalRelation.results.map(({ sourceKey }) => sourceKey?.key),
+    ["split-root"],
+  );
+  const historicalExpansion = await search({
+    scope: { kind: "asOf", binId: "rss-main", asOf: fixtureCommit.archiveSeq },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "split-root",
+    },
+    expand: [
+      { key: "mentions", direction: "outgoing", name: "mentions", limit: 10 },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    historicalExpansion.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId }) => relationId,
+    ),
+    [
+      "e2e:relation-query:split-author",
+      "e2e:relation-query:split-text",
+      "e2e:relation-query:zz-duplicate-target-edge",
+    ],
+  );
+
+  const foreignTarget = {
+    namespace: "e2e-relation-query",
+    key: "foreign-target",
+  };
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:foreign-target",
+    binId: "rss-secondary",
+    items: [
+      {
+        sourceKey: foreignTarget,
+        body: { searchText: "只在另一来源中的目标词" },
+        properties: { author: "甲" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const foreignRoot = {
+    namespace: "e2e-relation-query",
+    key: "foreign-root",
+  };
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:foreign-edge",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: foreignRoot,
+        body: { searchText: "外来源目标测试根" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [
+      {
+        relationId: "e2e:relation-query:foreign-edge",
+        value: {
+          from: foreignRoot,
+          to: { sourceKey: foreignTarget },
+          name: "mentions",
+          properties: { kind: "profile" },
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const noCrossBinTarget = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "foreign-root",
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "mentions",
+          target: {
+            type: "text",
+            text: { kind: "literal", value: "另一来源" },
+          },
+          operator: "exists",
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(noCrossBinTarget.results, []);
+
+  const unknownTargetExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "foreign-root",
+    },
+    expand: [{ key: "all", direction: "outgoing" }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.equal(unknownTargetExpansion.results.length, 1);
+  assert.equal(
+    unknownTargetExpansion.results[0]?.matches[0]?.expansions?.[0]?.relations[0]
+      ?.status,
+    "observed",
+  );
+  const unknownTargetRelation =
+    unknownTargetExpansion.results[0]?.matches[0]?.expansions?.[0]
+      ?.relations[0];
+  assert.ok(
+    unknownTargetRelation !== undefined && "to" in unknownTargetRelation,
+  );
+  assert.equal(unknownTargetRelation.to.kind, "item");
+  if (unknownTargetRelation.to.kind === "item") {
+    assert.equal(unknownTargetRelation.to.status, "unknown");
+  }
+
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:second-bin-root-view",
+    binId: "rss-secondary",
+    items: [
+      {
+        sourceKey: rootSplit,
+        body: { searchText: "第二来源中的相同根条目" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:second-bin-cites-edge",
+    binId: "rss-secondary",
+    items: [],
+    relations: [
+      {
+        relationId: "e2e:relation-query:secondary-cites",
+        value: {
+          from: rootSplit,
+          to: { sourceRef: "https://example.test/secondary-citation" },
+          name: "cites",
+          properties: { kind: "external" },
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const expandResponse = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "eq",
+            value: "split-root",
+          },
+          {
+            type: "relation",
+            direction: "outgoing",
+            name: "cites",
+            operator: "exists",
+          },
+        ],
+      },
+      expand: [
+        { key: "all", direction: "outgoing", limit: 1 },
+        {
+          key: "mentions",
+          direction: "outgoing",
+          name: "mentions",
+          properties: {
+            type: "json",
+            field: "properties",
+            path: ["kind"],
+            valueType: "string",
+            operator: "eq",
+            value: "profile",
+          },
+          limit: 1,
+        },
+        {
+          key: "authorship",
+          direction: "incoming",
+          name: "authored-by",
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    }),
+  });
+  if (expandResponse.status !== 200) {
+    throw new Error("独立关系展开失败：" + (await expandResponse.text()));
+  }
+  const expandedPage = (await expandResponse.json()) as {
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly expansions: readonly {
+          readonly key: string;
+          readonly hasMore: boolean;
+          readonly relations: readonly {
+            readonly relationId: string;
+            readonly direction: string;
+            readonly status: string;
+          }[];
+        }[];
+      }[];
+    }[];
+  };
+  assert.equal(expandedPage.results.length, 1);
+  assert.equal(expandedPage.results[0]?.sourceKey?.key, "split-root");
+  assert.deepEqual(
+    expandedPage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-main", "rss-secondary"],
+  );
+  const mainMatch = expandedPage.results[0]?.matches.find(
+    ({ binId }) => binId === "rss-main",
+  );
+  const secondaryMatch = expandedPage.results[0]?.matches.find(
+    ({ binId }) => binId === "rss-secondary",
+  );
+  const mainAllExpansion = mainMatch?.expansions.find(
+    ({ key }) => key === "all",
+  );
+  assert.deepEqual(
+    mainAllExpansion?.relations.map(({ relationId }) => relationId),
+    ["e2e:relation-query:split-author"],
+  );
+  assert.equal(mainAllExpansion?.hasMore, true);
+  const mainMentionsExpansion = mainMatch?.expansions.find(
+    ({ key }) => key === "mentions",
+  );
+  assert.deepEqual(
+    mainMentionsExpansion?.relations.map(({ relationId }) => relationId),
+    ["e2e:relation-query:split-text"],
+  );
+  assert.equal(mainMentionsExpansion?.hasMore, true);
+  const authorshipExpansion = mainMatch?.expansions.find(
+    ({ key }) => key === "authorship",
+  );
+  assert.deepEqual(
+    authorshipExpansion?.relations.map(({ relationId, direction }) => ({
+      relationId,
+      direction,
+    })),
+    [
+      {
+        relationId: "e2e:relation-query:incoming-authorship",
+        direction: "incoming",
+      },
+    ],
+  );
+  assert.deepEqual(
+    secondaryMatch?.expansions.map(({ key, relations, hasMore }) => ({
+      key,
+      relations: relations.map(({ relationId, status }) => ({
+        relationId,
+        status,
+      })),
+      hasMore,
+    })),
+    [
+      {
+        key: "all",
+        relations: [
+          {
+            relationId: "e2e:relation-query:secondary-cites",
+            status: "observed",
+          },
+        ],
+        hasMore: false,
+      },
+      { key: "mentions", relations: [], hasMore: false },
+      { key: "authorship", relations: [], hasMore: false },
+    ],
+  );
+
+  const pagedExpansionQuery: ArchiveSearchRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: ["match-root", "split-root"],
+    },
+    expand: [{ key: "all", direction: "outgoing", limit: 1 }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 1,
+  };
+  const firstRootPage = await search(pagedExpansionQuery);
+  assert.deepEqual(
+    firstRootPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["match-root"],
+  );
+  assert.ok(firstRootPage.nextCursor !== undefined);
+  assert.deepEqual(
+    firstRootPage.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId }) => relationId,
+    ),
+    ["e2e:relation-query:matching-target"],
+  );
+  const secondRootPage = await search({
+    ...pagedExpansionQuery,
+    cursor: firstRootPage.nextCursor,
+  });
+  assert.deepEqual(
+    secondRootPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["split-root"],
+  );
+  assert.equal(
+    secondRootPage.results[0]?.matches[0]?.expansions?.[0]?.hasMore,
+    true,
+  );
+
+  const emptyExpandResponse = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: "empty-root",
+      },
+      expand: [{ key: "mentions", direction: "outgoing", name: "mentions" }],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    }),
+  });
+  if (emptyExpandResponse.status !== 200) {
+    throw new Error("空关系展开失败：" + (await emptyExpandResponse.text()));
+  }
+  const emptyExpandedPage = (await emptyExpandResponse.json()) as {
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly expansions: readonly {
+          readonly key: string;
+          readonly hasMore: boolean;
+          readonly relations: readonly unknown[];
+        }[];
+      }[];
+    }[];
+  };
+  assert.equal(emptyExpandedPage.results.length, 1);
+  assert.equal(emptyExpandedPage.results[0]?.sourceKey?.key, "empty-root");
+  assert.deepEqual(emptyExpandedPage.results[0]?.matches[0]?.expansions, [
+    {
+      key: "mentions",
+      direction: "outgoing",
+      name: "mentions",
+      relations: [],
+      hasMore: false,
+    },
+  ]);
+
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:withdraw-edge",
+    binId: "rss-main",
+    items: [],
+    relations: [
+      { relationId: "e2e:relation-query:withdrawn-edge", value: null },
+    ],
+  });
+  const withdrawnExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "empty-root",
+    },
+    expand: [{ key: "all", direction: "outgoing" }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    withdrawnExpansion.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId, status }) => ({ relationId, status }),
+    ),
+    [{ relationId: "e2e:relation-query:withdrawn-edge", status: "withdrawn" }],
+  );
+
+  const targetMatchId = fixtureCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === "match-target",
+  )?.itemId;
+  assert.ok(targetMatchId !== undefined);
+  const hardDeleteResponse = await fetch(
+    baseUrl + "/archives/items/" + targetMatchId,
+    { method: "DELETE" },
+  );
+  assert.equal(hardDeleteResponse.status, 200);
+  const deletedGapExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "match-root",
+    },
+    expand: [{ key: "all", direction: "outgoing" }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    deletedGapExpansion.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId, status }) => ({ relationId, status }),
+    ),
+    [{ relationId: "e2e:relation-query:matching-target", status: "deleted" }],
+  );
+}
 async function verifyHardDeleteEntryPoint(
   client: ArchiveClient,
   baseUrl: string,
@@ -4501,6 +5635,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
     aba.historicalAsOf,
   );
   await verifySearchJsonPathFilter(baseUrl);
+  await verifyRelationSearch(baseUrl);
   await verifySearchSourceViews(baseUrl);
   await verifySearchPagination(baseUrl);
   await verifyConcurrentArchiveIdentity(client);

@@ -902,31 +902,59 @@ const archiveSearchJsonFilterSchema = z
     }
   });
 
+export type ArchiveSearchFieldFilter = {
+  readonly type: "field";
+  readonly field: ArchiveSearchField;
+  readonly operator:
+    | "exists"
+    | "eq"
+    | "ne"
+    | "in"
+    | "notIn"
+    | "gt"
+    | "gte"
+    | "lt"
+    | "lte"
+    | "between";
+  readonly value?: string | boolean | undefined;
+  readonly values?: string[] | undefined;
+  readonly lower?: string | undefined;
+  readonly upper?: string | undefined;
+};
+
+type ArchiveSearchScalarFilter =
+  | { readonly type: "text"; readonly text: ArchiveSearchText }
+  | ArchiveSearchJsonFilter
+  | ArchiveSearchFieldFilter;
+
+export type ArchiveSearchTargetFilter =
+  | { readonly type: "and"; readonly conditions: ArchiveSearchTargetFilter[] }
+  | { readonly type: "or"; readonly conditions: ArchiveSearchTargetFilter[] }
+  | { readonly type: "not"; readonly condition: ArchiveSearchTargetFilter }
+  | ArchiveSearchScalarFilter;
+
+export type ArchiveSearchRelationCount = {
+  /** 统计不同目标条目或源引用；多个关系指向同一目标只计一次。 */
+  readonly operator: "eq" | "gt" | "gte" | "lt" | "lte";
+  readonly value: number;
+};
+
+export type ArchiveSearchRelationFilter = {
+  readonly type: "relation";
+  readonly direction: "outgoing" | "incoming" | "either";
+  readonly name?: string | undefined;
+  readonly properties?: ArchiveSearchJsonFilter | undefined;
+  readonly target?: ArchiveSearchTargetFilter | undefined;
+  readonly operator: "exists" | "notExists" | "count";
+  readonly count?: ArchiveSearchRelationCount | undefined;
+};
+
 export type ArchiveSearchFilter =
   | { readonly type: "and"; readonly conditions: ArchiveSearchFilter[] }
   | { readonly type: "or"; readonly conditions: ArchiveSearchFilter[] }
   | { readonly type: "not"; readonly condition: ArchiveSearchFilter }
-  | { readonly type: "text"; readonly text: ArchiveSearchText }
-  | ArchiveSearchJsonFilter
-  | {
-      readonly type: "field";
-      readonly field: ArchiveSearchField;
-      readonly operator:
-        | "exists"
-        | "eq"
-        | "ne"
-        | "in"
-        | "notIn"
-        | "gt"
-        | "gte"
-        | "lt"
-        | "lte"
-        | "between";
-      readonly value?: string | boolean | undefined;
-      readonly values?: string[] | undefined;
-      readonly lower?: string | undefined;
-      readonly upper?: string | undefined;
-    };
+  | ArchiveSearchScalarFilter
+  | ArchiveSearchRelationFilter;
 
 export const archiveSearchOrderFieldSchema = z.enum([
   "itemId",
@@ -1175,6 +1203,130 @@ const archiveSearchFieldFilterSchema = z
     }
   });
 
+const archiveSearchScalarFilterSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("text"),
+      text: archiveSearchTextSchema,
+    })
+    .strict(),
+  archiveSearchFieldFilterSchema,
+  archiveSearchJsonFilterSchema,
+]);
+
+const archiveSearchTargetFilterNodeSchema: z.ZodType<ArchiveSearchTargetFilter> =
+  z.lazy(() =>
+    z.discriminatedUnion("type", [
+      z
+        .object({
+          type: z.literal("and"),
+          conditions: z
+            .array(archiveSearchTargetFilterNodeSchema)
+            .min(1)
+            .max(16),
+        })
+        .strict(),
+      z
+        .object({
+          type: z.literal("or"),
+          conditions: z
+            .array(archiveSearchTargetFilterNodeSchema)
+            .min(1)
+            .max(16),
+        })
+        .strict(),
+      z
+        .object({
+          type: z.literal("not"),
+          condition: archiveSearchTargetFilterNodeSchema,
+        })
+        .strict(),
+      archiveSearchScalarFilterSchema,
+    ]),
+  );
+
+const archiveSearchRelationCountSchema = z
+  .object({
+    operator: z.enum(["eq", "gt", "gte", "lt", "lte"]),
+    value: z.number().int().min(0).max(1_000_000),
+  })
+  .strict()
+  .describe("按不同目标条目或源引用计数；多条关系指向同一目标只计一次。");
+
+const archiveSearchRelationPropertiesFilterSchema =
+  archiveSearchJsonFilterSchema.superRefine((filter, context) => {
+    if (filter.field !== "properties") {
+      context.addIssue({
+        code: "custom",
+        path: ["field"],
+        message: "关系属性条件的 field 必须是 properties。",
+      });
+    }
+  });
+
+const archiveSearchRelationFilterSchema = z
+  .object({
+    type: z.literal("relation"),
+    direction: z.enum(["outgoing", "incoming", "either"]),
+    name: postgresTextSchema.min(1).max(256).optional(),
+    properties: archiveSearchRelationPropertiesFilterSchema.optional(),
+    target: archiveSearchTargetFilterNodeSchema.optional(),
+    operator: z.enum(["exists", "notExists", "count"]),
+    count: archiveSearchRelationCountSchema.optional(),
+  })
+  .strict()
+  .superRefine((filter, context) => {
+    if (filter.operator === "count" && filter.count === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["count"],
+        message: "关系数量条件必须声明比较符和值。",
+      });
+    } else if (filter.operator !== "count" && filter.count !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["count"],
+        message: "只有 count 条件可以声明数量比较。",
+      });
+    }
+  });
+
+const archiveSearchExpansionInputSchema = z
+  .array(
+    z
+      .object({
+        key: nonEmptyText.max(128),
+        direction: z.enum(["outgoing", "incoming", "either"]),
+        name: postgresTextSchema.min(1).max(256).optional(),
+        properties: archiveSearchRelationPropertiesFilterSchema.optional(),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .default(20)
+          .describe(
+            "每个根条目来源视图返回的关系明细上限；hasMore 提示仍有未返回项。",
+          ),
+      })
+      .strict(),
+  )
+  .max(8)
+  .describe("独立选择至多 8 种关系展开；hasMore 没有对应的展开续页游标。")
+  .superRefine((expansions, context) => {
+    const keys = new Set<string>();
+    for (const [index, expansion] of expansions.entries()) {
+      if (keys.has(expansion.key)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "key"],
+          message: "关系展开 key 不能重复。",
+        });
+      }
+      keys.add(expansion.key);
+    }
+  });
+
 const archiveSearchFilterNodeSchema: z.ZodType<ArchiveSearchFilter> = z.lazy(
   () =>
     z.discriminatedUnion("type", [
@@ -1196,14 +1348,8 @@ const archiveSearchFilterNodeSchema: z.ZodType<ArchiveSearchFilter> = z.lazy(
           condition: archiveSearchFilterNodeSchema,
         })
         .strict(),
-      z
-        .object({
-          type: z.literal("text"),
-          text: archiveSearchTextSchema,
-        })
-        .strict(),
-      archiveSearchFieldFilterSchema,
-      archiveSearchJsonFilterSchema,
+      archiveSearchScalarFilterSchema,
+      archiveSearchRelationFilterSchema,
     ]),
 );
 
@@ -1211,6 +1357,19 @@ const archiveSearchFilterNodeSchema: z.ZodType<ArchiveSearchFilter> = z.lazy(
 export const archiveSearchFilterSchema = withArchiveJsonSchemaProjection(
   archiveSearchFilterNodeSchema.superRefine((filter, context) => {
     let nodeCount = 0;
+    const visitTarget = (
+      node: ArchiveSearchTargetFilter,
+      depth: number,
+    ): void => {
+      nodeCount += 1;
+      if (depth > 8 || nodeCount > 64) return;
+      if (node.type === "and" || node.type === "or") {
+        for (const condition of node.conditions)
+          visitTarget(condition, depth + 1);
+      } else if (node.type === "not") {
+        visitTarget(node.condition, depth + 1);
+      }
+    };
     const visit = (node: ArchiveSearchFilter, depth: number): void => {
       nodeCount += 1;
       if (depth > 8 || nodeCount > 64) return;
@@ -1218,6 +1377,8 @@ export const archiveSearchFilterSchema = withArchiveJsonSchemaProjection(
         for (const condition of node.conditions) visit(condition, depth + 1);
       } else if (node.type === "not") {
         visit(node.condition, depth + 1);
+      } else if (node.type === "relation" && node.target !== undefined) {
+        visitTarget(node.target, depth + 1);
       }
     };
     visit(filter, 1);
@@ -1239,7 +1400,18 @@ function filterDepth(filter: ArchiveSearchFilter): number {
   if (filter.type === "and" || filter.type === "or") {
     return 1 + Math.max(...filter.conditions.map(filterDepth));
   }
-  return filter.type === "not" ? 1 + filterDepth(filter.condition) : 1;
+  if (filter.type === "not") return 1 + filterDepth(filter.condition);
+  if (filter.type === "relation" && filter.target !== undefined) {
+    return 1 + targetFilterDepth(filter.target);
+  }
+  return 1;
+}
+
+function targetFilterDepth(filter: ArchiveSearchTargetFilter): number {
+  if (filter.type === "and" || filter.type === "or") {
+    return 1 + Math.max(...filter.conditions.map(targetFilterDepth));
+  }
+  return filter.type === "not" ? 1 + targetFilterDepth(filter.condition) : 1;
 }
 
 /**
@@ -1248,8 +1420,12 @@ function filterDepth(filter: ArchiveSearchFilter): number {
  * current/asOf 结果以 item 为根，历史结果按所选单位分组。多视图排序值来自命中结果
  * 中 binId 按 C 排序最小的一项；null 置末尾，同值按结果标识升序。
  * 顶层 text 与 where 中的 text 节点使用相同的逻辑树，顶层 text 等价于 AND 条件。
- * 游标固定首屏 snapshot 并绑定查询。budgetMs 限制单条 PostgreSQL 搜索语句，超时返回
- * 422 且不返回部分结果。无 text 与 where 的空查询无效。
+ * expand 最多声明 8 个选择器，为每个返回 match/bin 独立读取关系：默认每个选择器最多 20 条，最大 100 条，
+ * 按 relationId 的 C 顺序排列；hasMore 表示还有未返回明细，本契约没有展开续页游标。
+ * 展开上限只约束返回明细，不限制根匹配、exists/count 等过滤使用的完整集合。观察到的
+ * 关系可带同 bin/K 下未知目标端点；撤回和硬删除缺口分别返回状态与删除提交依据，
+ * 不借用其他 bin 补资料。游标固定首屏 snapshot 并绑定查询；budgetMs 限制每条
+ * PostgreSQL 搜索语句，超时返回 422 且不返回部分结果。无 text 与 where 的空查询无效。
  */
 export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
   z
@@ -1285,6 +1461,9 @@ export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
       ]),
       text: archiveSearchTextSchema.optional(),
       where: archiveSearchFilterSchema.optional(),
+      expand: archiveSearchExpansionInputSchema
+        .optional()
+        .describe("按每个命中来源视图独立返回有界关系明细；不改变根筛选结果。"),
       select: archiveSearchProjectionSchema,
       orderBy: archiveSearchOrderBySchema,
       limit: z.number().int().min(1).max(100).default(50),
@@ -1295,7 +1474,7 @@ export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
         .min(1)
         .max(10_000)
         .default(1_000)
-        .describe("单条 PostgreSQL 搜索语句的超时预算（毫秒）。"),
+        .describe("每条 PostgreSQL 搜索与展开语句的超时预算（毫秒）。"),
     })
     .strict()
     .superRefine((input, context) => {
@@ -1355,6 +1534,101 @@ export type ArchiveSearchJsonProjectionResult = z.infer<
   typeof archiveSearchJsonProjectionResultSchema
 >;
 
+const archiveSearchExpandedItemEndpointSchema = z
+  .object({
+    kind: z.literal("item"),
+    itemId: archiveIdentifierSchema,
+    sourceKey: sourceKeySchema,
+    status: z.enum(["observed", "unknown"]),
+    revisionId: archiveIdentifierSchema.optional(),
+  })
+  .strict()
+  .superRefine((endpoint, context) => {
+    if (endpoint.status === "observed" && endpoint.revisionId === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["revisionId"],
+        message: "已观察对象必须关联内容版本。",
+      });
+    }
+    if (endpoint.status === "unknown" && endpoint.revisionId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["revisionId"],
+        message: "未知对象视图不能关联内容版本。",
+      });
+    }
+  });
+
+const archiveSearchExpandedEndpointSchema = z.discriminatedUnion("kind", [
+  archiveSearchExpandedItemEndpointSchema,
+  z
+    .object({
+      kind: z.literal("sourceRef"),
+      sourceRef: nonEmptyText.max(4096),
+    })
+    .strict(),
+]);
+
+const archiveSearchExpansionObservationSchema = z
+  .object({
+    commitId: archiveIdentifierSchema,
+    archiveSeq: archiveSequenceSchema,
+    ordinal: z.number().int().nonnegative(),
+    observedAt: timestampSchema,
+    recordedAt: timestampSchema,
+    runId: nonEmptyText.max(128).optional(),
+    collectorVersion: nonEmptyText.max(256).optional(),
+  })
+  .strict();
+
+const archiveSearchExpansionRelationSchema = withArchiveJsonSchemaProjection(
+  z.union([
+    z
+      .object({
+        relationId: nonEmptyText.max(256),
+        direction: z.enum(["outgoing", "incoming"]),
+        status: z.literal("observed"),
+        from: archiveSearchExpandedItemEndpointSchema,
+        to: archiveSearchExpandedEndpointSchema,
+        revisionId: archiveIdentifierSchema,
+        state: archiveRelationStateSchema,
+        observation: archiveSearchExpansionObservationSchema,
+      })
+      .strict(),
+    z
+      .object({
+        relationId: nonEmptyText.max(256),
+        direction: z.enum(["outgoing", "incoming"]),
+        status: z.literal("withdrawn"),
+        from: archiveSearchExpandedItemEndpointSchema,
+        to: archiveSearchExpandedEndpointSchema,
+        observation: archiveSearchExpansionObservationSchema,
+      })
+      .strict(),
+    z
+      .object({
+        relationId: nonEmptyText.max(256),
+        direction: z.enum(["outgoing", "incoming"]),
+        status: z.literal("deleted"),
+        observation: archiveSearchExpansionObservationSchema,
+      })
+      .strict(),
+  ]),
+);
+
+const archiveSearchExpansionResultSchema = z
+  .object({
+    key: nonEmptyText.max(128),
+    direction: z.enum(["outgoing", "incoming", "either"]),
+    name: postgresTextSchema.min(1).max(256).optional(),
+    relations: z.array(archiveSearchExpansionRelationSchema),
+    hasMore: z
+      .boolean()
+      .describe("当前限额之外仍有关系明细；本查询契约不提供展开续页游标。"),
+  })
+  .strict();
+
 const archiveSearchMatchSchema = z
   .object({
     binId: binIdSchema,
@@ -1369,6 +1643,7 @@ const archiveSearchMatchSchema = z
     collectorVersion: nonEmptyText.max(256).optional(),
     hit: archiveSearchHitSchema.optional(),
     json: z.array(archiveSearchJsonProjectionResultSchema).optional(),
+    expansions: z.array(archiveSearchExpansionResultSchema).optional(),
   })
   .strict();
 
