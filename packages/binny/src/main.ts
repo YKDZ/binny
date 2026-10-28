@@ -13,6 +13,7 @@ import {
   archiveItemDeletionResultSchema,
   archiveRelationPageSchema,
   archiveResourceMetadataSchema,
+  archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
@@ -993,6 +994,60 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档版本读取状态。");
+        },
+      }),
+      ...command("archiveRevisionDiff")({
+        kind: "command",
+        parent: "archive",
+        name: "diff",
+        description: "查看同一条目的两个不可变内容版本差异。",
+        fields: {
+          firstRevisionId: {
+            kind: "positional",
+            description: "第一个比较位置的内容版本 ID",
+          },
+          secondRevisionId: {
+            kind: "positional",
+            description: "第二个比较位置的内容版本 ID",
+          },
+        },
+        input: z.object({
+          firstRevisionId: archiveIdentifierSchema,
+          secondRevisionId: archiveIdentifierSchema,
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "内容版本差异",
+              exitCode: 0,
+              schema: archiveRevisionDiffSchema,
+              text: (diff) => outputText("内容版本差异", diff),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.revisions[":firstRevisionId"].diff[
+              ":secondRevisionId"
+            ].$get({
+              param: {
+                firstRevisionId: input.firstRevisionId,
+                secondRevisionId: input.secondRevisionId,
+              },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409 ||
+            response.status === 503
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档版本比较状态。");
         },
       }),
       ...command("archiveCommit")({

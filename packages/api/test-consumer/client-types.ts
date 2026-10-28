@@ -212,6 +212,47 @@ void checkPublicManualRunContract;
 
 async function checkPublicArchiveContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
+
+  const revisionDiffResponse = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: "650e8400-e29b-41d4-a716-446655440000",
+      secondRevisionId: "750e8400-e29b-41d4-a716-446655440000",
+    },
+  });
+  if (revisionDiffResponse.status === 200) {
+    const revisionDiff = await revisionDiffResponse.json();
+    void (revisionDiff.fields.body.status satisfies "unchanged" | "changed");
+    void (revisionDiff.fields.properties.status satisfies
+      | "unchanged"
+      | "changed");
+    void (revisionDiff.resources.added satisfies readonly string[]);
+    void (revisionDiff.hasChanges satisfies boolean);
+    // @ts-expect-error hasChanges 不能当作文本输出。
+    void (revisionDiff.hasChanges satisfies string);
+    // @ts-expect-error 差异响应不暴露任意 JSON Patch 操作。
+    void revisionDiff.operations;
+  } else if (
+    revisionDiffResponse.status === 400 ||
+    revisionDiffResponse.status === 404 ||
+    revisionDiffResponse.status === 409
+  ) {
+    const revisionDiffError = await revisionDiffResponse.json();
+    void (revisionDiffError.error.code satisfies string);
+    // @ts-expect-error 错误代码不是任意类型或数字。
+    void (revisionDiffError.error.code satisfies number);
+    // @ts-expect-error 归档差异错误不包含成功响应的字段集合。
+    void revisionDiffError.fields;
+  }
+
+  void client.archives.revisions[":firstRevisionId"].diff[
+    ":secondRevisionId"
+  ].$get({
+    // @ts-expect-error 两个版本标识都是必填路径参数。
+    param: { firstRevisionId: "650e8400-e29b-41d4-a716-446655440000" },
+  });
+
   const submission = await client.archives.$post({
     json: {
       requestId: "rss:request-7",
