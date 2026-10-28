@@ -1,4 +1,6 @@
+import { Readability } from "@mozilla/readability";
 import { parseFeed } from "@rowanmanning/feed-parser";
+import { JSDOM } from "jsdom";
 import { parseFragment, serialize, type DefaultTreeAdapterMap } from "parse5";
 
 type FeedParserJson = ReturnType<ReturnType<typeof parseFeed>["toJSON"]>;
@@ -64,15 +66,32 @@ export interface PreparedBody {
   readonly html: string;
   readonly text: string;
   readonly type: string;
-  readonly source: "content" | "summary";
+  readonly source: "content" | "summary" | "static-html";
   readonly parts: readonly BodyPart[];
   readonly media: readonly MediaCandidate[];
   readonly invalidMedia: readonly string[];
   rewriteHtml(references: ReadonlyMap<string, string>): string;
 }
 
+export type StaticArticleResult =
+  | {
+      readonly status: "extracted";
+      readonly requestedUrl: string;
+      readonly finalUrl: string;
+      readonly title: string | null;
+      readonly html: string;
+    }
+  | {
+      readonly status: "unavailable";
+      readonly requestedUrl: string;
+      readonly reason: string;
+      readonly suggestion: string;
+    };
+
 const maximumFeedBytes = 10 * 1024 * 1024;
+const maximumStaticPageBytes = 8 * 1024 * 1024;
 const maximumMediaBytes = 32 * 1024 * 1024;
+const minimumStaticArticleTextLength = 100;
 const fetchTimeoutMs = 20_000;
 const feedAccept =
   "application/atom+xml, application/rss+xml, application/xml, text/xml, application/*+xml;q=0.9, */*;q=0.8";
@@ -181,12 +200,16 @@ function requestSignal(signal: AbortSignal): AbortSignal {
   return AbortSignal.any([signal, AbortSignal.timeout(fetchTimeoutMs)]);
 }
 
-async function readLimitedText(response: Response): Promise<string> {
+async function readLimitedText(
+  response: Response,
+  maximumBytes = maximumFeedBytes,
+  contentName = "RSS/Atom feed",
+): Promise<string> {
   const contentLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maximumFeedBytes) {
+  if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
     await response.body?.cancel();
     throw new FeedRequestError(
-      "RSS/Atom feed 超过 10 MiB，未读取其正文。",
+      `${contentName}超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未读取其正文。`,
       413,
     );
   }
@@ -202,10 +225,10 @@ async function readLimitedText(response: Response): Promise<string> {
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > maximumFeedBytes) {
+      if (size > maximumBytes) {
         await reader.cancel();
         throw new FeedRequestError(
-          "RSS/Atom feed 超过 10 MiB，未读取其正文。",
+          `${contentName}超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未读取其正文。`,
           413,
         );
       }
@@ -222,10 +245,147 @@ async function readLimitedText(response: Response): Promise<string> {
     return new TextDecoder(charset ?? "utf-8", { fatal: true }).decode(bytes);
   } catch (error) {
     throw new FeedRequestError(
-      "RSS/Atom feed 正文不是可识别的文本编码。",
+      `${contentName}正文不是可识别的文本编码。`,
       response.status,
       error,
     );
+  }
+}
+
+function staticArticleUnavailable(
+  requestedUrl: string,
+  reason: string,
+): StaticArticleResult {
+  return {
+    status: "unavailable",
+    requestedUrl,
+    reason:
+      `${reason} 页面可能需要登录、脚本渲染或特殊交互，` +
+      "本次保留 feed 摘要并将其标记为 partial。",
+    suggestion:
+      "检查页面是否无需登录即可直接读取正文；需要脚本或特殊交互时，请提供可公开访问的静态正文来源。",
+  };
+}
+
+export async function fetchStaticArticle(
+  requestedUrl: string,
+  signal: AbortSignal,
+): Promise<StaticArticleResult> {
+  const normalizedUrl = httpUrl(requestedUrl, requestedUrl);
+  if (normalizedUrl === undefined) {
+    return staticArticleUnavailable(
+      requestedUrl,
+      "条目链接不是可读取的 HTTP/HTTPS 页面。",
+    );
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(normalizedUrl, {
+      method: "GET",
+      headers: {
+        accept: "text/html, application/xhtml+xml;q=0.9",
+        "user-agent": "Binny RSS collector/1.0",
+      },
+      signal: requestSignal(signal),
+    });
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return staticArticleUnavailable(
+      normalizedUrl,
+      "公开文章页面本次无法访问。",
+    );
+  }
+
+  if (!response.ok) {
+    await response.body?.cancel();
+    return staticArticleUnavailable(
+      normalizedUrl,
+      `公开文章页面返回 HTTP ${response.status}。`,
+    );
+  }
+
+  const contentType = response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== "text/html" && contentType !== "application/xhtml+xml") {
+    await response.body?.cancel();
+    return staticArticleUnavailable(
+      normalizedUrl,
+      "公开文章页面没有返回 HTML 正文。",
+    );
+  }
+
+  let source: string;
+  try {
+    source = await readLimitedText(
+      response,
+      maximumStaticPageBytes,
+      "静态文章页面",
+    );
+  } catch (error) {
+    if (signal.aborted) throw error;
+    const reason =
+      error instanceof Error ? error.message : "公开文章页面本次无法读取。";
+    return staticArticleUnavailable(normalizedUrl, reason);
+  }
+
+  const finalUrl = httpUrl(response.url, normalizedUrl);
+  if (finalUrl === undefined) {
+    return staticArticleUnavailable(
+      normalizedUrl,
+      "公开文章页面跳转到了不可读取的地址。",
+    );
+  }
+
+  let page: JSDOM;
+  try {
+    page = new JSDOM(source, { url: finalUrl });
+  } catch {
+    return staticArticleUnavailable(
+      normalizedUrl,
+      "公开文章页面无法解析为静态正文。",
+    );
+  }
+  try {
+    const document = page.window.document;
+    const hasPasswordInput =
+      document.querySelector('input[type="password"]') !== null;
+    // 逐段预筛选会漏掉短段落组成的完整文章，改用解析后的总正文长度判断。
+    const article = new Readability(document, {
+      charThreshold: minimumStaticArticleTextLength,
+    }).parse();
+    const text = article?.textContent?.trim();
+    if (
+      article === null ||
+      article.content === null ||
+      article.content === undefined ||
+      text === undefined ||
+      text.length < minimumStaticArticleTextLength
+    ) {
+      return staticArticleUnavailable(
+        normalizedUrl,
+        hasPasswordInput
+          ? "公开文章页面提示需要登录，且没有足够正文可供提取。"
+          : "页面没有足够的静态文章正文可供提取。",
+      );
+    }
+    return {
+      status: "extracted",
+      requestedUrl: normalizedUrl,
+      finalUrl,
+      title: article.title?.trim() || null,
+      html: article.content,
+    };
+  } catch {
+    return staticArticleUnavailable(
+      normalizedUrl,
+      "公开文章页面的正文提取未能完成。",
+    );
+  } finally {
+    page.window.close();
   }
 }
 
@@ -467,12 +627,23 @@ function addMediaCandidate(
 export function prepareBody(
   item: ParsedFeedItem,
   baseUrl: string,
+  source: "feed" | "static-html" = "feed",
 ): PreparedBody {
   const hasContent = (item.content?.trim().length ?? 0) > 0;
   const bodyText = hasContent ? (item.content ?? "") : (item.description ?? "");
-  const type = hasContent ? item.contentType : item.descriptionType;
+  const type =
+    source === "static-html"
+      ? "html"
+      : hasContent
+        ? item.contentType
+        : item.descriptionType;
   const html = isHtmlTextConstruct(type) ? bodyText : htmlText(bodyText);
-  const source = hasContent ? "content" : "summary";
+  const bodySource =
+    source === "static-html"
+      ? "static-html"
+      : hasContent
+        ? "content"
+        : "summary";
 
   const fragment = parseFragment(html);
   const parts: BodyPart[] = [];
@@ -591,7 +762,7 @@ export function prepareBody(
     html,
     text,
     type: type ?? "html",
-    source,
+    source: bodySource,
     parts,
     media: [...media.values()],
     invalidMedia,

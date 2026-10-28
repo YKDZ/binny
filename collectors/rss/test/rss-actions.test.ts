@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { isCollectorActionError } from "@binny/collector-sdk";
 import type {
   ArchiveCommit,
   ArchiveResourceMetadata,
@@ -15,7 +16,7 @@ import type {
 
 import collector from "../src/index.ts";
 
-void test("RSS 与 Atom 全文、结构和媒体由正式动作提交，编辑保留信源键", async () => {
+void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "binny-rss-test-"));
   const previousStateDirectory = process.env.BINNY_COLLECTOR_STATE_DIRECTORY;
   process.env.BINNY_COLLECTOR_STATE_DIRECTORY = stateDirectory;
@@ -52,6 +53,38 @@ void test("RSS 与 Atom 全文、结构和媒体由正式动作提交，编辑�
       );
       return;
     }
+    if (path === "/static-rss") {
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      response.end(
+        `<rss version="2.0"><channel><title>静态文章来源</title><item><guid>urn:binny:static:item-1</guid><title>静态文章</title><link>${origin}/pages/static.html</link><description>静态文章摘要</description></item></channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/pages/static.html") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<!doctype html><html><head><title>公开静态文章</title></head><body><main><article><h1>公开静态文章</h1><p>静态正文版本 1。这段内容来自订阅条目所指向的普通公开页面，服务器直接返回完整 HTML，无需登录、脚本执行或特殊交互。</p><p>文章正文保留有价值的段落和层级。归档应使用这段正文，而不是订阅源中的短摘要。</p><p>页面正文长度足以判断完整文章，侧栏登录框不应覆盖已经公开取得的内容。</p></article></main><aside><form><label>密码<input type="password"></label></form></aside></body></html>',
+      );
+      return;
+    }
+    if (path === "/login-rss") {
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      response.end(
+        `<rss version="2.0"><channel><title>登录页面来源</title><item><guid>urn:binny:login:item-1</guid><title>登录页面</title><link>${origin}/pages/login.html</link><description>登录页面摘要</description></item></channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/pages/login.html") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<!doctype html><html><body><main><h1>需要登录</h1><form><label>账号<input name="account"></label><label>密码<input type="password"></label><button>继续</button></form></main></body></html>',
+      );
+      return;
+    }
     if (path.startsWith("/media/")) {
       mediaRequests.push(path);
       response.writeHead(200, {
@@ -81,6 +114,8 @@ void test("RSS 与 Atom 全文、结构和媒体由正式动作提交，编辑�
       feeds: [
         { id: "rss-main", url: `${origin}/rss`, title: "RSS 来源" },
         { id: "atom-main", url: `${origin}/atom`, title: "Atom 来源" },
+        { id: "static-main", url: `${origin}/static-rss` },
+        { id: "login-main", url: `${origin}/login-rss` },
       ],
     },
     targets: [],
@@ -124,7 +159,9 @@ void test("RSS 与 Atom 全文、结构和媒体由正式动作提交，编辑�
   try {
     const collect = collector.actions.collect;
     assert.ok(collect !== undefined);
-    const first = await collect.execute(context, {});
+    const first = await collect.execute(context, {
+      feedIds: ["rss-main", "atom-main"],
+    });
     assert.deepEqual(first, {
       completedScopes: ["feed:rss-main", "feed:atom-main"],
     });
@@ -171,6 +208,33 @@ void test("RSS 与 Atom 全文、结构和媒体由正式动作提交，编辑�
     assert.equal(
       submissions[2]?.items[0]?.body?.html?.includes("RSS 全文版本 2"),
       true,
+    );
+
+    const staticResult = await collect.execute(context, {
+      feedIds: ["static-main"],
+    });
+    assert.deepEqual(staticResult, {
+      completedScopes: ["feed:static-main"],
+    });
+    const staticItem = submissions[3]?.items[0];
+    assert.ok(staticItem);
+    assert.equal(staticItem.capture.completeness, "complete");
+    assert.match(staticItem.body?.html ?? "", /静态正文版本 1/u);
+
+    let loginError: unknown;
+    try {
+      await collect.execute(context, { feedIds: ["login-main"] });
+    } catch (error) {
+      loginError = error;
+    }
+    assert.ok(isCollectorActionError(loginError));
+    assert.equal(loginError.failure.code, "rss_collection_incomplete");
+    assert.match(loginError.failure.message, /需要登录/u);
+    const loginItem = submissions[4]?.items[0];
+    assert.ok(loginItem);
+    assert.equal(loginItem.capture.completeness, "partial");
+    assert.ok(
+      loginItem.capture.missing.some(({ path }) => path === "body.fullText"),
     );
   } finally {
     await new Promise<void>((resolve, reject) => {
