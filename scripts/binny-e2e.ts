@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny08-" + process.pid.toString(10);
+const projectName = "binny08fix-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;
@@ -1194,10 +1194,10 @@ async function verifyRestartAndRemoval(
   );
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny08-resource-cli-"),
+    path.join(tmpdir(), "binny08fix-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny08-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny08fix-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1318,7 +1318,7 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny08-compose-"),
+    path.join(tmpdir(), "binny08fix-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";

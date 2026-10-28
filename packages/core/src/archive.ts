@@ -1362,31 +1362,61 @@ type SearchResult = ReturnType<
 >["results"][number];
 type SearchMatch = SearchResult["matches"][number];
 
-function firstInvalidRegexPath(
+type SearchRegexPattern = {
+  readonly pattern: string;
+  readonly path: (string | number)[];
+};
+
+function searchRegexPatterns(
   input: ReturnType<typeof archiveSearchInputSchema.parse>,
-): (string | number)[] | undefined {
-  if (input.text?.kind === "regex") return ["text", "pattern"];
+): SearchRegexPattern[] {
+  const patterns: SearchRegexPattern[] =
+    input.text?.kind === "regex"
+      ? [{ pattern: input.text.pattern, path: ["text", "pattern"] }]
+      : [];
   const visit = (
     filter: ArchiveSearchFilter,
     path: (string | number)[],
-  ): (string | number)[] | undefined => {
+  ): void => {
     if (filter.type === "text") {
-      return filter.text.kind === "regex"
-        ? [...path, "text", "pattern"]
-        : undefined;
+      if (filter.text.kind === "regex") {
+        patterns.push({
+          pattern: filter.text.pattern,
+          path: [...path, "text", "pattern"],
+        });
+      }
+      return;
     }
     if (filter.type === "not") {
-      return visit(filter.condition, [...path, "condition"]);
+      visit(filter.condition, [...path, "condition"]);
+      return;
     }
     if (filter.type === "and" || filter.type === "or") {
       for (const [index, condition] of filter.conditions.entries()) {
-        const found = visit(condition, [...path, "conditions", index]);
-        if (found !== undefined) return found;
+        visit(condition, [...path, "conditions", index]);
       }
     }
-    return undefined;
   };
-  return input.where === undefined ? undefined : visit(input.where, ["where"]);
+  if (input.where !== undefined) visit(input.where, ["where"]);
+  return patterns;
+}
+
+async function invalidSearchRegexPath(
+  transaction: ArchiveTransaction,
+  patterns: readonly SearchRegexPattern[],
+): Promise<(string | number)[] | undefined> {
+  // PostgreSQL 的 2201B 只标识整条查询；多正则需分别交给 ARE 校验才能定位字段。
+  for (const { pattern, path } of patterns) {
+    try {
+      await transaction.savepoint(async (savepoint) => {
+        await savepoint`SELECT ''::text ~ ${pattern}::text`;
+      });
+    } catch (error) {
+      if (postgresErrorCode(error) === "2201B") return path;
+      throw error;
+    }
+  }
+  return undefined;
 }
 
 async function readCurrentSearchPage(
@@ -2343,6 +2373,7 @@ export function createArchiveStore(
       const requestedAsOf =
         "asOf" in checked.data.scope ? checked.data.scope.asOf : undefined;
       const expectedMode = requestedAsOf === undefined ? "current" : "asOf";
+      const regexPatterns = searchRegexPatterns(checked.data);
       if (
         requestedCursor !== undefined &&
         (decodedCursor === undefined ||
@@ -2386,6 +2417,21 @@ export function createArchiveStore(
               true
             )
           `;
+          const regexPath =
+            regexPatterns.length > 1
+              ? await invalidSearchRegexPath(transaction, regexPatterns)
+              : undefined;
+          if (regexPath !== undefined) {
+            return {
+              ok: false,
+              status: 400,
+              error: {
+                code: "invalid_input",
+                message: "PostgreSQL ARE 正则表达式无效。",
+                path: regexPath,
+              },
+            };
+          }
           return {
             ok: true,
             value: await readCurrentSearchPage(
@@ -2408,8 +2454,11 @@ export function createArchiveStore(
             },
           };
         }
-        const regexPath = firstInvalidRegexPath(checked.data);
-        if (regexPath !== undefined && postgresErrorCode(error) === "2201B") {
+        const regexPath =
+          postgresErrorCode(error) === "2201B" && regexPatterns.length === 1
+            ? regexPatterns[0]?.path
+            : undefined;
+        if (regexPath !== undefined) {
           return {
             ok: false,
             status: 400,

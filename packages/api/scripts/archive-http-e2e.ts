@@ -2450,7 +2450,103 @@ async function verifySearchRoute(
   });
   assert.equal(invalidRegex.status, 400);
   if (invalidRegex.status !== 400) return;
-  assert.equal((await invalidRegex.json()).error.code, "invalid_input");
+  const invalidRegexError = await invalidRegex.json();
+  assert.equal(invalidRegexError.error.code, "invalid_input");
+  assert.deepEqual(invalidRegexError.error.path, ["text", "pattern"]);
+
+  const invalidRegexInCondition = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "or",
+        conditions: [
+          {
+            type: "text",
+            text: { kind: "regex", pattern: "valid" },
+          },
+          { type: "text", text: { kind: "regex", pattern: "(" } },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  assert.equal(invalidRegexInCondition.status, 400);
+  if (invalidRegexInCondition.status !== 400) return;
+  const invalidRegexInConditionError = await invalidRegexInCondition.json();
+  assert.equal(invalidRegexInConditionError.error.code, "invalid_input");
+  assert.deepEqual(invalidRegexInConditionError.error.path, [
+    "where",
+    "conditions",
+    1,
+    "text",
+    "pattern",
+  ]);
+
+  const invalidRegexAfterTopLevel = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "regex", pattern: "(?i)^正文 a" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "not",
+            condition: {
+              type: "text",
+              text: { kind: "regex", pattern: "(" },
+            },
+          },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  assert.equal(invalidRegexAfterTopLevel.status, 400);
+  if (invalidRegexAfterTopLevel.status !== 400) return;
+  const invalidRegexAfterTopLevelError = await invalidRegexAfterTopLevel.json();
+  assert.equal(invalidRegexAfterTopLevelError.error.code, "invalid_input");
+  assert.deepEqual(invalidRegexAfterTopLevelError.error.path, [
+    "where",
+    "conditions",
+    0,
+    "condition",
+    "text",
+    "pattern",
+  ]);
+
+  const validRegexCombination = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "regex", pattern: "(?i)^正文 a" },
+      where: {
+        type: "or",
+        conditions: [
+          {
+            type: "text",
+            text: { kind: "regex", pattern: "\\mA\\M" },
+          },
+          { type: "text", text: { kind: "regex", pattern: "never" } },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  if (validRegexCombination.status !== 200) {
+    throw new Error(
+      "PostgreSQL ARE 多正则组合搜索失败：" +
+        (await validRegexCombination.text()),
+    );
+  }
+  const validRegexCombinationPage = await validRegexCombination.json();
+  const validRegexCombinationResult = validRegexCombinationPage.results.find(
+    ({ itemId: matchedItemId }) => matchedItemId === itemId,
+  );
+  assert.ok(validRegexCombinationResult);
+  assert.deepEqual(validRegexCombinationResult.matches[0]?.hit?.position, {
+    encoding: "unicode-code-point",
+    start: 0,
+    end: 4,
+  });
 }
 
 async function verifySearchSourceViews(baseUrl: string): Promise<void> {
