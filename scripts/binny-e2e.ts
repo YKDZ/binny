@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny05-" + process.pid.toString(10);
+const projectName = "binny08fix-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;
@@ -1160,11 +1160,44 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(cliSdkItem, expectedArchive.sdkItem);
 
+  const cliSearch = cliData<{
+    readonly unit: string;
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly revisionId: string;
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        text: { kind: "literal", value: "正文 A" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(cliSearch.unit, "item");
+  const cliSearchResult = cliSearch.results.find(
+    (result) => result.itemId === itemId,
+  );
+  assert.ok(cliSearchResult);
+  assert.ok(
+    cliSearchResult.matches.some(
+      (match) => match.binId === "rss-main" && match.revisionId === revisionId,
+    ),
+  );
+
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny05-resource-cli-"),
+    path.join(tmpdir(), "binny08fix-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny05-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny08fix-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1285,7 +1318,7 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny05-compose-"),
+    path.join(tmpdir(), "binny08fix-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";

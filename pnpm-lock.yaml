@@ -292,6 +292,12 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 24.19.2
+      ajv:
+        specifier: 8.17.1
+        version: 8.17.1
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.17.1)
       oxfmt:
         specifier: 'catalog:'
         version: 0.71.0
