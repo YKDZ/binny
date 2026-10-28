@@ -6,6 +6,8 @@ import {
   archiveResourceMetadataSchema,
   archiveItemReadQuerySchema,
   archiveRevisionReadSchema,
+  archiveSearchInputSchema,
+  archiveSearchPageSchema,
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
   archiveSubmissionInputSchema,
@@ -148,6 +150,26 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
           }
         }
         return c.json(result.value, 201);
+      },
+    )
+    .post(
+      "/archives/search",
+      zValidator("json", archiveSearchInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.searchArchive(c.req.valid("json"));
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 422:
+              return c.json({ error: result.error }, 422);
+          }
+        }
+        return c.json(result.value, 200);
       },
     )
     .get(
@@ -301,6 +323,8 @@ export type ArchiveRoutes = ReturnType<typeof makeArchiveRoutes>;
 /** 公开归档输入输出的 JSON Schema 与正式运行时契约保持一致。 */
 export const archiveApiSchemas: {
   readonly submitInput: Record<string, unknown>;
+  readonly searchInput: Record<string, unknown>;
+  readonly searchPage: Record<string, unknown>;
   readonly commit: Record<string, unknown>;
   readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
@@ -311,6 +335,8 @@ export const archiveApiSchemas: {
   readonly error: Record<string, unknown>;
 } = {
   submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
+  searchInput: toInputJsonSchema(archiveSearchInputSchema),
+  searchPage: z.toJSONSchema(archiveSearchPageSchema),
   commit: z.toJSONSchema(archiveCommitSchema),
   itemQuery: toInputJsonSchema(archiveItemReadQuerySchema),
   item: z.toJSONSchema(archiveItemReadSchema),

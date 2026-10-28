@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny04-" + process.pid.toString(10);
+const projectName = "binny08-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;

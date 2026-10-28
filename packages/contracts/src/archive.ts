@@ -399,6 +399,7 @@ export const archiveErrorSchema = z
           "resource_not_found",
           "resource_storage_unavailable",
           "commit_not_found",
+          "query_budget_exceeded",
         ]),
         message: z.string(),
         path: z.array(z.union([z.string(), z.number()])).optional(),
@@ -411,6 +412,427 @@ export type ArchiveCommit = z.infer<typeof archiveCommitSchema>;
 export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
 export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
+
+export const archiveSearchFieldSchema = z.enum([
+  "sourceKey.namespace",
+  "sourceKey.key",
+  "sourceRef",
+  "sourceModifiedAt",
+  "capture.completeness",
+  "body.searchText",
+  "binId",
+  "runId",
+  "collectorVersion",
+  "observedAt",
+  "recordedAt",
+]);
+export type ArchiveSearchField = z.infer<typeof archiveSearchFieldSchema>;
+
+export type ArchiveSearchFilter =
+  | { readonly type: "and"; readonly conditions: ArchiveSearchFilter[] }
+  | { readonly type: "or"; readonly conditions: ArchiveSearchFilter[] }
+  | { readonly type: "not"; readonly condition: ArchiveSearchFilter }
+  | {
+      readonly type: "field";
+      readonly field: ArchiveSearchField;
+      readonly operator:
+        | "exists"
+        | "eq"
+        | "ne"
+        | "in"
+        | "notIn"
+        | "gt"
+        | "gte"
+        | "lt"
+        | "lte"
+        | "between";
+      readonly value?: string | boolean | undefined;
+      readonly values?: string[] | undefined;
+      readonly lower?: string | undefined;
+      readonly upper?: string | undefined;
+    };
+
+export const archiveSearchOrderFieldSchema = z.enum([
+  "itemId",
+  "sourceKey.namespace",
+  "sourceKey.key",
+  "sourceModifiedAt",
+  "binId",
+  "revisionId",
+  "archiveSeq",
+  "runId",
+  "collectorVersion",
+  "observedAt",
+  "recordedAt",
+]);
+
+const archiveSearchOrderBySchema = z
+  .array(
+    z
+      .object({
+        field: archiveSearchOrderFieldSchema,
+        direction: z.enum(["asc", "desc"]).default("asc"),
+      })
+      .strict(),
+  )
+  .min(1)
+  .max(5)
+  .default([{ field: "itemId", direction: "asc" }])
+  .superRefine((orderBy, context) => {
+    const fields = new Set<string>();
+    for (const [index, item] of orderBy.entries()) {
+      if (fields.has(item.field)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "field"],
+          message: "排序字段不能重复。",
+        });
+      }
+      fields.add(item.field);
+    }
+  });
+
+const archiveSearchProjectionSchema = z
+  .array(
+    z.enum([
+      "sourceKey",
+      "sourceModifiedAt",
+      "runId",
+      "collectorVersion",
+      "observedAt",
+      "recordedAt",
+      "hit.context",
+    ]),
+  )
+  .max(7)
+  .default([
+    "sourceKey",
+    "sourceModifiedAt",
+    "runId",
+    "collectorVersion",
+    "observedAt",
+    "recordedAt",
+    "hit.context",
+  ])
+  .superRefine((fields, context) => {
+    if (new Set(fields).size !== fields.length) {
+      context.addIssue({
+        code: "custom",
+        message: "投影字段不能重复。",
+      });
+    }
+  });
+
+const archiveSearchFieldFilterSchema = z
+  .object({
+    type: z.literal("field"),
+    field: archiveSearchFieldSchema,
+    operator: z.enum([
+      "exists",
+      "eq",
+      "ne",
+      "in",
+      "notIn",
+      "gt",
+      "gte",
+      "lt",
+      "lte",
+      "between",
+    ]),
+    value: z.union([z.string(), z.boolean()]).optional(),
+    values: z.array(z.string()).min(1).max(100).optional(),
+    lower: z.string().optional(),
+    upper: z.string().optional(),
+  })
+  .strict()
+  .superRefine((filter, context) => {
+    const hasValues = filter.value !== undefined;
+    const hasList = filter.values !== undefined;
+    const hasBounds = filter.lower !== undefined || filter.upper !== undefined;
+    if (filter.operator === "exists") {
+      if (typeof filter.value !== "boolean" || hasList || hasBounds) {
+        context.addIssue({
+          code: "custom",
+          path: ["value"],
+          message: "exists 条件必须用布尔值说明字段是否存在。",
+        });
+      }
+      return;
+    }
+    if (filter.operator === "in" || filter.operator === "notIn") {
+      if (!hasList || hasValues || hasBounds) {
+        context.addIssue({
+          code: "custom",
+          path: ["values"],
+          message: "集合条件必须提供 values 列表。",
+        });
+      }
+    } else if (filter.operator === "between") {
+      if (
+        filter.lower === undefined ||
+        filter.upper === undefined ||
+        hasValues ||
+        hasList
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["lower"],
+          message: "范围条件必须同时提供 lower 和 upper。",
+        });
+      }
+    } else if (typeof filter.value !== "string" || hasList || hasBounds) {
+      context.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: "比较条件必须提供字符串 value。",
+      });
+    }
+
+    if (
+      filter.field === "capture.completeness" &&
+      (filter.value !== undefined || filter.values !== undefined || hasBounds)
+    ) {
+      const values = [
+        ...(typeof filter.value === "string" ? [filter.value] : []),
+        ...(filter.values ?? []),
+        ...(filter.lower === undefined ? [] : [filter.lower]),
+        ...(filter.upper === undefined ? [] : [filter.upper]),
+      ];
+      if (values.some((value) => value !== "complete" && value !== "partial")) {
+        context.addIssue({
+          code: "custom",
+          path: ["value"],
+          message: "完整性只能是 complete 或 partial。",
+        });
+      }
+    }
+
+    if (
+      filter.field === "sourceModifiedAt" ||
+      filter.field === "observedAt" ||
+      filter.field === "recordedAt"
+    ) {
+      const dateValues = [
+        ...(typeof filter.value === "string" ? [filter.value] : []),
+        ...(filter.values ?? []),
+        ...(filter.lower === undefined ? [] : [filter.lower]),
+        ...(filter.upper === undefined ? [] : [filter.upper]),
+      ];
+      for (const value of dateValues) {
+        if (!timestampSchema.safeParse(value).success) {
+          context.addIssue({
+            code: "custom",
+            path: ["value"],
+            message: "时间条件必须是带时区的 ISO 日期时间。",
+          });
+          break;
+        }
+      }
+      if (
+        filter.operator === "between" &&
+        filter.lower !== undefined &&
+        filter.upper !== undefined &&
+        Date.parse(filter.lower) > Date.parse(filter.upper)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["upper"],
+          message: "范围上界不能早于下界。",
+        });
+      }
+    }
+  });
+
+const archiveSearchFilterNodeSchema: z.ZodType<ArchiveSearchFilter> = z.lazy(
+  () =>
+    z.discriminatedUnion("type", [
+      z
+        .object({
+          type: z.literal("and"),
+          conditions: z.array(archiveSearchFilterNodeSchema).min(1).max(16),
+        })
+        .strict(),
+      z
+        .object({
+          type: z.literal("or"),
+          conditions: z.array(archiveSearchFilterNodeSchema).min(1).max(16),
+        })
+        .strict(),
+      z
+        .object({
+          type: z.literal("not"),
+          condition: archiveSearchFilterNodeSchema,
+        })
+        .strict(),
+      archiveSearchFieldFilterSchema,
+    ]),
+);
+
+/** 字段逻辑对当前所选视图求值；缺失值不匹配比较，not 对 false 求补。 */
+export const archiveSearchFilterSchema =
+  archiveSearchFilterNodeSchema.superRefine((filter, context) => {
+    let nodeCount = 0;
+    const visit = (node: ArchiveSearchFilter, depth: number): void => {
+      nodeCount += 1;
+      if (depth > 8 || nodeCount > 64) return;
+      if (node.type === "and" || node.type === "or") {
+        for (const condition of node.conditions) visit(condition, depth + 1);
+      } else if (node.type === "not") {
+        visit(node.condition, depth + 1);
+      }
+    };
+    visit(filter, 1);
+    if (nodeCount > 64) {
+      context.addIssue({
+        code: "custom",
+        message: "查询条件不能超过 64 个节点。",
+      });
+    } else if (nodeCount > 0 && filterDepth(filter) > 8) {
+      context.addIssue({
+        code: "custom",
+        message: "查询条件嵌套深度不能超过 8 层。",
+      });
+    }
+  });
+
+function filterDepth(filter: ArchiveSearchFilter): number {
+  if (filter.type === "and" || filter.type === "or") {
+    return 1 + Math.max(...filter.conditions.map(filterDepth));
+  }
+  return filter.type === "not" ? 1 + filterDepth(filter.condition) : 1;
+}
+
+/** 搜索正文仅使用采集器提交的 searchText，不把其他表示或 HTML 字节当作匹配位置。 */
+export const archiveSearchInputSchema = z
+  .object({
+    scope: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("current"),
+          binId: binIdSchema.optional(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("asOf"),
+          binId: binIdSchema.optional(),
+          asOf: archiveSnapshotSequenceSchema,
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("revisions"),
+          binId: binIdSchema.optional(),
+          asOf: archiveSnapshotSequenceSchema.optional(),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("observations"),
+          binId: binIdSchema.optional(),
+          asOf: archiveSnapshotSequenceSchema.optional(),
+        })
+        .strict(),
+    ]),
+    text: z.discriminatedUnion("kind", [
+      z
+        .object({
+          kind: z.literal("literal"),
+          value: z
+            .string()
+            .min(1)
+            .max(1024, "字面检索词不能超过 1024 个字符。"),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("regex"),
+          pattern: z
+            .string()
+            .min(1)
+            .max(512, "正则表达式不能超过 512 个字符。")
+            .describe("PostgreSQL ARE 正则表达式；原样执行，默认区分大小写。"),
+        })
+        .strict(),
+    ]),
+    where: archiveSearchFilterSchema.optional(),
+    select: archiveSearchProjectionSchema,
+    orderBy: archiveSearchOrderBySchema,
+    limit: z.number().int().min(1).max(100).default(50),
+    cursor: z.string().min(1).max(4096).optional(),
+    budgetMs: z.number().int().min(1).max(10_000).default(1_000),
+  })
+  .strict();
+
+const archiveSearchHitSchema = z
+  .object({
+    field: z.literal("body.searchText"),
+    representation: z.literal("searchText"),
+    position: z
+      .object({
+        encoding: z.literal("unicode-code-point"),
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+      })
+      .strict(),
+    context: z
+      .object({
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+        text: z.string(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const archiveSearchMatchSchema = z
+  .object({
+    binId: binIdSchema,
+    revisionId: archiveIdentifierSchema,
+    archiveSeq: archiveSequenceSchema,
+    sourceModifiedAt: timestampSchema.optional(),
+    observedAt: timestampSchema.optional(),
+    recordedAt: timestampSchema.optional(),
+    runId: nonEmptyText.max(128).optional(),
+    collectorVersion: nonEmptyText.max(256).optional(),
+    hit: archiveSearchHitSchema,
+  })
+  .strict();
+
+const archiveSearchResultSchema = z
+  .object({
+    resultId: nonEmptyText.max(128),
+    itemId: archiveIdentifierSchema,
+    sourceKey: sourceKeySchema.optional(),
+    revisionId: archiveIdentifierSchema.optional(),
+    commitId: archiveIdentifierSchema.optional(),
+    ordinal: z.number().int().nonnegative().optional(),
+    matches: z.array(archiveSearchMatchSchema).min(1),
+  })
+  .strict();
+
+/** `select` 只裁剪可选字段；排序视图值取结果内 binId 的 C 排序首项，null 恒置末尾，同值按 resultId 升序。 */
+export const archiveSearchPageSchema = z
+  .object({
+    unit: z.enum(["item", "revision", "observation"]),
+    snapshot: archiveSnapshotSchema,
+    results: z.array(archiveSearchResultSchema),
+    nextCursor: z.string().min(1).max(4096).optional(),
+  })
+  .strict();
+
+export type ArchiveSearchInput = z.infer<typeof archiveSearchInputSchema>;
+export type ArchiveSearchRequest = z.input<typeof archiveSearchInputSchema>;
+export type ArchiveSearchPage = z.infer<typeof archiveSearchPageSchema>;
+export type ArchiveSearchOperation<T> =
+  | { readonly ok: true; readonly value: T }
+  | {
+      readonly ok: false;
+      readonly status: 400 | 422;
+      readonly error: ArchiveError;
+    };
+
 export type ArchiveReadOptions = {
   readonly binId?: z.infer<typeof binIdSchema>;
   readonly asOf?: z.infer<typeof archiveSnapshotSequenceSchema>;
@@ -443,4 +865,7 @@ export type ArchiveOperations = {
   getArchiveRevision(
     revisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionRead>>;
+  searchArchive(
+    input: ArchiveSearchRequest,
+  ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;
 } & ArchiveHistoryOperations;

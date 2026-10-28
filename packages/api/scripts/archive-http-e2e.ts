@@ -1065,12 +1065,452 @@ async function verifyArchiveReadErrors(
   );
 }
 
+async function verifySearchRoute(
+  baseUrl: string,
+  itemId: string,
+  revisionId: string,
+  historicalAsOf: string,
+): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const unicodeCommit = await submitArchive(client, {
+    requestId: "e2e:archive:search-unicode",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-unicode" },
+        sourceRef: "https://example.test/search-unicode",
+        sourceModifiedAt: "2026-10-28T04:04:00.000Z",
+        body: {
+          html: "<p>HTML-only phrase is not search text</p>",
+          searchText: "前🙂中文短串后",
+        },
+        capture: {
+          scope: { case: "search" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const unicodeItem = unicodeCommit.items[0];
+  assert.ok(unicodeItem);
+  const response = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "正文 A" },
+      limit: 10,
+    },
+  });
+  if (response.status !== 200) {
+    throw new Error("公开正文搜索失败：" + (await response.text()));
+  }
+  const page = await response.json();
+  assert.equal(page.unit, "item");
+  assert.equal(page.snapshot.mode, "current");
+  assert.equal(page.results.length, 1);
+  const result = page.results[0];
+  assert.ok(result);
+  assert.equal(result.itemId, itemId);
+  assert.equal(result.matches[0]?.revisionId, revisionId);
+  assert.equal(result.matches[0]?.binId, "rss-main");
+  assert.deepEqual(result.matches[0]?.hit.position, {
+    encoding: "unicode-code-point",
+    start: 0,
+    end: 4,
+  });
+  assert.deepEqual(result.matches[0]?.hit.context, {
+    start: 0,
+    end: 4,
+    text: "正文 A",
+  });
+
+  const regexResponse = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "regex", pattern: "\\mA\\M" },
+      limit: 10,
+    },
+  });
+  if (regexResponse.status !== 200) {
+    throw new Error("PostgreSQL ARE 搜索失败：" + (await regexResponse.text()));
+  }
+  const regexPage = await regexResponse.json();
+  assert.equal(regexPage.results.length, 1);
+  assert.equal(regexPage.results[0]?.itemId, itemId);
+  assert.deepEqual(regexPage.results[0]?.matches[0]?.hit.position, {
+    encoding: "unicode-code-point",
+    start: 3,
+    end: 4,
+  });
+
+  const unicodeSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "短串" },
+      limit: 10,
+    },
+  });
+  if (unicodeSearch.status !== 200) {
+    throw new Error("短中文字面搜索失败：" + (await unicodeSearch.text()));
+  }
+  const unicodePage = await unicodeSearch.json();
+  assert.equal(unicodePage.results.length, 1);
+  assert.equal(unicodePage.results[0]?.itemId, unicodeItem.itemId);
+  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit.position, {
+    encoding: "unicode-code-point",
+    start: 4,
+    end: 6,
+  });
+  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit.context, {
+    start: 0,
+    end: 7,
+    text: "前🙂中文短串后",
+  });
+
+  const composedFilter = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "短串" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "in",
+            values: ["search-unicode", "other"],
+          },
+          {
+            type: "or",
+            conditions: [
+              {
+                type: "field",
+                field: "sourceModifiedAt",
+                operator: "between",
+                lower: "2026-10-28T04:00:00.000Z",
+                upper: "2026-10-28T04:05:00.000Z",
+              },
+              {
+                type: "field",
+                field: "sourceRef",
+                operator: "eq",
+                value: "https://example.test/other",
+              },
+            ],
+          },
+          {
+            type: "not",
+            condition: {
+              type: "field",
+              field: "sourceRef",
+              operator: "eq",
+              value: "https://example.test/other",
+            },
+          },
+          {
+            type: "field",
+            field: "runId",
+            operator: "exists",
+            value: false,
+          },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  if (composedFilter.status !== 200) {
+    throw new Error("组合字段过滤失败：" + (await composedFilter.text()));
+  }
+  const composedPage = (await composedFilter.json()) as typeof unicodePage;
+  assert.equal(composedPage.results.length, 1);
+  assert.equal(composedPage.results[0]?.itemId, unicodeItem.itemId);
+
+  const htmlOnlySearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "HTML-only phrase" },
+      limit: 10,
+    },
+  });
+  assert.equal(htmlOnlySearch.status, 200);
+  if (htmlOnlySearch.status !== 200) return;
+  assert.deepEqual((await htmlOnlySearch.json()).results, []);
+
+  const currentOldText = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "正文 B" },
+      limit: 10,
+    },
+  });
+  assert.equal(currentOldText.status, 200);
+  if (currentOldText.status !== 200) return;
+  assert.equal((await currentOldText.json()).results.length, 0);
+
+  const historicalText = await client.archives.search.$post({
+    json: {
+      scope: { kind: "asOf", binId: "rss-main", asOf: historicalAsOf },
+      text: { kind: "literal", value: "正文 B" },
+      limit: 10,
+    },
+  });
+  if (historicalText.status !== 200) {
+    throw new Error("指定截点搜索失败：" + (await historicalText.text()));
+  }
+  const historicalPage = await historicalText.json();
+  assert.equal(historicalPage.snapshot.mode, "asOf");
+  assert.equal(historicalPage.snapshot.asOf, historicalAsOf);
+  assert.equal(historicalPage.results[0]?.itemId, itemId);
+  assert.notEqual(
+    historicalPage.results[0]?.matches[0]?.revisionId,
+    revisionId,
+  );
+
+  const invalidRegex = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "regex", pattern: "(" },
+      limit: 10,
+    },
+  });
+  assert.equal(invalidRegex.status, 400);
+  if (invalidRegex.status !== 400) return;
+  assert.equal((await invalidRegex.json()).error.code, "invalid_input");
+}
+
+async function verifySearchSourceViews(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const sourceKey = { namespace: "e2e", key: "search-cross-view" };
+  const primary = await submitArchive(client, {
+    requestId: "e2e:archive:search-cross-view:main",
+    binId: "rss-main",
+    runId: "search-view-left",
+    items: [
+      {
+        sourceKey,
+        body: { searchText: "分视图文字" },
+        capture: {
+          scope: { case: "search-view" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const secondary = await submitArchive(client, {
+    requestId: "e2e:archive:search-cross-view:secondary",
+    binId: "rss-secondary",
+    runId: "search-view-right",
+    items: [
+      {
+        sourceKey,
+        body: { searchText: "另一份内容" },
+        capture: {
+          scope: { case: "search-view" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  assert.equal(primary.items[0]?.itemId, secondary.items[0]?.itemId);
+
+  const spliced = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      text: { kind: "literal", value: "分视图文字" },
+      where: {
+        type: "field",
+        field: "runId",
+        operator: "eq",
+        value: "search-view-right",
+      },
+      limit: 10,
+    },
+  });
+  if (spliced.status !== 200) {
+    throw new Error("跨来源同视图条件查询失败：" + (await spliced.text()));
+  }
+  assert.deepEqual((await spliced.json()).results, []);
+
+  const matchedSource = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      text: { kind: "literal", value: "分视图文字" },
+      where: {
+        type: "field",
+        field: "runId",
+        operator: "eq",
+        value: "search-view-left",
+      },
+      limit: 10,
+    },
+  });
+  if (matchedSource.status !== 200) {
+    throw new Error("多来源结果查询失败：" + (await matchedSource.text()));
+  }
+  const matchedSourcePage = await matchedSource.json();
+  assert.equal(matchedSourcePage.results.length, 1);
+  assert.equal(matchedSourcePage.results[0]?.itemId, primary.items[0]?.itemId);
+  assert.deepEqual(
+    matchedSourcePage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-main"],
+  );
+
+  const sharedKey = { namespace: "e2e", key: "search-shared-revision" };
+  const sharedState = {
+    sourceKey: sharedKey,
+    body: { searchText: "相同正文跨两个来源" },
+    capture: {
+      scope: { case: "shared-search" },
+      completeness: "complete" as const,
+      missing: [],
+    },
+  };
+  const [sharedMain, sharedSecondary] = await Promise.all([
+    submitArchive(client, {
+      requestId: "e2e:archive:search-shared:main",
+      binId: "rss-main",
+      items: [sharedState],
+    }),
+    submitArchive(client, {
+      requestId: "e2e:archive:search-shared:secondary",
+      binId: "rss-secondary",
+      items: [sharedState],
+    }),
+  ]);
+  assert.equal(
+    sharedMain.items[0]?.revisionId,
+    sharedSecondary.items[0]?.revisionId,
+  );
+  const sharedSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      text: { kind: "literal", value: "相同正文跨两个来源" },
+      limit: 10,
+    },
+  });
+  if (sharedSearch.status !== 200) {
+    throw new Error("共享版本多来源查询失败：" + (await sharedSearch.text()));
+  }
+  const sharedPage = await sharedSearch.json();
+  assert.equal(sharedPage.results.length, 1);
+  assert.equal(sharedPage.results[0]?.itemId, sharedMain.items[0]?.itemId);
+  assert.deepEqual(
+    sharedPage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-main", "rss-secondary"],
+  );
+}
+
+async function verifySearchPagination(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const pageA = await submitArchive(client, {
+    requestId: "e2e:archive:search-page-a",
+    binId: "rss-main",
+    runId: "search-page-run",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-page-a" },
+        body: { searchText: "稳定分页唯一needle" },
+        capture: {
+          scope: { case: "search-page" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const pageB = await submitArchive(client, {
+    requestId: "e2e:archive:search-page-b",
+    binId: "rss-main",
+    runId: "search-page-run",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-page-b" },
+        body: { searchText: "稳定分页唯一needle" },
+        capture: {
+          scope: { case: "search-page" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const baseQuery = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    text: { kind: "literal" as const, value: "稳定分页唯一needle" },
+    select: ["runId" as const],
+    orderBy: [
+      { field: "sourceKey.namespace" as const, direction: "asc" as const },
+      { field: "sourceKey.key" as const, direction: "asc" as const },
+    ],
+    limit: 1,
+  };
+  const firstResponse = await client.archives.search.$post({
+    json: baseQuery,
+  });
+  if (firstResponse.status !== 200) {
+    throw new Error("搜索首页面失败：" + (await firstResponse.text()));
+  }
+  const firstPage = await firstResponse.json();
+  assert.equal(firstPage.results.length, 1);
+  assert.equal(firstPage.results[0]?.itemId, pageA.items[0]?.itemId);
+  assert.equal(firstPage.results[0]?.sourceKey, undefined);
+  assert.equal(firstPage.results[0]?.matches[0]?.runId, "search-page-run");
+  assert.equal(firstPage.results[0]?.matches[0]?.hit.context, undefined);
+  assert.ok(firstPage.nextCursor);
+
+  await submitArchive(client, {
+    requestId: "e2e:archive:search-page-c",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-page-c" },
+        body: { searchText: "稳定分页唯一needle" },
+        capture: {
+          scope: { case: "search-page" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const secondResponse = await client.archives.search.$post({
+    json: { ...baseQuery, cursor: firstPage.nextCursor },
+  });
+  if (secondResponse.status !== 200) {
+    throw new Error("搜索后续页面失败：" + (await secondResponse.text()));
+  }
+  const secondPage = await secondResponse.json();
+  assert.equal(secondPage.results.length, 1);
+  assert.equal(secondPage.results[0]?.itemId, pageB.items[0]?.itemId);
+  assert.equal(secondPage.nextCursor, undefined);
+  assert.equal(secondPage.snapshot.asOf, firstPage.snapshot.asOf);
+
+  const mismatchedCursor = await client.archives.search.$post({
+    json: {
+      ...baseQuery,
+      text: { kind: "literal", value: "另一条查询" },
+      cursor: firstPage.nextCursor,
+    },
+  });
+  assert.equal(mismatchedCursor.status, 400);
+}
+
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   const client = createApiClient(baseUrl);
   await verifyArchiveAtomicity(client);
   const resources = await verifyArchiveResourceHttp(client);
   await verifyArchiveIdempotency(client);
   const aba = await verifyArchiveABA(client);
+  await verifySearchRoute(
+    baseUrl,
+    aba.itemId,
+    aba.revisionId,
+    aba.historicalAsOf,
+  );
+  await verifySearchSourceViews(baseUrl);
+  await verifySearchPagination(baseUrl);
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);
   return {

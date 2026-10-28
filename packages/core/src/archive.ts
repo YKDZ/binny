@@ -6,6 +6,8 @@ import {
   archiveItemReadSchema,
   archiveItemStateSchema,
   archiveRevisionReadSchema,
+  archiveSearchInputSchema,
+  archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
   archiveTimelineCursorSchema,
   archiveTimelinePageSchema,
@@ -16,6 +18,10 @@ import {
   type ArchiveItemRead,
   type ArchiveOperation,
   type ArchiveOperations,
+  type ArchiveSearchOperation,
+  type ArchiveSearchField,
+  type ArchiveSearchFilter,
+  type ArchiveSearchRequest,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
 import type postgres from "postgres";
@@ -78,6 +84,31 @@ type TimelineRow = CommitRow & {
   readonly revision_id: string;
   readonly ordinal: number;
   readonly source_modified_at: string | null;
+};
+
+type SearchRow = {
+  readonly result_id: string;
+  readonly result_unit: "item" | "revision" | "observation";
+  readonly item_id: string;
+  readonly root_revision_id: string | null;
+  readonly root_commit_id: string | null;
+  readonly root_ordinal: number | null;
+  readonly namespace: string;
+  readonly source_key: string;
+  readonly sort_values: readonly (string | null)[];
+  readonly bin_id: string;
+  readonly revision_id: string;
+  readonly archive_seq: string;
+  readonly run_id: string | null;
+  readonly collector_version: string | null;
+  readonly source_modified_at: string | null;
+  readonly observed_at: Date;
+  readonly recorded_at: Date;
+  readonly hit_start: number;
+  readonly hit_end: number;
+  readonly context_start: number;
+  readonly context_end: number;
+  readonly context_text: string;
 };
 
 type ResolvedSnapshot = {
@@ -184,6 +215,70 @@ function decodeTimelineCursor(
     const json = Buffer.from(cursor, "base64url").toString("utf8");
     if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
     return archiveTimelineCursorSchema.parse(JSON.parse(json) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+type SearchCursor = {
+  readonly version: 1;
+  readonly queryHash: string;
+  readonly snapshot: ResolvedSnapshot;
+  readonly sortValues: readonly (string | null)[];
+  readonly resultId: string;
+};
+
+function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeSearchCursor(cursor: string): SearchCursor | undefined {
+  try {
+    const json = Buffer.from(cursor, "base64url").toString("utf8");
+    if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
+    const value: unknown = JSON.parse(json);
+    if (typeof value !== "object" || value === null) return undefined;
+    if (!("version" in value) || value.version !== 1) return undefined;
+    if (!("queryHash" in value) || typeof value.queryHash !== "string")
+      return undefined;
+    if (!/^[a-f0-9]{64}$/u.test(value.queryHash)) return undefined;
+    if (!("snapshot" in value) || typeof value.snapshot !== "object")
+      return undefined;
+    const snapshot = value.snapshot;
+    if (snapshot === null || !("asOf" in snapshot) || !("mode" in snapshot))
+      return undefined;
+    const checkedSequence = archiveSnapshotSequenceSchema.safeParse(
+      snapshot.asOf,
+    );
+    if (
+      !checkedSequence.success ||
+      (snapshot.mode !== "current" && snapshot.mode !== "asOf")
+    ) {
+      return undefined;
+    }
+    if (!("sortValues" in value) || !Array.isArray(value.sortValues))
+      return undefined;
+    if (
+      value.sortValues.some(
+        (entry) => entry !== null && typeof entry !== "string",
+      )
+    ) {
+      return undefined;
+    }
+    if (!("resultId" in value) || typeof value.resultId !== "string")
+      return undefined;
+    if (value.resultId.length === 0 || value.resultId.length > 128)
+      return undefined;
+    return {
+      version: 1,
+      queryHash: value.queryHash,
+      snapshot: {
+        asOf: checkedSequence.data,
+        mode: snapshot.mode,
+      },
+      sortValues: value.sortValues,
+      resultId: value.resultId,
+    };
   } catch {
     return undefined;
   }
@@ -317,6 +412,12 @@ export async function initializeArchiveSchema(
         "UNIQUE (item_id, state_hash), " +
         "UNIQUE (item_id, revision_id)" +
         ")",
+    );
+    await transaction.unsafe("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_revision_search_text_trgm_idx " +
+        "ON archive_revision USING gin " +
+        "((state_data->'body'->>'searchText') gin_trgm_ops)",
     );
     await transaction.unsafe(
       "CREATE TABLE IF NOT EXISTS archive_revision_resource (" +
@@ -666,6 +767,468 @@ export type ArchiveStoreOptions = {
   readonly resourceCleanupIntervalMs?: number;
 };
 
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/[\\%_]/gu, "\\$&");
+}
+
+type SearchFieldExpression = {
+  readonly sql: string;
+  readonly kind: "text" | "timestamp";
+};
+
+function searchFieldExpression(
+  field: ArchiveSearchField,
+): SearchFieldExpression {
+  switch (field) {
+    case "sourceKey.namespace":
+      return { sql: "item.namespace", kind: "text" };
+    case "sourceKey.key":
+      return { sql: "item.source_key", kind: "text" };
+    case "sourceRef":
+      return { sql: "revision.state_data->>'sourceRef'", kind: "text" };
+    case "sourceModifiedAt":
+      return {
+        sql: "(revision.state_data->>'sourceModifiedAt')::timestamptz",
+        kind: "timestamp",
+      };
+    case "capture.completeness":
+      return {
+        sql: "revision.state_data->'capture'->>'completeness'",
+        kind: "text",
+      };
+    case "body.searchText":
+      return {
+        sql: "revision.state_data->'body'->>'searchText'",
+        kind: "text",
+      };
+    case "binId":
+      return { sql: "latest.bin_id", kind: "text" };
+    case "runId":
+      return { sql: "latest.run_id", kind: "text" };
+    case "collectorVersion":
+      return { sql: "latest.collector_version", kind: "text" };
+    case "observedAt":
+      return { sql: "latest.observed_at", kind: "timestamp" };
+    case "recordedAt":
+      return { sql: "latest.recorded_at", kind: "timestamp" };
+  }
+}
+
+function postgresErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error))
+    return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+type SearchResult = ReturnType<
+  typeof archiveSearchPageSchema.parse
+>["results"][number];
+type SearchMatch = SearchResult["matches"][number];
+
+async function readCurrentSearchPage(
+  transaction: ArchiveTransaction,
+  snapshot: ResolvedSnapshot,
+  input: ReturnType<typeof archiveSearchInputSchema.parse>,
+  cursor: SearchCursor | undefined,
+  queryHash: string,
+): Promise<ReturnType<typeof archiveSearchPageSchema.parse>> {
+  const parameters: (string | null)[] = [];
+  const bind = (value: string | null): string => {
+    parameters.push(value);
+    return "$" + parameters.length.toString(10);
+  };
+  const asOf = bind(snapshot.asOf);
+  const binPredicate =
+    input.scope.binId === undefined
+      ? ""
+      : " AND commit.bin_id = " + bind(input.scope.binId) + "::text";
+  const compileFilter = (filter: ArchiveSearchFilter): string => {
+    if (filter.type === "and" || filter.type === "or") {
+      const operator = filter.type === "and" ? " AND " : " OR ";
+      return "(" + filter.conditions.map(compileFilter).join(operator) + ")";
+    }
+    if (filter.type === "not")
+      return "NOT (" + compileFilter(filter.condition) + ")";
+
+    const field = searchFieldExpression(filter.field);
+    if (filter.operator === "exists") {
+      return field.sql + (filter.value === true ? " IS NOT NULL" : " IS NULL");
+    }
+    const expression =
+      field.kind === "text" ? "(" + field.sql + ') COLLATE "C"' : field.sql;
+    const parameter = (value: string): string =>
+      field.kind === "text"
+        ? bind(value) + '::text COLLATE "C"'
+        : bind(value) + "::timestamptz";
+    const present = field.sql + " IS NOT NULL AND ";
+    if (filter.operator === "in" || filter.operator === "notIn") {
+      const values = (filter.values ?? []).map(parameter).join(", ");
+      return (
+        present +
+        expression +
+        (filter.operator === "in" ? " IN (" : " NOT IN (") +
+        values +
+        ")"
+      );
+    }
+    if (filter.operator === "between") {
+      return (
+        present +
+        expression +
+        " >= " +
+        parameter(filter.lower ?? "") +
+        " AND " +
+        expression +
+        " <= " +
+        parameter(filter.upper ?? "")
+      );
+    }
+    const operator = {
+      eq: "=",
+      ne: "<>",
+      gt: ">",
+      gte: ">=",
+      lt: "<",
+      lte: "<=",
+    }[filter.operator];
+    return (
+      present +
+      expression +
+      " " +
+      operator +
+      " " +
+      parameter(String(filter.value))
+    );
+  };
+  const filterPredicate =
+    input.where === undefined ? "TRUE" : compileFilter(input.where);
+  let matchPredicate: string;
+  let hitStart: string;
+  let hitEnd: string;
+  if (input.text.kind === "literal") {
+    const value = bind(input.text.value);
+    const pattern = bind("%" + escapeLikeLiteral(input.text.value) + "%");
+    matchPredicate =
+      "revision.state_data->'body'->>'searchText' LIKE " +
+      pattern +
+      " ESCAPE E'\\\\'";
+    hitStart = "strpos(search_text, " + value + ") - 1";
+    hitEnd = "hit_start + char_length(" + value + ")";
+  } else {
+    const pattern = bind(input.text.pattern);
+    matchPredicate = "revision.state_data->'body'->>'searchText' ~ " + pattern;
+    hitStart = "regexp_instr(search_text, " + pattern + ", 1, 1, 0, 'c') - 1";
+    hitEnd = "regexp_instr(search_text, " + pattern + ", 1, 1, 1, 'c') - 1";
+  }
+  const scopeKind = input.scope.kind;
+  const resultUnit =
+    scopeKind === "revisions"
+      ? "revision"
+      : scopeKind === "observations"
+        ? "observation"
+        : "item";
+  const distinctOn =
+    scopeKind === "revisions"
+      ? "observation.item_id, commit.bin_id, observation.revision_id"
+      : "observation.item_id, commit.bin_id";
+  const sourceOrder =
+    scopeKind === "revisions"
+      ? "observation.item_id, commit.bin_id, observation.revision_id, "
+      : "observation.item_id, commit.bin_id, ";
+  const sourceSelection =
+    scopeKind === "observations" ? "" : `DISTINCT ON (${distinctOn})`;
+  const resultIdExpression =
+    resultUnit === "item"
+      ? "latest.item_id::text"
+      : resultUnit === "revision"
+        ? "latest.item_id::text || ':' || latest.revision_id::text"
+        : "latest.commit_id::text || ':' || latest.ordinal::text";
+  const rootRevisionExpression =
+    resultUnit === "revision" ? "min(revision_id::text)" : "NULL::text";
+  const rootCommitExpression =
+    resultUnit === "observation" ? "min(commit_id::text)" : "NULL::text";
+  const rootOrdinalExpression =
+    resultUnit === "observation" ? "min(ordinal)" : "NULL::integer";
+  const selectSortExpression = (field: string): string => {
+    switch (field) {
+      case "itemId":
+        return "item_id::text";
+      case "sourceKey.namespace":
+        return "namespace";
+      case "sourceKey.key":
+        return "source_key";
+      case "sourceModifiedAt":
+        return '(array_agg(source_modified_at ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "binId":
+        return '(array_agg(bin_id ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "revisionId":
+        return '(array_agg(revision_id::text ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "archiveSeq":
+        return "(array_agg(lpad(archive_seq, 19, '0') ORDER BY bin_id COLLATE \"C\", archive_seq::bigint, ordinal, commit_id))[1]";
+      case "runId":
+        return '(array_agg(run_id ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "collectorVersion":
+        return '(array_agg(collector_version ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "observedAt":
+        return '(array_agg(to_char(observed_at AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      case "recordedAt":
+        return '(array_agg(to_char(recorded_at AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
+      default:
+        throw new Error("搜索排序字段未声明。");
+    }
+  };
+  const sortExpressions = input.orderBy.map(({ field }) =>
+    selectSortExpression(field),
+  );
+  const pageOrdering = input.orderBy
+    .map(
+      ({ direction }, index) =>
+        `sort_${index.toString(10)} COLLATE "C" ${direction.toUpperCase()} NULLS LAST`,
+    )
+    .concat(['result_id COLLATE "C" ASC'])
+    .join(", ");
+  let cursorPredicate = "TRUE";
+  if (cursor !== undefined) {
+    const afterBranches: string[] = [];
+    const equalPrefix: string[] = [];
+    for (const [index, sort] of input.orderBy.entries()) {
+      const alias = `sort_${index.toString(10)}`;
+      const cursorValue = cursor.sortValues[index];
+      if (cursorValue === undefined) {
+        throw new Error("搜索游标排序值与请求排序不同步。");
+      }
+      if (cursorValue !== null) {
+        const comparison = bind(cursorValue);
+        const operator = sort.direction === "asc" ? ">" : "<";
+        afterBranches.push(
+          `(${equalPrefix.join(" AND ")}${equalPrefix.length > 0 ? " AND " : ""}(${alias} IS NULL OR ${alias} COLLATE "C" ${operator} ${comparison}::text COLLATE "C"))`,
+        );
+      }
+      const equality = bind(cursorValue);
+      equalPrefix.push(
+        `${alias} IS NOT DISTINCT FROM ${equality}::text COLLATE "C"`,
+      );
+    }
+    const afterId = bind(cursor.resultId);
+    afterBranches.push(
+      `(${equalPrefix.join(" AND ")} AND result_id COLLATE "C" > ${afterId}::text COLLATE "C")`,
+    );
+    cursorPredicate = "(" + afterBranches.join(" OR ") + ")";
+  }
+  const limit = bind(String(input.limit + 1));
+  const resultSortValues = input.orderBy
+    .map((_, index) => `page.sort_${index.toString(10)}`)
+    .join(", ");
+  const query = `
+    WITH latest AS (
+      SELECT ${sourceSelection}
+        observation.item_id,
+        observation.revision_id,
+        commit.commit_id,
+        commit.archive_seq::text AS archive_seq,
+        commit.bin_id,
+        commit.run_id,
+        commit.collector_version,
+        commit.observed_at,
+        commit.recorded_at,
+        observation.ordinal,
+        revision.state_data->>'sourceModifiedAt' AS source_modified_at
+      FROM archive_observation AS observation
+      JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+      JOIN archive_revision AS revision
+        ON revision.item_id = observation.item_id
+        AND revision.revision_id = observation.revision_id
+      WHERE commit.archive_seq <= ${asOf}::bigint${binPredicate}
+      ORDER BY
+        ${sourceOrder}
+        commit.archive_seq DESC,
+        observation.ordinal DESC,
+        commit.commit_id DESC
+    ),
+    matched AS (
+      SELECT
+        latest.*,
+        item.namespace,
+        item.source_key,
+        revision.state_data->'body'->>'searchText' AS search_text,
+        ${resultIdExpression} AS result_id
+      FROM latest
+      JOIN archive_item AS item ON item.item_id = latest.item_id
+      JOIN archive_revision AS revision
+        ON revision.item_id = latest.item_id
+        AND revision.revision_id = latest.revision_id
+      WHERE ${matchPredicate} AND ${filterPredicate}
+    ),
+    located AS (
+      SELECT matched.*, ${hitStart} AS hit_start
+      FROM matched
+    ),
+    bounded AS (
+      SELECT
+        located.*,
+        ${hitEnd} AS hit_end
+      FROM located
+    ),
+    contextual AS (
+      SELECT
+        bounded.*,
+        greatest(0, hit_start - 80) AS context_start,
+        least(
+          char_length(search_text),
+          hit_end + 80
+        ) AS context_end
+      FROM bounded
+    ),
+    roots AS (
+      SELECT
+        result_id,
+        '${resultUnit}'::text AS result_unit,
+        item_id,
+        ${rootRevisionExpression} AS root_revision_id,
+        ${rootCommitExpression} AS root_commit_id,
+        ${rootOrdinalExpression} AS root_ordinal,
+        namespace,
+        source_key,
+        ${sortExpressions.map((expression, index) => `${expression} AS sort_${index.toString(10)}`).join(",\n        ")}
+      FROM contextual
+      GROUP BY result_id, item_id, namespace, source_key
+    ),
+    page AS (
+      SELECT
+        roots.*,
+        row_number() OVER (ORDER BY ${pageOrdering}) AS result_rank
+      FROM roots
+      WHERE ${cursorPredicate}
+      ORDER BY ${pageOrdering}
+      LIMIT ${limit}::integer
+    )
+    SELECT
+      page.result_id,
+      page.result_unit,
+      page.root_revision_id,
+      page.root_commit_id,
+      page.root_ordinal,
+      ARRAY[${resultSortValues}]::text[] AS sort_values,
+      contextual.item_id AS item_id,
+      contextual.namespace AS namespace,
+      contextual.source_key AS source_key,
+      contextual.bin_id AS bin_id,
+      contextual.revision_id AS revision_id,
+      contextual.archive_seq AS archive_seq,
+      contextual.run_id AS run_id,
+      contextual.collector_version AS collector_version,
+      contextual.source_modified_at AS source_modified_at,
+      contextual.observed_at AS observed_at,
+      contextual.recorded_at AS recorded_at,
+      contextual.hit_start AS hit_start,
+      contextual.hit_end AS hit_end,
+      contextual.context_start AS context_start,
+      contextual.context_end AS context_end,
+      substring(
+        contextual.search_text FROM contextual.context_start + 1 FOR contextual.context_end - contextual.context_start
+      ) AS context_text
+    FROM page
+    JOIN contextual ON contextual.result_id = page.result_id
+    ORDER BY page.result_rank, contextual.bin_id COLLATE "C", contextual.archive_seq::bigint
+  `;
+  const rows = await transaction.unsafe<SearchRow[]>(query, parameters);
+
+  const selected = new Set(input.select);
+  const results = new Map<
+    string,
+    {
+      readonly result: SearchResult;
+      readonly sortValues: readonly (string | null)[];
+    }
+  >();
+  for (const row of rows) {
+    const match: SearchMatch = {
+      binId: row.bin_id,
+      revisionId: row.revision_id,
+      archiveSeq: row.archive_seq,
+      ...(selected.has("sourceModifiedAt") && row.source_modified_at !== null
+        ? { sourceModifiedAt: row.source_modified_at }
+        : {}),
+      ...(selected.has("observedAt")
+        ? { observedAt: isoTimestamp(row.observed_at) }
+        : {}),
+      ...(selected.has("recordedAt")
+        ? { recordedAt: isoTimestamp(row.recorded_at) }
+        : {}),
+      ...(selected.has("runId") ? optionalText("runId", row.run_id) : {}),
+      ...(selected.has("collectorVersion")
+        ? optionalText("collectorVersion", row.collector_version)
+        : {}),
+      hit: {
+        field: "body.searchText",
+        representation: "searchText",
+        position: {
+          encoding: "unicode-code-point",
+          start: row.hit_start,
+          end: row.hit_end,
+        },
+        ...(selected.has("hit.context")
+          ? {
+              context: {
+                start: row.context_start,
+                end: row.context_end,
+                text: row.context_text,
+              },
+            }
+          : {}),
+      },
+    };
+    const result = results.get(row.result_id);
+    if (result === undefined) {
+      const created: SearchResult = {
+        resultId: row.result_id,
+        itemId: row.item_id,
+        ...(selected.has("sourceKey")
+          ? { sourceKey: { namespace: row.namespace, key: row.source_key } }
+          : {}),
+        ...(row.root_revision_id === null
+          ? {}
+          : { revisionId: row.root_revision_id }),
+        ...(row.root_commit_id === null
+          ? {}
+          : {
+              commitId: row.root_commit_id,
+              ordinal: row.root_ordinal ?? 0,
+            }),
+        matches: [match],
+      };
+      results.set(row.result_id, {
+        result: created,
+        sortValues: row.sort_values,
+      });
+    } else {
+      result.result.matches.push(match);
+    }
+  }
+
+  const orderedResults = [...results.values()];
+  const hasMore = orderedResults.length > input.limit;
+  const pageResults = orderedResults.slice(0, input.limit);
+  const last = pageResults.at(-1);
+  const nextCursor =
+    hasMore && last !== undefined
+      ? encodeSearchCursor({
+          version: 1,
+          queryHash,
+          snapshot,
+          sortValues: last.sortValues,
+          resultId: last.result.resultId,
+        })
+      : undefined;
+
+  return archiveSearchPageSchema.parse({
+    unit: resultUnit,
+    snapshot,
+    results: pageResults.map(({ result }) => result),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  });
+}
+
 export type ArchiveStore = ArchiveOperations & {
   readonly initializeResourceStorage: () => Promise<void>;
   readonly close: () => Promise<void>;
@@ -934,6 +1497,124 @@ export function createArchiveStore(
           };
         },
       );
+    },
+
+    async searchArchive(
+      input: ArchiveSearchRequest,
+    ): Promise<
+      ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
+    > {
+      const checked = archiveSearchInputSchema.safeParse(input);
+      if (!checked.success) {
+        const issue = checked.error.issues[0];
+        return {
+          ok: false,
+          status: 400,
+          error: {
+            code: "invalid_input",
+            message: issue?.message ?? "归档搜索请求格式无效。",
+            ...(issue === undefined
+              ? {}
+              : {
+                  path: issue.path.map((part) =>
+                    typeof part === "symbol" ? String(part) : part,
+                  ),
+                }),
+          },
+        };
+      }
+      const { cursor: requestedCursor, ...queryInput } = checked.data;
+      const queryHash = createHash("sha256")
+        .update(canonicalJson(queryInput))
+        .digest("hex");
+      const decodedCursor =
+        requestedCursor === undefined
+          ? undefined
+          : decodeSearchCursor(requestedCursor);
+      const requestedAsOf =
+        "asOf" in checked.data.scope ? checked.data.scope.asOf : undefined;
+      const expectedMode = requestedAsOf === undefined ? "current" : "asOf";
+      if (
+        requestedCursor !== undefined &&
+        (decodedCursor === undefined ||
+          decodedCursor.queryHash !== queryHash ||
+          decodedCursor.sortValues.length !== checked.data.orderBy.length ||
+          decodedCursor.snapshot.mode !== expectedMode ||
+          (requestedAsOf !== undefined &&
+            decodedCursor.snapshot.asOf !== requestedAsOf))
+      ) {
+        return {
+          ok: false,
+          status: 400,
+          error: {
+            code: "invalid_input",
+            message: "搜索游标无效，或不属于当前查询。",
+            path: ["cursor"],
+          },
+        };
+      }
+      try {
+        return await database.begin(async (transaction) => {
+          const snapshot = await resolveSnapshot(
+            transaction,
+            decodedCursor?.snapshot.asOf ?? requestedAsOf,
+          );
+          if (!snapshot.ok) {
+            return {
+              ok: false,
+              status: 400,
+              error: snapshot.error,
+            };
+          }
+          const fixedSnapshot: ResolvedSnapshot =
+            decodedCursor === undefined
+              ? snapshot.value
+              : { ...snapshot.value, mode: decodedCursor.snapshot.mode };
+          await transaction`
+            SELECT set_config(
+              'statement_timeout',
+              ${String(checked.data.budgetMs) + "ms"},
+              true
+            )
+          `;
+          return {
+            ok: true,
+            value: await readCurrentSearchPage(
+              transaction,
+              fixedSnapshot,
+              checked.data,
+              decodedCursor,
+              queryHash,
+            ),
+          };
+        });
+      } catch (error) {
+        if (postgresErrorCode(error) === "57014") {
+          return {
+            ok: false,
+            status: 422,
+            error: {
+              code: "query_budget_exceeded",
+              message: "搜索超过请求预算，未返回部分结果。",
+            },
+          };
+        }
+        if (
+          checked.data.text.kind === "regex" &&
+          postgresErrorCode(error) === "2201B"
+        ) {
+          return {
+            ok: false,
+            status: 400,
+            error: {
+              code: "invalid_input",
+              message: "PostgreSQL ARE 正则表达式无效。",
+              path: ["text", "pattern"],
+            },
+          };
+        }
+        throw error;
+      }
     },
 
     async getArchiveItem(itemId, options) {
