@@ -1,16 +1,14 @@
+import { archiveWriteClock, type Database, type Transaction } from "@binny/db";
 import { eq } from "drizzle-orm";
 
-import type { CoreDatabase, CoreTransaction } from "./database.ts";
-import { archiveWriteClock } from "./schema.ts";
-
-export type ArchiveTransaction = CoreTransaction;
+export type ArchiveTransaction = Transaction;
 
 /**
  * 所有归档写入和资源生命周期操作使用同一短事务写门，
  * 避免并发提交、引用登记与资源清理采用不同锁序。
  */
 export async function withArchiveWriteLock<T>(
-  database: CoreDatabase,
+  database: Database,
   operation: (
     transaction: ArchiveTransaction,
     currentSequence: bigint,
