@@ -28,7 +28,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny09-" + process.pid.toString(10);
+const projectName = "binny10-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -1661,11 +1661,76 @@ async function verifyRestartAndRemoval(
     },
   ]);
 
+  const cliRelationSearch = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly expansions?: readonly {
+          readonly key: string;
+          readonly hasMore: boolean;
+          readonly relations: readonly {
+            readonly relationId: string;
+            readonly status: string;
+          }[];
+        }[];
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "split-root",
+            },
+            {
+              type: "relation",
+              direction: "outgoing",
+              name: "cites",
+              operator: "exists",
+            },
+          ],
+        },
+        expand: [
+          {
+            key: "mentions",
+            direction: "outgoing",
+            name: "mentions",
+            limit: 1,
+          },
+        ],
+        select: ["sourceKey"],
+        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    cliRelationSearch.results.map((result) => result.sourceKey?.key),
+    ["split-root"],
+  );
+  assert.deepEqual(
+    cliRelationSearch.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId }) => relationId,
+    ),
+    ["e2e:relation-query:split-text"],
+  );
+
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny09-resource-cli-"),
+    path.join(tmpdir(), "binny10-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny09-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny10-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1784,7 +1849,7 @@ async function verifyRestartAndRemoval(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny09-compose-"),
+    path.join(tmpdir(), "binny10-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.9.0/24";
