@@ -1,5 +1,10 @@
 // 归档、查询、删除、运行管理及 PostgreSQL 与资源存储实现。
-export { createArchiveStore, initializeArchiveSchema } from "./archive.ts";
+export {
+  createArchiveStore,
+  initializeArchiveSchema,
+  type ArchiveStore,
+  type ArchiveStoreOptions,
+} from "./archive.ts";
 export {
   createBinConfigurationStore,
   initializeBinConfigurationSchema,

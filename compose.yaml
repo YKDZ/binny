@@ -30,11 +30,15 @@ services:
     environment:
       DATABASE_URL: postgres://binny:${BINNY_POSTGRES_PASSWORD:-binny}@postgres:5432/binny
       BINNY_API_URL: http://127.0.0.1:3000
+      BINNY_RESOURCE_DIRECTORY: /var/lib/binny/resources
+      BINNY_RESOURCE_UNREFERENCED_AGE_MS: ${BINNY_RESOURCE_UNREFERENCED_AGE_MS:-86400000}
+      BINNY_RESOURCE_CLEANUP_INTERVAL_MS: ${BINNY_RESOURCE_CLEANUP_INTERVAL_MS:-3600000}
       PORT: 3000
     ports:
       - "${BINNY_PORT:-3000}:3000"
     volumes:
       - bins:/var/lib/binny/bins
+      - resource-data:/var/lib/binny/resources
     restart: unless-stopped
 
   runtime-one:
@@ -77,3 +81,4 @@ services:
 volumes:
   postgres-data:
   bins:
+  resource-data:

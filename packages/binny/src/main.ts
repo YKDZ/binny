@@ -1,9 +1,16 @@
+import { randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
+import { rename, rm } from "node:fs/promises";
+import path from "node:path";
+import { pipeline } from "node:stream/promises";
+
 import { createApiClient } from "@binny/api/client";
 import {
   archiveCommitSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveResourceMetadataSchema,
   archiveRevisionReadSchema,
   archiveSnapshotSequenceSchema,
   archiveTimelinePageSchema,
@@ -42,6 +49,29 @@ export type CliRuntime = {
 type CliDependencies = {
   readonly createClient: () => ReturnType<typeof createApiClient>;
 };
+
+async function saveResourceBody(
+  response: Response,
+  outputPath: string,
+): Promise<void> {
+  const body = response.body;
+  if (body === null) throw new Error("资源响应不包含字节正文。");
+  const resolvedPath = path.resolve(outputPath);
+  const temporaryPath = path.join(
+    path.dirname(resolvedPath),
+    `.${path.basename(resolvedPath)}.binny-${randomUUID()}.tmp`,
+  );
+  try {
+    await pipeline(
+      body,
+      createWriteStream(temporaryPath, { flags: "wx", mode: 0o600 }),
+    );
+    await rename(temporaryPath, resolvedPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
 
 const jsonTextSchema = z.string().transform((source, context) => {
   try {
@@ -489,7 +519,8 @@ function createCliContract(identity: CliCommandIdentity) {
           if (
             response.status === 400 ||
             response.status === 404 ||
-            response.status === 409
+            response.status === 409 ||
+            response.status === 503
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档条目读取状态。");
@@ -562,7 +593,8 @@ function createCliContract(identity: CliCommandIdentity) {
           if (
             response.status === 400 ||
             response.status === 404 ||
-            response.status === 409
+            response.status === 409 ||
+            response.status === 503
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的时间线读取状态。");
@@ -600,7 +632,8 @@ function createCliContract(identity: CliCommandIdentity) {
           if (
             response.status === 400 ||
             response.status === 404 ||
-            response.status === 409
+            response.status === 409 ||
+            response.status === 503
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档版本读取状态。");
@@ -638,10 +671,76 @@ function createCliContract(identity: CliCommandIdentity) {
           if (
             response.status === 400 ||
             response.status === 404 ||
-            response.status === 409
+            response.status === 409 ||
+            response.status === 503
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档提交读取状态。");
+        },
+      }),
+      ...command("archiveResource")({
+        kind: "command",
+        parent: "archive",
+        name: "resource",
+        description: "将归档资源保存到本地文件。",
+        fields: {
+          resourceId: { kind: "positional", description: "归档资源 ID" },
+          output: {
+            kind: "valueOption",
+            longOption: "--output",
+            description: "本地输出文件路径",
+          },
+        },
+        input: z.object({
+          resourceId: archiveIdentifierSchema,
+          output: z.string().min(1),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            downloaded: {
+              description: "归档资源元信息与本地保存位置",
+              exitCode: 0,
+              schema: archiveResourceMetadataSchema.extend({
+                savedTo: z.string(),
+              }),
+              text: ({ savedTo, size }) =>
+                text.line(`已保存归档资源至 ${savedTo}（${size} 字节）。`),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .resources[":resourceId"].$get({
+              param: { resourceId: input.resourceId },
+            });
+          if (response.status === 200) {
+            const checkedMetadata = archiveResourceMetadataSchema.safeParse({
+              resourceId:
+                response.headers.get("x-binny-resource-id") ?? input.resourceId,
+              sha256: response.headers.get("etag")?.replace(/^"|"$/gu, ""),
+              mediaType: response.headers.get("content-type"),
+              size: Number(response.headers.get("content-length")),
+            });
+            if (!checkedMetadata.success) {
+              throw new Error("服务返回的归档资源元信息无效。");
+            }
+            await saveResourceBody(response, input.output);
+            return outcome.data.downloaded({
+              ...checkedMetadata.data,
+              savedTo: input.output,
+            });
+          }
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409 ||
+            response.status === 503
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档资源读取状态。");
         },
       }),
     },

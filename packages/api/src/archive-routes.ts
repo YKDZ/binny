@@ -3,6 +3,7 @@ import {
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveResourceMetadataSchema,
   archiveItemReadQuerySchema,
   archiveRevisionReadSchema,
   archiveTimelinePageSchema,
@@ -42,6 +43,89 @@ function validationFailure(issues: readonly z.core.$ZodIssue[]) {
 
 function makeArchiveRoutes(operations: ArchiveOperations) {
   return new Hono()
+    .post("/resources", async (c) => {
+      const contentType = c.req.header("content-type") ?? "";
+      const mediaType = contentType.split(";", 1)[0]?.trim().toLowerCase();
+      const checkedMediaType =
+        archiveResourceMetadataSchema.shape.mediaType.safeParse(mediaType);
+      if (!checkedMediaType.success) {
+        return c.json(
+          validationFailure(
+            checkedMediaType.error.issues.map((issue) => ({
+              ...issue,
+              path: ["content-type", ...issue.path],
+            })),
+          ),
+          400,
+        );
+      }
+      const body = c.req.raw.body;
+      if (body === null) {
+        return c.json(
+          {
+            error: {
+              code: "invalid_input" as const,
+              message: "请求正文必须包含资源字节。",
+              path: ["body"],
+            },
+          },
+          400,
+        );
+      }
+
+      const result = await operations.uploadArchiveResource(
+        body,
+        checkedMediaType.data,
+      );
+      if (!result.ok) {
+        switch (result.status) {
+          case 400:
+            return c.json({ error: result.error }, 400);
+          case 404:
+            return c.json({ error: result.error }, 404);
+          case 409:
+            return c.json({ error: result.error }, 409);
+          case 503:
+            return c.json({ error: result.error }, 503);
+        }
+      }
+      return c.json(result.value, 201);
+    })
+    .get(
+      "/resources/:resourceId",
+      zValidator(
+        "param",
+        z.object({ resourceId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.getArchiveResource(
+          c.req.valid("param").resourceId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.body(result.value.body, 200, {
+          "content-type": result.value.metadata.mediaType,
+          "content-length": String(result.value.metadata.size),
+          etag: `"${result.value.metadata.sha256}"`,
+          "x-binny-resource-id": result.value.metadata.resourceId,
+        });
+      },
+    )
     .post(
       "/archives",
       zValidator("json", archiveSubmissionInputSchema, (result, c) => {
@@ -59,6 +143,8 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 404);
             case 409:
               return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 201);
@@ -97,6 +183,8 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 404);
             case 409:
               return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 200);
@@ -139,6 +227,8 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 404);
             case 409:
               return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 200);
@@ -167,6 +257,8 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 404);
             case 409:
               return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 200);
@@ -195,6 +287,8 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 404);
             case 409:
               return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 200);
@@ -212,6 +306,7 @@ export const archiveApiSchemas: {
   readonly item: Record<string, unknown>;
   readonly timelineQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
+  readonly resource: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
@@ -221,6 +316,7 @@ export const archiveApiSchemas: {
   item: z.toJSONSchema(archiveItemReadSchema),
   timelineQuery: toInputJsonSchema(archiveTimelineQuerySchema),
   revision: z.toJSONSchema(archiveRevisionReadSchema),
+  resource: z.toJSONSchema(archiveResourceMetadataSchema),
   timeline: z.toJSONSchema(archiveTimelinePageSchema),
   error: z.toJSONSchema(archiveErrorSchema),
 };

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 import { createApiClient } from "@binny/api/client";
 import {
@@ -23,6 +24,18 @@ type ArchiveJourney = {
   readonly replayRequest: ArchiveSubmission;
   readonly replayCommitId: string;
   readonly expectedObservationCount: number;
+  readonly resourceItemId: string;
+  readonly resourceRevisionId: string;
+  readonly resourceId: string;
+  readonly repairedResourceId: string;
+  readonly orphanResourceId: string;
+  readonly resourceMarkerItemId: string;
+};
+
+type SdkResourceJourney = {
+  readonly itemId: string;
+  readonly revisionId: string;
+  readonly resourceId: string;
 };
 
 const archiveJourneySchema = z.object({
@@ -33,6 +46,18 @@ const archiveJourneySchema = z.object({
   replayRequest: archiveSubmissionInputSchema,
   replayCommitId: archiveIdentifierSchema,
   expectedObservationCount: z.number().int().nonnegative(),
+  resourceItemId: archiveIdentifierSchema,
+  resourceRevisionId: archiveIdentifierSchema,
+  resourceId: archiveIdentifierSchema,
+  repairedResourceId: archiveIdentifierSchema,
+  orphanResourceId: archiveIdentifierSchema,
+  resourceMarkerItemId: archiveIdentifierSchema,
+});
+
+const sdkResourceJourneySchema = z.object({
+  itemId: archiveIdentifierSchema,
+  revisionId: archiveIdentifierSchema,
+  resourceId: archiveIdentifierSchema,
 });
 
 async function submitArchive(
@@ -55,6 +80,256 @@ async function readArchiveItem(client: ArchiveClient, itemId: string) {
     throw new Error("读取归档条目失败：" + (await response.text()));
   }
   return await response.json();
+}
+
+async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
+  readonly resourceId: string;
+  readonly repairedResourceId: string;
+  readonly orphanResourceId: string;
+  readonly resourceMarkerItemId: string;
+  readonly itemId: string;
+  readonly revisionId: string;
+}> {
+  const bytes = new TextEncoder().encode("binny media bytes v1");
+  const upload = (value: BodyInit) =>
+    client.resources.$post(
+      { header: { "content-type": "image/png" } },
+      { init: { body: value } },
+    );
+  const firstResponsePromise = upload(new Blob([bytes]));
+  const duplicateResponsePromise = upload(new Blob([bytes]));
+  const firstResponse = await firstResponsePromise;
+  assert.equal(firstResponse.status, 201);
+  if (firstResponse.status !== 201) {
+    throw new Error("归档资源上传失败。");
+  }
+  const first = await firstResponse.json();
+
+  const firstCommitPromise = submitArchive(client, {
+    requestId: "e2e:archive:resource-history:first",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "resource-history" },
+        metadata: { title: "原始完整版本" },
+        body: {
+          markdown: `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
+        },
+        resources: [{ resourceId: first.resourceId }],
+        capture: {
+          scope: { phase: "full" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const duplicateResponse = await duplicateResponsePromise;
+  assert.equal(duplicateResponse.status, 201);
+  if (duplicateResponse.status !== 201) {
+    throw new Error("并发归档资源上传失败。");
+  }
+  const duplicate = await duplicateResponse.json();
+  assert.equal(first.resourceId, duplicate.resourceId);
+  assert.equal(first.mediaType, "image/png");
+  assert.equal(first.size, 20);
+  assert.equal(
+    first.sha256,
+    "07b91a192c733e472f4ccc16deb88af601cc2a3463486b672f6b5a11f821a7c4",
+  );
+  const firstCommit = await firstCommitPromise;
+  const firstItem = firstCommit.items[0];
+  assert.ok(firstItem);
+
+  const read = await client.resources[":resourceId"].$get({
+    param: { resourceId: first.resourceId },
+  });
+  assert.equal(read.status, 200);
+  if (read.status !== 200) throw new Error("读取归档资源失败。");
+  assert.equal(read.headers.get("content-type"), "image/png");
+  assert.equal(Number(read.headers.get("content-length")), bytes.byteLength);
+  assert.deepEqual(new Uint8Array(await read.arrayBuffer()), bytes);
+
+  const orphanBytes = new TextEncoder().encode("unreferenced media");
+  const orphanResponse = await upload(new Blob([orphanBytes]));
+  if (orphanResponse.status !== 201) {
+    throw new Error("未引用资源上传失败：" + (await orphanResponse.text()));
+  }
+  const orphan = await orphanResponse.json();
+
+  const resourceMarker = await submitArchive(client, {
+    requestId: "e2e:archive:resource-text-marker-only",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "resource-text-marker-only" },
+        metadata: { note: `binny://resource/${orphan.resourceId}` },
+        body: { text: `正文保留标记 binny://resource/${orphan.resourceId}` },
+        capture: {
+          scope: { phase: "text-marker-only" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const resourceMarkerItemId = resourceMarker.items[0]?.itemId;
+  assert.ok(resourceMarkerItemId);
+  const resourceMarkerRead = await readArchiveItem(
+    client,
+    resourceMarkerItemId,
+  );
+  assert.equal(
+    resourceMarkerRead.views[0]?.state.body?.text,
+    `正文保留标记 binny://resource/${orphan.resourceId}`,
+  );
+  assert.equal(resourceMarkerRead.views[0]?.state.resources, undefined);
+
+  const invalidReference = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:invalid-resource-reference",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "invalid-resource-reference" },
+          body: { text: "悬空资源引用" },
+          resources: [{ resourceId: randomUUID() }],
+          capture: {
+            scope: { case: "invalid-resource-reference" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  if (invalidReference.status !== 400) {
+    throw new Error(
+      "未上传的资源引用应被拒绝：" + (await invalidReference.text()),
+    );
+  }
+  const invalidReferenceError = await invalidReference.json();
+  assert.equal(invalidReferenceError.error.code, "resource_not_found");
+  assert.deepEqual(invalidReferenceError.error.path, [
+    "items",
+    0,
+    "resources",
+    0,
+    "resourceId",
+  ]);
+
+  const attachmentOnly = await submitArchive(client, {
+    requestId: "e2e:archive:resource-attachment-only",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "resource-attachment-only" },
+        resources: [{ resourceId: first.resourceId }],
+        capture: {
+          scope: { phase: "attachment-only" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const attachmentItemId = attachmentOnly.items[0]?.itemId;
+  assert.ok(attachmentItemId);
+  const attachmentRead = await readArchiveItem(client, attachmentItemId);
+  assert.equal(attachmentRead.views[0]?.state.body, undefined);
+  assert.deepEqual(attachmentRead.views[0]?.state.resources, [
+    { resourceId: first.resourceId },
+  ]);
+
+  const partialCommit = await submitArchive(client, {
+    requestId: "e2e:archive:resource-history:partial",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "resource-history" },
+        metadata: { title: "本次只取得部分资料" },
+        body: { text: "本次取得的正文" },
+        capture: {
+          scope: { phase: "partial" },
+          completeness: "partial",
+          missing: [{ path: "resources.image", reason: "媒体下载失败" }],
+        },
+      },
+    ],
+  });
+  const partialItem = partialCommit.items[0];
+  assert.ok(partialItem);
+  assert.notEqual(partialItem.revisionId, firstItem.revisionId);
+  const partialRead = await readArchiveItem(client, firstItem.itemId);
+  assert.equal(partialRead.views[0]?.revisionId, partialItem.revisionId);
+  assert.equal(partialRead.views[0]?.state.body?.text, "本次取得的正文");
+  assert.equal(
+    partialRead.views[0]?.state.metadata?.title,
+    "本次只取得部分资料",
+  );
+  assert.equal(partialRead.views[0]?.state.capture.completeness, "partial");
+  assert.deepEqual(partialRead.views[0]?.state.capture.missing, [
+    { path: "resources.image", reason: "媒体下载失败" },
+  ]);
+  assert.equal(partialRead.views[0]?.state.resources, undefined);
+
+  const replacementBytes = new TextEncoder().encode("binny media bytes v2");
+  const replacementResponse = await upload(new Blob([replacementBytes]));
+  if (replacementResponse.status !== 201) {
+    throw new Error("补齐资源上传失败：" + (await replacementResponse.text()));
+  }
+  const replacement = await replacementResponse.json();
+  const repairedCommit = await submitArchive(client, {
+    requestId: "e2e:archive:resource-history:repaired",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "resource-history" },
+        metadata: { title: "补齐后的资料" },
+        body: { markdown: "补齐后的正文" },
+        resources: [{ resourceId: replacement.resourceId }],
+        capture: {
+          scope: { phase: "repaired" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const repairedItem = repairedCommit.items[0];
+  assert.ok(repairedItem);
+  const repairedRead = await readArchiveItem(client, firstItem.itemId);
+  assert.equal(repairedRead.views[0]?.revisionId, repairedItem.revisionId);
+  assert.equal(repairedRead.views[0]?.state.body?.markdown, "补齐后的正文");
+  assert.deepEqual(repairedRead.views[0]?.state.resources, [
+    { resourceId: replacement.resourceId },
+  ]);
+  assert.equal(repairedRead.revisions.length, 3);
+
+  const historicRead = await client.archives.revisions[":revisionId"].$get({
+    param: { revisionId: firstItem.revisionId },
+  });
+  if (historicRead.status !== 200) {
+    throw new Error("读取历史资源版本失败：" + (await historicRead.text()));
+  }
+  const historicRevision = await historicRead.json();
+  assert.equal(historicRevision.state.metadata?.title, "原始完整版本");
+  assert.deepEqual(historicRevision.state.resources, [
+    { resourceId: first.resourceId },
+  ]);
+  assert.equal(
+    historicRevision.state.body?.markdown,
+    `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
+  );
+
+  return {
+    resourceId: first.resourceId,
+    repairedResourceId: replacement.resourceId,
+    orphanResourceId: orphan.resourceId,
+    resourceMarkerItemId,
+    itemId: firstItem.itemId,
+    revisionId: firstItem.revisionId,
+  };
 }
 
 async function readArchiveTimeline(
@@ -325,7 +600,18 @@ async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
 
 async function verifyArchiveABA(
   client: ArchiveClient,
-): Promise<ArchiveJourney> {
+): Promise<
+  Pick<
+    ArchiveJourney,
+    | "itemId"
+    | "revisionId"
+    | "commitId"
+    | "historicalAsOf"
+    | "replayRequest"
+    | "replayCommitId"
+    | "expectedObservationCount"
+  >
+> {
   const abaA = {
     sourceKey: { namespace: "e2e", key: "aba-item" },
     sourceRef: "https://example.test/aba-item",
@@ -782,16 +1068,26 @@ async function verifyArchiveReadErrors(
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   const client = createApiClient(baseUrl);
   await verifyArchiveAtomicity(client);
+  const resources = await verifyArchiveResourceHttp(client);
   await verifyArchiveIdempotency(client);
   const aba = await verifyArchiveABA(client);
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);
-  return aba;
+  return {
+    ...aba,
+    resourceItemId: resources.itemId,
+    resourceRevisionId: resources.revisionId,
+    resourceId: resources.resourceId,
+    repairedResourceId: resources.repairedResourceId,
+    orphanResourceId: resources.orphanResourceId,
+    resourceMarkerItemId: resources.resourceMarkerItemId,
+  };
 }
 
 async function verifyArchivePersistence(
   baseUrl: string,
   archive: ArchiveJourney,
+  sdkResource: SdkResourceJourney,
 ) {
   const client = createApiClient(baseUrl);
   const replay = await submitArchive(client, archive.replayRequest);
@@ -817,6 +1113,96 @@ async function verifyArchivePersistence(
   }
   const persistedRevision = await revisionResponse.json();
   assert.equal(persistedRevision.state.body?.markdown, "正文 A");
+
+  const resourceItem = await readArchiveItem(client, archive.resourceItemId);
+  assert.equal(resourceItem.views[0]?.state.capture.completeness, "complete");
+  assert.equal(resourceItem.views[0]?.state.body?.markdown, "补齐后的正文");
+  assert.deepEqual(resourceItem.views[0]?.state.resources, [
+    { resourceId: archive.repairedResourceId },
+  ]);
+  assert.equal(resourceItem.revisions.length, 3);
+  const oldResourceRevision = await client.archives.revisions[
+    ":revisionId"
+  ].$get({ param: { revisionId: archive.resourceRevisionId } });
+  if (oldResourceRevision.status !== 200) {
+    throw new Error(
+      "重启后读取历史媒体版本失败：" + (await oldResourceRevision.text()),
+    );
+  }
+  const historicalResource = await oldResourceRevision.json();
+  assert.equal(
+    historicalResource.state.body?.markdown,
+    `原文位置 binny://resource/${archive.resourceId}；外链 https://example.test/image.png`,
+  );
+  assert.deepEqual(historicalResource.state.resources, [
+    { resourceId: archive.resourceId },
+  ]);
+
+  const resourceMarkerItem = await readArchiveItem(
+    client,
+    archive.resourceMarkerItemId,
+  );
+  assert.equal(
+    resourceMarkerItem.views[0]?.state.body?.text,
+    `正文保留标记 binny://resource/${archive.orphanResourceId}`,
+  );
+  assert.equal(
+    resourceMarkerItem.views[0]?.state.metadata?.note,
+    `binny://resource/${archive.orphanResourceId}`,
+  );
+  assert.equal(resourceMarkerItem.views[0]?.state.resources, undefined);
+
+  for (const [resourceId, expected] of [
+    [archive.resourceId, "binny media bytes v1"],
+    [archive.repairedResourceId, "binny media bytes v2"],
+  ] as const) {
+    const response = await client.resources[":resourceId"].$get({
+      param: { resourceId },
+    });
+    if (response.status !== 200) {
+      throw new Error("重启后读取归档资源失败：" + (await response.text()));
+    }
+    assert.deepEqual(
+      new Uint8Array(await response.arrayBuffer()),
+      new TextEncoder().encode(expected),
+    );
+  }
+
+  const orphanResponse = await client.resources[":resourceId"].$get({
+    param: { resourceId: archive.orphanResourceId },
+  });
+  assert.equal(orphanResponse.status, 404);
+  if (orphanResponse.status === 404) {
+    assert.equal(
+      (await orphanResponse.json()).error.code,
+      "resource_not_found",
+    );
+  }
+
+  const sdkItem = await readArchiveItem(client, sdkResource.itemId);
+  assert.equal(sdkItem.views[0]?.revisionId, sdkResource.revisionId);
+  assert.deepEqual(sdkItem.views[0]?.state.resources, [
+    { resourceId: sdkResource.resourceId },
+  ]);
+  const sdkResourceResponse = await client.resources[":resourceId"].$get({
+    param: { resourceId: sdkResource.resourceId },
+  });
+  if (sdkResourceResponse.status !== 200) {
+    throw new Error(
+      "SDK 媒体重启后不可读取：" + (await sdkResourceResponse.text()),
+    );
+  }
+  const sdkBytes = new TextEncoder().encode("collector sdk image v1");
+  assert.deepEqual(
+    new Uint8Array(await sdkResourceResponse.arrayBuffer()),
+    sdkBytes,
+  );
+  const sdkResourceMetadata = {
+    resourceId: sdkResource.resourceId,
+    mediaType: sdkResourceResponse.headers.get("content-type"),
+    size: Number(sdkResourceResponse.headers.get("content-length")),
+    sha256: sdkResourceResponse.headers.get("etag")?.replaceAll('"', ""),
+  };
 
   const historicalResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: archive.itemId },
@@ -844,6 +1230,11 @@ async function verifyArchivePersistence(
     item: persistedArchive,
     historicalItem,
     revision: persistedRevision,
+    resourceItem,
+    resourceMarkerItem,
+    resourceRevision: historicalResource,
+    sdkItem,
+    sdkResourceMetadata,
     firstTimelinePage,
     secondTimelinePage,
     commit,
@@ -866,7 +1257,18 @@ async function main(): Promise<void> {
       throw new Error("重启后归档验收缺少前置状态。");
     }
     const archive = archiveJourneySchema.parse(JSON.parse(rawState) as unknown);
-    const persisted = await verifyArchivePersistence(baseUrl, archive);
+    const rawSdkState = process.env.BINNY_E2E_SDK_RESOURCE_STATE;
+    if (rawSdkState === undefined) {
+      throw new Error("重启后归档验收缺少 SDK 资源前置状态。");
+    }
+    const sdkResource = sdkResourceJourneySchema.parse(
+      JSON.parse(rawSdkState) as unknown,
+    );
+    const persisted = await verifyArchivePersistence(
+      baseUrl,
+      archive,
+      sdkResource,
+    );
     process.stdout.write(JSON.stringify(persisted));
     return;
   }
