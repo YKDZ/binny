@@ -1,9 +1,12 @@
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveCommitSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
   archiveRevisionReadSchema,
+  archiveSnapshotSequenceSchema,
+  archiveTimelinePageSchema,
   binConfigurationSchema,
   binCreateInputSchema,
   binErrorSchema,
@@ -441,8 +444,24 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "item",
         description: "读取条目及各 bin 的归档视图。",
-        fields: { itemId: { kind: "positional", description: "归档条目 ID" } },
-        input: z.object({ itemId: archiveIdentifierSchema }),
+        fields: {
+          itemId: { kind: "positional", description: "归档条目 ID" },
+          binId: {
+            kind: "valueOption",
+            longOption: "--bin",
+            description: "只读取这个 bin 的视图和历史",
+          },
+          asOf: {
+            kind: "valueOption",
+            longOption: "--as-of",
+            description: "使用这个归档序号作为读取截点",
+          },
+        },
+        input: z.object({
+          itemId: archiveIdentifierSchema,
+          binId: binIdSchema.optional(),
+          asOf: archiveSnapshotSequenceSchema.optional(),
+        }),
         success: {
           kind: "data",
           variants: {
@@ -460,6 +479,10 @@ function createCliContract(identity: CliCommandIdentity) {
             .createClient()
             .archives.items[":itemId"].$get({
               param: { itemId: input.itemId },
+              query: {
+                ...(input.binId === undefined ? {} : { binId: input.binId }),
+                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+              },
             });
           if (response.status === 200)
             return outcome.data.found(await response.json());
@@ -470,6 +493,79 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档条目读取状态。");
+        },
+      }),
+      ...command("archiveTimeline")({
+        kind: "command",
+        parent: "archive",
+        name: "timeline",
+        description: "按归档顺序读取观察及其来源时间线。",
+        fields: {
+          itemId: { kind: "positional", description: "归档条目 ID" },
+          binId: {
+            kind: "valueOption",
+            longOption: "--bin",
+            description: "只读取这个 bin 的观察",
+          },
+          asOf: {
+            kind: "valueOption",
+            longOption: "--as-of",
+            description: "固定归档截点，跨页继续使用同一截点",
+          },
+          limit: {
+            kind: "valueOption",
+            longOption: "--limit",
+            description: "每页观察数量（1 到 100）",
+          },
+          cursor: {
+            kind: "valueOption",
+            longOption: "--cursor",
+            description: "继续读取上一页返回的游标",
+          },
+        },
+        input: z.object({
+          itemId: archiveIdentifierSchema,
+          binId: binIdSchema.optional(),
+          asOf: archiveSnapshotSequenceSchema.optional(),
+          limit: z
+            .string()
+            .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
+            .optional(),
+          cursor: z.string().min(1).max(4096).optional(),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "一页观察时间线",
+              exitCode: 0,
+              schema: archiveTimelinePageSchema,
+              text: (timeline) => outputText("观察时间线", timeline),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.items[":itemId"].timeline.$get({
+              param: { itemId: input.itemId },
+              query: {
+                ...(input.binId === undefined ? {} : { binId: input.binId }),
+                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+                ...(input.limit === undefined ? {} : { limit: input.limit }),
+                ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+              },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的时间线读取状态。");
         },
       }),
       ...command("archiveRevision")({
@@ -508,6 +604,44 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档版本读取状态。");
+        },
+      }),
+      ...command("archiveCommit")({
+        kind: "command",
+        parent: "archive",
+        name: "commit",
+        description: "读取一批归档资料的来源、时间和版本依据。",
+        fields: {
+          commitId: { kind: "positional", description: "归档提交 ID" },
+        },
+        input: z.object({ commitId: archiveIdentifierSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "归档提交依据",
+              exitCode: 0,
+              schema: archiveCommitSchema,
+              text: (commit) => outputText("归档提交", commit),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.commits[":commitId"].$get({
+              param: { commitId: input.commitId },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档提交读取状态。");
         },
       }),
     },

@@ -3,17 +3,23 @@ import assert from "node:assert/strict";
 import { createApiClient } from "@binny/api/client";
 import {
   archiveIdentifierSchema,
+  archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
 import * as z from "zod";
 
 type ArchiveClient = ReturnType<typeof createApiClient>;
+type ArchiveTimelineQuery = Parameters<
+  ArchiveClient["archives"]["items"][":itemId"]["timeline"]["$get"]
+>[0]["query"];
 type ArchiveSubmission = Parameters<
   ArchiveClient["archives"]["$post"]
 >[0]["json"];
 type ArchiveJourney = {
   readonly itemId: string;
   readonly revisionId: string;
+  readonly commitId: string;
+  readonly historicalAsOf: string;
   readonly replayRequest: ArchiveSubmission;
   readonly replayCommitId: string;
   readonly expectedObservationCount: number;
@@ -22,6 +28,8 @@ type ArchiveJourney = {
 const archiveJourneySchema = z.object({
   itemId: archiveIdentifierSchema,
   revisionId: archiveIdentifierSchema,
+  commitId: archiveIdentifierSchema,
+  historicalAsOf: archiveSnapshotSequenceSchema,
   replayRequest: archiveSubmissionInputSchema,
   replayCommitId: archiveIdentifierSchema,
   expectedObservationCount: z.number().int().nonnegative(),
@@ -41,9 +49,35 @@ async function submitArchive(
 async function readArchiveItem(client: ArchiveClient, itemId: string) {
   const response = await client.archives.items[":itemId"].$get({
     param: { itemId },
+    query: {},
   });
   if (response.status !== 200) {
     throw new Error("读取归档条目失败：" + (await response.text()));
+  }
+  return await response.json();
+}
+
+async function readArchiveTimeline(
+  client: ArchiveClient,
+  itemId: string,
+  query: ArchiveTimelineQuery,
+) {
+  const response = await client.archives.items[":itemId"].timeline.$get({
+    param: { itemId },
+    query,
+  });
+  if (response.status !== 200) {
+    throw new Error("读取观察时间线失败：" + (await response.text()));
+  }
+  return await response.json();
+}
+
+async function readArchiveCommit(client: ArchiveClient, commitId: string) {
+  const response = await client.archives.commits[":commitId"].$get({
+    param: { commitId },
+  });
+  if (response.status !== 200) {
+    throw new Error("读取归档提交失败：" + (await response.text()));
   }
   return await response.json();
 }
@@ -324,7 +358,7 @@ async function verifyArchiveABA(
     binId: "rss-main",
     runId: "run-a2",
     collectorVersion: "rss@1.1.0",
-    observedAt: "2026-10-28T04:02:00.000Z",
+    observedAt: "2026-10-28T04:01:00.000Z",
     items: [
       {
         ...abaA,
@@ -370,6 +404,10 @@ async function verifyArchiveABA(
   const abaRead = await readArchiveItem(client, abaThirdItem.itemId);
   assert.equal(abaRead.revisions.length, 2);
   assert.equal(abaRead.observations.length, 3);
+  assert.deepEqual(abaRead.snapshot, {
+    asOf: abaThird.archiveSeq,
+    mode: "current",
+  });
   assert.deepEqual(
     abaRead.observations.map(({ revisionId }) => revisionId),
     [
@@ -381,6 +419,165 @@ async function verifyArchiveABA(
   assert.equal(abaRead.views[0]?.state.body?.markdown, "正文 A");
   assert.equal(abaRead.views[0]?.diagnostics?.[0]?.message, "诊断已变化");
   assert.equal(abaRead.views[0]?.observedAt, "2026-10-28T04:03:00.000Z");
+
+  const historicalViewResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId: abaThirdItem.itemId },
+    query: { binId: "rss-main", asOf: abaSecond.archiveSeq },
+  });
+  if (historicalViewResponse.status !== 200) {
+    throw new Error(
+      "按归档截点读取历史视图失败：" + (await historicalViewResponse.text()),
+    );
+  }
+  const historicalView = await historicalViewResponse.json();
+  assert.deepEqual(historicalView.snapshot, {
+    asOf: abaSecond.archiveSeq,
+    mode: "asOf",
+  });
+  assert.equal(historicalView.views[0]?.state.body?.markdown, "正文 B");
+  assert.equal(historicalView.revisions.length, 2);
+  assert.equal(historicalView.observations.length, 2);
+  assert.equal(
+    historicalView.observations[0]?.sourceModifiedAt,
+    "2026-10-28T04:00:00.000Z",
+  );
+  assert.equal(
+    historicalView.observations[0]?.observedAt,
+    "2026-10-28T04:01:00.000Z",
+  );
+  assert.ok(historicalView.observations[0]?.recordedAt);
+
+  const historicalTimeline = await readArchiveTimeline(
+    client,
+    abaThirdItem.itemId,
+    { binId: "rss-main", asOf: abaSecond.archiveSeq, limit: "10" },
+  );
+  assert.deepEqual(historicalTimeline.snapshot, {
+    asOf: abaSecond.archiveSeq,
+    mode: "asOf",
+  });
+  assert.deepEqual(
+    historicalTimeline.observations.map(({ revisionId }) => revisionId),
+    [abaFirstItem.revisionId, abaSecondItem.revisionId],
+  );
+  assert.equal(historicalTimeline.observations[0]?.commitId, abaFirst.commitId);
+  assert.equal(historicalTimeline.observations[0]?.binId, "rss-main");
+  assert.equal(historicalTimeline.observations[0]?.runId, "run-a1");
+  assert.equal(
+    historicalTimeline.observations[0]?.collectorVersion,
+    "rss@1.0.0",
+  );
+  assert.equal(
+    historicalTimeline.observations[0]?.sourceModifiedAt,
+    "2026-10-28T04:00:00.000Z",
+  );
+  assert.equal(
+    historicalTimeline.observations[0]?.observedAt,
+    "2026-10-28T04:01:00.000Z",
+  );
+  assert.equal(
+    historicalTimeline.observations[1]?.observedAt,
+    "2026-10-28T04:01:00.000Z",
+  );
+
+  const firstTimelinePage = await readArchiveTimeline(
+    client,
+    abaThirdItem.itemId,
+    { binId: "rss-main", limit: "1" },
+  );
+  assert.equal(firstTimelinePage.snapshot.mode, "current");
+  assert.equal(firstTimelinePage.snapshot.asOf, abaThird.archiveSeq);
+  assert.equal(
+    firstTimelinePage.observations[0]?.revisionId,
+    abaFirstItem.revisionId,
+  );
+  assert.ok(firstTimelinePage.nextCursor);
+
+  const [lateCommit, secondTimelinePage] = await Promise.all([
+    submitArchive(client, {
+      requestId: "e2e:archive:aba:late-repeat",
+      binId: "rss-main",
+      collectorVersion: "rss@2.1.0",
+      observedAt: "2026-10-28T03:59:00.000Z",
+      items: [abaA],
+    }),
+    readArchiveTimeline(client, abaThirdItem.itemId, {
+      cursor: firstTimelinePage.nextCursor,
+      limit: "1",
+    }),
+  ]);
+  assert.deepEqual(secondTimelinePage.snapshot, {
+    asOf: abaThird.archiveSeq,
+    mode: "asOf",
+  });
+  assert.equal(
+    secondTimelinePage.observations[0]?.revisionId,
+    abaSecondItem.revisionId,
+  );
+  assert.ok(secondTimelinePage.nextCursor);
+
+  const thirdTimelinePage = await readArchiveTimeline(
+    client,
+    abaThirdItem.itemId,
+    { cursor: secondTimelinePage.nextCursor, limit: "1" },
+  );
+  assert.deepEqual(thirdTimelinePage.snapshot, secondTimelinePage.snapshot);
+  assert.equal(
+    thirdTimelinePage.observations[0]?.revisionId,
+    abaThirdItem.revisionId,
+  );
+  assert.equal(thirdTimelinePage.nextCursor, undefined);
+
+  const currentTimeline = await readArchiveTimeline(
+    client,
+    abaThirdItem.itemId,
+    { binId: "rss-main", limit: "10" },
+  );
+  assert.deepEqual(
+    currentTimeline.observations.map(({ archiveSeq }) => archiveSeq),
+    [
+      abaFirst.archiveSeq,
+      abaSecond.archiveSeq,
+      abaThird.archiveSeq,
+      lateCommit.archiveSeq,
+    ],
+  );
+  assert.equal(
+    currentTimeline.observations[3]?.sourceModifiedAt,
+    "2026-10-28T04:00:00.000Z",
+  );
+  assert.equal(
+    currentTimeline.observations[3]?.observedAt,
+    "2026-10-28T03:59:00.000Z",
+  );
+  assert.equal(lateCommit.items[0]?.revisionId, abaFirstItem.revisionId);
+  const firstCommitRead = await readArchiveCommit(client, abaFirst.commitId);
+  assert.equal(firstCommitRead.runId, "run-a1");
+  assert.equal(firstCommitRead.collectorVersion, "rss@1.0.0");
+  assert.equal(firstCommitRead.items[0]?.itemId, abaFirstItem.itemId);
+  assert.equal(
+    historicalTimeline.observations[0]?.recordedAt,
+    firstCommitRead.recordedAt,
+  );
+  const lateCommitRead = await readArchiveCommit(client, lateCommit.commitId);
+  assert.deepEqual(lateCommitRead, lateCommit);
+  assert.equal(lateCommitRead.runId, undefined);
+  assert.equal(lateCommitRead.collectorVersion, "rss@2.1.0");
+
+  const currentAfterLateArrival = await readArchiveItem(
+    client,
+    abaThirdItem.itemId,
+  );
+  assert.equal(
+    currentAfterLateArrival.views[0]?.archiveSeq,
+    lateCommit.archiveSeq,
+  );
+  assert.equal(
+    currentAfterLateArrival.views[0]?.observedAt,
+    "2026-10-28T03:59:00.000Z",
+  );
+  assert.equal(currentAfterLateArrival.revisions.length, 2);
+  assert.equal(currentAfterLateArrival.observations.length, 4);
 
   const abaRevisionResponse = await client.archives.revisions[
     ":revisionId"
@@ -398,9 +595,11 @@ async function verifyArchiveABA(
   return {
     itemId: abaThirdItem.itemId,
     revisionId: abaThirdItem.revisionId,
+    commitId: lateCommit.commitId,
+    historicalAsOf: abaSecond.archiveSeq,
     replayRequest: abaFirstRequest,
     replayCommitId: abaFirst.commitId,
-    expectedObservationCount: abaRead.observations.length,
+    expectedObservationCount: currentAfterLateArrival.observations.length,
   };
 }
 
@@ -463,11 +662,76 @@ async function verifyConcurrentArchiveIdentity(
     "rss-secondary",
   ]);
   assert.equal(concurrentRead.observations.length, 2);
+  assert.equal(
+    concurrentRead.views.find(({ binId }) => binId === "rss-main")?.state.body
+      ?.text,
+    "main view",
+  );
+  assert.equal(
+    concurrentRead.views.find(({ binId }) => binId === "rss-secondary")?.state
+      .body?.text,
+    "secondary view",
+  );
+  assert.equal(concurrentRead.revisions.length, 2);
+
+  const selectedMain = await client.archives.items[":itemId"].$get({
+    param: { itemId: mainConcurrentItem.itemId },
+    query: { binId: "rss-main", asOf: mainCommit.archiveSeq },
+  });
+  assert.equal(selectedMain.status, 200);
+  const selectedMainRead = await selectedMain.json();
+  assert.equal(selectedMainRead.views.length, 1);
+  assert.equal(selectedMainRead.views[0]?.binId, "rss-main");
+  assert.equal(selectedMainRead.views[0]?.state.body?.text, "main view");
+  assert.equal(selectedMainRead.observations.length, 1);
+  assert.equal(selectedMainRead.revisions.length, 1);
 }
 
-async function verifyArchiveReadErrors(client: ArchiveClient): Promise<void> {
+async function verifyArchiveReadErrors(
+  client: ArchiveClient,
+  itemId: string,
+): Promise<void> {
+  const current = await readArchiveItem(client, itemId);
+  const futureCut = (BigInt(current.snapshot.asOf) + 1n).toString();
+  const futureCutResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId },
+    query: { asOf: futureCut },
+  });
+  assert.equal(futureCutResponse.status, 400);
+  assert.equal((await futureCutResponse.json()).error.code, "invalid_input");
+
+  const beforeFirstCutResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId },
+    query: { asOf: "0" },
+  });
+  assert.equal(beforeFirstCutResponse.status, 404);
+  assert.equal(
+    (await beforeFirstCutResponse.json()).error.code,
+    "item_not_found",
+  );
+
+  const invalidCutResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId },
+    query: { asOf: "not-a-sequence" },
+  });
+  assert.equal(invalidCutResponse.status, 400);
+  assert.equal((await invalidCutResponse.json()).error.code, "invalid_input");
+
+  const invalidCursorResponse = await client.archives.items[
+    ":itemId"
+  ].timeline.$get({
+    param: { itemId },
+    query: { cursor: "not-a-cursor" },
+  });
+  assert.equal(invalidCursorResponse.status, 400);
+  assert.equal(
+    (await invalidCursorResponse.json()).error.code,
+    "invalid_input",
+  );
+
   const invalidItemIdResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: "not-a-uuid" },
+    query: {},
   });
   if (invalidItemIdResponse.status !== 400) {
     throw new Error(
@@ -481,6 +745,7 @@ async function verifyArchiveReadErrors(client: ArchiveClient): Promise<void> {
 
   const absentItemResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: "850e8400-e29b-41d4-a716-446655440000" },
+    query: {},
   });
   if (absentItemResponse.status !== 404) {
     throw new Error(
@@ -503,6 +768,15 @@ async function verifyArchiveReadErrors(client: ArchiveClient): Promise<void> {
     (await absentRevisionResponse.json()).error.code,
     "revision_not_found",
   );
+
+  const absentCommitResponse = await client.archives.commits[":commitId"].$get({
+    param: { commitId: "750e8400-e29b-41d4-a716-446655440000" },
+  });
+  assert.equal(absentCommitResponse.status, 404);
+  assert.equal(
+    (await absentCommitResponse.json()).error.code,
+    "commit_not_found",
+  );
 }
 
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
@@ -511,7 +785,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifyArchiveIdempotency(client);
   const aba = await verifyArchiveABA(client);
   await verifyConcurrentArchiveIdentity(client);
-  await verifyArchiveReadErrors(client);
+  await verifyArchiveReadErrors(client, aba.itemId);
   return aba;
 }
 
@@ -543,7 +817,37 @@ async function verifyArchivePersistence(
   }
   const persistedRevision = await revisionResponse.json();
   assert.equal(persistedRevision.state.body?.markdown, "正文 A");
-  return { item: persistedArchive, revision: persistedRevision };
+
+  const historicalResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId: archive.itemId },
+    query: { binId: "rss-main", asOf: archive.historicalAsOf },
+  });
+  if (historicalResponse.status !== 200) {
+    throw new Error(
+      "重启后按归档截点读取失败：" + (await historicalResponse.text()),
+    );
+  }
+  const historicalItem = await historicalResponse.json();
+  assert.equal(historicalItem.views[0]?.state.body?.markdown, "正文 B");
+
+  const firstTimelinePage = await readArchiveTimeline(client, archive.itemId, {
+    binId: "rss-main",
+    limit: "1",
+  });
+  assert.ok(firstTimelinePage.nextCursor);
+  const secondTimelinePage = await readArchiveTimeline(client, archive.itemId, {
+    cursor: firstTimelinePage.nextCursor,
+    limit: "1",
+  });
+  const commit = await readArchiveCommit(client, archive.commitId);
+  return {
+    item: persistedArchive,
+    historicalItem,
+    revision: persistedRevision,
+    firstTimelinePage,
+    secondTimelinePage,
+    commit,
+  };
 }
 
 async function main(): Promise<void> {

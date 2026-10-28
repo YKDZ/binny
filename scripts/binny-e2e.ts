@@ -19,7 +19,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny02-" + process.pid.toString(10);
+const projectName = "binny03-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;
@@ -186,22 +186,51 @@ async function archiveHttpStep(
 function archiveIds(state: string): {
   readonly itemId: string;
   readonly revisionId: string;
+  readonly commitId: string;
+  readonly historicalAsOf: string;
 } {
   const parsed: unknown = JSON.parse(state);
   assert.ok(typeof parsed === "object" && parsed !== null);
   assert.ok("itemId" in parsed && typeof parsed.itemId === "string");
   assert.ok("revisionId" in parsed && typeof parsed.revisionId === "string");
-  return { itemId: parsed.itemId, revisionId: parsed.revisionId };
+  assert.ok("commitId" in parsed && typeof parsed.commitId === "string");
+  assert.ok(
+    "historicalAsOf" in parsed && typeof parsed.historicalAsOf === "string",
+  );
+  return {
+    itemId: parsed.itemId,
+    revisionId: parsed.revisionId,
+    commitId: parsed.commitId,
+    historicalAsOf: parsed.historicalAsOf,
+  };
 }
 
 function archiveResponses(response: string): {
   readonly item: unknown;
+  readonly historicalItem: unknown;
   readonly revision: unknown;
+  readonly firstTimelinePage: unknown;
+  readonly secondTimelinePage: unknown;
+  readonly commit: unknown;
 } {
   const parsed: unknown = JSON.parse(response);
   assert.ok(typeof parsed === "object" && parsed !== null);
-  assert.ok("item" in parsed && "revision" in parsed);
-  return { item: parsed.item, revision: parsed.revision };
+  assert.ok(
+    "item" in parsed &&
+      "historicalItem" in parsed &&
+      "revision" in parsed &&
+      "firstTimelinePage" in parsed &&
+      "secondTimelinePage" in parsed &&
+      "commit" in parsed,
+  );
+  return {
+    item: parsed.item,
+    historicalItem: parsed.historicalItem,
+    revision: parsed.revision,
+    firstTimelinePage: parsed.firstTimelinePage,
+    secondTimelinePage: parsed.secondTimelinePage,
+    commit: parsed.commit,
+  };
 }
 
 async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
@@ -594,18 +623,63 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(empty.bins, []);
   const archiveState = await archiveHttpStep("after-restart", baseUrl, archive);
-  const { itemId, revisionId } = archiveIds(archive);
+  const { itemId, revisionId, commitId, historicalAsOf } = archiveIds(archive);
   const expectedArchive = archiveResponses(archiveState);
   const cliArchiveItem = cliData<unknown>(
     await cli(baseUrl, ["archive", "item", itemId]),
     "found",
   );
   assert.deepEqual(cliArchiveItem, expectedArchive.item);
+  const cliHistoricalItem = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      itemId,
+      "--bin",
+      "rss-main",
+      "--as-of",
+      historicalAsOf,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliHistoricalItem, expectedArchive.historicalItem);
   const cliArchiveRevision = cliData<unknown>(
     await cli(baseUrl, ["archive", "revision", revisionId]),
     "found",
   );
   assert.deepEqual(cliArchiveRevision, expectedArchive.revision);
+  const cliFirstTimelinePage = cliData<{ readonly nextCursor?: string }>(
+    await cli(baseUrl, [
+      "archive",
+      "timeline",
+      itemId,
+      "--bin",
+      "rss-main",
+      "--limit",
+      "1",
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliFirstTimelinePage, expectedArchive.firstTimelinePage);
+  assert.ok(cliFirstTimelinePage.nextCursor);
+  const cliSecondTimelinePage = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "timeline",
+      itemId,
+      "--limit",
+      "1",
+      "--cursor",
+      cliFirstTimelinePage.nextCursor,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliSecondTimelinePage, expectedArchive.secondTimelinePage);
+  const cliArchiveCommit = cliData<unknown>(
+    await cli(baseUrl, ["archive", "commit", commitId]),
+    "found",
+  );
+  assert.deepEqual(cliArchiveCommit, expectedArchive.commit);
   await validateApiInput();
 }
 
@@ -615,7 +689,7 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny02-compose-"),
+    path.join(tmpdir(), "binny03-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";
