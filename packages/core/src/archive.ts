@@ -1120,7 +1120,62 @@ async function readRelationsPage(
   ArchiveOperation<ReturnType<typeof archiveRelationPageSchema.parse>>
 > {
   const rows = await transaction<RelationReadRow[]>`
-    WITH active AS (
+    WITH relevant_relation_ids AS (
+      SELECT relation.relation_id
+      FROM archive_relation AS relation
+      WHERE (
+        (${direction}::text = 'outgoing' AND relation.from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
+      )
+        AND relation.created_seq <= ${snapshot.asOf}::bigint
+      UNION ALL
+      SELECT gap.relation_id
+      FROM archive_relation_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      WHERE (
+        (${direction}::text = 'outgoing' AND gap.from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND gap.target_item_id = ${itemId})
+      )
+        AND commit.bin_id = ${binId}
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+    ), gaps AS (
+      SELECT DISTINCT ON (gap.relation_id)
+        gap.relation_id,
+        gap.from_item_id,
+        gap.target_item_id,
+        NULL::text AS target_source_ref,
+        commit.archive_seq::text AS created_seq,
+        'deleted'::text AS state_status,
+        NULL::uuid AS relation_revision_id,
+        NULL::jsonb AS state_data,
+        commit.commit_id AS relation_commit_id,
+        commit.archive_seq::text AS relation_archive_seq,
+        gap.ordinal AS relation_ordinal,
+        commit.observed_at AS relation_observed_at,
+        commit.recorded_at AS relation_recorded_at,
+        commit.run_id AS relation_run_id,
+        commit.collector_version AS relation_collector_version
+      FROM archive_relation_observation_gap AS gap
+      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
+      WHERE gap.relation_id IN (
+        SELECT relation_id FROM relevant_relation_ids
+      )
+        AND commit.bin_id = ${binId}
+        AND commit.archive_seq <= ${snapshot.asOf}::bigint
+        AND NOT EXISTS (
+          SELECT 1
+          FROM archive_relation_observation AS later
+          WHERE later.relation_id = gap.relation_id
+            AND later.bin_id = ${binId}
+            AND later.archive_seq > commit.archive_seq
+            AND later.archive_seq <= ${snapshot.asOf}::bigint
+        )
+      ORDER BY
+        gap.relation_id,
+        commit.archive_seq DESC,
+        gap.ordinal DESC,
+        gap.commit_id DESC
+    ), active AS (
       SELECT
         relation.relation_id,
         relation.from_item_id,
@@ -1172,46 +1227,19 @@ async function readRelationsPage(
         OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
       )
         AND relation.created_seq <= ${snapshot.asOf}::bigint
-    ), gaps AS (
-      SELECT DISTINCT ON (gap.relation_id)
-        gap.relation_id,
-        gap.from_item_id,
-        gap.target_item_id,
-        NULL::text AS target_source_ref,
-        commit.archive_seq::text AS created_seq,
-        'deleted'::text AS state_status,
-        NULL::uuid AS relation_revision_id,
-        NULL::jsonb AS state_data,
-        commit.commit_id AS relation_commit_id,
-        commit.archive_seq::text AS relation_archive_seq,
-        gap.ordinal AS relation_ordinal,
-        commit.observed_at AS relation_observed_at,
-        commit.recorded_at AS relation_recorded_at,
-        commit.run_id AS relation_run_id,
-        commit.collector_version AS relation_collector_version
-      FROM archive_relation_observation_gap AS gap
-      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-      WHERE (
-        (${direction}::text = 'outgoing' AND gap.from_item_id = ${itemId})
-        OR (${direction}::text = 'incoming' AND gap.target_item_id = ${itemId})
-      )
-        AND commit.bin_id = ${binId}
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
         AND NOT EXISTS (
           SELECT 1
-          FROM archive_relation AS current_relation
-          WHERE current_relation.relation_id = gap.relation_id
-            AND current_relation.created_seq <= ${snapshot.asOf}::bigint
+          FROM gaps
+          WHERE gaps.relation_id = relation.relation_id
         )
-      ORDER BY
-        gap.relation_id,
-        commit.archive_seq DESC,
-        gap.ordinal DESC,
-        gap.commit_id DESC
     ), candidates AS (
       SELECT * FROM active
       UNION ALL
       SELECT * FROM gaps
+      WHERE (
+        (${direction}::text = 'outgoing' AND from_item_id = ${itemId})
+        OR (${direction}::text = 'incoming' AND target_item_id = ${itemId})
+      )
     )
     SELECT *
     FROM candidates

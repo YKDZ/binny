@@ -2474,6 +2474,165 @@ async function verifyHardDeleteEntryPoint(
     query: {},
   });
   assert.equal(freshRead.status, 200);
+
+  const reusedRelationId = relationIds[1]!;
+  const secondaryRelationCommit = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:secondary-relation:" + runId,
+    binId: "rss-secondary",
+    items: [],
+    relations: [
+      {
+        relationId: reusedRelationId,
+        value: {
+          from: ownerKey,
+          to: { sourceKey: targetKey },
+          name: "ordinary-owner-target",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const relationBeforeMainReobservation = await readArchiveRelations(
+    client,
+    owner.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      limit: "10",
+    },
+  );
+  const retainedDeletionGap = relationBeforeMainReobservation.relations.filter(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(retainedDeletionGap.length, 1);
+  assert.equal(retainedDeletionGap[0]?.status, "deleted");
+  assert.equal("from" in retainedDeletionGap[0]!, false);
+  assert.equal("to" in retainedDeletionGap[0]!, false);
+
+  const secondaryRelation = await readArchiveRelations(client, owner.itemId, {
+    direction: "outgoing",
+    binId: "rss-secondary",
+    limit: "10",
+  });
+  const secondaryObservedRelation = secondaryRelation.relations.find(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(secondaryObservedRelation?.status, "observed");
+  if (secondaryObservedRelation?.status === "observed") {
+    assert.equal(
+      secondaryObservedRelation.observation.commitId,
+      secondaryRelationCommit.commitId,
+    );
+    assert.equal(secondaryObservedRelation.to.kind, "item");
+    if (secondaryObservedRelation.to.kind === "item") {
+      assert.equal(secondaryObservedRelation.to.itemId, freshItem.itemId);
+    }
+  }
+
+  const oldMainSnapshot = await readArchiveRelations(client, owner.itemId, {
+    direction: "outgoing",
+    binId: "rss-main",
+    asOf: firstCommit.archiveSeq,
+    limit: "10",
+  });
+  const oldSnapshotGap = oldMainSnapshot.relations.find(
+    ({ relationId }) => relationId === reusedRelationId,
+  );
+  assert.equal(oldSnapshotGap?.status, "deleted");
+
+  const mainReobservation = await submitArchive(client, {
+    requestId: "e2e:archive:hard-delete:main-reobservation:" + runId,
+    binId: "rss-main",
+    items: [],
+    relations: [
+      {
+        relationId: reusedRelationId,
+        value: {
+          from: ownerKey,
+          to: { sourceKey: targetKey },
+          name: "ordinary-owner-target",
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:hard-delete:" + runId + ":a-before",
+        value: {
+          from: ownerKey,
+          to: { sourceRef: "https://example.test/a-before" },
+          name: "page-boundary",
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:hard-delete:" + runId + ":z-after",
+        value: {
+          from: ownerKey,
+          to: { sourceRef: "https://example.test/z-after" },
+          name: "page-boundary",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  assert.equal(mainReobservation.relations.length, 3);
+  const currentMainRelationIds: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await readArchiveRelations(client, owner.itemId, {
+      direction: "outgoing",
+      binId: "rss-main",
+      ...(cursor === undefined ? {} : { cursor }),
+      limit: "1",
+    });
+    currentMainRelationIds.push(
+      ...page.relations.map(({ relationId }) => relationId),
+    );
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  assert.deepEqual(currentMainRelationIds, [
+    "e2e:hard-delete:" + runId + ":a-before",
+    reusedRelationId,
+    "e2e:hard-delete:" + runId + ":z-after",
+  ]);
+  assert.equal(
+    new Set(currentMainRelationIds).size,
+    currentMainRelationIds.length,
+  );
+  const restoredMainRelation = (
+    await readArchiveRelations(client, owner.itemId, {
+      direction: "outgoing",
+      binId: "rss-main",
+      limit: "10",
+    })
+  ).relations.find(({ relationId }) => relationId === reusedRelationId);
+  assert.equal(restoredMainRelation?.status, "observed");
+  if (restoredMainRelation?.status === "observed") {
+    assert.equal(
+      restoredMainRelation.observation.commitId,
+      mainReobservation.commitId,
+    );
+    assert.equal(restoredMainRelation.to.kind, "item");
+    if (restoredMainRelation.to.kind === "item") {
+      assert.equal(restoredMainRelation.to.itemId, freshItem.itemId);
+      assert.equal(restoredMainRelation.to.status, "observed");
+    }
+  }
+  const gapAfterMainReobservation = await readArchiveRelations(
+    client,
+    owner.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      asOf: firstCommit.archiveSeq,
+      limit: "10",
+    },
+  );
+  assert.equal(
+    gapAfterMainReobservation.relations.find(
+      ({ relationId }) => relationId === reusedRelationId,
+    )?.status,
+    "deleted",
+  );
 }
 
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
