@@ -14,7 +14,7 @@ import {
 } from "@binny/contracts";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
-import type { CoreDatabase } from "./database.ts";
+import type { CoreDatabase, CoreTransaction } from "./database.ts";
 
 type RuntimeConnectionRow = {
   readonly bin_id: string;
@@ -218,7 +218,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
 }
 
 async function selectRuntimeConnection(
-  database: CoreDatabase,
+  database: CoreDatabase | CoreTransaction,
   binId: string,
 ): Promise<RuntimeConnectionRow | undefined> {
   const rows = await database.unsafe<RuntimeConnectionRow[]>(
@@ -231,6 +231,20 @@ async function selectRuntimeConnection(
     [binId],
   );
   return rows[0];
+}
+
+export async function readRuntimeExecution(
+  database: CoreDatabase | CoreTransaction,
+  binId: string,
+): Promise<BinOperation<RuntimeExecution>> {
+  const row = await selectRuntimeConnection(database, binId);
+  return row === undefined
+    ? failure(404, {
+        code: "bin_not_found",
+        message: "没有找到这个 bin。",
+        path: ["binId"],
+      })
+    : { ok: true, value: rowExecution(row) };
 }
 
 export async function initializeRuntimeConnectionSchema(
@@ -255,14 +269,7 @@ export function createRuntimeConnectionStore(
 ): RuntimeConnectionOperations {
   return {
     async getExecution(binId) {
-      const row = await selectRuntimeConnection(database, binId);
-      return row === undefined
-        ? failure(404, {
-            code: "bin_not_found",
-            message: "没有找到这个 bin。",
-            path: ["binId"],
-          })
-        : { ok: true, value: rowExecution(row) };
+      return await readRuntimeExecution(database, binId);
     },
 
     async heartbeat(binId, input: RuntimeHeartbeatInput) {

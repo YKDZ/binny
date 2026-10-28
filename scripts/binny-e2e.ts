@@ -29,10 +29,12 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny08fix-" + process.pid.toString(10);
+const projectName = "binny15fix-" + process.pid.toString(10);
 const imageName = projectName + ":local";
+const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
 let composePort = 0;
+let manualRunSourcePort = 0;
 
 function composePrefix(): readonly string[] {
   return [
@@ -50,6 +52,8 @@ function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_PORT: String(composePort),
     BINNY_IMAGE: imageName,
+    BINNY15_RUNTIME_IMAGE: runtimeImageName,
+    BINNY15_SOURCE_HOST_PORT: String(manualRunSourcePort),
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -518,7 +522,7 @@ async function restartServer(port: number): Promise<void> {
 
 function resourceUploadProcess(): ManagedProcess {
   const program = [
-    'const body = Buffer.from("binny05 interrupted resource publish");',
+    'const body = Buffer.from("binny15 interrupted resource publish");',
     'process.stdout.write("BINNY04_UPLOAD_STARTED\\n");',
     'const response = await fetch("http://127.0.0.1:3000/resources", { method: "POST", headers: { "content-type": "application/octet-stream" }, body });',
     'process.stdout.write("BINNY04_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
@@ -631,7 +635,7 @@ async function verifyResourceStorageInterruptions(
   }
 
   const referenceBytes = new TextEncoder().encode(
-    "binny05 committed upload survives interrupted reference registration",
+    "binny15 committed upload survives interrupted reference registration",
   );
   const uploadResponse = await fetch(baseUrl + "/resources", {
     method: "POST",
@@ -778,6 +782,281 @@ async function createSdkManifest(): Promise<unknown> {
   ]);
   assert.equal(result.code, 0, result.stderr);
   return JSON.parse(result.stdout) as unknown;
+}
+
+async function createRuntimeFixtureManifest(): Promise<unknown> {
+  const program = [
+    'import { collectorManifest } from "@binny/collector-sdk";',
+    'import collector from "./test/fixtures/manual-runs-collector.ts";',
+    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+  ].join("\n");
+  const result = await run("pnpm", [
+    "--silent",
+    "--filter",
+    "@binny/collector-runtime",
+    "exec",
+    "node",
+    "--conditions=source",
+    "--input-type=module",
+    "-e",
+    program,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return JSON.parse(result.stdout) as unknown;
+}
+
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForRuntime(baseUrl: string, binId: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const result = cliData<{
+      readonly execution: { readonly status: string };
+    }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+    if (result.execution.status === "online") return;
+    await wait(100);
+  }
+  assert.fail(`bin ${binId} 的运行器没有上线。`);
+}
+
+function sourceArrived(
+  response: unknown,
+  gateKey: string,
+  runId?: string,
+  binId?: string,
+): boolean {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    !("arrivals" in response) ||
+    !Array.isArray(response.arrivals)
+  ) {
+    return false;
+  }
+  return response.arrivals.some((arrival: unknown) => {
+    if (typeof arrival !== "object" || arrival === null) return false;
+    return (
+      "gateKey" in arrival &&
+      arrival.gateKey === gateKey &&
+      (runId === undefined ||
+        ("runId" in arrival && arrival.runId === runId)) &&
+      (binId === undefined || ("binId" in arrival && arrival.binId === binId))
+    );
+  });
+}
+
+async function waitForSourceArrival(
+  sourceUrl: string,
+  gateKey: string,
+  runId?: string,
+  binId?: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(sourceUrl + "/control/arrivals", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const status: unknown = await response.json();
+    if (sourceArrived(status, gateKey, runId, binId)) return;
+    await wait(50);
+  }
+  assert.fail(`运行没有到达受控信源：${gateKey}`);
+}
+
+async function releaseSource(
+  sourceUrl: string,
+  gateKey: string,
+): Promise<void> {
+  const response = await fetch(sourceUrl + "/control/release", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ gateKey, disposition: "material" }),
+    signal: AbortSignal.timeout(3_000),
+  });
+  assert.equal(response.status, 200);
+}
+
+function manualRunSourceRuntimeUrl(): string {
+  return "http://manual-runs-source:8081";
+}
+
+function manualRunSourceControlUrl(): string {
+  const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
+  return "http://" + host + ":" + String(manualRunSourcePort);
+}
+
+async function waitForManualRunSource(): Promise<void> {
+  const sourceUrl = manualRunSourceControlUrl();
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(sourceUrl + "/control/arrivals", {
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (response.status === 200) return;
+    } catch {
+      // Compose 服务可能比 `up --wait` 晚几毫秒开始监听。
+    }
+    await wait(50);
+  }
+  assert.fail("受控信源没有在 Compose 网络入口启动。");
+}
+
+type ManualRunCliState = {
+  readonly runId: string;
+  readonly binId: string;
+  readonly status: string;
+  readonly result?: {
+    readonly completedScopes: readonly string[];
+    readonly commits: readonly {
+      readonly commitId: string;
+      readonly items: readonly { readonly itemId: string }[];
+    }[];
+    readonly stopReason: { readonly code: string };
+  };
+};
+
+async function manualRunsCliStep(
+  baseUrl: string,
+  manifest: unknown,
+): Promise<void> {
+  const manifestJson = JSON.stringify(manifest);
+  assert.ok(manifestJson !== undefined);
+  for (const binId of ["binny15-one", "binny15-two"]) {
+    const created = cliData<{
+      readonly id: string;
+      readonly execution: unknown;
+    }>(
+      await cli(baseUrl, [
+        "bin",
+        "create",
+        binId,
+        "--collector",
+        manifestJson,
+        "--identity",
+        binId + "-identity",
+        "--config",
+        JSON.stringify({ section: "initial" }),
+        "--targets",
+        "[]",
+      ]),
+      "created",
+    );
+    assert.equal(created.id, binId);
+  }
+
+  await Promise.all([
+    waitForRuntime(baseUrl, "binny15-one"),
+    waitForRuntime(baseUrl, "binny15-two"),
+  ]);
+
+  await waitForManualRunSource();
+  const sourceRuntimeUrl = manualRunSourceRuntimeUrl();
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const gateKey = "15-cli-manual-run";
+  const parameters = {
+    sourceUrl: sourceRuntimeUrl,
+    gateKey,
+    sourceKey: "cli-created-item",
+  };
+  const triggered = cliData<{
+    readonly runId: string;
+    readonly status: string;
+    readonly binId: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify(parameters),
+    ]),
+    "triggered",
+  );
+  assert.equal(triggered.status, "queued");
+  assert.equal(triggered.binId, "binny15-one");
+  await waitForSourceArrival(
+    sourceControlUrl,
+    gateKey,
+    triggered.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, gateKey);
+
+  const deadline = Date.now() + 30_000;
+  let completed: ManualRunCliState | undefined;
+  while (Date.now() < deadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", "binny15-one", triggered.runId]),
+      "found",
+    );
+    if (current.status === "completed" || current.status === "failed") {
+      completed = current;
+      break;
+    }
+    await wait(100);
+  }
+  assert.ok(completed !== undefined, "CLI 没有读取到终结运行结果。");
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.result?.stopReason.code, "completed");
+  assert.deepEqual(completed.result?.completedScopes, [
+    "source/cli-created-item",
+  ]);
+  const savedCommit = completed.result?.commits[0];
+  assert.ok(savedCommit !== undefined);
+  const savedItem = savedCommit.items[0];
+  assert.ok(savedItem !== undefined);
+
+  const commit = cliData<{
+    readonly binId: string;
+    readonly runId?: string;
+    readonly collectorVersion?: string;
+  }>(await cli(baseUrl, ["archive", "commit", savedCommit.commitId]), "found");
+  assert.equal(commit.binId, "binny15-one");
+  assert.equal(commit.runId, triggered.runId);
+  assert.equal(commit.collectorVersion, "1.0.0");
+
+  const item = cliData<{
+    readonly views: readonly {
+      readonly state: {
+        readonly metadata?: { readonly section?: unknown };
+        readonly body?: { readonly text?: string };
+      };
+    }[];
+  }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
+  assert.equal(item.views[0]?.state.metadata?.section, "initial");
+  assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
+}
+
+async function manualRunsHttpStep(
+  baseUrl: string,
+  manifest: unknown,
+): Promise<void> {
+  const result = await run(
+    "pnpm",
+    [
+      "--silent",
+      "--filter",
+      "@binny/api",
+      "exec",
+      "node",
+      "--conditions=source",
+      "scripts/manual-runs-http-e2e.ts",
+    ],
+    {
+      env: {
+        BINNY_E2E_BASE_URL: baseUrl,
+        BINNY15_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
+        BINNY15_COLLECTOR_MANIFEST: JSON.stringify(manifest),
+      },
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  process.stdout.write(result.stdout);
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
@@ -1194,10 +1473,10 @@ async function verifyRestartAndRemoval(
   );
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny08fix-resource-cli-"),
+    path.join(tmpdir(), "binny15fix-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny08fix-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny15fix-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1315,13 +1594,14 @@ async function verifyRestartAndRemoval(
 async function main(): Promise<void> {
   const port = await reservePort();
   composePort = port;
+  manualRunSourcePort = await reservePort();
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny08fix-compose-"),
+    path.join(tmpdir(), "binny15fix-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -1347,6 +1627,9 @@ async function main(): Promise<void> {
         "360",
         "postgres",
         "server",
+        "manual-runs-source",
+        "runtime-fifteen-one",
+        "runtime-fifteen-two",
       ],
       port,
     );
@@ -1360,6 +1643,16 @@ async function main(): Promise<void> {
       binIds: [],
     });
     await verifyConfigurationJourney(baseUrl);
+    const manualRunManifest = await createRuntimeFixtureManifest();
+    await manualRunsCliStep(baseUrl, manualRunManifest);
+    await manualRunsHttpStep(baseUrl, manualRunManifest);
+    for (const binId of ["binny15-one", "binny15-two"]) {
+      const removed = cliData<{
+        readonly removed: boolean;
+        readonly id: string;
+      }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
+      assert.deepEqual(removed, { removed: true, id: binId });
+    }
     const enabled = cliData<{ readonly status: string }>(
       await cli(baseUrl, ["bin", "enable", "rss-main"]),
       "enabled",
@@ -1388,6 +1681,8 @@ async function main(): Promise<void> {
       "docker",
       [
         ...composePrefix(),
+        "--profile",
+        "binny15",
         "down",
         "--rmi",
         "all",

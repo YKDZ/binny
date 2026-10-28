@@ -3,4 +3,5 @@ export * from "./archive.ts";
 export * from "./archive-history.ts";
 export * from "./archive-relations.ts";
 export * from "./bin-configuration.ts";
+export * from "./manual-run.ts";
 export * from "./postgres-text.ts";

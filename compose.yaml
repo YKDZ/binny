@@ -41,6 +41,20 @@ services:
       - resource-data:/var/lib/binny/resources
     restart: unless-stopped
 
+  manual-runs-source:
+    <<: *binny-image
+    profiles: [binny15]
+    command:
+      - node
+      - --conditions=source
+      - packages/api/scripts/manual-runs-source.ts
+      - --serve
+    environment:
+      BINNY15_SOURCE_PORT: 8081
+    ports:
+      - "${BINNY15_SOURCE_HOST_PORT:-18815}:8081"
+    restart: unless-stopped
+
   runtime-one:
     image: ${BINNY14_RUNTIME_IMAGE:-binny14-lightweight:local}
     profiles: [binny14]
@@ -76,6 +90,50 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: lightweight
     ports:
       - "${BINNY14_RUNTIME_TWO_PORT:-14142}:8080"
+    restart: unless-stopped
+
+  runtime-fifteen-one:
+    image: ${BINNY15_RUNTIME_IMAGE:-binny15-lightweight:local}
+    profiles: [binny15]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny15-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-fifteen-two:
+    image: ${BINNY15_RUNTIME_IMAGE:-binny15-lightweight:local}
+    profiles: [binny15]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny15-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
 volumes:

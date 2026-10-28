@@ -2,6 +2,7 @@
 import postgres from "postgres";
 
 export type CoreDatabase = ReturnType<typeof postgres>;
+export type CoreTransaction = postgres.TransactionSql;
 
 export function connectCoreDatabase(connectionString: string): CoreDatabase {
   return postgres(connectionString, {

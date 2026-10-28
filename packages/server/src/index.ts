@@ -6,9 +6,11 @@ import {
   createArchiveStore,
   connectCoreDatabase,
   createBinConfigurationStore,
+  createManualRunStore,
   createRuntimeConnectionStore,
   initializeArchiveSchema,
   initializeBinConfigurationSchema,
+  initializeManualRunSchema,
   initializeRuntimeConnectionSchema,
 } from "@binny/core";
 // 核心与 HTTP 的组装、配置及服务启动。
@@ -52,11 +54,14 @@ export async function createServerRuntime(options: {
       100,
     ),
   });
+  const runtime = createRuntimeConnectionStore(database);
+  const runs = createManualRunStore(database);
   try {
     await initializeBinConfigurationSchema(database);
     await initializeArchiveSchema(database);
     await archives.initializeResourceStorage();
     await initializeRuntimeConnectionSchema(database);
+    await initializeManualRunSchema(database);
   } catch (error) {
     await archives.close();
     await database.end();
@@ -65,7 +70,8 @@ export async function createServerRuntime(options: {
   return {
     app: createApiRoutes({
       bins: createBinConfigurationStore(database),
-      runtime: createRuntimeConnectionStore(database),
+      runtime,
+      runs,
       archives,
     }),
     close: async () => {

@@ -4,11 +4,16 @@ import {
   binErrorSchema,
   binIdSchema,
   binUpdateInputSchema,
+  manualRunClaimInputSchema,
+  manualRunCompleteInputSchema,
+  manualRunApiSchemas as contractManualRunApiSchemas,
+  manualRunTriggerInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
   type ArchiveOperations,
   type BinConfiguration,
   type BinConfigurationOperations,
+  type ManualRunOperations,
   type RuntimeConnectionOperations,
   toInputJsonSchema,
   toPostgresJsonSchema,
@@ -23,12 +28,14 @@ import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
 export type {
   ArchiveOperations,
   BinConfigurationOperations,
+  ManualRunOperations,
   RuntimeConnectionOperations,
 } from "@binny/contracts";
 
 export type ApiOperations = {
   readonly bins: BinConfigurationOperations;
   readonly runtime: RuntimeConnectionOperations;
+  readonly runs: ManualRunOperations;
   readonly archives: ArchiveOperations;
 };
 
@@ -142,6 +149,93 @@ function makeApp(operations: ApiOperations) {
           },
           200,
         );
+      },
+    )
+    .post(
+      "/bins/:binId/runs",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", manualRunTriggerInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runs.triggerRun(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 202);
+      },
+    )
+    .get(
+      "/bins/:binId/runs/:runId",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, runId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, runId } = c.req.valid("param");
+        const result = await operations.runs.getRun(binId, runId);
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/runtime/runs/claim",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", manualRunClaimInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runs.claimRun(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json({ run: result.value }, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/runtime/runs/:runId/complete",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, runId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("json", manualRunCompleteInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const { binId, runId } = c.req.valid("param");
+        const result = await operations.runs.completeRun(
+          binId,
+          runId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
       },
     )
     .patch(
@@ -278,6 +372,8 @@ export const binApiSchemas = {
   output: toPostgresJsonSchema(binConfigurationSchema, "output"),
   error: toPostgresJsonSchema(binErrorSchema, "output"),
 };
+
+export const manualRunApiSchemas = contractManualRunApiSchemas;
 
 export { archiveApiSchemas };
 

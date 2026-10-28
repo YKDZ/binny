@@ -13,4 +13,8 @@ export {
   createRuntimeConnectionStore,
   initializeRuntimeConnectionSchema,
 } from "./runtime-connection.ts";
+export {
+  createManualRunStore,
+  initializeManualRunSchema,
+} from "./manual-run.ts";
 export { connectCoreDatabase, type CoreDatabase } from "./database.ts";
