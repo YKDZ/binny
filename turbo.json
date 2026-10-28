@@ -37,13 +37,23 @@
       "tags": ["quality:light"]
     },
     "//#test:binny:e2e": {
-      "dependsOn": ["@binny/binny#build"],
+      "dependsOn": [
+        "@binny/api#build",
+        "@binny/binny#build",
+        "@binny/collector-sdk#build"
+      ],
+      "passThroughEnv": ["BINNY_E2E_HOST", "BINNY_E2E_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
+        "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
+        "packages/api/package.json",
         "packages/api/src/**",
+        "packages/api/scripts/**",
+        "packages/api/test-consumer/**",
         "packages/binny/src/**",
+        "packages/collector-sdk/src/**",
         "packages/contracts/src/**",
         "packages/core/src/**",
         "packages/server/src/**"
@@ -79,6 +89,7 @@
     },
     "//#test:runtime-connections": {
       "dependsOn": ["@binny/binny#build"],
+      "passThroughEnv": ["BINNY14_PUBLISHED_HOST", "BINNY14_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",

@@ -6,21 +6,29 @@ import {
   binUpdateInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
+  type ArchiveOperations,
   type BinConfiguration,
   type BinConfigurationOperations,
   type RuntimeConnectionOperations,
   toInputJsonSchema,
 } from "@binny/contracts";
-// 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import * as z from "zod";
-export type { BinConfigurationOperations } from "@binny/contracts";
-export type { RuntimeConnectionOperations } from "@binny/contracts";
+
+// 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
+import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
+export type {
+  ArchiveOperations,
+  BinConfigurationOperations,
+  RuntimeConnectionOperations,
+} from "@binny/contracts";
 
 export type ApiOperations = {
   readonly bins: BinConfigurationOperations;
   readonly runtime: RuntimeConnectionOperations;
+  readonly archives: ArchiveOperations;
 };
 
 function validationFailure(issues: readonly z.core.$ZodIssue[]) {
@@ -54,6 +62,26 @@ function makeApp(operations: ApiOperations) {
   }
 
   return new Hono()
+    .onError((error, c) => {
+      if (
+        error instanceof HTTPException &&
+        error.status === 400 &&
+        error.message === "Malformed JSON in request body"
+      ) {
+        return c.json(
+          {
+            error: {
+              code: "invalid_input" as const,
+              message: "请求正文必须是有效 JSON。",
+            },
+          },
+          400,
+        );
+      }
+      if (error instanceof HTTPException) return error.getResponse();
+      console.error(error);
+      return c.text("Internal Server Error", 500);
+    })
     .get("/health", (c) => c.json({ status: "ok" as const }, 200))
     .get("/bins", async (c) => {
       const bins = await operations.bins.listBins();
@@ -234,7 +262,8 @@ function makeApp(operations: ApiOperations) {
         if (!result.ok) return c.json({ error: result.error }, result.status);
         return c.json(result.value, 200);
       },
-    );
+    )
+    .route("/", createArchiveRoutes(operations.archives));
 }
 
 export type ApiRoutes = ReturnType<typeof makeApp>;
@@ -248,6 +277,8 @@ export const binApiSchemas = {
   output: z.toJSONSchema(binConfigurationSchema),
   error: z.toJSONSchema(binErrorSchema),
 };
+
+export { archiveApiSchemas };
 
 export function createApiRoutes(operations: ApiOperations): ApiRoutes {
   return makeApp(operations);

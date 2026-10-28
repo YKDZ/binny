@@ -10,7 +10,7 @@
       "tags": ["work:preparation"]
     },
     "format:check": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -23,7 +23,7 @@
     },
     "lint": {
       "dependsOn": [],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -35,7 +35,7 @@
     },
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     }

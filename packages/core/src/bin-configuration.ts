@@ -10,7 +10,13 @@ import {
   type CollectorManifest,
   type JsonObject,
 } from "@binny/contracts";
-import * as z from "zod";
+import * as formats from "ajv-formats";
+import {
+  Ajv2020,
+  type ErrorObject,
+  type Schema,
+  type ValidateFunction,
+} from "ajv/dist/2020.js";
 
 import type { CoreDatabase } from "./database.ts";
 
@@ -32,6 +38,38 @@ const tableName = "bin_configurations";
 const jsonbType = 3802;
 const selectColumns =
   "id, collector, identity_id, config, targets, status, created_at, updated_at";
+const addFormats = formats.default.default;
+const collectorValidatorCacheLimit = 32;
+
+type CompiledCollectorValidators = {
+  readonly configuration: ValidateFunction;
+  // Ajv 持有 schema 对象强引用；淘汰条目时一并释放整个编译器。
+  readonly compiler: Ajv2020;
+};
+
+const collectorValidatorCache = new Map<string, CompiledCollectorValidators>();
+
+function dynamicSchemaPath(issue: ErrorObject): (string | number)[] {
+  const path = issue.instancePath
+    .split("/")
+    .slice(1)
+    .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"));
+  if (
+    issue.keyword === "required" &&
+    "missingProperty" in issue.params &&
+    typeof issue.params.missingProperty === "string"
+  ) {
+    path.push(issue.params.missingProperty);
+  }
+  if (
+    issue.keyword === "additionalProperties" &&
+    "additionalProperty" in issue.params &&
+    typeof issue.params.additionalProperty === "string"
+  ) {
+    path.push(issue.params.additionalProperty);
+  }
+  return path;
+}
 
 function jsonbParameter(database: CoreDatabase, value: unknown) {
   return database.typed(value, jsonbType);
@@ -99,18 +137,19 @@ function schemaIssuePath(
 function createDynamicSchema(
   document: Record<string, unknown>,
   path: readonly (string | number)[],
+  compiler: Ajv2020,
 ): {
-  readonly schema: z.ZodType | undefined;
+  readonly validator: ValidateFunction | undefined;
   readonly error: BinError | undefined;
 } {
   try {
     return {
-      schema: z.fromJSONSchema(document),
+      validator: compiler.compile(document as Schema),
       error: undefined,
     };
   } catch {
     return {
-      schema: undefined,
+      validator: undefined,
       error: {
         code: "invalid_manifest",
         message: "采集器声明的 JSON Schema 无效或包含不支持的关键字。",
@@ -120,7 +159,61 @@ function createDynamicSchema(
   }
 }
 
-function validateManifest(collector: CollectorManifest): BinError | undefined {
+function dynamicSchemaCacheKey(collector: CollectorManifest): string {
+  const actions = Object.entries(collector.actions)
+    .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([name, action]) => [name, action.params]);
+  return JSON.stringify({ config: collector.configSchema, actions });
+}
+
+function compileCollectorValidators(collector: CollectorManifest): {
+  readonly validators: CompiledCollectorValidators | undefined;
+  readonly error: BinError | undefined;
+} {
+  const cacheKey = dynamicSchemaCacheKey(collector);
+  const cached = collectorValidatorCache.get(cacheKey);
+  if (cached !== undefined) {
+    collectorValidatorCache.delete(cacheKey);
+    collectorValidatorCache.set(cacheKey, cached);
+    return { validators: cached, error: undefined };
+  }
+
+  const compiler = new Ajv2020({ strictTypes: false });
+  addFormats(compiler);
+  const config = createDynamicSchema(
+    collector.configSchema,
+    ["collector", "configSchema"],
+    compiler,
+  );
+  if (config.error !== undefined)
+    return { validators: undefined, error: config.error };
+
+  for (const [name, action] of Object.entries(collector.actions)) {
+    const result = createDynamicSchema(
+      action.params,
+      ["collector", "actions", name, "params"],
+      compiler,
+    );
+    if (result.error !== undefined)
+      return { validators: undefined, error: result.error };
+  }
+
+  const validators = {
+    configuration: config.validator!,
+    compiler,
+  };
+  collectorValidatorCache.set(cacheKey, validators);
+  if (collectorValidatorCache.size > collectorValidatorCacheLimit) {
+    const oldestKey = collectorValidatorCache.keys().next();
+    if (!oldestKey.done) collectorValidatorCache.delete(oldestKey.value);
+  }
+  return { validators, error: undefined };
+}
+
+export function validateCollectorConfiguration(
+  collector: CollectorManifest,
+  config: JsonObject,
+): BinError | undefined {
   const checked = collectorManifestSchema.safeParse(collector);
   if (!checked.success) {
     const issue = checked.error.issues[0];
@@ -133,60 +226,18 @@ function validateManifest(collector: CollectorManifest): BinError | undefined {
     };
   }
 
-  const definitions = [
-    {
-      document: collector.configSchema,
-      path: ["collector", "configSchema"],
-    },
-    ...Object.entries(collector.actions).map(([name, action]) => ({
-      document: action.params,
-      path: ["collector", "actions", name, "params"],
-    })),
-  ];
-  for (const definition of definitions) {
-    const result = createDynamicSchema(definition.document, definition.path);
-    if (result.error !== undefined) return result.error;
-  }
-  return undefined;
-}
-
-function validateDynamicValue(
-  value: unknown,
-  document: Record<string, unknown>,
-  prefix: readonly (string | number)[],
-  errorCode: "invalid_configuration",
-  message: string,
-): BinError | undefined {
-  const built = createDynamicSchema(document, prefix);
+  const built = compileCollectorValidators(collector);
   if (built.error !== undefined) return built.error;
-  const parsed = built.schema!.safeParse(value);
-  if (parsed.success) return undefined;
-  const issue = parsed.error.issues[0];
+  if (built.validators!.configuration(config)) return undefined;
+
+  const issue = built.validators!.configuration.errors?.[0];
   return {
-    code: errorCode,
-    message,
+    code: "invalid_configuration",
+    message: "长期配置不符合采集器声明。",
     ...(issue === undefined
       ? {}
-      : { path: [...schemaIssuePath(prefix, issue.path)] }),
+      : { path: ["config", ...dynamicSchemaPath(issue)] }),
   };
-}
-
-function validateConfiguration(
-  collector: CollectorManifest,
-  config: JsonObject,
-): BinError | undefined {
-  const manifestError = validateManifest(collector);
-  if (manifestError !== undefined) return manifestError;
-
-  const configError = validateDynamicValue(
-    config,
-    collector.configSchema,
-    ["config"],
-    "invalid_configuration",
-    "长期配置不符合采集器声明。",
-  );
-  if (configError !== undefined) return configError;
-  return undefined;
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -246,7 +297,7 @@ export function createBinConfigurationStore(
           issue === undefined ? undefined : issue.path.map(String),
         );
       }
-      const invalid = validateConfiguration(
+      const invalid = validateCollectorConfiguration(
         checked.data.collector,
         checked.data.config,
       );
@@ -306,7 +357,7 @@ export function createBinConfigurationStore(
         const collector = checked.data.collector ?? previous.collector;
         const config = checked.data.config ?? previous.config;
         const targets = checked.data.targets ?? previous.targets;
-        const invalid = validateConfiguration(collector, config);
+        const invalid = validateCollectorConfiguration(collector, config);
         if (invalid !== undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
 

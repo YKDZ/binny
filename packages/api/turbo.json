@@ -10,7 +10,7 @@
       "tags": ["work:preparation"]
     },
     "format:check": {
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -23,7 +23,7 @@
     },
     "lint": {
       "dependsOn": [],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
@@ -35,15 +35,15 @@
     },
     "typecheck": {
       "dependsOn": ["^typecheck"],
-      "inputs": [],
+      "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
     },
-    "test:client-types": {
-      "dependsOn": ["build"],
-      "inputs": ["package.json", "test-consumer/**", "src/**"],
+    "prepare:client-consumer": {
+      "inputs": ["test-consumer/**", "scripts/prepare-client-consumer.ts"],
       "outputs": [],
-      "tags": ["quality:heavy"]
+      "cache": false,
+      "tags": ["work:preparation"]
     }
   }
 }

@@ -1,5 +1,9 @@
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveErrorSchema,
+  archiveIdentifierSchema,
+  archiveItemReadSchema,
+  archiveRevisionReadSchema,
   binConfigurationSchema,
   binCreateInputSchema,
   binErrorSchema,
@@ -51,7 +55,10 @@ const jsonTextSchema = z.string().transform((source, context) => {
 const jsonObjectTextSchema = jsonTextSchema.pipe(jsonObjectSchema);
 const collectorTextSchema = jsonTextSchema.pipe(collectorManifestSchema);
 const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
-const errorOutputSchema = binErrorSchema.shape.error;
+const errorOutputSchema = z.union([
+  binErrorSchema.shape.error,
+  archiveErrorSchema.shape.error,
+]);
 
 function createCliContract(identity: CliCommandIdentity) {
   const define = defineCli<CliDependencies>();
@@ -100,6 +107,12 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "bin",
         description: "管理采集配置和已声明动作。",
+      },
+      archive: {
+        kind: "commandGroup",
+        parent: "cli",
+        name: "archive",
+        description: "读取已归档资料和不可变内容版本。",
       },
       ...command("binList")({
         kind: "command",
@@ -421,6 +434,80 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的移除状态。");
+        },
+      }),
+      ...command("archiveItem")({
+        kind: "command",
+        parent: "archive",
+        name: "item",
+        description: "读取条目及各 bin 的归档视图。",
+        fields: { itemId: { kind: "positional", description: "归档条目 ID" } },
+        input: z.object({ itemId: archiveIdentifierSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "归档条目及观察历史",
+              exitCode: 0,
+              schema: archiveItemReadSchema,
+              text: (item) => outputText("归档条目", item),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.items[":itemId"].$get({
+              param: { itemId: input.itemId },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档条目读取状态。");
+        },
+      }),
+      ...command("archiveRevision")({
+        kind: "command",
+        parent: "archive",
+        name: "revision",
+        description: "读取一个不可变内容版本。",
+        fields: {
+          revisionId: { kind: "positional", description: "内容版本 ID" },
+        },
+        input: z.object({ revisionId: archiveIdentifierSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "不可变内容版本",
+              exitCode: 0,
+              schema: archiveRevisionReadSchema,
+              text: (revision) => outputText("内容版本", revision),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.revisions[":revisionId"].$get({
+              param: { revisionId: input.revisionId },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档版本读取状态。");
         },
       }),
     },
