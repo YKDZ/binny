@@ -13,6 +13,7 @@ import {
   archiveRelationStateSchema,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
+  archiveSearchJsonProjectionResultSchema,
   archiveSnapshotSequenceSchema,
   archiveTimelineCursorSchema,
   archiveTimelinePageSchema,
@@ -26,6 +27,7 @@ import {
   type ArchiveSearchOperation,
   type ArchiveSearchField,
   type ArchiveSearchFilter,
+  type ArchiveSearchJsonProjection,
   type ArchiveSearchRequest,
   type ArchiveSearchText,
   type ArchiveRelationOptions,
@@ -125,7 +127,6 @@ type SearchRow = {
   readonly root_ordinal: number | null;
   readonly namespace: string;
   readonly source_key: string;
-  readonly sort_values: readonly (string | null)[];
   readonly bin_id: string;
   readonly revision_id: string;
   readonly archive_seq: string;
@@ -141,6 +142,7 @@ type SearchRow = {
   readonly context_start: number | null;
   readonly context_end: number | null;
   readonly context_text: string | null;
+  readonly json_projections: unknown;
 };
 
 type RelationIdentityRow = {
@@ -300,10 +302,9 @@ function decodeTimelineCursor(
 }
 
 type SearchCursor = {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly queryHash: string;
   readonly snapshot: ResolvedSnapshot;
-  readonly sortValues: readonly (string | null)[];
   readonly resultId: string;
 };
 
@@ -317,7 +318,10 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
     if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
     const value: unknown = JSON.parse(json);
     if (typeof value !== "object" || value === null) return undefined;
-    if (!("version" in value) || value.version !== 1) return undefined;
+    if (!("version" in value) || (value.version !== 1 && value.version !== 2)) {
+      return undefined;
+    }
+    const version = value.version;
     if (!("queryHash" in value) || typeof value.queryHash !== "string")
       return undefined;
     if (!/^[a-f0-9]{64}$/u.test(value.queryHash)) return undefined;
@@ -335,15 +339,17 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
     ) {
       return undefined;
     }
-    if (!("sortValues" in value) || !Array.isArray(value.sortValues))
-      return undefined;
-    if (
-      value.sortValues.some(
-        (entry) =>
-          entry !== null && !postgresTextSchema.safeParse(entry).success,
-      )
-    ) {
-      return undefined;
+    if (version === 1) {
+      if (!("sortValues" in value) || !Array.isArray(value.sortValues))
+        return undefined;
+      if (
+        value.sortValues.some(
+          (entry) =>
+            entry !== null && !postgresTextSchema.safeParse(entry).success,
+        )
+      ) {
+        return undefined;
+      }
     }
     if (!("resultId" in value) || typeof value.resultId !== "string")
       return undefined;
@@ -354,13 +360,12 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
     )
       return undefined;
     return {
-      version: 1,
+      version,
       queryHash: value.queryHash,
       snapshot: {
         asOf: checkedSequence.data,
         mode: snapshot.mode,
       },
-      sortValues: value.sortValues,
       resultId: value.resultId,
     };
   } catch {
@@ -1573,6 +1578,29 @@ function searchFieldExpression(
   }
 }
 
+function searchJsonPathExpression(
+  stateExpression: string,
+  field: ArchiveSearchJsonProjection["field"],
+  path: readonly (string | number)[],
+  bind: (value: postgres.JSONValue) => string,
+): string {
+  let expression = `(${stateExpression}->'${field}')`;
+  for (const segment of path) {
+    const indexType = typeof segment === "number";
+    expression = `(${expression} -> ${bind(String(segment))}::${indexType ? "integer" : "text"})`;
+  }
+  return expression;
+}
+
+function searchJsonValueParameter(
+  value: unknown,
+  bind: (value: postgres.JSONValue | postgres.Parameter) => string,
+  jsonParameter: (value: postgres.JSONValue) => postgres.Parameter,
+): string {
+  if (value === null) return "'null'::jsonb";
+  return bind(jsonParameter(value as postgres.JSONValue)) + "::jsonb";
+}
+
 function postgresErrorCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null || !("code" in error))
     return undefined;
@@ -1648,8 +1676,8 @@ async function readCurrentSearchPage(
   cursor: SearchCursor | undefined,
   queryHash: string,
 ): Promise<ReturnType<typeof archiveSearchPageSchema.parse>> {
-  const parameters: (string | null)[] = [];
-  const bind = (value: string | null): string => {
+  const parameters: (postgres.JSONValue | postgres.Parameter)[] = [];
+  const bind = (value: postgres.JSONValue | postgres.Parameter): string => {
     parameters.push(value);
     return "$" + parameters.length.toString(10);
   };
@@ -1702,6 +1730,80 @@ async function readCurrentSearchPage(
     if (filter.type === "not")
       return "NOT (" + compileFilter(filter.condition) + ")";
     if (filter.type === "text") return compileText(filter.text);
+    if (filter.type === "json") {
+      const expression = searchJsonPathExpression(
+        "revision.state_data",
+        filter.field,
+        filter.path,
+        bind,
+      );
+      if (filter.operator === "exists") {
+        return (
+          expression + (filter.value === true ? " IS NOT NULL" : " IS NULL")
+        );
+      }
+      if (filter.valueType === undefined) {
+        throw new Error("JSON 路径比较缺少预期类型。");
+      }
+      const valueType = filter.valueType;
+      const matchesType = `jsonb_typeof(${expression}) = ${bind(valueType)}::text`;
+      const comparedExpression =
+        valueType === "string"
+          ? `(${expression} #>> '{}') COLLATE "C"`
+          : expression;
+      const parameter = (value: unknown): string =>
+        valueType === "string"
+          ? bind(String(value)) + '::text COLLATE "C"'
+          : searchJsonValueParameter(value, bind, (jsonValue) =>
+              transaction.json(jsonValue),
+            );
+      if (filter.operator === "in" || filter.operator === "notIn") {
+        const values = (filter.values ?? []).map(parameter).join(", ");
+        return (
+          "COALESCE((" +
+          matchesType +
+          " AND " +
+          comparedExpression +
+          (filter.operator === "in" ? " IN (" : " NOT IN (") +
+          values +
+          ")), FALSE)"
+        );
+      }
+      if (filter.operator === "between") {
+        return (
+          "COALESCE((" +
+          matchesType +
+          " AND " +
+          comparedExpression +
+          " >= " +
+          parameter(filter.lower) +
+          " AND " +
+          comparedExpression +
+          " <= " +
+          parameter(filter.upper) +
+          "), FALSE)"
+        );
+      }
+      const operator = {
+        eq: "=",
+        ne: "<>",
+        gt: ">",
+        gte: ">=",
+        lt: "<",
+        lte: "<=",
+      }[filter.operator];
+      return (
+        "COALESCE((" +
+        matchesType +
+        " AND " +
+        comparedExpression +
+        " " +
+        operator +
+        " " +
+        parameter(filter.value) +
+        "), FALSE)"
+      );
+    }
 
     const field = searchFieldExpression(filter.field);
     if (filter.operator === "exists") {
@@ -1817,80 +1919,138 @@ async function readCurrentSearchPage(
     resultUnit === "observation" ? "min(commit_id::text)" : "NULL::text";
   const rootOrdinalExpression =
     resultUnit === "observation" ? "min(ordinal)" : "NULL::integer";
-  const selectSortExpression = (field: string): string => {
-    switch (field) {
-      case "itemId":
-        return "item_id::text";
-      case "sourceKey.namespace":
-        return "namespace";
-      case "sourceKey.key":
-        return "source_key";
-      case "sourceRef":
-        return '(array_agg(source_ref ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "sourceModifiedAt":
-        return '(array_agg(source_modified_at ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "capture.completeness":
-        return '(array_agg(completeness ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "binId":
-        return '(array_agg(bin_id ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "revisionId":
-        return '(array_agg(revision_id::text ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "archiveSeq":
-        return "(array_agg(lpad(archive_seq, 19, '0') ORDER BY bin_id COLLATE \"C\", archive_seq::bigint, ordinal, commit_id))[1]";
-      case "runId":
-        return '(array_agg(run_id ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "collectorVersion":
-        return '(array_agg(collector_version ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "observedAt":
-        return '(array_agg(to_char(observed_at AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      case "recordedAt":
-        return '(array_agg(to_char(recorded_at AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]';
-      default:
-        throw new Error("搜索排序字段未声明。");
-    }
+  type SearchOrder = (typeof input.orderBy)[number];
+  type SearchSortKind = "text" | "jsonb";
+  type SearchSortExpression = {
+    readonly sql: string;
+    readonly kind: SearchSortKind;
   };
-  const sortExpressions = input.orderBy.map(({ field }) =>
-    selectSortExpression(field),
-  );
+  const selectSortExpression = (sort: SearchOrder): SearchSortExpression => {
+    if (sort.field === "metadata" || sort.field === "properties") {
+      if (sort.path === undefined || sort.valueType === undefined) {
+        throw new Error("JSON 路径排序缺少路径或预期类型。");
+      }
+      const expression = searchJsonPathExpression(
+        "state_data",
+        sort.field,
+        sort.path,
+        bind,
+      );
+      const typeName = sort.valueType;
+      const value =
+        typeName === "number"
+          ? `CASE WHEN jsonb_typeof(${expression}) = 'number' THEN ${expression} END`
+          : `CASE WHEN jsonb_typeof(${expression}) = '${typeName}' THEN ${expression} #>> '{}' END`;
+      return {
+        sql: `(array_agg(${value} ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]`,
+        kind: typeName === "number" ? "jsonb" : "text",
+      };
+    }
+    const aggregate = (expression: string): string =>
+      `(array_agg(${expression} ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]`;
+    switch (sort.field) {
+      case "itemId":
+        return { sql: "item_id::text", kind: "text" };
+      case "sourceKey.namespace":
+        return { sql: "namespace", kind: "text" };
+      case "sourceKey.key":
+        return { sql: "source_key", kind: "text" };
+      case "sourceRef":
+        return { sql: aggregate("source_ref"), kind: "text" };
+      case "sourceModifiedAt":
+        return { sql: aggregate("source_modified_at"), kind: "text" };
+      case "capture.completeness":
+        return { sql: aggregate("completeness"), kind: "text" };
+      case "binId":
+        return { sql: aggregate("bin_id"), kind: "text" };
+      case "revisionId":
+        return { sql: aggregate("revision_id::text"), kind: "text" };
+      case "archiveSeq":
+        return { sql: aggregate("lpad(archive_seq, 19, '0')"), kind: "text" };
+      case "runId":
+        return { sql: aggregate("run_id"), kind: "text" };
+      case "collectorVersion":
+        return { sql: aggregate("collector_version"), kind: "text" };
+      case "observedAt":
+        return {
+          sql: aggregate(
+            "to_char(observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+          ),
+          kind: "text",
+        };
+      case "recordedAt":
+        return {
+          sql: aggregate(
+            "to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+          ),
+          kind: "text",
+        };
+    }
+    throw new Error("搜索排序字段未声明。");
+  };
+  const sortExpressions = input.orderBy.map(selectSortExpression);
   const pageOrdering = input.orderBy
     .map(
       ({ direction }, index) =>
-        `sort_${index.toString(10)} COLLATE "C" ${direction.toUpperCase()} NULLS LAST`,
+        `sort_${index.toString(10)}${sortExpressions[index]?.kind === "text" ? ' COLLATE "C"' : ""} ${direction.toUpperCase()} NULLS LAST`,
     )
     .concat(['result_id COLLATE "C" ASC'])
     .join(", ");
   let cursorPredicate = "TRUE";
+  let cursorRootCte = "";
   if (cursor !== undefined) {
+    const cursorResultId = bind(cursor.resultId);
+    cursorRootCte = `cursor_root AS (SELECT * FROM roots WHERE result_id = ${cursorResultId}::text),`;
     const afterBranches: string[] = [];
     const equalPrefix: string[] = [];
     for (const [index, sort] of input.orderBy.entries()) {
-      const alias = `sort_${index.toString(10)}`;
-      const cursorValue = cursor.sortValues[index];
-      if (cursorValue === undefined) {
-        throw new Error("搜索游标排序值与请求排序不同步。");
-      }
-      if (cursorValue !== null) {
-        const comparison = bind(cursorValue);
-        const operator = sort.direction === "asc" ? ">" : "<";
-        afterBranches.push(
-          `(${equalPrefix.join(" AND ")}${equalPrefix.length > 0 ? " AND " : ""}(${alias} IS NULL OR ${alias} COLLATE "C" ${operator} ${comparison}::text COLLATE "C"))`,
-        );
-      }
-      const equality = bind(cursorValue);
-      equalPrefix.push(
-        `${alias} IS NOT DISTINCT FROM ${equality}::text COLLATE "C"`,
+      const alias = `roots.sort_${index.toString(10)}`;
+      const cursorAlias = `cursor_root.sort_${index.toString(10)}`;
+      const comparison =
+        sortExpressions[index]?.kind === "text"
+          ? `${alias} COLLATE "C"`
+          : alias;
+      const cursorComparison =
+        sortExpressions[index]?.kind === "text"
+          ? `${cursorAlias} COLLATE "C"`
+          : cursorAlias;
+      const operator = sort.direction === "asc" ? ">" : "<";
+      afterBranches.push(
+        `(${equalPrefix.join(" AND ")}${equalPrefix.length > 0 ? " AND " : ""}${cursorAlias} IS NOT NULL AND (${alias} IS NULL OR (${alias} IS NOT NULL AND ${comparison} ${operator} ${cursorComparison})))`,
       );
+      equalPrefix.push(`${alias} IS NOT DISTINCT FROM ${cursorAlias}`);
     }
-    const afterId = bind(cursor.resultId);
     afterBranches.push(
-      `(${equalPrefix.join(" AND ")} AND result_id COLLATE "C" > ${afterId}::text COLLATE "C")`,
+      `(${equalPrefix.join(" AND ")} AND roots.result_id COLLATE "C" > cursor_root.result_id COLLATE "C")`,
     );
-    cursorPredicate = "(" + afterBranches.join(" OR ") + ")";
+    cursorPredicate =
+      "EXISTS (SELECT 1 FROM cursor_root WHERE " +
+      afterBranches.join(" OR ") +
+      ")";
   }
   const limit = bind(String(input.limit + 1));
-  const resultSortValues = input.orderBy
-    .map((_, index) => `page.sort_${index.toString(10)}`)
-    .join(", ");
+  const jsonSelectors = input.select.filter(
+    (selector): selector is ArchiveSearchJsonProjection =>
+      typeof selector !== "string",
+  );
+  const jsonProjectionExpression =
+    jsonSelectors.length === 0
+      ? "'[]'::jsonb"
+      : "jsonb_build_array(" +
+        jsonSelectors
+          .map((selector) => {
+            const expression = searchJsonPathExpression(
+              "contextual.state_data",
+              selector.field,
+              selector.path,
+              bind,
+            );
+            const field = bind(selector.field);
+            const path = bind(selector.path);
+            return `CASE WHEN ${expression} IS NULL THEN jsonb_build_object('field', ${field}::text, 'path', ${path}::jsonb, 'exists', false) ELSE jsonb_build_object('field', ${field}::text, 'path', ${path}::jsonb, 'exists', true, 'value', ${expression}) END`;
+          })
+          .join(", ") +
+        ")";
   const query = `
     WITH latest AS (
       SELECT ${sourceSelection}
@@ -1924,6 +2084,7 @@ async function readCurrentSearchPage(
         latest.*,
         item.namespace,
         item.source_key,
+        revision.state_data AS state_data,
         revision.state_data->'body'->>'searchText' AS search_text,
         ${resultIdExpression} AS result_id
       FROM latest
@@ -1963,10 +2124,11 @@ async function readCurrentSearchPage(
         ${rootOrdinalExpression} AS root_ordinal,
         namespace,
         source_key,
-        ${sortExpressions.map((expression, index) => `${expression} AS sort_${index.toString(10)}`).join(",\n        ")}
+        ${sortExpressions.map(({ sql }, index) => `${sql} AS sort_${index.toString(10)}`).join(",\n        ")}
       FROM contextual
       GROUP BY result_id, item_id, namespace, source_key
     ),
+    ${cursorRootCte}
     page AS (
       SELECT
         roots.*,
@@ -1982,7 +2144,6 @@ async function readCurrentSearchPage(
       page.root_revision_id,
       page.root_commit_id,
       page.root_ordinal,
-      ARRAY[${resultSortValues}]::text[] AS sort_values,
       contextual.item_id AS item_id,
       contextual.namespace AS namespace,
       contextual.source_key AS source_key,
@@ -2002,7 +2163,8 @@ async function readCurrentSearchPage(
       contextual.context_end AS context_end,
       substring(
         contextual.search_text FROM contextual.context_start + 1 FOR contextual.context_end - contextual.context_start
-      ) AS context_text
+      ) AS context_text,
+      ${jsonProjectionExpression} AS json_projections
     FROM page
     JOIN contextual ON contextual.result_id = page.result_id
     ORDER BY page.result_rank, contextual.bin_id COLLATE "C", contextual.archive_seq::bigint
@@ -2010,13 +2172,7 @@ async function readCurrentSearchPage(
   const rows = await transaction.unsafe<SearchRow[]>(query, parameters);
 
   const selected = new Set(input.select);
-  const results = new Map<
-    string,
-    {
-      readonly result: SearchResult;
-      readonly sortValues: readonly (string | null)[];
-    }
-  >();
+  const results = new Map<string, SearchResult>();
   for (const row of rows) {
     const match: SearchMatch = {
       binId: row.bin_id,
@@ -2066,6 +2222,13 @@ async function readCurrentSearchPage(
                 : {}),
             },
           }),
+      ...(jsonSelectors.length === 0
+        ? {}
+        : {
+            json: archiveSearchJsonProjectionResultSchema
+              .array()
+              .parse(row.json_projections),
+          }),
     };
     const result = results.get(row.result_id);
     if (result === undefined) {
@@ -2086,12 +2249,9 @@ async function readCurrentSearchPage(
             }),
         matches: [match],
       };
-      results.set(row.result_id, {
-        result: created,
-        sortValues: row.sort_values,
-      });
+      results.set(row.result_id, created);
     } else {
-      result.result.matches.push(match);
+      result.matches.push(match);
     }
   }
 
@@ -2102,18 +2262,17 @@ async function readCurrentSearchPage(
   const nextCursor =
     hasMore && last !== undefined
       ? encodeSearchCursor({
-          version: 1,
+          version: 2,
           queryHash,
           snapshot,
-          sortValues: last.sortValues,
-          resultId: last.result.resultId,
+          resultId: last.resultId,
         })
       : undefined;
 
   return archiveSearchPageSchema.parse({
     unit: resultUnit,
     snapshot,
-    results: pageResults.map(({ result }) => result),
+    results: pageResults,
     ...(nextCursor === undefined ? {} : { nextCursor }),
   });
 }
@@ -2800,7 +2959,6 @@ export function createArchiveStore(
         requestedCursor !== undefined &&
         (decodedCursor === undefined ||
           decodedCursor.queryHash !== queryHash ||
-          decodedCursor.sortValues.length !== checked.data.orderBy.length ||
           decodedCursor.snapshot.mode !== expectedMode ||
           (requestedAsOf !== undefined &&
             decodedCursor.snapshot.asOf !== requestedAsOf))

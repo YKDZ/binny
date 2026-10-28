@@ -40,6 +40,52 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
+type ArchiveJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | ArchiveJsonValue[]
+  | { [key: string]: ArchiveJsonValue };
+
+function isJsonValue(
+  value: unknown,
+  ancestors: WeakSet<object> = new WeakSet<object>(),
+): value is ArchiveJsonValue {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
+    return true;
+  }
+  if (typeof value !== "object") return false;
+  if (ancestors.has(value)) return true;
+
+  ancestors.add(value);
+  let valid = true;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (index in value && !isJsonValue(value[index], ancestors)) {
+        valid = false;
+        break;
+      }
+    }
+  } else if (isPlainJsonObject(value)) {
+    for (const nestedValue of Object.values(value)) {
+      if (!isJsonValue(nestedValue, ancestors)) {
+        valid = false;
+        break;
+      }
+    }
+  } else {
+    valid = false;
+  }
+  ancestors.delete(value);
+  return valid;
+}
+
 function validateJsonValue(
   value: unknown,
   context: z.RefinementCtx,
@@ -113,6 +159,26 @@ function validateJsonValue(
 const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
   isPlainJsonObject,
   { message: "字段必须是 JSON 对象。" },
+);
+const archiveJsonValueBaseSchema = z.custom<unknown>(isJsonValue, {
+  message: "字段值必须是 JSON 数据。",
+});
+const archiveJsonValueSchema = archiveJsonValueBaseSchema.superRefine(
+  (value, context) => {
+    if (!isJsonValue(value)) {
+      context.addIssue({
+        code: "custom",
+        message: "字段值必须是 JSON 数据。",
+      });
+      return;
+    }
+    validateJsonValue(value, context, [], new WeakSet<object>());
+  },
+);
+registerPostgresJsonSchemaProjection(
+  archiveJsonValueBaseSchema,
+  archiveJsonValueSchema,
+  z.unknown(),
 );
 const jsonObjectSchema = jsonObjectBaseSchema.superRefine((object, context) => {
   const ancestors = new WeakSet<object>([object]);
@@ -625,11 +691,222 @@ export const archiveSearchTextSchema = z.discriminatedUnion("kind", [
 ]);
 export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
+const archiveSearchJsonFieldSchema = z.enum(["metadata", "properties"]);
+const archiveSearchJsonPathSchema = z
+  .array(
+    z.union([postgresTextSchema, z.number().int().min(0).max(2_147_483_647)]),
+  )
+  .max(16)
+  .describe(
+    "JSON 路径使用对象键字符串或数组下标数字；空路径表示整个自定义字段。",
+  );
+const archiveSearchJsonValueTypeSchema = z.enum([
+  "string",
+  "number",
+  "boolean",
+  "null",
+  "array",
+  "object",
+]);
+const archiveSearchJsonOperatorSchema = z.enum([
+  "exists",
+  "eq",
+  "ne",
+  "in",
+  "notIn",
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "between",
+]);
+
+type ArchiveSearchJsonValueType = z.infer<
+  typeof archiveSearchJsonValueTypeSchema
+>;
+type ArchiveSearchJsonPathSegment = z.infer<
+  typeof archiveSearchJsonPathSchema
+>[number];
+export type ArchiveSearchJsonProjection = {
+  readonly type: "json";
+  readonly field: z.infer<typeof archiveSearchJsonFieldSchema>;
+  readonly path: ArchiveSearchJsonPathSegment[];
+};
+
+export type ArchiveSearchJsonFilter = {
+  readonly type: "json";
+  readonly field: z.infer<typeof archiveSearchJsonFieldSchema>;
+  readonly path: ArchiveSearchJsonPathSegment[];
+  readonly operator: z.infer<typeof archiveSearchJsonOperatorSchema>;
+  readonly valueType?: ArchiveSearchJsonValueType | undefined;
+  readonly value?: unknown;
+  readonly values?: unknown[] | undefined;
+  readonly lower?: unknown;
+  readonly upper?: unknown;
+};
+
+function matchesArchiveJsonType(
+  value: unknown,
+  valueType: ArchiveSearchJsonValueType,
+): boolean {
+  switch (valueType) {
+    case "string":
+      return typeof value === "string";
+    case "number":
+      return typeof value === "number";
+    case "boolean":
+      return typeof value === "boolean";
+    case "null":
+      return value === null;
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return (
+        typeof value === "object" && value !== null && !Array.isArray(value)
+      );
+  }
+}
+
+const archiveSearchJsonFilterSchema = z
+  .object({
+    type: z.literal("json"),
+    field: archiveSearchJsonFieldSchema,
+    path: archiveSearchJsonPathSchema,
+    operator: archiveSearchJsonOperatorSchema,
+    valueType: archiveSearchJsonValueTypeSchema.optional(),
+    value: archiveJsonValueSchema.optional(),
+    values: z.array(archiveJsonValueSchema).min(1).max(100).optional(),
+    lower: archiveJsonValueSchema.optional(),
+    upper: archiveJsonValueSchema.optional(),
+  })
+  .strict()
+  .superRefine((filter, context) => {
+    const hasValue = filter.value !== undefined;
+    const hasValues = filter.values !== undefined;
+    const hasBounds = filter.lower !== undefined || filter.upper !== undefined;
+    if (filter.operator === "exists") {
+      if (
+        typeof filter.value !== "boolean" ||
+        filter.valueType !== undefined ||
+        hasValues ||
+        hasBounds
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["value"],
+          message: "JSON 路径 exists 条件必须用布尔值说明路径是否存在。",
+        });
+      }
+      return;
+    }
+
+    if (filter.valueType === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["valueType"],
+        message: "JSON 路径比较必须声明预期 JSON 类型。",
+      });
+      return;
+    }
+    const valueType = filter.valueType;
+    const requireTypedValue = (
+      value: unknown,
+      path: (string | number)[],
+    ): void => {
+      if (value !== undefined && !matchesArchiveJsonType(value, valueType)) {
+        context.addIssue({
+          code: "custom",
+          path,
+          message: "JSON 路径比较值与声明类型不一致。",
+        });
+      }
+    };
+    const operator = filter.operator;
+    if (operator === "in" || operator === "notIn") {
+      if (!hasValues || hasValue || hasBounds) {
+        context.addIssue({
+          code: "custom",
+          path: ["values"],
+          message: "JSON 路径集合条件必须提供 values 列表。",
+        });
+      } else {
+        for (const [index, value] of (filter.values ?? []).entries()) {
+          requireTypedValue(value, ["values", index]);
+        }
+      }
+      return;
+    }
+
+    if (operator === "between") {
+      if (
+        !hasBounds ||
+        filter.lower === undefined ||
+        filter.upper === undefined ||
+        hasValue ||
+        hasValues
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["lower"],
+          message: "JSON 路径范围条件必须同时提供 lower 和 upper。",
+        });
+      } else {
+        if (valueType !== "number" && valueType !== "string") {
+          context.addIssue({
+            code: "custom",
+            path: ["valueType"],
+            message: "JSON 路径范围只支持 string 和 number 类型。",
+          });
+        }
+        requireTypedValue(filter.lower, ["lower"]);
+        requireTypedValue(filter.upper, ["upper"]);
+        if (
+          valueType === "number" &&
+          typeof filter.lower === "number" &&
+          typeof filter.upper === "number" &&
+          filter.lower > filter.upper
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["upper"],
+            message: "JSON 数值范围上界不能早于下界。",
+          });
+        }
+      }
+      return;
+    }
+
+    if (!hasValue || hasValues || hasBounds) {
+      context.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: "JSON 路径比较条件必须提供单个 value。",
+      });
+      return;
+    }
+    requireTypedValue(filter.value, ["value"]);
+    if (
+      (operator === "gt" ||
+        operator === "gte" ||
+        operator === "lt" ||
+        operator === "lte") &&
+      valueType !== "number" &&
+      valueType !== "string"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["valueType"],
+        message: "JSON 路径范围只支持 string 和 number 类型。",
+      });
+    }
+  });
+
 export type ArchiveSearchFilter =
   | { readonly type: "and"; readonly conditions: ArchiveSearchFilter[] }
   | { readonly type: "or"; readonly conditions: ArchiveSearchFilter[] }
   | { readonly type: "not"; readonly condition: ArchiveSearchFilter }
   | { readonly type: "text"; readonly text: ArchiveSearchText }
+  | ArchiveSearchJsonFilter
   | {
       readonly type: "field";
       readonly field: ArchiveSearchField;
@@ -664,6 +941,8 @@ export const archiveSearchOrderFieldSchema = z.enum([
   "collectorVersion",
   "observedAt",
   "recordedAt",
+  "metadata",
+  "properties",
 ]);
 
 const archiveSearchOrderBySchema = z
@@ -671,9 +950,35 @@ const archiveSearchOrderBySchema = z
     z
       .object({
         field: archiveSearchOrderFieldSchema,
+        path: archiveSearchJsonPathSchema.optional(),
+        valueType: z.enum(["string", "number", "boolean"]).optional(),
         direction: z.enum(["asc", "desc"]).default("asc"),
       })
-      .strict(),
+      .strict()
+      .superRefine((item, context) => {
+        const customJsonField =
+          item.field === "metadata" || item.field === "properties";
+        if (
+          customJsonField &&
+          (item.path === undefined || item.valueType === undefined)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: [item.path === undefined ? "path" : "valueType"],
+            message:
+              "JSON 路径排序必须声明路径和预期 string、number 或 boolean 类型。",
+          });
+        } else if (
+          !customJsonField &&
+          (item.path !== undefined || item.valueType !== undefined)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["path"],
+            message: "内置字段排序不能声明 JSON 路径或 JSON 类型。",
+          });
+        }
+      }),
   )
   .min(1)
   .max(5)
@@ -681,32 +986,45 @@ const archiveSearchOrderBySchema = z
   .superRefine((orderBy, context) => {
     const fields = new Set<string>();
     for (const [index, item] of orderBy.entries()) {
-      if (fields.has(item.field)) {
+      const field =
+        item.path === undefined
+          ? item.field
+          : item.field + ":" + JSON.stringify(item.path);
+      if (fields.has(field)) {
         context.addIssue({
           code: "custom",
-          path: [index, "field"],
+          path: [index, item.path === undefined ? "field" : "path"],
           message: "排序字段不能重复。",
         });
       }
-      fields.add(item.field);
+      fields.add(field);
     }
   });
 
 const archiveSearchProjectionSchema = z
   .array(
-    z.enum([
-      "sourceKey",
-      "sourceRef",
-      "sourceModifiedAt",
-      "capture.completeness",
-      "runId",
-      "collectorVersion",
-      "observedAt",
-      "recordedAt",
-      "hit.context",
+    z.union([
+      z.enum([
+        "sourceKey",
+        "sourceRef",
+        "sourceModifiedAt",
+        "capture.completeness",
+        "runId",
+        "collectorVersion",
+        "observedAt",
+        "recordedAt",
+        "hit.context",
+      ]),
+      z
+        .object({
+          type: z.literal("json"),
+          field: archiveSearchJsonFieldSchema,
+          path: archiveSearchJsonPathSchema,
+        })
+        .strict(),
     ]),
   )
-  .max(9)
+  .max(25)
   .default([
     "sourceKey",
     "sourceRef",
@@ -719,11 +1037,20 @@ const archiveSearchProjectionSchema = z
     "hit.context",
   ])
   .superRefine((fields, context) => {
-    if (new Set(fields).size !== fields.length) {
-      context.addIssue({
-        code: "custom",
-        message: "投影字段不能重复。",
-      });
+    const selectors = new Set<string>();
+    for (const [index, item] of fields.entries()) {
+      const selector =
+        typeof item === "string"
+          ? item
+          : "json:" + item.field + ":" + JSON.stringify(item.path);
+      if (selectors.has(selector)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "投影字段不能重复。",
+        });
+      }
+      selectors.add(selector);
     }
   });
 
@@ -875,6 +1202,7 @@ const archiveSearchFilterNodeSchema: z.ZodType<ArchiveSearchFilter> = z.lazy(
         })
         .strict(),
       archiveSearchFieldFilterSchema,
+      archiveSearchJsonFilterSchema,
     ]),
 );
 
@@ -1002,6 +1330,30 @@ const archiveSearchHitSchema = z
   })
   .strict();
 
+export const archiveSearchJsonProjectionResultSchema = z.discriminatedUnion(
+  "exists",
+  [
+    z
+      .object({
+        field: archiveSearchJsonFieldSchema,
+        path: archiveSearchJsonPathSchema,
+        exists: z.literal(true),
+        value: archiveJsonValueSchema,
+      })
+      .strict(),
+    z
+      .object({
+        field: archiveSearchJsonFieldSchema,
+        path: archiveSearchJsonPathSchema,
+        exists: z.literal(false),
+      })
+      .strict(),
+  ],
+);
+export type ArchiveSearchJsonProjectionResult = z.infer<
+  typeof archiveSearchJsonProjectionResultSchema
+>;
+
 const archiveSearchMatchSchema = z
   .object({
     binId: binIdSchema,
@@ -1015,6 +1367,7 @@ const archiveSearchMatchSchema = z
     runId: nonEmptyText.max(128).optional(),
     collectorVersion: nonEmptyText.max(256).optional(),
     hit: archiveSearchHitSchema.optional(),
+    json: z.array(archiveSearchJsonProjectionResultSchema).optional(),
   })
   .strict();
 
