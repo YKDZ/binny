@@ -3,9 +3,11 @@ import { pathToFileURL } from "node:url";
 
 import { createApiRoutes } from "@binny/api/routes";
 import {
+  createArchiveStore,
   connectCoreDatabase,
   createBinConfigurationStore,
   createRuntimeConnectionStore,
+  initializeArchiveSchema,
   initializeBinConfigurationSchema,
   initializeRuntimeConnectionSchema,
 } from "@binny/core";
@@ -24,6 +26,7 @@ export async function createServerRuntime(options: {
   const database = connectCoreDatabase(options.databaseUrl);
   try {
     await initializeBinConfigurationSchema(database);
+    await initializeArchiveSchema(database);
     await initializeRuntimeConnectionSchema(database);
   } catch (error) {
     await database.end();
@@ -33,6 +36,7 @@ export async function createServerRuntime(options: {
     app: createApiRoutes({
       bins: createBinConfigurationStore(database),
       runtime: createRuntimeConnectionStore(database),
+      archives: createArchiveStore(database),
     }),
     close: () => database.end(),
   };
