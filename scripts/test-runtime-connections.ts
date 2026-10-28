@@ -528,6 +528,7 @@ try {
   await compose(["stop", "runtime-one", "runtime-two"]);
 
   await compose(["up", "--detach", "--force-recreate", "server"]);
+  await waitForApi();
   const persistedOne = cliData<{
     readonly id: string;
     readonly identityId: string;

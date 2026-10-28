@@ -17,27 +17,21 @@ import {
   type Schema,
   type ValidateFunction,
 } from "ajv/dist/2020.js";
+import { and, eq, sql } from "drizzle-orm";
 
-import type { CoreDatabase } from "./database.ts";
+import { databaseErrorCode, type CoreDatabase } from "./database.ts";
+import { binConfigurations, manualRuns } from "./schema.ts";
 
-type BinStatus = "active" | "disabled";
-
-type BinRow = {
-  readonly id: string;
-  readonly collector: CollectorManifest;
-  readonly identity_id: string;
-  readonly config: JsonObject;
-  readonly targets: readonly unknown[];
-  readonly status: BinStatus;
-  readonly created_at: Date;
-  readonly updated_at: Date;
+const binSelection = {
+  id: binConfigurations.id,
+  collector: binConfigurations.collector,
+  identityId: binConfigurations.identityId,
+  config: binConfigurations.config,
+  targets: binConfigurations.targets,
+  status: binConfigurations.status,
+  createdAt: binConfigurations.createdAt,
+  updatedAt: binConfigurations.updatedAt,
 };
-
-const tableName = "bin_configurations";
-// postgres.js 的 JSONB OID；传对象让驱动序列化一次，避免把 JSON 存成字符串。
-const jsonbType = 3802;
-const selectColumns =
-  "id, collector, identity_id, config, targets, status, created_at, updated_at";
 const addFormats = formats.default.default;
 const collectorValidatorCacheLimit = 32;
 
@@ -72,27 +66,6 @@ function dynamicSchemaPath(issue: ErrorObject): (string | number)[] {
   return path;
 }
 
-function jsonbParameter(database: CoreDatabase, value: unknown) {
-  return database.typed(value, jsonbType);
-}
-
-export async function initializeBinConfigurationSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.unsafe(
-    "CREATE TABLE IF NOT EXISTS bin_configurations (" +
-      "id text PRIMARY KEY, " +
-      "collector jsonb NOT NULL, " +
-      "identity_id text NOT NULL, " +
-      "config jsonb NOT NULL, " +
-      "targets jsonb NOT NULL, " +
-      "status text NOT NULL CHECK (status IN ('active', 'disabled')), " +
-      "created_at timestamptz NOT NULL DEFAULT now(), " +
-      "updated_at timestamptz NOT NULL DEFAULT now()" +
-      ")",
-  );
-}
-
 function failure<T>(
   status: 400 | 404 | 409,
   code: BinError["code"],
@@ -104,23 +77,6 @@ function failure<T>(
     status,
     error: { code, message, ...(path === undefined ? {} : { path }) },
   };
-}
-
-function rowToConfiguration(row: BinRow): BinConfiguration {
-  return binConfigurationSchema.parse({
-    id: row.id,
-    collector: row.collector,
-    identityId: row.identity_id,
-    config: row.config,
-    targets: row.targets,
-    status: row.status,
-    execution: {
-      status: "offline",
-      reason: "runtime_not_connected",
-    },
-    createdAt: row.created_at.toISOString(),
-    updatedAt: row.updated_at.toISOString(),
-  });
 }
 
 function schemaIssuePath(
@@ -307,24 +263,31 @@ export function validateCollectorActionParameters(
   };
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "23505"
-  );
+async function selectBin(database: CoreDatabase, id: string) {
+  const [row] = await database
+    .select(binSelection)
+    .from(binConfigurations)
+    .where(eq(binConfigurations.id, id));
+  return row;
 }
 
-async function selectBin(
-  database: CoreDatabase,
-  id: string,
-): Promise<BinRow | undefined> {
-  const rows = await database.unsafe<BinRow[]>(
-    "SELECT " + selectColumns + " FROM " + tableName + " WHERE id = $1",
-    [id],
-  );
-  return rows[0];
+type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
+
+function rowToConfiguration(row: BinRow): BinConfiguration {
+  return binConfigurationSchema.parse({
+    id: row.id,
+    collector: row.collector,
+    identityId: row.identityId,
+    config: row.config,
+    targets: row.targets,
+    status: row.status,
+    execution: {
+      status: "offline",
+      reason: "runtime_not_connected",
+    },
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  });
 }
 
 function notFound<T>(_id: string): BinOperation<T> {
@@ -336,13 +299,10 @@ export function createBinConfigurationStore(
 ): BinConfigurationOperations {
   return {
     async listBins() {
-      const rows = await database.unsafe<BinRow[]>(
-        "SELECT " +
-          selectColumns +
-          " FROM " +
-          tableName +
-          " ORDER BY created_at, id",
-      );
+      const rows = await database
+        .select(binSelection)
+        .from(binConfigurations)
+        .orderBy(binConfigurations.createdAt, binConfigurations.id);
       return rows.map(rowToConfiguration);
     },
 
@@ -372,24 +332,21 @@ export function createBinConfigurationStore(
         return { ok: false, status: 400, error: invalid };
 
       try {
-        const rows = await database.unsafe<BinRow[]>(
-          "INSERT INTO " +
-            tableName +
-            " (id, collector, identity_id, config, targets, status) " +
-            "VALUES ($1, $2, $3, $4, $5, 'active') " +
-            "RETURNING " +
-            selectColumns,
-          [
-            checked.data.id,
-            jsonbParameter(database, checked.data.collector),
-            checked.data.identityId,
-            jsonbParameter(database, checked.data.config),
-            jsonbParameter(database, checked.data.targets),
-          ],
-        );
-        return { ok: true, value: rowToConfiguration(rows[0]!) };
+        const [row] = await database
+          .insert(binConfigurations)
+          .values({
+            id: checked.data.id,
+            collector: checked.data.collector,
+            identityId: checked.data.identityId,
+            config: checked.data.config,
+            targets: checked.data.targets,
+            status: "active",
+          })
+          .returning(binSelection);
+        if (row === undefined) throw new Error("bin 创建后没有返回记录。");
+        return { ok: true, value: rowToConfiguration(row) };
       } catch (error) {
-        if (isUniqueViolation(error))
+        if (databaseErrorCode(error) === "23505")
           return failure(409, "bin_already_exists", "这个 bin 标识已被使用。", [
             "id",
           ]);
@@ -409,96 +366,101 @@ export function createBinConfigurationStore(
         );
       }
 
-      return await database.begin(async (transaction) => {
-        const rows = await transaction.unsafe<BinRow[]>(
-          "SELECT " +
-            selectColumns +
-            " FROM " +
-            tableName +
-            " WHERE id = $1 FOR UPDATE",
-          [id],
-        );
-        const previous = rows[0];
+      return await database.transaction(async (transaction) => {
+        const [previous] = await transaction
+          .select(binSelection)
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, id))
+          .for("update");
         if (previous === undefined) return notFound(id);
 
-        const collector = checked.data.collector ?? previous.collector;
-        const config = checked.data.config ?? previous.config;
-        const targets = checked.data.targets ?? previous.targets;
+        const existing = binCreateInputSchema.parse({
+          id: previous.id,
+          collector: previous.collector,
+          identityId: previous.identityId,
+          config: previous.config,
+          targets: previous.targets,
+        });
+        const collector = checked.data.collector ?? existing.collector;
+        const config = checked.data.config ?? existing.config;
+        const targets = checked.data.targets ?? existing.targets;
         const invalid = validateCollectorConfiguration(collector, config);
         if (invalid !== undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
 
-        const updated = await transaction.unsafe<BinRow[]>(
-          "UPDATE " +
-            tableName +
-            " SET collector = $1, identity_id = $2, config = $3, " +
-            "targets = $4, updated_at = now() WHERE id = $5 RETURNING " +
-            selectColumns,
-          [
-            jsonbParameter(database, collector),
-            checked.data.identityId ?? previous.identity_id,
-            jsonbParameter(database, config),
-            jsonbParameter(database, targets),
-            id,
-          ],
-        );
-        return { ok: true as const, value: rowToConfiguration(updated[0]!) };
+        // Drizzle 没有用于 UPDATE 的事务时间 helper；保留原来的 PostgreSQL now() 语义。
+        const [updated] = await transaction
+          .update(binConfigurations)
+          .set({
+            collector,
+            identityId: checked.data.identityId ?? existing.identityId,
+            config,
+            targets,
+            updatedAt: sql`now()`,
+          })
+          .where(eq(binConfigurations.id, id))
+          .returning(binSelection);
+        if (updated === undefined) throw new Error("bin 更新后没有返回记录。");
+        return { ok: true as const, value: rowToConfiguration(updated) };
       });
     },
 
     async setBinStatus(id, status) {
-      return await database.begin(async (transaction) => {
-        const rows = await transaction.unsafe<BinRow[]>(
-          "UPDATE " +
-            tableName +
-            " SET status = $1, updated_at = now() WHERE id = $2 RETURNING " +
-            selectColumns,
-          [status, id],
-        );
-        const bin = rows[0];
+      return await database.transaction(async (transaction) => {
+        // 保留原来的 PostgreSQL now() 语义；Drizzle 只提供 INSERT 默认值 helper。
+        const [bin] = await transaction
+          .update(binConfigurations)
+          .set({ status, updatedAt: sql`now()` })
+          .where(eq(binConfigurations.id, id))
+          .returning(binSelection);
         if (bin === undefined) return notFound(id);
         if (status === "disabled") {
           // 已在执行的运行继续使用快照；排队运行在停用时明确失败。
-          await transaction.unsafe(
-            "UPDATE manual_runs SET status = 'failed', " +
-              "failure = $2, finished_at = clock_timestamp() " +
-              "WHERE bin_id = $1 AND status = 'queued'",
-            [
-              id,
-              transaction.json({
+          await transaction
+            .update(manualRuns)
+            .set({
+              status: "failed",
+              failure: {
                 code: "bin_disabled",
                 message: "bin 已停用，排队中的运行没有执行。",
                 impact: "排队中的运行已结束。",
                 suggestion: "重新启用后可创建新的运行。",
                 requiresHuman: false,
-              }),
-            ],
-          );
+              },
+              finishedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(eq(manualRuns.binId, id), eq(manualRuns.status, "queued")),
+            );
         }
         return { ok: true, value: rowToConfiguration(bin) };
       });
     },
 
     async removeBin(id) {
-      return await database.begin(async (transaction) => {
-        const pendingFailure = transaction.json({
-          code: "bin_removed",
-          message: "bin 配置已移除，排队中的运行没有执行。",
-          impact: "排队中的运行已结束。",
-          requiresHuman: false,
-        });
-        await transaction.unsafe(
-          "UPDATE manual_runs SET status = 'failed', failure = $2, " +
-            "finished_at = clock_timestamp() WHERE bin_id = $1 AND status = 'queued'",
-          [id, pendingFailure],
-        );
-        const rows = await transaction.unsafe<{ readonly id: string }[]>(
-          "DELETE FROM " + tableName + " WHERE id = $1 RETURNING id",
-          [id],
-        );
-        return rows[0] === undefined
+      return await database.transaction(async (transaction) => {
+        await transaction
+          .update(manualRuns)
+          .set({
+            status: "failed",
+            failure: {
+              code: "bin_removed",
+              message: "bin 配置已移除，排队中的运行没有执行。",
+              impact: "排队中的运行已结束。",
+              requiresHuman: false,
+            },
+            finishedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(eq(manualRuns.binId, id), eq(manualRuns.status, "queued")),
+          );
+        const [removed] = await transaction
+          .delete(binConfigurations)
+          .where(eq(binConfigurations.id, id))
+          .returning({ id: binConfigurations.id });
+        return removed === undefined
           ? notFound(id)
-          : { ok: true as const, value: { id: rows[0].id } };
+          : { ok: true as const, value: removed };
       });
     },
   };

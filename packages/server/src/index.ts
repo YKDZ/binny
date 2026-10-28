@@ -8,10 +8,7 @@ import {
   createBinConfigurationStore,
   createManualRunStore,
   createRuntimeConnectionStore,
-  initializeArchiveSchema,
-  initializeBinConfigurationSchema,
-  initializeManualRunSchema,
-  initializeRuntimeConnectionSchema,
+  migrateCoreDatabase,
 } from "@binny/core";
 // 核心与 HTTP 的组装、配置及服务启动。
 import { serve } from "@hono/node-server";
@@ -39,7 +36,8 @@ function environmentMilliseconds(
 export async function createServerRuntime(options: {
   readonly databaseUrl: string;
 }): Promise<ServerRuntime> {
-  const database = connectCoreDatabase(options.databaseUrl);
+  const connection = connectCoreDatabase(options.databaseUrl);
+  const { database } = connection;
   const archives = createArchiveStore(database, {
     resourceDirectory:
       process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
@@ -57,14 +55,14 @@ export async function createServerRuntime(options: {
   const runtime = createRuntimeConnectionStore(database);
   const runs = createManualRunStore(database);
   try {
-    await initializeBinConfigurationSchema(database);
-    await initializeArchiveSchema(database);
+    await migrateCoreDatabase(database);
     await archives.initializeResourceStorage();
-    await initializeRuntimeConnectionSchema(database);
-    await initializeManualRunSchema(database);
   } catch (error) {
-    await archives.close();
-    await database.end();
+    try {
+      await archives.close();
+    } finally {
+      await connection.close();
+    }
     throw error;
   }
   return {
@@ -75,8 +73,11 @@ export async function createServerRuntime(options: {
       archives,
     }),
     close: async () => {
-      await archives.close();
-      await database.end();
+      try {
+        await archives.close();
+      } finally {
+        await connection.close();
+      }
     },
   };
 }
@@ -97,12 +98,15 @@ export async function startServer(options: {
   return {
     server,
     close: async () => {
-      await new Promise<void>((resolveClose, reject) => {
-        server.close((error) =>
-          error === undefined ? resolveClose() : reject(error),
-        );
-      });
-      await runtime.close();
+      try {
+        await new Promise<void>((resolveClose, reject) => {
+          server.close((error) =>
+            error === undefined ? resolveClose() : reject(error),
+          );
+        });
+      } finally {
+        await runtime.close();
+      }
     },
   };
 }

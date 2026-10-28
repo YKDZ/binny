@@ -13,16 +13,60 @@ import {
   type ArchiveSearchJsonFilter,
   type ArchiveSearchJsonProjection,
   type ArchiveSearchOperation,
+  type ArchiveSearchRelationFilter,
   type ArchiveSearchRequest,
   type ArchiveSearchTargetFilter,
   type ArchiveSearchText,
 } from "@binny/contracts";
-import type postgres from "postgres";
+import {
+  and,
+  asc,
+  countDistinct,
+  desc,
+  eq,
+  exists,
+  getColumns,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  min,
+  ne,
+  not,
+  notExists,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+  type SQLWrapper,
+} from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 import { canonicalJson, isoTimestamp, optionalText } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import { resolveSnapshot, type ResolvedSnapshot } from "./archive-read.ts";
-import type { CoreDatabase } from "./database.ts";
+import { databaseErrorCode, type CoreDatabase } from "./database.ts";
+import {
+  archiveCommits,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRevisions,
+} from "./schema.ts";
+
+type SearchInput = ReturnType<typeof archiveSearchInputSchema.parse>;
+type SearchResult = ReturnType<
+  typeof archiveSearchPageSchema.parse
+>["results"][number];
+type SearchMatch = SearchResult["matches"][number];
+type SearchExpansion = NonNullable<SearchMatch["expansions"]>[number];
+type SearchExpansionRelation = SearchExpansion["relations"][number];
 
 type SearchCursor = {
   readonly version: 1 | 2;
@@ -31,35 +75,31 @@ type SearchCursor = {
   readonly resultId: string;
 };
 
-type SearchResultRow = {
-  readonly cursor_missing: false;
-  readonly result_id: string;
-  readonly result_unit: "item" | "revision" | "observation";
-  readonly item_id: string;
-  readonly root_revision_id: string | null;
-  readonly root_commit_id: string | null;
-  readonly root_ordinal: number | null;
-  readonly namespace: string;
-  readonly source_key: string;
-  readonly bin_id: string;
-  readonly revision_id: string;
-  readonly archive_seq: string;
-  readonly run_id: string | null;
-  readonly collector_version: string | null;
-  readonly source_ref: string | null;
-  readonly source_modified_at: string | null;
-  readonly completeness: "complete" | "partial" | null;
-  readonly observed_at: Date;
-  readonly recorded_at: Date;
-  readonly hit_start: number | null;
-  readonly hit_end: number | null;
-  readonly context_start: number | null;
-  readonly context_end: number | null;
-  readonly context_text: string | null;
-  readonly json_projections: unknown;
+type SearchFields = {
+  readonly item: {
+    readonly itemId: SQLWrapper;
+    readonly namespace: SQLWrapper;
+    readonly sourceKey: SQLWrapper;
+  };
+  readonly revision: {
+    readonly stateData: SQLWrapper;
+  };
+  readonly latest: {
+    readonly binId: SQLWrapper;
+    readonly runId: SQLWrapper;
+    readonly collectorVersion: SQLWrapper;
+    readonly observedAt: SQLWrapper;
+    readonly recordedAt: SQLWrapper;
+  };
 };
 
-type SearchRow = SearchResultRow | { readonly cursor_missing: true };
+type SearchSort = SearchInput["orderBy"][number];
+type SearchSortKind = "text" | "jsonb";
+
+type SearchRegexPattern = {
+  readonly pattern: string;
+  readonly path: (string | number)[];
+};
 
 function encodeSearchCursor(cursor: SearchCursor): string {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
@@ -75,14 +115,17 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
       return undefined;
     }
     const version = value.version;
-    if (!("queryHash" in value) || typeof value.queryHash !== "string")
+    if (!("queryHash" in value) || typeof value.queryHash !== "string") {
       return undefined;
+    }
     if (!/^[a-f0-9]{64}$/u.test(value.queryHash)) return undefined;
-    if (!("snapshot" in value) || typeof value.snapshot !== "object")
+    if (!("snapshot" in value) || typeof value.snapshot !== "object") {
       return undefined;
+    }
     const snapshot = value.snapshot;
-    if (snapshot === null || !("asOf" in snapshot) || !("mode" in snapshot))
+    if (snapshot === null || !("asOf" in snapshot) || !("mode" in snapshot)) {
       return undefined;
+    }
     const checkedSequence = archiveSnapshotSequenceSchema.safeParse(
       snapshot.asOf,
     );
@@ -93,8 +136,9 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
       return undefined;
     }
     if (version === 1) {
-      if (!("sortValues" in value) || !Array.isArray(value.sortValues))
+      if (!("sortValues" in value) || !Array.isArray(value.sortValues)) {
         return undefined;
+      }
       if (
         value.sortValues.some(
           (entry) =>
@@ -104,14 +148,16 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
         return undefined;
       }
     }
-    if (!("resultId" in value) || typeof value.resultId !== "string")
+    if (!("resultId" in value) || typeof value.resultId !== "string") {
       return undefined;
+    }
     if (
       value.resultId.length === 0 ||
       value.resultId.length > 128 ||
       !postgresTextSchema.safeParse(value.resultId).success
-    )
+    ) {
       return undefined;
+    }
     return {
       version,
       queryHash: value.queryHash,
@@ -130,136 +176,201 @@ function escapeLikeLiteral(value: string): string {
   return value.replace(/[\\%_]/gu, "\\$&");
 }
 
-type SearchFieldExpression = {
-  readonly sql: string;
-  readonly kind: "text" | "timestamp";
-};
-
-type SearchViewAliases = {
-  readonly item: string;
-  readonly revision: string;
-  readonly latest: string;
-};
-
-function searchFieldExpression(
-  field: ArchiveSearchField,
-  aliases: SearchViewAliases = {
-    item: "item",
-    revision: "revision",
-    latest: "latest",
-  },
-): SearchFieldExpression {
-  switch (field) {
-    case "sourceKey.namespace":
-      return { sql: aliases.item + ".namespace", kind: "text" };
-    case "sourceKey.key":
-      return { sql: aliases.item + ".source_key", kind: "text" };
-    case "sourceRef":
-      return {
-        sql: aliases.revision + ".state_data->>'sourceRef'",
-        kind: "text",
-      };
-    case "sourceModifiedAt":
-      return {
-        sql:
-          "(" +
-          aliases.revision +
-          ".state_data->>'sourceModifiedAt')::timestamptz",
-        kind: "timestamp",
-      };
-    case "capture.completeness":
-      return {
-        sql: aliases.revision + ".state_data->'capture'->>'completeness'",
-        kind: "text",
-      };
-    case "body.searchText":
-      return {
-        sql: aliases.revision + ".state_data->'body'->>'searchText'",
-        kind: "text",
-      };
-    case "binId":
-      return { sql: aliases.latest + ".bin_id", kind: "text" };
-    case "runId":
-      return { sql: aliases.latest + ".run_id", kind: "text" };
-    case "collectorVersion":
-      return { sql: aliases.latest + ".collector_version", kind: "text" };
-    case "observedAt":
-      return { sql: aliases.latest + ".observed_at", kind: "timestamp" };
-    case "recordedAt":
-      return { sql: aliases.latest + ".recorded_at", kind: "timestamp" };
-  }
+function searchTextExpression(stateData: SQLWrapper): SQL {
+  // RC 没有 jsonb 的 ->/->> 类型化运算符；状态仍由 schema 列引用。
+  return sql`${stateData}->'body'->>'searchText'`;
 }
 
 function searchJsonPathExpression(
-  stateExpression: string,
+  stateData: SQLWrapper,
   field: ArchiveSearchJsonProjection["field"],
   path: readonly (string | number)[],
-  bind: (value: postgres.JSONValue) => string,
-): string {
-  let expression = `(${stateExpression}->'${field}')`;
+): SQL {
+  // RC 没有 JSON 路径运算符；每段键保持参数化，数字段按 PostgreSQL 数组下标处理。
+  let expression = sql`(${stateData}->${field})`;
   for (const segment of path) {
-    const indexType = typeof segment === "number";
-    expression = `(${expression} -> ${bind(String(segment))}::${indexType ? "integer" : "text"})`;
+    const cast = typeof segment === "number" ? sql`integer` : sql`text`;
+    expression = sql`(${expression}->${String(segment)}::${cast})`;
   }
   return expression;
 }
 
-function searchJsonValueParameter(
-  value: unknown,
-  bind: (value: postgres.JSONValue | postgres.Parameter) => string,
-  jsonParameter: (value: postgres.JSONValue) => postgres.Parameter,
-): string {
-  if (value === null) return "'null'::jsonb";
-  return bind(jsonParameter(value as postgres.JSONValue)) + "::jsonb";
+function searchJsonValue(value: unknown): SQL {
+  // RC 不编码 jsonb 标量；包入对象后绑定原生 Jsonb Param，再解包保留 null、布尔和数组。
+  return sql`(${sql.param({ value }, archiveRevisions.stateData)}::jsonb -> 'value')`;
 }
 
-function postgresErrorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error))
-    return undefined;
-  return typeof error.code === "string" ? error.code : undefined;
+function decodeCaptureCompleteness(value: unknown): "complete" | "partial" {
+  if (value === "complete" || value === "partial") return value;
+  throw new Error("归档状态包含无效的完整性标记。");
 }
 
-type SearchResult = ReturnType<
-  typeof archiveSearchPageSchema.parse
->["results"][number];
-type SearchMatch = SearchResult["matches"][number];
-type SearchExpansion = NonNullable<SearchMatch["expansions"]>[number];
-type SearchExpansionRelation = SearchExpansion["relations"][number];
+function searchFieldExpression(
+  field: ArchiveSearchField,
+  fields: SearchFields,
+): { readonly expression: SQLWrapper; readonly kind: "text" | "timestamp" } {
+  // JSON 提取与文本 collation 在 RC 中没有原生表达式；基础表和字段仍使用 schema 引用。
+  switch (field) {
+    case "sourceKey.namespace":
+      return { expression: fields.item.namespace, kind: "text" };
+    case "sourceKey.key":
+      return { expression: fields.item.sourceKey, kind: "text" };
+    case "sourceRef":
+      return {
+        expression: sql`${fields.revision.stateData}->>'sourceRef'`,
+        kind: "text",
+      };
+    case "sourceModifiedAt":
+      return {
+        expression: sql`(${fields.revision.stateData}->>'sourceModifiedAt')::timestamptz`,
+        kind: "timestamp",
+      };
+    case "capture.completeness":
+      return {
+        expression: sql`${fields.revision.stateData}->'capture'->>'completeness'`,
+        kind: "text",
+      };
+    case "body.searchText":
+      return {
+        expression: searchTextExpression(fields.revision.stateData),
+        kind: "text",
+      };
+    case "binId":
+      return { expression: fields.latest.binId, kind: "text" };
+    case "runId":
+      return { expression: fields.latest.runId, kind: "text" };
+    case "collectorVersion":
+      return { expression: fields.latest.collectorVersion, kind: "text" };
+    case "observedAt":
+      return { expression: fields.latest.observedAt, kind: "timestamp" };
+    case "recordedAt":
+      return { expression: fields.latest.recordedAt, kind: "timestamp" };
+  }
+}
 
-type SearchExpansionRow = {
-  readonly result_id: string;
-  readonly bin_id: string;
-  readonly relation_id: string;
-  readonly direction: "outgoing" | "incoming";
-  readonly status: "observed" | "withdrawn" | "deleted";
-  readonly from_item_id: string | null;
-  readonly from_namespace: string | null;
-  readonly from_source_key: string | null;
-  readonly from_revision_id: string | null;
-  readonly target_item_id: string | null;
-  readonly target_source_ref: string | null;
-  readonly target_namespace: string | null;
-  readonly target_source_key: string | null;
-  readonly target_revision_id: string | null;
-  readonly relation_revision_id: string | null;
-  readonly state_data: unknown;
-  readonly relation_commit_id: string;
-  readonly relation_archive_seq: string;
-  readonly relation_ordinal: number;
-  readonly relation_observed_at: Date;
-  readonly relation_recorded_at: Date;
-  readonly relation_run_id: string | null;
-  readonly relation_collector_version: string | null;
-};
+function compileJsonFilter(
+  filter: ArchiveSearchJsonFilter,
+  stateData: SQLWrapper,
+): SQL {
+  const expression = searchJsonPathExpression(
+    stateData,
+    filter.field,
+    filter.path,
+  );
+  if (filter.operator === "exists") {
+    return filter.value === true ? isNotNull(expression) : isNull(expression);
+  }
+  if (filter.valueType === undefined) {
+    throw new Error("JSON 路径比较缺少预期类型。");
+  }
 
-type SearchRegexPattern = {
-  readonly pattern: string;
-  readonly path: (string | number)[];
-};
+  // RC 未声明 jsonb_typeof 与 COLLATE；二者只构成局部类型判别和 C 序比较。
+  const matchesType = eq(sql`jsonb_typeof(${expression})`, filter.valueType);
+  const comparedExpression =
+    filter.valueType === "string"
+      ? sql`(${expression} #>> '{}') COLLATE "C"`
+      : expression;
+  const parameter = (value: unknown): SQL =>
+    filter.valueType === "string"
+      ? sql`${String(value)}::text COLLATE "C"`
+      : searchJsonValue(value);
+  let comparison: SQL;
+  if (filter.operator === "in" || filter.operator === "notIn") {
+    const values = (filter.values ?? []).map(parameter);
+    comparison =
+      filter.operator === "in"
+        ? inArray(comparedExpression, values)
+        : notInArray(comparedExpression, values);
+  } else if (filter.operator === "between") {
+    comparison = and(
+      gte(comparedExpression, parameter(filter.lower)),
+      lte(comparedExpression, parameter(filter.upper)),
+    )!;
+  } else {
+    const value = parameter(filter.value);
+    switch (filter.operator) {
+      case "eq":
+        comparison = eq(comparedExpression, value);
+        break;
+      case "ne":
+        comparison = ne(comparedExpression, value);
+        break;
+      case "gt":
+        comparison = gt(comparedExpression, value);
+        break;
+      case "gte":
+        comparison = gte(comparedExpression, value);
+        break;
+      case "lt":
+        comparison = lt(comparedExpression, value);
+        break;
+      case "lte":
+        comparison = lte(comparedExpression, value);
+        break;
+      default:
+        throw new Error("JSON 路径比较操作符未声明。");
+    }
+  }
 
-function searchRegexPatterns(
-  input: ReturnType<typeof archiveSearchInputSchema.parse>,
-): SearchRegexPattern[] {
+  // RC 没有 COALESCE 条件构造；缺失路径和类型不符必须继续按 false 参与 not/in 组合。
+  return sql`COALESCE((${matchesType} AND ${comparison}), FALSE)`;
+}
+
+function compileFieldFilter(
+  filter: Extract<
+    ArchiveSearchFilter | ArchiveSearchTargetFilter,
+    { type: "field" }
+  >,
+  fields: SearchFields,
+): SQL {
+  const { expression, kind } = searchFieldExpression(filter.field, fields);
+  if (filter.operator === "exists") {
+    return filter.value === true ? isNotNull(expression) : isNull(expression);
+  }
+  // RC 未提供 COLLATE 表达式；时间仍显式按 timestamptz 参数比较。
+  const comparedExpression =
+    kind === "text" ? sql`${expression} COLLATE "C"` : expression;
+  const parameter = (value: string): SQL =>
+    kind === "text"
+      ? sql`${value}::text COLLATE "C"`
+      : sql`${value}::timestamptz`;
+  const present = isNotNull(expression);
+  if (filter.operator === "in" || filter.operator === "notIn") {
+    const values = (filter.values ?? []).map(parameter);
+    return and(
+      present,
+      filter.operator === "in"
+        ? inArray(comparedExpression, values)
+        : notInArray(comparedExpression, values),
+    )!;
+  }
+  if (filter.operator === "between") {
+    return and(
+      present,
+      gte(comparedExpression, parameter(filter.lower ?? "")),
+      lte(comparedExpression, parameter(filter.upper ?? "")),
+    )!;
+  }
+  const value = parameter(String(filter.value));
+  switch (filter.operator) {
+    case "eq":
+      return and(present, eq(comparedExpression, value))!;
+    case "ne":
+      return and(present, ne(comparedExpression, value))!;
+    case "gt":
+      return and(present, gt(comparedExpression, value))!;
+    case "gte":
+      return and(present, gte(comparedExpression, value))!;
+    case "lt":
+      return and(present, lt(comparedExpression, value))!;
+    case "lte":
+      return and(present, lte(comparedExpression, value))!;
+    default:
+      throw new Error("搜索字段比较操作符未声明。");
+  }
+}
+
+function searchRegexPatterns(input: SearchInput): SearchRegexPattern[] {
   const patterns: SearchRegexPattern[] =
     input.text?.kind === "regex"
       ? [{ pattern: input.text.pattern, path: ["text", "pattern"] }]
@@ -322,14 +433,14 @@ async function invalidSearchRegexPath(
   transaction: ArchiveTransaction,
   patterns: readonly SearchRegexPattern[],
 ): Promise<(string | number)[] | undefined> {
-  // PostgreSQL 的 2201B 只标识整条查询；多正则需分别交给 ARE 校验才能定位字段。
+  // PostgreSQL 2201B 只标识整条查询；savepoint 分别校验模式以定位字段。
   for (const { pattern, path } of patterns) {
     try {
-      await transaction.savepoint(async (savepoint) => {
-        await savepoint`SELECT ''::text ~ ${pattern}::text`;
+      await transaction.transaction(async (savepoint) => {
+        await savepoint.execute(sql`SELECT ''::text ~ ${pattern}::text`);
       });
     } catch (error) {
-      if (postgresErrorCode(error) === "2201B") return path;
+      if (databaseErrorCode(error) === "2201B") return path;
       throw error;
     }
   }
@@ -339,407 +450,13 @@ async function invalidSearchRegexPath(
 async function readCurrentSearchPage(
   transaction: ArchiveTransaction,
   snapshot: ResolvedSnapshot,
-  input: ReturnType<typeof archiveSearchInputSchema.parse>,
+  input: SearchInput,
   cursor: SearchCursor | undefined,
   queryHash: string,
 ): Promise<
   ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
 > {
-  const parameters: (postgres.JSONValue | postgres.Parameter)[] = [];
-  const bind = (value: postgres.JSONValue | postgres.Parameter): string => {
-    parameters.push(value);
-    return "$" + parameters.length.toString(10);
-  };
-  const asOf = bind(snapshot.asOf);
-  const binPredicate =
-    input.scope.binId === undefined
-      ? ""
-      : " AND commit.bin_id = " + bind(input.scope.binId) + "::text";
-  const textConditions: {
-    readonly predicate: string;
-    readonly hitPredicate: string;
-    readonly hitStart: string;
-    readonly hitEnd: string;
-  }[] = [];
-  const rootAliases: SearchViewAliases = {
-    item: "item",
-    revision: "revision",
-    latest: "latest",
-  };
-  const compileText = (
-    text: ArchiveSearchText,
-    aliases: SearchViewAliases,
-    includeRootHit: boolean,
-  ): string => {
-    const searchTextExpression =
-      aliases.revision + ".state_data->'body'->>'searchText'";
-    let predicate: string;
-    let hitPredicate: string;
-    let hitStart: string;
-    let hitEnd: string;
-    if (text.kind === "literal") {
-      const value = includeRootHit ? bind(text.value) : "";
-      const pattern = bind("%" + escapeLikeLiteral(text.value) + "%");
-      predicate =
-        searchTextExpression +
-        " IS NOT NULL AND " +
-        searchTextExpression +
-        " LIKE " +
-        pattern +
-        " ESCAPE E'\\\\'";
-      hitPredicate =
-        "search_text IS NOT NULL AND search_text LIKE " +
-        pattern +
-        " ESCAPE E'\\\\'";
-      hitStart = includeRootHit
-        ? "strpos(search_text, " + value + ") - 1"
-        : "NULL::integer";
-      hitEnd = includeRootHit
-        ? "hit_start + char_length(" + value + ")"
-        : "NULL::integer";
-    } else {
-      const pattern = bind(text.pattern);
-      predicate =
-        searchTextExpression +
-        " IS NOT NULL AND " +
-        searchTextExpression +
-        " ~ " +
-        pattern;
-      hitPredicate = "search_text IS NOT NULL AND search_text ~ " + pattern;
-      hitStart = includeRootHit
-        ? "regexp_instr(search_text, " + pattern + ", 1, 1, 0, 'c') - 1"
-        : "NULL::integer";
-      hitEnd = includeRootHit
-        ? "regexp_instr(search_text, " + pattern + ", 1, 1, 1, 'c') - 1"
-        : "NULL::integer";
-    }
-    if (includeRootHit) {
-      textConditions.push({ predicate, hitPredicate, hitStart, hitEnd });
-    }
-    return "(" + predicate + ")";
-  };
-  const compileJsonFilter = (
-    filter: ArchiveSearchJsonFilter,
-    stateExpression: string,
-    bindParameter: (
-      value: postgres.JSONValue | postgres.Parameter,
-    ) => string = bind,
-  ): string => {
-    const expression = searchJsonPathExpression(
-      stateExpression,
-      filter.field,
-      filter.path,
-      (value) => bindParameter(value),
-    );
-    if (filter.operator === "exists") {
-      return expression + (filter.value === true ? " IS NOT NULL" : " IS NULL");
-    }
-    if (filter.valueType === undefined) {
-      throw new Error("JSON 路径比较缺少预期类型。");
-    }
-    const valueType = filter.valueType;
-    const matchesType = `jsonb_typeof(${expression}) = ${bindParameter(valueType)}::text`;
-    const comparedExpression =
-      valueType === "string"
-        ? `(${expression} #>> '{}') COLLATE "C"`
-        : expression;
-    const parameter = (value: unknown): string =>
-      valueType === "string"
-        ? bindParameter(String(value)) + '::text COLLATE "C"'
-        : searchJsonValueParameter(value, bindParameter, (jsonValue) =>
-            transaction.json(jsonValue),
-          );
-    if (filter.operator === "in" || filter.operator === "notIn") {
-      const values = (filter.values ?? []).map(parameter).join(", ");
-      return (
-        "COALESCE((" +
-        matchesType +
-        " AND " +
-        comparedExpression +
-        (filter.operator === "in" ? " IN (" : " NOT IN (") +
-        values +
-        ")), FALSE)"
-      );
-    }
-    if (filter.operator === "between") {
-      return (
-        "COALESCE((" +
-        matchesType +
-        " AND " +
-        comparedExpression +
-        " >= " +
-        parameter(filter.lower) +
-        " AND " +
-        comparedExpression +
-        " <= " +
-        parameter(filter.upper) +
-        "), FALSE)"
-      );
-    }
-    const operator = {
-      eq: "=",
-      ne: "<>",
-      gt: ">",
-      gte: ">=",
-      lt: "<",
-      lte: "<=",
-    }[filter.operator];
-    return (
-      "COALESCE((" +
-      matchesType +
-      " AND " +
-      comparedExpression +
-      " " +
-      operator +
-      " " +
-      parameter(filter.value) +
-      "), FALSE)"
-    );
-  };
-  const compileFilter = (
-    filter: ArchiveSearchFilter | ArchiveSearchTargetFilter,
-    aliases: SearchViewAliases = rootAliases,
-    includeRootHit = true,
-  ): string => {
-    if (filter.type === "and" || filter.type === "or") {
-      const operator = filter.type === "and" ? " AND " : " OR ";
-      return (
-        "(" +
-        filter.conditions
-          .map((condition) => compileFilter(condition, aliases, includeRootHit))
-          .join(operator) +
-        ")"
-      );
-    }
-    if (filter.type === "not")
-      return (
-        "NOT (" + compileFilter(filter.condition, aliases, includeRootHit) + ")"
-      );
-    if (filter.type === "text")
-      return compileText(filter.text, aliases, includeRootHit);
-    if (filter.type === "json") {
-      return compileJsonFilter(filter, aliases.revision + ".state_data");
-    }
-
-    if (filter.type === "relation") {
-      const relatedItemId =
-        filter.direction === "outgoing"
-          ? "relation_filter.target_item_id"
-          : filter.direction === "incoming"
-            ? "relation_filter.from_item_id"
-            : `CASE
-                WHEN relation_filter.from_item_id = ${aliases.item}.item_id
-                THEN relation_filter.target_item_id
-                ELSE relation_filter.from_item_id
-              END`;
-      const relatedSourceRef =
-        filter.direction === "outgoing"
-          ? "relation_filter.target_source_ref"
-          : filter.direction === "incoming"
-            ? "NULL::text"
-            : `CASE
-                WHEN relation_filter.from_item_id = ${aliases.item}.item_id
-                THEN relation_filter.target_source_ref
-                ELSE NULL::text
-              END`;
-      const relationConditions = [
-        filter.direction === "outgoing"
-          ? `relation_filter.from_item_id = ${aliases.item}.item_id`
-          : filter.direction === "incoming"
-            ? `relation_filter.target_item_id = ${aliases.item}.item_id`
-            : `(relation_filter.from_item_id = ${aliases.item}.item_id OR relation_filter.target_item_id = ${aliases.item}.item_id)`,
-        `relation_filter.created_seq <= ${asOf}::bigint`,
-        ...(filter.name === undefined
-          ? []
-          : [
-              `relation_revision.state_data->>'name' COLLATE "C" = ${bind(filter.name)}::text COLLATE "C"`,
-            ]),
-        ...(filter.properties === undefined
-          ? []
-          : [
-              compileJsonFilter(
-                filter.properties,
-                "relation_revision.state_data",
-              ),
-            ]),
-      ];
-      const relationFrom = `
-        FROM archive_relation AS relation_filter
-        JOIN LATERAL (
-          SELECT observation.relation_revision_id
-          FROM archive_relation_observation AS observation
-          WHERE observation.relation_id = relation_filter.relation_id
-            AND observation.bin_id = ${aliases.latest}.bin_id
-            AND observation.archive_seq <= ${asOf}::bigint
-          ORDER BY
-            observation.archive_seq DESC,
-            observation.ordinal DESC,
-            observation.commit_id DESC
-          LIMIT 1
-        ) AS relation_latest
-          ON relation_latest.relation_revision_id IS NOT NULL
-        JOIN archive_relation_revision AS relation_revision
-          ON relation_revision.relation_id = relation_filter.relation_id
-          AND relation_revision.relation_revision_id = relation_latest.relation_revision_id
-        ${
-          filter.target === undefined
-            ? ""
-            : `
-        JOIN LATERAL (
-          SELECT
-            observation.revision_id,
-            commit.bin_id,
-            commit.run_id,
-            commit.collector_version,
-            commit.observed_at,
-            commit.recorded_at
-          FROM archive_observation AS observation
-          JOIN archive_commit AS commit
-            ON commit.commit_id = observation.commit_id
-          WHERE observation.item_id = ${relatedItemId}
-            AND commit.bin_id = ${aliases.latest}.bin_id
-            AND commit.archive_seq <= ${asOf}::bigint
-          ORDER BY
-            commit.archive_seq DESC,
-            observation.ordinal DESC,
-            commit.commit_id DESC
-          LIMIT 1
-        ) AS target_latest
-          ON ${relatedItemId} IS NOT NULL
-        JOIN archive_item AS target_item
-          ON target_item.item_id = ${relatedItemId}
-        JOIN archive_revision AS target_revision
-          ON target_revision.item_id = target_item.item_id
-          AND target_revision.revision_id = target_latest.revision_id
-        `
-        }
-      `;
-      const relationPredicate = relationConditions.join(" AND ");
-      const targetPredicate =
-        filter.target === undefined
-          ? "TRUE"
-          : compileFilter(
-              filter.target,
-              {
-                item: "target_item",
-                revision: "target_revision",
-                latest: "target_latest",
-              },
-              false,
-            );
-      const matchingRelations = `SELECT
-          ${relatedItemId} AS target_item_id,
-          ${relatedSourceRef} AS target_source_ref
-        ${relationFrom}
-        WHERE ${relationPredicate} AND (${targetPredicate})`;
-      if (filter.operator === "exists") {
-        return `EXISTS (SELECT 1 FROM (${matchingRelations}) AS matching_relation)`;
-      }
-      if (filter.operator === "notExists") {
-        return `NOT EXISTS (SELECT 1 FROM (${matchingRelations}) AS matching_relation)`;
-      }
-      const count = filter.count;
-      if (count === undefined) {
-        throw new Error("关系数量条件缺少比较符和值。");
-      }
-      const countOperator = {
-        eq: "=",
-        gt: ">",
-        gte: ">=",
-        lt: "<",
-        lte: "<=",
-      }[count.operator];
-      return `(SELECT count(DISTINCT COALESCE(
-          'item:' || matching_relation.target_item_id::text,
-          'sourceRef:' || matching_relation.target_source_ref
-        )) FROM (${matchingRelations}) AS matching_relation) ${countOperator} ${bind(String(count.value))}::bigint`;
-    }
-
-    const field = searchFieldExpression(filter.field, aliases);
-    if (filter.operator === "exists") {
-      return field.sql + (filter.value === true ? " IS NOT NULL" : " IS NULL");
-    }
-    const expression =
-      field.kind === "text" ? "(" + field.sql + ') COLLATE "C"' : field.sql;
-    const parameter = (value: string): string =>
-      field.kind === "text"
-        ? bind(value) + '::text COLLATE "C"'
-        : bind(value) + "::timestamptz";
-    const present = field.sql + " IS NOT NULL AND ";
-    if (filter.operator === "in" || filter.operator === "notIn") {
-      const values = (filter.values ?? []).map(parameter).join(", ");
-      return (
-        present +
-        expression +
-        (filter.operator === "in" ? " IN (" : " NOT IN (") +
-        values +
-        ")"
-      );
-    }
-    if (filter.operator === "between") {
-      return (
-        present +
-        expression +
-        " >= " +
-        parameter(filter.lower ?? "") +
-        " AND " +
-        expression +
-        " <= " +
-        parameter(filter.upper ?? "")
-      );
-    }
-    const operator = {
-      eq: "=",
-      ne: "<>",
-      gt: ">",
-      gte: ">=",
-      lt: "<",
-      lte: "<=",
-    }[filter.operator];
-    return (
-      present +
-      expression +
-      " " +
-      operator +
-      " " +
-      parameter(String(filter.value))
-    );
-  };
-  const filters: ArchiveSearchFilter[] = [
-    ...(input.text === undefined
-      ? []
-      : [{ type: "text" as const, text: input.text }]),
-    ...(input.where === undefined ? [] : [input.where]),
-  ];
-  const firstFilter = filters[0];
-  if (firstFilter === undefined) {
-    throw new Error("搜索条件至少需要一个文本或字段谓词。");
-  }
-  const queryFilter: ArchiveSearchFilter =
-    filters.length === 1 ? firstFilter : { type: "and", conditions: filters };
-  const matchPredicate = compileFilter(queryFilter);
-  const hitStart =
-    textConditions.length === 0
-      ? "NULL::integer"
-      : "CASE " +
-        textConditions
-          .map(
-            ({ hitPredicate, hitStart: start }) =>
-              `WHEN (${hitPredicate}) THEN ${start}`,
-          )
-          .join(" ") +
-        " ELSE NULL::integer END";
-  const hitEnd =
-    textConditions.length === 0
-      ? "NULL::integer"
-      : "CASE " +
-        textConditions
-          .map(
-            ({ hitPredicate, hitEnd: end }) =>
-              `WHEN (${hitPredicate}) THEN ${end}`,
-          )
-          .join(" ") +
-        " ELSE NULL::integer END";
+  const asOf = BigInt(snapshot.asOf);
   const scopeKind = input.scope.kind;
   const resultUnit =
     scopeKind === "revisions"
@@ -747,308 +464,673 @@ async function readCurrentSearchPage(
       : scopeKind === "observations"
         ? "observation"
         : "item";
-  const distinctOn =
+  const latestSelection = {
+    itemId: archiveObservations.itemId,
+    revisionId: archiveObservations.revisionId,
+    commitId: archiveCommits.commitId,
+    archiveSequence: archiveCommits.archiveSequence,
+    binId: archiveCommits.binId,
+    runId: archiveCommits.runId,
+    collectorVersion: archiveCommits.collectorVersion,
+    observedAt: archiveCommits.observedAt,
+    recordedAt: archiveCommits.recordedAt,
+    ordinal: archiveObservations.ordinal,
+    stateData: archiveRevisions.stateData,
+  };
+  const latestPredicate = and(
+    lte(archiveCommits.archiveSequence, asOf),
+    input.scope.binId === undefined
+      ? undefined
+      : eq(archiveCommits.binId, input.scope.binId),
+  );
+  const distinctOn: SQLWrapper[] =
     scopeKind === "revisions"
-      ? "observation.item_id, commit.bin_id, observation.revision_id"
-      : "observation.item_id, commit.bin_id";
-  const sourceOrder =
-    scopeKind === "revisions"
-      ? "observation.item_id, commit.bin_id, observation.revision_id, "
-      : "observation.item_id, commit.bin_id, ";
-  const sourceSelection =
-    scopeKind === "observations" ? "" : `DISTINCT ON (${distinctOn})`;
+      ? [
+          archiveObservations.itemId,
+          archiveCommits.binId,
+          archiveObservations.revisionId,
+        ]
+      : [archiveObservations.itemId, archiveCommits.binId];
+  const latestOrdering = [
+    ...distinctOn.map((column) => asc(column)),
+    desc(archiveCommits.archiveSequence),
+    desc(archiveObservations.ordinal),
+    desc(archiveCommits.commitId),
+  ];
+  const latestRows =
+    scopeKind === "observations"
+      ? transaction
+          .select(latestSelection)
+          .from(archiveObservations)
+          .innerJoin(
+            archiveCommits,
+            eq(archiveCommits.commitId, archiveObservations.commitId),
+          )
+          .innerJoin(
+            archiveRevisions,
+            and(
+              eq(archiveRevisions.itemId, archiveObservations.itemId),
+              eq(archiveRevisions.revisionId, archiveObservations.revisionId),
+            ),
+          )
+          .where(latestPredicate)
+          .orderBy(...latestOrdering)
+      : transaction
+          .selectDistinctOn(distinctOn, latestSelection)
+          .from(archiveObservations)
+          .innerJoin(
+            archiveCommits,
+            eq(archiveCommits.commitId, archiveObservations.commitId),
+          )
+          .innerJoin(
+            archiveRevisions,
+            and(
+              eq(archiveRevisions.itemId, archiveObservations.itemId),
+              eq(archiveRevisions.revisionId, archiveObservations.revisionId),
+            ),
+          )
+          .where(latestPredicate)
+          .orderBy(...latestOrdering);
+  const latest = transaction.$with("latest").as(latestRows);
+
+  const textConditions: ArchiveSearchText[] = [];
+  const rootFields: SearchFields = {
+    item: {
+      itemId: archiveItems.itemId,
+      namespace: archiveItems.namespace,
+      sourceKey: archiveItems.sourceKey,
+    },
+    revision: { stateData: archiveRevisions.stateData },
+    latest: {
+      binId: latest.binId,
+      runId: latest.runId,
+      collectorVersion: latest.collectorVersion,
+      observedAt: latest.observedAt,
+      recordedAt: latest.recordedAt,
+    },
+  };
+  const compileText = (
+    text: ArchiveSearchText,
+    fields: SearchFields,
+    includeHit: boolean,
+  ): SQL => {
+    const searchText = searchTextExpression(fields.revision.stateData);
+    if (includeHit) textConditions.push(text);
+    // RC 不提供 LIKE ESCAPE 或 PostgreSQL ARE 条件构造；模式值仍由插值绑定。
+    if (text.kind === "literal") {
+      const pattern = `%${escapeLikeLiteral(text.value)}%`;
+      return and(
+        isNotNull(searchText),
+        sql`${searchText} LIKE ${pattern} ESCAPE E'\\\\'`,
+      )!;
+    }
+    return and(isNotNull(searchText), sql`${searchText} ~ ${text.pattern}`)!;
+  };
+  const compileFilter = (
+    filter: ArchiveSearchFilter | ArchiveSearchTargetFilter,
+    fields: SearchFields,
+    includeHit = true,
+  ): SQL => {
+    if (filter.type === "and" || filter.type === "or") {
+      const conditions = filter.conditions.map((condition) =>
+        compileFilter(condition, fields, includeHit),
+      );
+      return (filter.type === "and" ? and(...conditions) : or(...conditions))!;
+    }
+    if (filter.type === "not") {
+      return not(compileFilter(filter.condition, fields, includeHit))!;
+    }
+    if (filter.type === "text") {
+      return compileText(filter.text, fields, includeHit);
+    }
+    if (filter.type === "json") {
+      return compileJsonFilter(filter, fields.revision.stateData);
+    }
+    if (filter.type === "field") {
+      return compileFieldFilter(filter, fields);
+    }
+    return compileRelationFilter(filter, fields);
+  };
+
+  let relationAliasIndex = 0;
+  const compileRelationFilter = (
+    filter: ArchiveSearchRelationFilter,
+    fields: SearchFields,
+  ): SQL => {
+    const suffix = relationAliasIndex.toString(10);
+    relationAliasIndex += 1;
+    const relation = alias(archiveRelations, `search_relation_${suffix}`);
+    const relationObservation = alias(
+      archiveRelationObservations,
+      `search_relation_observation_${suffix}`,
+    );
+    const relationRevision = alias(
+      archiveRelationRevisions,
+      `search_relation_revision_${suffix}`,
+    );
+    const latestRelation = transaction
+      .select({
+        relationRevisionId: relationObservation.relationRevisionId,
+      })
+      .from(relationObservation)
+      .where(
+        and(
+          eq(relationObservation.relationId, relation.relationId),
+          eq(relationObservation.binId, fields.latest.binId),
+          lte(relationObservation.archiveSequence, asOf),
+        ),
+      )
+      .orderBy(
+        desc(relationObservation.archiveSequence),
+        desc(relationObservation.ordinal),
+        desc(relationObservation.commitId),
+      )
+      .limit(1)
+      .as(`search_relation_latest_${suffix}`);
+    // RC 没有 CASE/COALESCE 构造器；表达式保留逻辑对端及 item/sourceRef 身份供同一 bin/K 筛选和去重。
+    const relatedItemId: SQLWrapper =
+      filter.direction === "outgoing"
+        ? relation.targetItemId
+        : filter.direction === "incoming"
+          ? relation.fromItemId
+          : sql`CASE WHEN ${relation.fromItemId} = ${fields.item.itemId} THEN ${relation.targetItemId} ELSE ${relation.fromItemId} END`;
+    const relatedSourceRef: SQLWrapper =
+      filter.direction === "outgoing"
+        ? relation.targetSourceRef
+        : filter.direction === "incoming"
+          ? sql`NULL::text`
+          : sql`CASE WHEN ${relation.fromItemId} = ${fields.item.itemId} THEN ${relation.targetSourceRef} ELSE NULL::text END`;
+    const relationIdentity = sql`COALESCE('item:' || ${relatedItemId}::text, 'sourceRef:' || ${relatedSourceRef})`;
+    const endpointCondition =
+      filter.direction === "outgoing"
+        ? eq(relation.fromItemId, fields.item.itemId)
+        : filter.direction === "incoming"
+          ? eq(relation.targetItemId, fields.item.itemId)
+          : or(
+              eq(relation.fromItemId, fields.item.itemId),
+              eq(relation.targetItemId, fields.item.itemId),
+            );
+    const conditions: SQL[] = [
+      endpointCondition!,
+      lte(relation.createdSequence, asOf),
+    ];
+    if (filter.name !== undefined) {
+      // RC 未提供 JSON ->> 与 COLLATE 表达式；关系名仍以 C 序比较。
+      conditions.push(
+        sql`${relationRevision.stateData}->>'name' COLLATE "C" = ${filter.name}::text COLLATE "C"`,
+      );
+    }
+    if (filter.properties !== undefined) {
+      conditions.push(
+        compileJsonFilter(filter.properties, relationRevision.stateData),
+      );
+    }
+
+    const relationRows = transaction
+      .select({ identity: relationIdentity.as("identity") })
+      .from(relation)
+      .innerJoinLateral(latestRelation, sql`true`)
+      .innerJoin(
+        relationRevision,
+        and(
+          eq(relationRevision.relationId, relation.relationId),
+          eq(
+            relationRevision.relationRevisionId,
+            latestRelation.relationRevisionId,
+          ),
+        ),
+      );
+    const compareRelationCount = (countExpression: SQL): SQL => {
+      if (filter.count === undefined) {
+        throw new Error("关系数量条件缺少比较符和值。");
+      }
+      switch (filter.count.operator) {
+        case "eq":
+          return eq(countExpression, filter.count.value);
+        case "gt":
+          return gt(countExpression, filter.count.value);
+        case "gte":
+          return gte(countExpression, filter.count.value);
+        case "lt":
+          return lt(countExpression, filter.count.value);
+        case "lte":
+          return lte(countExpression, filter.count.value);
+      }
+    };
+
+    if (filter.target === undefined) {
+      const matchingRelations = relationRows
+        .where(and(...conditions))!
+        .as(`search_matching_relations_${suffix}`);
+      if (filter.operator === "exists") {
+        return exists(
+          transaction.select({ present: sql`1` }).from(matchingRelations),
+        );
+      }
+      if (filter.operator === "notExists") {
+        return notExists(
+          transaction.select({ present: sql`1` }).from(matchingRelations),
+        );
+      }
+      const countQuery = transaction
+        .select({ count: countDistinct(matchingRelations.identity) })
+        .from(matchingRelations);
+      return compareRelationCount(sql`(${countQuery})`);
+    }
+
+    const targetObservation = alias(
+      archiveObservations,
+      `search_target_observation_${suffix}`,
+    );
+    const targetCommit = alias(
+      archiveCommits,
+      `search_target_commit_${suffix}`,
+    );
+    const targetItem = alias(archiveItems, `search_target_item_${suffix}`);
+    const targetRevision = alias(
+      archiveRevisions,
+      `search_target_revision_${suffix}`,
+    );
+    const targetLatest = transaction
+      .select({
+        revisionId: targetObservation.revisionId,
+        binId: targetCommit.binId,
+        runId: targetCommit.runId,
+        collectorVersion: targetCommit.collectorVersion,
+        observedAt: targetCommit.observedAt,
+        recordedAt: targetCommit.recordedAt,
+      })
+      .from(targetObservation)
+      .innerJoin(
+        targetCommit,
+        eq(targetCommit.commitId, targetObservation.commitId),
+      )
+      .where(
+        and(
+          eq(targetObservation.itemId, relatedItemId),
+          eq(targetCommit.binId, fields.latest.binId),
+          lte(targetCommit.archiveSequence, asOf),
+        ),
+      )
+      .orderBy(
+        desc(targetCommit.archiveSequence),
+        desc(targetObservation.ordinal),
+        desc(targetCommit.commitId),
+      )
+      .limit(1)
+      .as(`search_target_latest_${suffix}`);
+    const targetFields: SearchFields = {
+      item: {
+        itemId: targetItem.itemId,
+        namespace: targetItem.namespace,
+        sourceKey: targetItem.sourceKey,
+      },
+      revision: { stateData: targetRevision.stateData },
+      latest: {
+        binId: targetLatest.binId,
+        runId: targetLatest.runId,
+        collectorVersion: targetLatest.collectorVersion,
+        observedAt: targetLatest.observedAt,
+        recordedAt: targetLatest.recordedAt,
+      },
+    };
+    const matchingRelations = relationRows
+      .innerJoinLateral(targetLatest, sql`true`)
+      .innerJoin(targetItem, eq(targetItem.itemId, relatedItemId))
+      .innerJoin(
+        targetRevision,
+        and(
+          eq(targetRevision.itemId, targetItem.itemId),
+          eq(targetRevision.revisionId, targetLatest.revisionId),
+        ),
+      )
+      .where(
+        and(...conditions, compileFilter(filter.target, targetFields, false)),
+      )!
+      .as(`search_matching_relations_${suffix}`);
+    if (filter.operator === "exists") {
+      return exists(
+        transaction.select({ present: sql`1` }).from(matchingRelations),
+      );
+    }
+    if (filter.operator === "notExists") {
+      return notExists(
+        transaction.select({ present: sql`1` }).from(matchingRelations),
+      );
+    }
+    const countQuery = transaction
+      .select({ count: countDistinct(matchingRelations.identity) })
+      .from(matchingRelations);
+    return compareRelationCount(sql`(${countQuery})`);
+  };
+
+  const filters: ArchiveSearchFilter[] = [
+    ...(input.text === undefined
+      ? []
+      : [{ type: "text" as const, text: input.text }]),
+    ...(input.where === undefined ? [] : [input.where]),
+  ];
+  if (filters.length === 0) {
+    throw new Error("搜索条件至少需要一个文本或字段谓词。");
+  }
+  const matchPredicate =
+    filters.length === 1
+      ? compileFilter(filters[0]!, rootFields)
+      : and(...filters.map((filter) => compileFilter(filter, rootFields)))!;
+  // 公共 resultId 由多列文本组成，RC 未提供 PostgreSQL ::text 与 || 的类型化表达式。
   const resultIdExpression =
     resultUnit === "item"
-      ? "latest.item_id::text"
+      ? sql`${latest.itemId}::text`.mapWith(String)
       : resultUnit === "revision"
-        ? "latest.item_id::text || ':' || latest.revision_id::text"
-        : "latest.commit_id::text || ':' || latest.ordinal::text";
-  const rootRevisionExpression =
-    resultUnit === "revision" ? "min(revision_id::text)" : "NULL::text";
-  const rootCommitExpression =
-    resultUnit === "observation" ? "min(commit_id::text)" : "NULL::text";
-  const rootOrdinalExpression =
-    resultUnit === "observation" ? "min(ordinal)" : "NULL::integer";
-  type SearchOrder = (typeof input.orderBy)[number];
-  type SearchSortKind = "text" | "jsonb";
-  type SearchSortExpression = {
-    readonly sql: string;
-    readonly kind: SearchSortKind;
+        ? sql`${latest.itemId}::text || ':' || ${latest.revisionId}::text`.mapWith(
+            String,
+          )
+        : sql`${latest.commitId}::text || ':' || ${latest.ordinal}::text`.mapWith(
+            String,
+          );
+  const matched = transaction.$with("matched").as(
+    transaction
+      .select({
+        ...getColumns(latest),
+        namespace: archiveItems.namespace,
+        sourceKey: archiveItems.sourceKey,
+        sourceRef: sql`${archiveRevisions.stateData}->>'sourceRef'`
+          .mapWith(String)
+          .nullable()
+          .as("sourceRef"),
+        sourceModifiedAt:
+          sql`${archiveRevisions.stateData}->>'sourceModifiedAt'`
+            .mapWith(String)
+            .nullable()
+            .as("sourceModifiedAt"),
+        completeness:
+          sql`${archiveRevisions.stateData}->'capture'->>'completeness'`
+            .mapWith(decodeCaptureCompleteness)
+            .nullable()
+            .as("completeness"),
+        searchText: searchTextExpression(archiveRevisions.stateData)
+          .mapWith(String)
+          .nullable()
+          .as("searchText"),
+        resultId: resultIdExpression.as("resultId"),
+      })
+      .from(latest)
+      .innerJoin(archiveItems, eq(archiveItems.itemId, latest.itemId))
+      .innerJoin(
+        archiveRevisions,
+        and(
+          eq(archiveRevisions.itemId, latest.itemId),
+          eq(archiveRevisions.revisionId, latest.revisionId),
+        ),
+      )
+      .where(matchPredicate),
+  );
+  const hitPosition = (
+    text: ArchiveSearchText,
+    stateData: SQLWrapper,
+    edge: "start" | "end",
+  ): SQL => {
+    const searchText = searchTextExpression(stateData);
+    if (text.kind === "literal") {
+      const start = sql`strpos(${searchText}, ${text.value}) - 1`;
+      return edge === "start"
+        ? start.mapWith(Number).nullable()
+        : sql`${start} + char_length(${text.value})`.mapWith(Number).nullable();
+    }
+    // RC 未声明 PostgreSQL ARE、regexp_instr 与字符位置函数；数据库端位置按 Unicode 码点计算。
+    return edge === "start"
+      ? sql`regexp_instr(${searchText}, ${text.pattern}, 1, 1, 0, 'c') - 1`
+          .mapWith(Number)
+          .nullable()
+      : sql`regexp_instr(${searchText}, ${text.pattern}, 1, 1, 1, 'c') - 1`
+          .mapWith(Number)
+          .nullable();
   };
-  const selectSortExpression = (sort: SearchOrder): SearchSortExpression => {
+  // CASE 选取逻辑遍历中首个命中文本条件；RC 没有 CASE 构造器。
+  const hitStart =
+    textConditions.length === 0
+      ? sql`NULL::integer`.mapWith(Number).nullable()
+      : sql`CASE ${sql.join(
+          textConditions.map(
+            (text) =>
+              sql`WHEN ${compileText(
+                text,
+                {
+                  ...rootFields,
+                  revision: { stateData: matched.stateData },
+                },
+                false,
+              )} THEN ${hitPosition(text, matched.stateData, "start")}`,
+          ),
+          sql` `,
+        )} ELSE NULL::integer END`
+          .mapWith(Number)
+          .nullable();
+  const located = transaction.$with("located").as(
+    transaction
+      .select({
+        ...getColumns(matched),
+        hitStart: hitStart.as("hitStart"),
+      })
+      .from(matched),
+  );
+  const hitEnd =
+    textConditions.length === 0
+      ? sql`NULL::integer`.mapWith(Number).nullable()
+      : sql`CASE ${sql.join(
+          textConditions.map(
+            (text) =>
+              sql`WHEN ${compileText(
+                text,
+                {
+                  ...rootFields,
+                  revision: { stateData: located.stateData },
+                },
+                false,
+              )} THEN ${hitPosition(text, located.stateData, "end")}`,
+          ),
+          sql` `,
+        )} ELSE NULL::integer END`
+          .mapWith(Number)
+          .nullable();
+  const bounded = transaction.$with("bounded").as(
+    transaction
+      .select({
+        ...getColumns(located),
+        hitEnd: hitEnd.as("hitEnd"),
+      })
+      .from(located),
+  );
+  // RC 未提供 greatest/least/substring 构造器；范围与上下文仍在数据库按码点计算。
+  const contextual = transaction.$with("contextual").as(
+    transaction
+      .select({
+        ...getColumns(bounded),
+        contextStart: sql`greatest(0, ${bounded.hitStart} - 80)`
+          .mapWith(Number)
+          .nullable()
+          .as("contextStart"),
+        contextEnd:
+          sql`least(char_length(${bounded.searchText}), ${bounded.hitEnd} + 80)`
+            .mapWith(Number)
+            .nullable()
+            .as("contextEnd"),
+      })
+      .from(bounded),
+  );
+
+  const aggregateByView = (value: SQLWrapper): SQL =>
+    // RC 未声明有序 array_agg；它只负责每个根排序列，分组与查询仍由构建器表达。
+    sql`(array_agg(${value} ORDER BY ${contextual.binId} COLLATE "C", ${contextual.archiveSequence}, ${contextual.ordinal}, ${contextual.commitId}))[1]`;
+  // JSON 类型分支、lpad 与 to_char 是排序列的 PostgreSQL 局部表达式，用于保留原排序语义。
+  const selectSortExpression = (
+    sort: SearchSort,
+  ): { readonly expression: SQLWrapper; readonly kind: SearchSortKind } => {
     if (sort.field === "metadata" || sort.field === "properties") {
       if (sort.path === undefined || sort.valueType === undefined) {
         throw new Error("JSON 路径排序缺少路径或预期类型。");
       }
       const expression = searchJsonPathExpression(
-        "state_data",
+        contextual.stateData,
         sort.field,
         sort.path,
-        bind,
       );
-      const typeName = sort.valueType;
-      const value =
-        typeName === "number"
-          ? `CASE WHEN jsonb_typeof(${expression}) = 'number' THEN ${expression} END`
-          : `CASE WHEN jsonb_typeof(${expression}) = '${typeName}' THEN ${expression} #>> '{}' END`;
+      const typedValue =
+        sort.valueType === "number"
+          ? sql`CASE WHEN jsonb_typeof(${expression}) = 'number' THEN ${expression} END`
+          : sql`CASE WHEN jsonb_typeof(${expression}) = ${sort.valueType} THEN ${expression} #>> '{}'\n            END`;
       return {
-        sql: `(array_agg(${value} ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]`,
-        kind: typeName === "number" ? "jsonb" : "text",
+        expression: aggregateByView(typedValue),
+        kind: sort.valueType === "number" ? "jsonb" : "text",
       };
     }
-    const aggregate = (expression: string): string =>
-      `(array_agg(${expression} ORDER BY bin_id COLLATE "C", archive_seq::bigint, ordinal, commit_id))[1]`;
     switch (sort.field) {
       case "itemId":
-        return { sql: "item_id::text", kind: "text" };
+        return {
+          expression: sql`${contextual.itemId}::text`,
+          kind: "text",
+        };
       case "sourceKey.namespace":
-        return { sql: "namespace", kind: "text" };
+        return { expression: contextual.namespace, kind: "text" };
       case "sourceKey.key":
-        return { sql: "source_key", kind: "text" };
+        return { expression: contextual.sourceKey, kind: "text" };
       case "sourceRef":
-        return { sql: aggregate("source_ref"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.sourceRef),
+          kind: "text",
+        };
       case "sourceModifiedAt":
-        return { sql: aggregate("source_modified_at"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.sourceModifiedAt),
+          kind: "text",
+        };
       case "capture.completeness":
-        return { sql: aggregate("completeness"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.completeness),
+          kind: "text",
+        };
       case "binId":
-        return { sql: aggregate("bin_id"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.binId),
+          kind: "text",
+        };
       case "revisionId":
-        return { sql: aggregate("revision_id::text"), kind: "text" };
+        return {
+          expression: aggregateByView(sql`${contextual.revisionId}::text`),
+          kind: "text",
+        };
       case "archiveSeq":
-        return { sql: aggregate("lpad(archive_seq, 19, '0')"), kind: "text" };
+        return {
+          expression: aggregateByView(
+            sql`lpad(${contextual.archiveSequence}::text, 19, '0')`,
+          ),
+          kind: "text",
+        };
       case "runId":
-        return { sql: aggregate("run_id"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.runId),
+          kind: "text",
+        };
       case "collectorVersion":
-        return { sql: aggregate("collector_version"), kind: "text" };
+        return {
+          expression: aggregateByView(contextual.collectorVersion),
+          kind: "text",
+        };
       case "observedAt":
         return {
-          sql: aggregate(
-            "to_char(observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+          expression: aggregateByView(
+            sql`to_char(${contextual.observedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
           ),
           kind: "text",
         };
       case "recordedAt":
         return {
-          sql: aggregate(
-            "to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+          expression: aggregateByView(
+            sql`to_char(${contextual.recordedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
           ),
           kind: "text",
         };
     }
-    throw new Error("搜索排序字段未声明。");
   };
   const sortExpressions = input.orderBy.map(selectSortExpression);
-  const pageOrdering = input.orderBy
-    .map(
-      ({ direction }, index) =>
-        `sort_${index.toString(10)}${sortExpressions[index]?.kind === "text" ? ' COLLATE "C"' : ""} ${direction.toUpperCase()} NULLS LAST`,
-    )
-    .concat(['result_id COLLATE "C" ASC'])
-    .join(", ");
-  let cursorPredicate = "TRUE";
-  let cursorRootCte = "";
-  let cursorMissingPageRow = "";
-  if (cursor !== undefined) {
-    const cursorResultId = bind(cursor.resultId);
-    cursorRootCte = `cursor_root AS (SELECT * FROM roots WHERE result_id = ${cursorResultId}::text),`;
-    const nullSortValues = sortExpressions
-      .map(({ kind }) => (kind === "jsonb" ? "NULL::jsonb" : "NULL::text"))
-      .join(", ");
-    cursorMissingPageRow = `UNION ALL
-      SELECT
-        true AS cursor_missing,
-        NULL::text AS result_id,
-        '${resultUnit}'::text AS result_unit,
-        NULL AS item_id,
-        NULL::text AS root_revision_id,
-        NULL::text AS root_commit_id,
-        NULL::integer AS root_ordinal,
-        NULL AS namespace,
-        NULL AS source_key,
-        ${nullSortValues},
-        NULL::bigint AS result_rank
-      WHERE NOT EXISTS (SELECT 1 FROM cursor_root)`;
-    const afterBranches: string[] = [];
-    const equalPrefix: string[] = [];
-    for (const [index, sort] of input.orderBy.entries()) {
-      const alias = `roots.sort_${index.toString(10)}`;
-      const cursorAlias = `cursor_root.sort_${index.toString(10)}`;
-      const comparison =
-        sortExpressions[index]?.kind === "text"
-          ? `${alias} COLLATE "C"`
-          : alias;
-      const cursorComparison =
-        sortExpressions[index]?.kind === "text"
-          ? `${cursorAlias} COLLATE "C"`
-          : cursorAlias;
-      const operator = sort.direction === "asc" ? ">" : "<";
-      afterBranches.push(
-        `(${equalPrefix.join(" AND ")}${equalPrefix.length > 0 ? " AND " : ""}${cursorAlias} IS NOT NULL AND (${alias} IS NULL OR (${alias} IS NOT NULL AND ${comparison} ${operator} ${cursorComparison})))`,
-      );
-      equalPrefix.push(`${alias} IS NOT DISTINCT FROM ${cursorAlias}`);
-    }
-    afterBranches.push(
-      `(${equalPrefix.join(" AND ")} AND roots.result_id COLLATE "C" > cursor_root.result_id COLLATE "C")`,
+  // 未使用的排序槽显式给 text 空值类型，让嵌套 CTE 的固定选择保持可推导。
+  const sortColumn = (index: number): SQL.Aliased =>
+    sql`${sortExpressions[index]?.expression ?? sql`NULL::text`}`.as(
+      `sort${index}`,
     );
-    cursorPredicate =
-      "EXISTS (SELECT 1 FROM cursor_root WHERE " +
-      afterBranches.join(" OR ") +
-      ")";
-  }
-  const limit = bind(String(input.limit + 1));
-  const jsonSelectors = input.select.filter(
-    (selector): selector is ArchiveSearchJsonProjection =>
-      typeof selector !== "string",
+  // 非对应搜索单位使用有类型的 NULL；历史单位的标识由原生 min 聚合保留。
+  const rootRevisionId =
+    resultUnit === "revision"
+      ? min(sql`${contextual.revisionId}::text`)
+      : sql`NULL::text`.mapWith(String).nullable();
+  const rootCommitId =
+    resultUnit === "observation"
+      ? min(sql`${contextual.commitId}::text`)
+      : sql`NULL::text`.mapWith(String).nullable();
+  const rootOrdinal =
+    resultUnit === "observation"
+      ? min(contextual.ordinal)
+      : sql`NULL::integer`.mapWith(Number).nullable();
+  const roots = transaction.$with("roots").as(
+    transaction
+      .select({
+        resultId: contextual.resultId,
+        itemId: contextual.itemId,
+        rootRevisionId: rootRevisionId.as("rootRevisionId"),
+        rootCommitId: rootCommitId.as("rootCommitId"),
+        rootOrdinal: rootOrdinal.as("rootOrdinal"),
+        namespace: contextual.namespace,
+        sourceKey: contextual.sourceKey,
+        sort: {
+          sort0: sortColumn(0),
+          sort1: sortColumn(1),
+          sort2: sortColumn(2),
+          sort3: sortColumn(3),
+          sort4: sortColumn(4),
+        },
+      })
+      .from(contextual)
+      .groupBy(
+        contextual.resultId,
+        contextual.itemId,
+        contextual.namespace,
+        contextual.sourceKey,
+      ),
   );
-  const jsonProjectionExpression =
-    jsonSelectors.length === 0
-      ? "'[]'::jsonb"
-      : "jsonb_build_array(" +
-        jsonSelectors
-          .map((selector) => {
-            const expression = searchJsonPathExpression(
-              "contextual.state_data",
-              selector.field,
-              selector.path,
-              bind,
-            );
-            const field = bind(selector.field);
-            const path = bind(selector.path);
-            return `CASE WHEN ${expression} IS NULL THEN jsonb_build_object('field', ${field}::text, 'path', ${path}::jsonb, 'exists', false) ELSE jsonb_build_object('field', ${field}::text, 'path', ${path}::jsonb, 'exists', true, 'value', ${expression}) END`;
-          })
-          .join(", ") +
-        ")";
-  const query = `
-    WITH latest AS (
-      SELECT ${sourceSelection}
-        observation.item_id,
-        observation.revision_id,
-        commit.commit_id,
-        commit.archive_seq::text AS archive_seq,
-        commit.bin_id,
-        commit.run_id,
-        commit.collector_version,
-        commit.observed_at,
-        commit.recorded_at,
-        observation.ordinal,
-        revision.state_data->>'sourceRef' AS source_ref,
-        revision.state_data->'capture'->>'completeness' AS completeness,
-        revision.state_data->>'sourceModifiedAt' AS source_modified_at
-      FROM archive_observation AS observation
-      JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-      JOIN archive_revision AS revision
-        ON revision.item_id = observation.item_id
-        AND revision.revision_id = observation.revision_id
-      WHERE commit.archive_seq <= ${asOf}::bigint${binPredicate}
-      ORDER BY
-        ${sourceOrder}
-        commit.archive_seq DESC,
-        observation.ordinal DESC,
-        commit.commit_id DESC
-    ),
-    matched AS (
-      SELECT
-        latest.*,
-        item.namespace,
-        item.source_key,
-        revision.state_data AS state_data,
-        revision.state_data->'body'->>'searchText' AS search_text,
-        ${resultIdExpression} AS result_id
-      FROM latest
-      JOIN archive_item AS item ON item.item_id = latest.item_id
-      JOIN archive_revision AS revision
-        ON revision.item_id = latest.item_id
-        AND revision.revision_id = latest.revision_id
-      WHERE ${matchPredicate}
-    ),
-    located AS (
-      SELECT matched.*, ${hitStart} AS hit_start
-      FROM matched
-    ),
-    bounded AS (
-      SELECT
-        located.*,
-        ${hitEnd} AS hit_end
-      FROM located
-    ),
-    contextual AS (
-      SELECT
-        bounded.*,
-        greatest(0, hit_start - 80) AS context_start,
-        least(
-          char_length(search_text),
-          hit_end + 80
-        ) AS context_end
-      FROM bounded
-    ),
-    roots AS (
-      SELECT
-        result_id,
-        '${resultUnit}'::text AS result_unit,
-        item_id,
-        ${rootRevisionExpression} AS root_revision_id,
-        ${rootCommitExpression} AS root_commit_id,
-        ${rootOrdinalExpression} AS root_ordinal,
-        namespace,
-        source_key,
-        ${sortExpressions.map(({ sql }, index) => `${sql} AS sort_${index.toString(10)}`).join(",\n        ")}
-      FROM contextual
-      GROUP BY result_id, item_id, namespace, source_key
-    ),
-    ${cursorRootCte}
-    limited_page AS (
-      SELECT
-        roots.*,
-        row_number() OVER (ORDER BY ${pageOrdering}) AS result_rank
-      FROM roots
-      WHERE ${cursorPredicate}
-      ORDER BY ${pageOrdering}
-      LIMIT ${limit}::integer
-    ),
-    page AS (
-      SELECT false AS cursor_missing, limited_page.*
-      FROM limited_page
-      ${cursorMissingPageRow}
-    )
-    SELECT
-      page.cursor_missing,
-      page.result_id,
-      page.result_unit,
-      page.root_revision_id,
-      page.root_commit_id,
-      page.root_ordinal,
-      contextual.item_id AS item_id,
-      contextual.namespace AS namespace,
-      contextual.source_key AS source_key,
-      contextual.bin_id AS bin_id,
-      contextual.revision_id AS revision_id,
-      contextual.archive_seq AS archive_seq,
-      contextual.run_id AS run_id,
-      contextual.collector_version AS collector_version,
-      contextual.source_ref AS source_ref,
-      contextual.source_modified_at AS source_modified_at,
-      contextual.completeness AS completeness,
-      contextual.observed_at AS observed_at,
-      contextual.recorded_at AS recorded_at,
-      contextual.hit_start AS hit_start,
-      contextual.hit_end AS hit_end,
-      contextual.context_start AS context_start,
-      contextual.context_end AS context_end,
-      substring(
-        contextual.search_text FROM contextual.context_start + 1 FOR contextual.context_end - contextual.context_start
-      ) AS context_text,
-      ${jsonProjectionExpression} AS json_projections
-    FROM page
-    LEFT JOIN contextual ON contextual.result_id = page.result_id
-    ORDER BY page.cursor_missing, page.result_rank, contextual.bin_id COLLATE "C", contextual.archive_seq::bigint
-  `;
-  const rows = await transaction.unsafe<SearchRow[]>(query, parameters);
-
-  const selected = new Set(input.select);
-  const results = new Map<string, SearchResult>();
-  for (const row of rows) {
-    if (row.cursor_missing) {
+  const rootSortValues: SQLWrapper[] = [
+    roots.sort.sort0,
+    roots.sort.sort1,
+    roots.sort.sort2,
+    roots.sort.sort3,
+    roots.sort.sort4,
+  ];
+  const rootOrdering = (sortValues: readonly SQLWrapper[]): SQL[] =>
+    input.orderBy.map((sort, index) => {
+      const value = sortValues[index]!;
+      const orderedValue =
+        sortExpressions[index]?.kind === "text"
+          ? sql`${value} COLLATE "C"`
+          : value;
+      // RC 的 SELECT 排序构造器没有 NULLS LAST；该后缀与方向一起用于每个根排序列。
+      return sql`${sort.direction === "asc" ? asc(orderedValue) : desc(orderedValue)} NULLS LAST`;
+    });
+  const cursorRoot = transaction.$with("cursor_root").as(
+    transaction
+      .select()
+      .from(roots)
+      .where(
+        cursor === undefined ? sql`FALSE` : eq(roots.resultId, cursor.resultId),
+      ),
+  );
+  let cursorCondition: SQL | undefined;
+  if (cursor !== undefined) {
+    const cursorRows = await transaction
+      .with(latest, matched, located, bounded, contextual, roots)
+      .select({ resultId: roots.resultId })
+      .from(roots)
+      .where(eq(roots.resultId, cursor.resultId))
+      .limit(1);
+    if (cursorRows[0] === undefined) {
       return {
         ok: false,
         status: 400,
@@ -1059,30 +1141,176 @@ async function readCurrentSearchPage(
         },
       };
     }
+    const cursorSortValues: SQLWrapper[] = [
+      cursorRoot.sort.sort0,
+      cursorRoot.sort.sort1,
+      cursorRoot.sort.sort2,
+      cursorRoot.sort.sort3,
+      cursorRoot.sort.sort4,
+    ];
+    const afterBranches: SQL[] = [];
+    const equalPrefix: SQL[] = [];
+    for (const [index, sort] of input.orderBy.entries()) {
+      const rootValue = rootSortValues[index]!;
+      const cursorValue = cursorSortValues[index]!;
+      const rootComparison =
+        sortExpressions[index]?.kind === "text"
+          ? sql`${rootValue} COLLATE "C"`
+          : rootValue;
+      const cursorComparison =
+        sortExpressions[index]?.kind === "text"
+          ? sql`${cursorValue} COLLATE "C"`
+          : cursorValue;
+      const comparison =
+        sort.direction === "asc"
+          ? gt(rootComparison, cursorComparison)
+          : lt(rootComparison, cursorComparison);
+      afterBranches.push(
+        and(
+          ...equalPrefix,
+          isNotNull(cursorValue),
+          or(isNull(rootValue), and(isNotNull(rootValue), comparison)),
+        )!,
+      );
+      // RC 没有 IS NOT DISTINCT FROM 条件构造；它保留 NULL 排序值的游标相等前缀。
+      equalPrefix.push(
+        sql`${rootComparison} IS NOT DISTINCT FROM ${cursorComparison}`,
+      );
+    }
+    afterBranches.push(
+      and(
+        ...equalPrefix,
+        sql`${roots.resultId} COLLATE "C" > ${cursorRoot.resultId} COLLATE "C"`,
+      )!,
+    );
+    const afterCursor = or(...afterBranches)!;
+    cursorCondition = exists(
+      transaction
+        .select({ present: sql`1` })
+        .from(cursorRoot)
+        .where(afterCursor),
+    );
+  }
+  const limitedPage = transaction.$with("limited_page").as(
+    transaction
+      .select()
+      .from(roots)
+      .where(cursorCondition)
+      .orderBy(
+        ...rootOrdering(rootSortValues),
+        asc(sql`${roots.resultId} COLLATE "C"`),
+      )
+      .limit(input.limit + 1),
+  );
+
+  const selectedFields = new Set(input.select);
+  const jsonSelectors = input.select.filter(
+    (selector): selector is ArchiveSearchJsonProjection =>
+      typeof selector !== "string",
+  );
+  // RC 未声明 jsonb_build_array/object；只在最终投影列中构造契约 JSON。
+  const jsonProjections =
+    jsonSelectors.length === 0
+      ? sql`'[]'::jsonb`
+      : sql`jsonb_build_array(${sql.join(
+          jsonSelectors.map((selector) => {
+            const expression = searchJsonPathExpression(
+              contextual.stateData,
+              selector.field,
+              selector.path,
+            );
+            const field = sql`${selector.field}::text`;
+            const path = searchJsonValue(selector.path);
+            return sql`CASE WHEN ${isNull(expression)} THEN jsonb_build_object('field', ${field}, 'path', ${path}, 'exists', false) ELSE jsonb_build_object('field', ${field}, 'path', ${path}, 'exists', true, 'value', ${expression}) END`;
+          }),
+          sql`, `,
+        )})`;
+  const pageOrdering = rootOrdering([
+    limitedPage.sort.sort0,
+    limitedPage.sort.sort1,
+    limitedPage.sort.sort2,
+    limitedPage.sort.sort3,
+    limitedPage.sort.sort4,
+  ]);
+  const rows = await transaction
+    .with(
+      latest,
+      matched,
+      located,
+      bounded,
+      contextual,
+      roots,
+      cursorRoot,
+      limitedPage,
+    )
+    .select({
+      resultId: limitedPage.resultId,
+      rootRevisionId: limitedPage.rootRevisionId,
+      rootCommitId: limitedPage.rootCommitId,
+      rootOrdinal: limitedPage.rootOrdinal,
+      itemId: contextual.itemId,
+      namespace: contextual.namespace,
+      sourceKey: contextual.sourceKey,
+      binId: contextual.binId,
+      revisionId: contextual.revisionId,
+      archiveSequence: contextual.archiveSequence,
+      runId: contextual.runId,
+      collectorVersion: contextual.collectorVersion,
+      sourceRef: contextual.sourceRef,
+      sourceModifiedAt: contextual.sourceModifiedAt,
+      completeness: contextual.completeness,
+      observedAt: contextual.observedAt,
+      recordedAt: contextual.recordedAt,
+      hitStart: contextual.hitStart,
+      hitEnd: contextual.hitEnd,
+      contextStart: contextual.contextStart,
+      contextEnd: contextual.contextEnd,
+      contextText:
+        sql`substring(${contextual.searchText} FROM ${contextual.contextStart} + 1 FOR ${contextual.contextEnd} - ${contextual.contextStart})`
+          .mapWith(String)
+          .nullable(),
+      jsonProjections,
+    })
+    .from(limitedPage)
+    .innerJoin(contextual, eq(contextual.resultId, limitedPage.resultId))
+    .orderBy(
+      ...pageOrdering,
+      // 与分页锚点使用相同的同值根顺序，避免 join 后按观察序号重排 Map。
+      asc(sql`${limitedPage.resultId} COLLATE "C"`),
+      asc(sql`${contextual.binId} COLLATE "C"`),
+      asc(contextual.archiveSequence),
+      asc(contextual.ordinal),
+      asc(contextual.commitId),
+    );
+
+  const results = new Map<string, SearchResult>();
+  for (const row of rows) {
     const match: SearchMatch = {
-      binId: row.bin_id,
-      revisionId: row.revision_id,
-      archiveSeq: row.archive_seq,
-      ...(selected.has("sourceModifiedAt") && row.source_modified_at !== null
-        ? { sourceModifiedAt: row.source_modified_at }
+      binId: row.binId,
+      revisionId: row.revisionId,
+      archiveSeq: row.archiveSequence.toString(),
+      ...(selectedFields.has("sourceModifiedAt") &&
+      row.sourceModifiedAt !== null
+        ? { sourceModifiedAt: row.sourceModifiedAt }
         : {}),
-      ...(selected.has("sourceRef") && row.source_ref !== null
-        ? { sourceRef: row.source_ref }
+      ...(selectedFields.has("sourceRef") && row.sourceRef !== null
+        ? { sourceRef: row.sourceRef }
         : {}),
-      ...(selected.has("capture.completeness") && row.completeness !== null
+      ...(selectedFields.has("capture.completeness") &&
+      row.completeness !== null
         ? { completeness: row.completeness }
         : {}),
-      ...(selected.has("observedAt")
-        ? { observedAt: isoTimestamp(row.observed_at) }
+      ...(selectedFields.has("observedAt")
+        ? { observedAt: isoTimestamp(row.observedAt) }
         : {}),
-      ...(selected.has("recordedAt")
-        ? { recordedAt: isoTimestamp(row.recorded_at) }
+      ...(selectedFields.has("recordedAt")
+        ? { recordedAt: isoTimestamp(row.recordedAt) }
         : {}),
-      ...(selected.has("runId") ? optionalText("runId", row.run_id) : {}),
-      ...(selected.has("collectorVersion")
-        ? optionalText("collectorVersion", row.collector_version)
+      ...(selectedFields.has("runId") ? optionalText("runId", row.runId) : {}),
+      ...(selectedFields.has("collectorVersion")
+        ? optionalText("collectorVersion", row.collectorVersion)
         : {}),
-      ...(row.hit_start === null || row.hit_end === null
+      ...(row.hitStart === null || row.hitEnd === null
         ? {}
         : {
             hit: {
@@ -1090,18 +1318,18 @@ async function readCurrentSearchPage(
               representation: "searchText" as const,
               position: {
                 encoding: "unicode-code-point" as const,
-                start: row.hit_start,
-                end: row.hit_end,
+                start: row.hitStart,
+                end: row.hitEnd,
               },
-              ...(selected.has("hit.context") &&
-              row.context_start !== null &&
-              row.context_end !== null &&
-              row.context_text !== null
+              ...(selectedFields.has("hit.context") &&
+              row.contextStart !== null &&
+              row.contextEnd !== null &&
+              row.contextText !== null
                 ? {
                     context: {
-                      start: row.context_start,
-                      end: row.context_end,
-                      text: row.context_text,
+                      start: row.contextStart,
+                      end: row.contextEnd,
+                      text: row.contextText,
                     },
                   }
                 : {}),
@@ -1112,46 +1340,38 @@ async function readCurrentSearchPage(
         : {
             json: archiveSearchJsonProjectionResultSchema
               .array()
-              .parse(row.json_projections),
+              .parse(row.jsonProjections),
           }),
     };
-    const result = results.get(row.result_id);
+    const result = results.get(row.resultId);
     if (result === undefined) {
       const created: SearchResult = {
-        resultId: row.result_id,
-        itemId: row.item_id,
-        ...(selected.has("sourceKey")
-          ? { sourceKey: { namespace: row.namespace, key: row.source_key } }
+        resultId: row.resultId,
+        itemId: row.itemId,
+        ...(selectedFields.has("sourceKey")
+          ? { sourceKey: { namespace: row.namespace, key: row.sourceKey } }
           : {}),
-        ...(row.root_revision_id === null
+        ...(row.rootRevisionId === null
           ? {}
-          : { revisionId: row.root_revision_id }),
-        ...(row.root_commit_id === null
+          : { revisionId: row.rootRevisionId }),
+        ...(row.rootCommitId === null
           ? {}
           : {
-              commitId: row.root_commit_id,
-              ordinal: row.root_ordinal ?? 0,
+              commitId: row.rootCommitId,
+              ordinal: row.rootOrdinal ?? 0,
             }),
         matches: [match],
       };
-      results.set(row.result_id, created);
+      results.set(row.resultId, created);
     } else {
       result.matches.push(match);
     }
   }
-
   const orderedResults = [...results.values()];
   const hasMore = orderedResults.length > input.limit;
   const pageResults = orderedResults.slice(0, input.limit);
   const expansions = input.expand ?? [];
   if (expansions.length > 0) {
-    const views = pageResults.flatMap((result) =>
-      result.matches.map((match) => ({
-        result_id: result.resultId,
-        item_id: result.itemId,
-        bin_id: match.binId,
-      })),
-    );
     for (const result of pageResults) {
       for (const match of result.matches) {
         match.expansions = expansions.map(({ key, direction, name }) => ({
@@ -1163,364 +1383,526 @@ async function readCurrentSearchPage(
         }));
       }
     }
-
+  }
+  if (expansions.length > 0) {
+    const views = pageResults.flatMap((result) =>
+      result.matches.map((match) => ({
+        result_id: result.resultId,
+        item_id: result.itemId,
+        bin_id: match.binId,
+      })),
+    );
     if (views.length > 0) {
       const keyForView = (resultId: string, binId: string): string =>
         JSON.stringify([resultId, binId]);
+      const decodeDirection = (value: unknown): "outgoing" | "incoming" => {
+        if (value === "outgoing" || value === "incoming") return value;
+        throw new Error("关系展开返回未知方向。");
+      };
+      const decodeStatus = (
+        value: unknown,
+      ): "observed" | "withdrawn" | "deleted" => {
+        if (
+          value === "observed" ||
+          value === "withdrawn" ||
+          value === "deleted"
+        ) {
+          return value;
+        }
+        throw new Error("关系展开返回未知状态。");
+      };
       for (const selector of expansions) {
-        const expansionParameters: (postgres.JSONValue | postgres.Parameter)[] =
-          [];
-        const bindExpansion = (
-          value: postgres.JSONValue | postgres.Parameter,
-        ): string => {
-          expansionParameters.push(value);
-          return "$" + expansionParameters.length.toString(10);
-        };
-        const viewsParameter = bindExpansion(
-          transaction.json(views as unknown as postgres.JSONValue),
+        // RC 没有 JSON 记录集的表值函数类型；此处仅声明页内有界输入列，再立即生成类型化 CTE。
+        const requestRows = sql`jsonb_to_recordset(${searchJsonValue(views)}) AS request(result_id text, item_id uuid, bin_id text)`;
+        const viewsCte = transaction.$with("views").as(
+          transaction
+            .selectDistinct({
+              resultId: sql`request.result_id`.mapWith(String).as("resultId"),
+              itemId: sql`request.item_id`.mapWith(String).as("itemId"),
+              binId: sql`request.bin_id`.mapWith(String).as("binId"),
+            })
+            .from(requestRows),
         );
-        const expansionAsOf = bindExpansion(snapshot.asOf);
-        const relationEndpointCondition =
+        const gap = alias(archiveRelationObservationGaps, "expanded_gap");
+        const gapCommit = alias(archiveCommits, "expanded_gap_commit");
+        const laterObservation = alias(
+          archiveRelationObservations,
+          "expanded_later_observation",
+        );
+        const gapEndpoint =
           selector.direction === "outgoing"
-            ? "relation.from_item_id = views.item_id"
+            ? eq(gap.fromItemId, viewsCte.itemId)
             : selector.direction === "incoming"
-              ? "relation.target_item_id = views.item_id"
-              : "(relation.from_item_id = views.item_id OR relation.target_item_id = views.item_id)";
-        const gapEndpointCondition =
-          selector.direction === "outgoing"
-            ? "gap.from_item_id = views.item_id"
-            : selector.direction === "incoming"
-              ? "gap.target_item_id = views.item_id"
-              : "(gap.from_item_id = views.item_id OR gap.target_item_id = views.item_id)";
-        const selectedRelationConditions = [
-          ...(selector.name === undefined
-            ? []
-            : [
-                `relation_revision.state_data->>'name' COLLATE "C" = ${bindExpansion(selector.name)}::text COLLATE "C"`,
-              ]),
-          ...(selector.properties === undefined
-            ? []
-            : [
-                compileJsonFilter(
-                  selector.properties,
-                  "relation_revision.state_data",
-                  bindExpansion,
-                ),
-              ]),
-        ];
-        const activeSelection =
-          selectedRelationConditions.length === 0
-            ? ""
-            : `AND latest.relation_revision_id IS NOT NULL AND ${selectedRelationConditions.join(" AND ")}`;
-        const relationLimit = selector.limit + 1;
-        const query = `
-          WITH views AS (
-            SELECT DISTINCT request.result_id, request.item_id, request.bin_id
-            FROM jsonb_to_recordset(${viewsParameter}::jsonb)
-              AS request(result_id text, item_id uuid, bin_id text)
-          ), latest_gaps AS (
-            SELECT DISTINCT ON (views.result_id, views.bin_id, gap.relation_id)
-              views.result_id,
-              views.bin_id,
-              gap.relation_id,
-              CASE
-                WHEN gap.from_item_id = views.item_id THEN 'outgoing'
-                ELSE 'incoming'
-              END AS direction,
-              gap.from_item_id,
-              gap.target_item_id,
-              commit.commit_id,
-              commit.archive_seq::text AS archive_seq,
-              gap.ordinal,
-              commit.observed_at,
-              commit.recorded_at,
-              commit.run_id,
-              commit.collector_version
-            FROM views
-            JOIN archive_relation_observation_gap AS gap
-              ON ${gapEndpointCondition}
-            JOIN archive_commit AS commit
-              ON commit.commit_id = gap.commit_id
-              AND commit.bin_id = views.bin_id
-            WHERE commit.archive_seq <= ${expansionAsOf}::bigint
-              AND NOT EXISTS (
-                SELECT 1
-                FROM archive_relation_observation AS later
-                WHERE later.relation_id = gap.relation_id
-                  AND later.bin_id = views.bin_id
-                  AND later.archive_seq > commit.archive_seq
-                  AND later.archive_seq <= ${expansionAsOf}::bigint
-              )
-            ORDER BY
-              views.result_id,
-              views.bin_id,
-              gap.relation_id,
-              commit.archive_seq DESC,
-              gap.ordinal DESC,
-              gap.commit_id DESC
-          ), active_relations AS (
-            SELECT
-              views.result_id,
-              views.bin_id,
-              relation.relation_id,
-              CASE
-                WHEN relation.from_item_id = views.item_id THEN 'outgoing'
-                ELSE 'incoming'
-              END AS direction,
-              CASE
-                WHEN latest.relation_revision_id IS NULL THEN 'withdrawn'
-                ELSE 'observed'
-              END AS status,
-              relation.from_item_id,
-              relation.target_item_id,
-              relation.target_source_ref,
-              latest.relation_revision_id,
-              relation_revision.state_data,
-              latest.commit_id,
-              latest.archive_seq::text AS archive_seq,
-              latest.ordinal,
-              latest.observed_at,
-              latest.recorded_at,
-              latest.run_id,
-              latest.collector_version
-            FROM views
-            JOIN archive_relation AS relation
-              ON ${relationEndpointCondition}
-            JOIN LATERAL (
-              SELECT
-                observation.relation_revision_id,
-                observation.commit_id,
-                observation.archive_seq,
-                observation.ordinal,
-                commit.observed_at,
-                commit.recorded_at,
-                commit.run_id,
-                commit.collector_version
-              FROM archive_relation_observation AS observation
-              JOIN archive_commit AS commit
-                ON commit.commit_id = observation.commit_id
-              WHERE observation.relation_id = relation.relation_id
-                AND observation.bin_id = views.bin_id
-                AND observation.archive_seq <= ${expansionAsOf}::bigint
-              ORDER BY
-                observation.archive_seq DESC,
-                observation.ordinal DESC,
-                observation.commit_id DESC
-              LIMIT 1
-            ) AS latest ON TRUE
-            LEFT JOIN archive_relation_revision AS relation_revision
-              ON relation_revision.relation_id = relation.relation_id
-              AND relation_revision.relation_revision_id = latest.relation_revision_id
-            WHERE relation.created_seq <= ${expansionAsOf}::bigint
-              AND NOT EXISTS (
-                SELECT 1
-                FROM latest_gaps
-                WHERE latest_gaps.result_id = views.result_id
-                  AND latest_gaps.bin_id = views.bin_id
-                  AND latest_gaps.relation_id = relation.relation_id
-              )
-              ${activeSelection}
-          ), candidates AS (
-            SELECT
-              active_relations.result_id,
-              active_relations.bin_id,
-              active_relations.relation_id,
-              active_relations.direction,
-              active_relations.status,
-              active_relations.from_item_id,
-              active_relations.target_item_id,
-              active_relations.target_source_ref,
-              active_relations.relation_revision_id,
-              active_relations.state_data,
-              active_relations.commit_id,
-              active_relations.archive_seq,
-              active_relations.ordinal,
-              active_relations.observed_at,
-              active_relations.recorded_at,
-              active_relations.run_id,
-              active_relations.collector_version
-            FROM active_relations
-            UNION ALL
-            SELECT
-              latest_gaps.result_id,
-              latest_gaps.bin_id,
-              latest_gaps.relation_id,
-              latest_gaps.direction,
-              'deleted'::text AS status,
-              NULL::uuid AS from_item_id,
-              NULL::uuid AS target_item_id,
-              NULL::text AS target_source_ref,
-              NULL::uuid AS relation_revision_id,
-              NULL::jsonb AS state_data,
-              latest_gaps.commit_id,
-              latest_gaps.archive_seq,
-              latest_gaps.ordinal,
-              latest_gaps.observed_at,
-              latest_gaps.recorded_at,
-              latest_gaps.run_id,
-              latest_gaps.collector_version
-            FROM latest_gaps
-            WHERE ${selectedRelationConditions.length === 0 ? "TRUE" : "FALSE"}
-          ), ranked AS (
-            SELECT
-              candidates.*,
-              row_number() OVER (
-                PARTITION BY candidates.result_id, candidates.bin_id
-                ORDER BY candidates.relation_id COLLATE "C", candidates.direction
-              ) AS expansion_rank
-            FROM candidates
-          ), limited AS (
-            SELECT *
-            FROM ranked
-            WHERE expansion_rank <= ${relationLimit}
+              ? eq(gap.targetItemId, viewsCte.itemId)
+              : or(
+                  eq(gap.fromItemId, viewsCte.itemId),
+                  eq(gap.targetItemId, viewsCte.itemId),
+                );
+        const laterObservationExists = notExists(
+          transaction
+            .select({ present: sql`1` })
+            .from(laterObservation)
+            .where(
+              and(
+                eq(laterObservation.relationId, gap.relationId),
+                eq(laterObservation.binId, viewsCte.binId),
+                gt(laterObservation.archiveSequence, gapCommit.archiveSequence),
+                lte(laterObservation.archiveSequence, asOf),
+              ),
+            ),
+        );
+        // RC 没有 CASE 构造器；方向由当前 match 与 gap 的声明端点决定。
+        const latestGaps = transaction.$with("latest_gaps").as(
+          transaction
+            .selectDistinctOn(
+              [viewsCte.resultId, viewsCte.binId, gap.relationId],
+              {
+                resultId: viewsCte.resultId,
+                binId: viewsCte.binId,
+                relationId: gap.relationId,
+                direction:
+                  sql`CASE WHEN ${gap.fromItemId} = ${viewsCte.itemId} THEN 'outgoing' ELSE 'incoming' END`
+                    .mapWith(decodeDirection)
+                    .as("direction"),
+                fromItemId: gap.fromItemId,
+                targetItemId: gap.targetItemId,
+                commitId: gapCommit.commitId,
+                archiveSequence: gapCommit.archiveSequence,
+                ordinal: gap.ordinal,
+                observedAt: gapCommit.observedAt,
+                recordedAt: gapCommit.recordedAt,
+                runId: gapCommit.runId,
+                collectorVersion: gapCommit.collectorVersion,
+              },
+            )
+            .from(viewsCte)
+            .innerJoin(gap, gapEndpoint!)
+            .innerJoin(
+              gapCommit,
+              and(
+                eq(gapCommit.commitId, gap.commitId),
+                eq(gapCommit.binId, viewsCte.binId),
+              ),
+            )
+            .where(
+              and(lte(gapCommit.archiveSequence, asOf), laterObservationExists),
+            )
+            .orderBy(
+              asc(viewsCte.resultId),
+              asc(viewsCte.binId),
+              asc(gap.relationId),
+              desc(gapCommit.archiveSequence),
+              desc(gap.ordinal),
+              desc(gap.commitId),
+            ),
+        );
+
+        const relation = alias(archiveRelations, "expanded_relation");
+        const relationObservation = alias(
+          archiveRelationObservations,
+          "expanded_relation_observation",
+        );
+        const relationCommit = alias(
+          archiveCommits,
+          "expanded_relation_commit",
+        );
+        const relationRevision = alias(
+          archiveRelationRevisions,
+          "expanded_relation_revision",
+        );
+        const relationLatest = transaction
+          .select({
+            relationRevisionId: relationObservation.relationRevisionId,
+            commitId: relationObservation.commitId,
+            archiveSequence: relationObservation.archiveSequence,
+            ordinal: relationObservation.ordinal,
+            observedAt: relationCommit.observedAt,
+            recordedAt: relationCommit.recordedAt,
+            runId: relationCommit.runId,
+            collectorVersion: relationCommit.collectorVersion,
+          })
+          .from(relationObservation)
+          .innerJoin(
+            relationCommit,
+            eq(relationCommit.commitId, relationObservation.commitId),
           )
-          SELECT
-            limited.result_id,
-            limited.bin_id,
-            limited.relation_id,
-            limited.direction,
-            limited.status,
-            limited.from_item_id,
-            from_item.namespace AS from_namespace,
-            from_item.source_key AS from_source_key,
-            from_latest.revision_id AS from_revision_id,
-            limited.target_item_id,
-            limited.target_source_ref,
-            target_item.namespace AS target_namespace,
-            target_item.source_key AS target_source_key,
-            target_latest.revision_id AS target_revision_id,
-            limited.relation_revision_id,
-            limited.state_data,
-            limited.commit_id AS relation_commit_id,
-            limited.archive_seq AS relation_archive_seq,
-            limited.ordinal AS relation_ordinal,
-            limited.observed_at AS relation_observed_at,
-            limited.recorded_at AS relation_recorded_at,
-            limited.run_id AS relation_run_id,
-            limited.collector_version AS relation_collector_version
-          FROM limited
-          LEFT JOIN archive_item AS from_item
-            ON from_item.item_id = limited.from_item_id
-          LEFT JOIN LATERAL (
-            SELECT observation.revision_id
-            FROM archive_observation AS observation
-            JOIN archive_commit AS commit
-              ON commit.commit_id = observation.commit_id
-            WHERE observation.item_id = limited.from_item_id
-              AND commit.bin_id = limited.bin_id
-              AND commit.archive_seq <= ${expansionAsOf}::bigint
-            ORDER BY
-              commit.archive_seq DESC,
-              observation.ordinal DESC,
-              commit.commit_id DESC
-            LIMIT 1
-          ) AS from_latest ON TRUE
-          LEFT JOIN archive_item AS target_item
-            ON target_item.item_id = limited.target_item_id
-          LEFT JOIN LATERAL (
-            SELECT observation.revision_id
-            FROM archive_observation AS observation
-            JOIN archive_commit AS commit
-              ON commit.commit_id = observation.commit_id
-            WHERE observation.item_id = limited.target_item_id
-              AND commit.bin_id = limited.bin_id
-              AND commit.archive_seq <= ${expansionAsOf}::bigint
-            ORDER BY
-              commit.archive_seq DESC,
-              observation.ordinal DESC,
-              commit.commit_id DESC
-            LIMIT 1
-          ) AS target_latest ON TRUE
-          ORDER BY
-            limited.result_id COLLATE "C",
-            limited.bin_id COLLATE "C",
-            limited.expansion_rank
-        `;
-        const rows = await transaction.unsafe<SearchExpansionRow[]>(
-          query,
-          expansionParameters,
+          .where(
+            and(
+              eq(relationObservation.relationId, relation.relationId),
+              eq(relationObservation.binId, viewsCte.binId),
+              lte(relationObservation.archiveSequence, asOf),
+            ),
+          )
+          .orderBy(
+            desc(relationObservation.archiveSequence),
+            desc(relationObservation.ordinal),
+            desc(relationObservation.commitId),
+          )
+          .limit(1)
+          .as("expanded_relation_latest");
+        const relationEndpoint =
+          selector.direction === "outgoing"
+            ? eq(relation.fromItemId, viewsCte.itemId)
+            : selector.direction === "incoming"
+              ? eq(relation.targetItemId, viewsCte.itemId)
+              : or(
+                  eq(relation.fromItemId, viewsCte.itemId),
+                  eq(relation.targetItemId, viewsCte.itemId),
+                );
+        const noLaterGap = notExists(
+          transaction
+            .select({ present: sql`1` })
+            .from(latestGaps)
+            .where(
+              and(
+                eq(latestGaps.resultId, viewsCte.resultId),
+                eq(latestGaps.binId, viewsCte.binId),
+                eq(latestGaps.relationId, relation.relationId),
+              ),
+            ),
         );
-        const rowsByView = new Map<string, SearchExpansionRow[]>();
+        const relationStateConditions: SQL[] = [];
+        if (selector.name !== undefined) {
+          // RC 未提供 JSON ->> 与 COLLATE 表达式；关系名仍以 C 序比较。
+          relationStateConditions.push(
+            sql`${relationRevision.stateData}->>'name' COLLATE "C" = ${selector.name}::text COLLATE "C"`,
+          );
+        }
+        if (selector.properties !== undefined) {
+          relationStateConditions.push(
+            compileJsonFilter(selector.properties, relationRevision.stateData),
+          );
+        }
+        const activeRelations = transaction.$with("active_relations").as(
+          transaction
+            .select({
+              resultId: viewsCte.resultId,
+              binId: viewsCte.binId,
+              relationId: relation.relationId,
+              // CASE 将 match 的逻辑端点映射为展示方向和关系状态；RC 没有 CASE 构造器。
+              direction:
+                sql`CASE WHEN ${relation.fromItemId} = ${viewsCte.itemId} THEN 'outgoing' ELSE 'incoming' END`
+                  .mapWith(decodeDirection)
+                  .as("direction"),
+              status:
+                sql`CASE WHEN ${relationLatest.relationRevisionId} IS NULL THEN 'withdrawn' ELSE 'observed' END`
+                  .mapWith(decodeStatus)
+                  .as("status"),
+              fromItemId: relation.fromItemId,
+              targetItemId: relation.targetItemId,
+              targetSourceRef: relation.targetSourceRef,
+              relationRevisionId: relationLatest.relationRevisionId,
+              stateData: relationRevision.stateData,
+              commitId: relationLatest.commitId,
+              archiveSequence: relationLatest.archiveSequence,
+              ordinal: relationLatest.ordinal,
+              observedAt: relationLatest.observedAt,
+              recordedAt: relationLatest.recordedAt,
+              runId: relationLatest.runId,
+              collectorVersion: relationLatest.collectorVersion,
+            })
+            .from(viewsCte)
+            .innerJoin(relation, relationEndpoint!)
+            .innerJoinLateral(relationLatest, sql`true`)
+            .leftJoin(
+              relationRevision,
+              and(
+                eq(relationRevision.relationId, relation.relationId),
+                eq(
+                  relationRevision.relationRevisionId,
+                  relationLatest.relationRevisionId,
+                ),
+              ),
+            )
+            .where(
+              and(
+                lte(relation.createdSequence, asOf),
+                noLaterGap,
+                ...(relationStateConditions.length === 0
+                  ? []
+                  : [
+                      isNotNull(relationLatest.relationRevisionId),
+                      ...relationStateConditions,
+                    ]),
+              ),
+            ),
+        );
+        const activeCandidates = transaction
+          .select({
+            resultId: activeRelations.resultId,
+            binId: activeRelations.binId,
+            relationId: activeRelations.relationId,
+            direction: activeRelations.direction,
+            status: activeRelations.status,
+            fromItemId: sql`${activeRelations.fromItemId}`
+              .mapWith(String)
+              .nullable()
+              .as("fromItemId"),
+            targetItemId: activeRelations.targetItemId,
+            targetSourceRef: activeRelations.targetSourceRef,
+            relationRevisionId: activeRelations.relationRevisionId,
+            stateData: activeRelations.stateData,
+            commitId: activeRelations.commitId,
+            archiveSequence: activeRelations.archiveSequence,
+            ordinal: activeRelations.ordinal,
+            observedAt: activeRelations.observedAt,
+            recordedAt: activeRelations.recordedAt,
+            runId: activeRelations.runId,
+            collectorVersion: activeRelations.collectorVersion,
+          })
+          .from(activeRelations);
+        const includeGaps =
+          selector.name === undefined && selector.properties === undefined;
+        // UNION 两侧以显式 PG 类型对齐已删除关系的空端点和状态列。
+        const candidateRows = includeGaps
+          ? activeCandidates.unionAll(
+              transaction
+                .select({
+                  resultId: latestGaps.resultId,
+                  binId: latestGaps.binId,
+                  relationId: latestGaps.relationId,
+                  direction: latestGaps.direction,
+                  status: sql`'deleted'::text`
+                    .mapWith(decodeStatus)
+                    .as("status"),
+                  fromItemId: sql`NULL::uuid`
+                    .mapWith(String)
+                    .nullable()
+                    .as("fromItemId"),
+                  targetItemId: sql`NULL::uuid`
+                    .mapWith(String)
+                    .nullable()
+                    .as("targetItemId"),
+                  targetSourceRef: sql`NULL::text`
+                    .mapWith(String)
+                    .nullable()
+                    .as("targetSourceRef"),
+                  relationRevisionId: sql`NULL::uuid`
+                    .mapWith(String)
+                    .nullable()
+                    .as("relationRevisionId"),
+                  stateData: sql`NULL::jsonb`.nullable().as("stateData"),
+                  commitId: latestGaps.commitId,
+                  archiveSequence: latestGaps.archiveSequence,
+                  ordinal: latestGaps.ordinal,
+                  observedAt: latestGaps.observedAt,
+                  recordedAt: latestGaps.recordedAt,
+                  runId: latestGaps.runId,
+                  collectorVersion: latestGaps.collectorVersion,
+                })
+                .from(latestGaps),
+            )
+          : activeCandidates;
+        const candidates = transaction.$with("candidates").as(candidateRows);
+        // RC 未声明窗口 row_number；窗口只负责每个返回视图内的展开上限。
+        const ranked = transaction.$with("ranked").as(
+          transaction
+            .select({
+              ...getColumns(candidates),
+              expansionRank:
+                sql`row_number() OVER (PARTITION BY ${candidates.resultId}, ${candidates.binId} ORDER BY ${candidates.relationId} COLLATE "C", ${candidates.direction})`
+                  .mapWith(Number)
+                  .as("expansionRank"),
+            })
+            .from(candidates),
+        );
+        const limited = transaction.$with("limited").as(
+          transaction
+            .select()
+            .from(ranked)
+            .where(lte(ranked.expansionRank, selector.limit + 1)),
+        );
+
+        const fromItem = alias(archiveItems, "expanded_from_item");
+        const fromObservation = alias(
+          archiveObservations,
+          "expanded_from_observation",
+        );
+        const fromCommit = alias(archiveCommits, "expanded_from_commit");
+        const fromLatest = transaction
+          .select({ revisionId: fromObservation.revisionId })
+          .from(fromObservation)
+          .innerJoin(
+            fromCommit,
+            eq(fromCommit.commitId, fromObservation.commitId),
+          )
+          .where(
+            and(
+              eq(fromObservation.itemId, limited.fromItemId),
+              eq(fromCommit.binId, limited.binId),
+              lte(fromCommit.archiveSequence, asOf),
+            ),
+          )
+          .orderBy(
+            desc(fromCommit.archiveSequence),
+            desc(fromObservation.ordinal),
+            desc(fromCommit.commitId),
+          )
+          .limit(1)
+          .as("expanded_from_latest");
+        const targetItem = alias(archiveItems, "expanded_target_item");
+        const targetObservation = alias(
+          archiveObservations,
+          "expanded_target_observation",
+        );
+        const targetCommit = alias(archiveCommits, "expanded_target_commit");
+        const targetLatest = transaction
+          .select({ revisionId: targetObservation.revisionId })
+          .from(targetObservation)
+          .innerJoin(
+            targetCommit,
+            eq(targetCommit.commitId, targetObservation.commitId),
+          )
+          .where(
+            and(
+              eq(targetObservation.itemId, limited.targetItemId),
+              eq(targetCommit.binId, limited.binId),
+              lte(targetCommit.archiveSequence, asOf),
+            ),
+          )
+          .orderBy(
+            desc(targetCommit.archiveSequence),
+            desc(targetObservation.ordinal),
+            desc(targetCommit.commitId),
+          )
+          .limit(1)
+          .as("expanded_target_latest");
+        const rows = await transaction
+          .with(
+            viewsCte,
+            latestGaps,
+            activeRelations,
+            candidates,
+            ranked,
+            limited,
+          )
+          .select({
+            resultId: limited.resultId,
+            binId: limited.binId,
+            relationId: limited.relationId,
+            direction: limited.direction,
+            status: limited.status,
+            fromItemId: limited.fromItemId,
+            fromNamespace: fromItem.namespace,
+            fromSourceKey: fromItem.sourceKey,
+            fromRevisionId: fromLatest.revisionId,
+            targetItemId: limited.targetItemId,
+            targetSourceRef: limited.targetSourceRef,
+            targetNamespace: targetItem.namespace,
+            targetSourceKey: targetItem.sourceKey,
+            targetRevisionId: targetLatest.revisionId,
+            relationRevisionId: limited.relationRevisionId,
+            stateData: limited.stateData,
+            relationCommitId: limited.commitId,
+            relationArchiveSequence: limited.archiveSequence,
+            relationOrdinal: limited.ordinal,
+            relationObservedAt: limited.observedAt,
+            relationRecordedAt: limited.recordedAt,
+            relationRunId: limited.runId,
+            relationCollectorVersion: limited.collectorVersion,
+          })
+          .from(limited)
+          .leftJoin(fromItem, eq(fromItem.itemId, limited.fromItemId))
+          .leftJoinLateral(fromLatest, sql`true`)
+          .leftJoin(targetItem, eq(targetItem.itemId, limited.targetItemId))
+          .leftJoinLateral(targetLatest, sql`true`)
+          .orderBy(
+            asc(sql`${limited.resultId} COLLATE "C"`),
+            asc(sql`${limited.binId} COLLATE "C"`),
+            asc(limited.expansionRank),
+          );
+        const rowsByView = new Map<string, (typeof rows)[number][]>();
         for (const row of rows) {
-          const key = keyForView(row.result_id, row.bin_id);
+          const key = keyForView(row.resultId, row.binId);
           const groupedRows = rowsByView.get(key);
           if (groupedRows === undefined) rowsByView.set(key, [row]);
           else groupedRows.push(row);
         }
         const relationForRow = (
-          row: SearchExpansionRow,
+          row: (typeof rows)[number],
         ): SearchExpansionRelation => {
           const observation = {
-            commitId: row.relation_commit_id,
-            archiveSeq: row.relation_archive_seq,
-            ordinal: row.relation_ordinal,
-            observedAt: isoTimestamp(row.relation_observed_at),
-            recordedAt: isoTimestamp(row.relation_recorded_at),
-            ...optionalText("runId", row.relation_run_id),
-            ...optionalText("collectorVersion", row.relation_collector_version),
+            commitId: row.relationCommitId,
+            archiveSeq: row.relationArchiveSequence.toString(),
+            ordinal: row.relationOrdinal,
+            observedAt: isoTimestamp(row.relationObservedAt),
+            recordedAt: isoTimestamp(row.relationRecordedAt),
+            ...optionalText("runId", row.relationRunId),
+            ...optionalText("collectorVersion", row.relationCollectorVersion),
           };
           if (row.status === "deleted") {
             return {
-              relationId: row.relation_id,
+              relationId: row.relationId,
               direction: row.direction,
               status: row.status,
               observation,
             };
           }
           if (
-            row.from_item_id === null ||
-            row.from_namespace === null ||
-            row.from_source_key === null
+            row.fromItemId === null ||
+            row.fromNamespace === null ||
+            row.fromSourceKey === null
           ) {
-            throw new Error("关系展开缺少来源端点。 ");
+            throw new Error("关系展开缺少来源端点。");
           }
           const from = {
             kind: "item" as const,
-            itemId: row.from_item_id,
+            itemId: row.fromItemId,
             sourceKey: {
-              namespace: row.from_namespace,
-              key: row.from_source_key,
+              namespace: row.fromNamespace,
+              key: row.fromSourceKey,
             },
             status:
-              row.from_revision_id === null
+              row.fromRevisionId === null
                 ? ("unknown" as const)
                 : ("observed" as const),
-            ...(row.from_revision_id === null
+            ...(row.fromRevisionId === null
               ? {}
-              : { revisionId: row.from_revision_id }),
+              : { revisionId: row.fromRevisionId }),
           };
-          const to =
-            row.target_item_id === null
-              ? {
-                  kind: "sourceRef" as const,
-                  sourceRef: row.target_source_ref!,
-                }
-              : (() => {
-                  if (
-                    row.target_namespace === null ||
-                    row.target_source_key === null
-                  ) {
-                    throw new Error("关系展开缺少目标端点。 ");
-                  }
-                  return {
-                    kind: "item" as const,
-                    itemId: row.target_item_id,
-                    sourceKey: {
-                      namespace: row.target_namespace,
-                      key: row.target_source_key,
-                    },
-                    status:
-                      row.target_revision_id === null
-                        ? ("unknown" as const)
-                        : ("observed" as const),
-                    ...(row.target_revision_id === null
-                      ? {}
-                      : { revisionId: row.target_revision_id }),
-                  };
-                })();
+          let to:
+            | {
+                readonly kind: "sourceRef";
+                readonly sourceRef: string;
+              }
+            | {
+                readonly kind: "item";
+                readonly itemId: string;
+                readonly sourceKey: {
+                  readonly namespace: string;
+                  readonly key: string;
+                };
+                readonly status: "unknown" | "observed";
+                readonly revisionId?: string;
+              };
+          if (row.targetItemId === null) {
+            if (row.targetSourceRef === null) {
+              throw new Error("关系展开缺少目标源引用。");
+            }
+            to = {
+              kind: "sourceRef",
+              sourceRef: row.targetSourceRef,
+            };
+          } else {
+            if (row.targetNamespace === null || row.targetSourceKey === null) {
+              throw new Error("关系展开缺少目标端点。");
+            }
+            to = {
+              kind: "item",
+              itemId: row.targetItemId,
+              sourceKey: {
+                namespace: row.targetNamespace,
+                key: row.targetSourceKey,
+              },
+              status: row.targetRevisionId === null ? "unknown" : "observed",
+              ...(row.targetRevisionId === null
+                ? {}
+                : { revisionId: row.targetRevisionId }),
+            };
+          }
           if (row.status === "withdrawn") {
             return {
-              relationId: row.relation_id,
+              relationId: row.relationId,
               direction: row.direction,
               status: row.status,
               from,
@@ -1528,17 +1910,17 @@ async function readCurrentSearchPage(
               observation,
             };
           }
-          if (row.relation_revision_id === null) {
-            throw new Error("已观察关系缺少不可变关系版本。 ");
+          if (row.relationRevisionId === null) {
+            throw new Error("已观察关系缺少不可变关系版本。");
           }
           return {
-            relationId: row.relation_id,
+            relationId: row.relationId,
             direction: row.direction,
             status: row.status,
             from,
             to,
-            revisionId: row.relation_revision_id,
-            state: archiveRelationStateSchema.parse(row.state_data),
+            revisionId: row.relationRevisionId,
+            state: archiveRelationStateSchema.parse(row.stateData),
             observation,
           };
         };
@@ -1550,7 +1932,7 @@ async function readCurrentSearchPage(
               ({ key }) => key === selector.key,
             );
             if (expansion === undefined) {
-              throw new Error("关系展开结果缺少对应选择器。 ");
+              throw new Error("关系展开结果缺少对应选择器。");
             }
             expansion.relations = groupedRows
               .slice(0, selector.limit)
@@ -1561,6 +1943,7 @@ async function readCurrentSearchPage(
       }
     }
   }
+
   const last = pageResults.at(-1);
   const nextCursor =
     hasMore && last !== undefined
@@ -1571,7 +1954,6 @@ async function readCurrentSearchPage(
           resultId: last.resultId,
         })
       : undefined;
-
   return {
     ok: true,
     value: archiveSearchPageSchema.parse({
@@ -1642,54 +2024,57 @@ export function createArchiveSearchOperation(
         };
       }
       try {
-        return await database.begin(async (transaction) => {
-          const snapshot = await resolveSnapshot(
-            transaction,
-            decodedCursor?.snapshot.asOf ?? requestedAsOf,
-          );
-          if (!snapshot.ok) {
-            return {
-              ok: false,
-              status: 400,
-              error: snapshot.error,
-            };
-          }
-          const fixedSnapshot: ResolvedSnapshot =
-            decodedCursor === undefined
-              ? snapshot.value
-              : { ...snapshot.value, mode: decodedCursor.snapshot.mode };
-          await transaction`
-            SELECT set_config(
-              'statement_timeout',
-              ${String(checked.data.budgetMs) + "ms"},
-              true
-            )
-          `;
-          const regexPath =
-            regexPatterns.length > 1
-              ? await invalidSearchRegexPath(transaction, regexPatterns)
-              : undefined;
-          if (regexPath !== undefined) {
-            return {
-              ok: false,
-              status: 400,
-              error: {
-                code: "invalid_input",
-                message: "PostgreSQL ARE 正则表达式无效。",
-                path: regexPath,
-              },
-            };
-          }
-          return await readCurrentSearchPage(
-            transaction,
-            fixedSnapshot,
-            checked.data,
-            decodedCursor,
-            queryHash,
-          );
-        });
+        return await database.transaction(
+          async (transaction) => {
+            // statement_timeout 是 PostgreSQL 局部会话函数，保证搜索和展开语句采用同一预算。
+            await transaction.execute(
+              sql`SELECT set_config('statement_timeout', ${String(checked.data.budgetMs) + "ms"}, true)`,
+            );
+            const snapshot = await resolveSnapshot(
+              transaction,
+              decodedCursor?.snapshot.asOf ?? requestedAsOf,
+            );
+            if (!snapshot.ok) {
+              return {
+                ok: false,
+                status: 400,
+                error: snapshot.error,
+              };
+            }
+            const fixedSnapshot: ResolvedSnapshot =
+              decodedCursor === undefined
+                ? snapshot.value
+                : { ...snapshot.value, mode: decodedCursor.snapshot.mode };
+            const regexPath =
+              regexPatterns.length > 1
+                ? await invalidSearchRegexPath(transaction, regexPatterns)
+                : undefined;
+            if (regexPath !== undefined) {
+              return {
+                ok: false,
+                status: 400,
+                error: {
+                  code: "invalid_input",
+                  message: "PostgreSQL ARE 正则表达式无效。",
+                  path: regexPath,
+                },
+              };
+            }
+            return readCurrentSearchPage(
+              transaction,
+              fixedSnapshot,
+              checked.data,
+              decodedCursor,
+              queryHash,
+            );
+          },
+          {
+            isolationLevel: "repeatable read",
+            accessMode: "read only",
+          },
+        );
       } catch (error) {
-        if (postgresErrorCode(error) === "57014") {
+        if (databaseErrorCode(error) === "57014") {
           return {
             ok: false,
             status: 422,
@@ -1700,7 +2085,7 @@ export function createArchiveSearchOperation(
           };
         }
         const regexPath =
-          postgresErrorCode(error) === "2201B" && regexPatterns.length === 1
+          databaseErrorCode(error) === "2201B" && regexPatterns.length === 1
             ? regexPatterns[0]?.path
             : undefined;
         if (regexPath !== undefined) {

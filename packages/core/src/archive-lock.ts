@@ -1,12 +1,9 @@
-import type postgres from "postgres";
+import { eq } from "drizzle-orm";
 
-import type { CoreDatabase } from "./database.ts";
+import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { archiveWriteClock } from "./schema.ts";
 
-type ClockRow = {
-  readonly last_seq: string;
-};
-
-export type ArchiveTransaction = postgres.TransactionSql;
+export type ArchiveTransaction = CoreTransaction;
 
 /**
  * 所有归档写入和资源生命周期操作使用同一短事务写门，
@@ -19,19 +16,18 @@ export async function withArchiveWriteLock<T>(
     currentSequence: bigint,
   ) => Promise<T>,
 ): Promise<T> {
-  const result = await database.begin(async (transaction) => {
-    const clocks = await transaction<ClockRow[]>`
-      SELECT last_seq::text AS last_seq
-      FROM archive_write_clock
-      WHERE clock_id = 1
-      FOR UPDATE
-    `;
+  const result = await database.transaction(async (transaction) => {
+    const clocks = await transaction
+      .select({ lastSequence: archiveWriteClock.lastSequence })
+      .from(archiveWriteClock)
+      .where(eq(archiveWriteClock.clockId, 1))
+      .for("update");
     const clock = clocks[0];
     if (clock === undefined) {
       throw new Error("归档写入时钟尚未初始化。");
     }
     return {
-      value: await operation(transaction, BigInt(clock.last_seq)),
+      value: await operation(transaction, clock.lastSequence),
     };
   });
   return result.value;
@@ -42,16 +38,15 @@ export async function advanceArchiveSequence(
   transaction: ArchiveTransaction,
   currentSequence: bigint,
 ): Promise<string> {
-  const nextSequence = (currentSequence + 1n).toString();
-  const rows = await transaction<{ readonly last_seq: string }[]>`
-    UPDATE archive_write_clock
-    SET last_seq = ${nextSequence}::bigint
-    WHERE clock_id = 1
-    RETURNING last_seq::text AS last_seq
-  `;
+  const nextSequence = currentSequence + 1n;
+  const rows = await transaction
+    .update(archiveWriteClock)
+    .set({ lastSequence: nextSequence })
+    .where(eq(archiveWriteClock.clockId, 1))
+    .returning({ lastSequence: archiveWriteClock.lastSequence });
   const row = rows[0];
   if (row === undefined) {
     throw new Error("无法推进归档写入时钟。");
   }
-  return row.last_seq;
+  return row.lastSequence.toString();
 }

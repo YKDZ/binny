@@ -1,0 +1,3335 @@
+{
+  "type": "base",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "4d508d2b-ae0a-4a2f-bab8-d1e5a7905a20",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_commit"],
+      "writes": [
+        "s|tbl|public.archive_commit",
+        "n|tbl|public.archive_commit",
+        "e|tbl|public.archive_commit",
+        "n|rel|public.archive_commit",
+        "n|type|public.archive_commit",
+        "n|rel|public.archive_commit_pkey",
+        "n|rel|public.archive_commit_archive_seq_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_item_deletion"],
+      "writes": [
+        "s|tbl|public.archive_item_deletion",
+        "n|tbl|public.archive_item_deletion",
+        "e|tbl|public.archive_item_deletion",
+        "n|rel|public.archive_item_deletion",
+        "n|type|public.archive_item_deletion",
+        "n|rel|public.archive_item_deletion_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_item_observation_gap"],
+      "writes": [
+        "s|tbl|public.archive_item_observation_gap",
+        "n|tbl|public.archive_item_observation_gap",
+        "e|tbl|public.archive_item_observation_gap",
+        "n|rel|public.archive_item_observation_gap",
+        "n|type|public.archive_item_observation_gap",
+        "n|rel|public.archive_item_observation_gap_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_item"],
+      "writes": [
+        "s|tbl|public.archive_item",
+        "n|tbl|public.archive_item",
+        "e|tbl|public.archive_item",
+        "n|rel|public.archive_item",
+        "n|type|public.archive_item",
+        "n|rel|public.archive_item_pkey",
+        "n|rel|public.archive_item_namespace_source_key_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_observation"],
+      "writes": [
+        "s|tbl|public.archive_observation",
+        "n|tbl|public.archive_observation",
+        "e|tbl|public.archive_observation",
+        "n|rel|public.archive_observation",
+        "n|type|public.archive_observation",
+        "n|rel|public.archive_observation_pkey",
+        "n|rel|public.archive_observation_commit_id_item_id_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": [
+        "table",
+        "public",
+        "archive_relation_observation_gap"
+      ],
+      "writes": [
+        "s|tbl|public.archive_relation_observation_gap",
+        "n|tbl|public.archive_relation_observation_gap",
+        "e|tbl|public.archive_relation_observation_gap",
+        "n|rel|public.archive_relation_observation_gap",
+        "n|type|public.archive_relation_observation_gap",
+        "n|rel|public.archive_relation_observation_gap_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_relation_observation"],
+      "writes": [
+        "s|tbl|public.archive_relation_observation",
+        "n|tbl|public.archive_relation_observation",
+        "e|tbl|public.archive_relation_observation",
+        "n|rel|public.archive_relation_observation",
+        "n|type|public.archive_relation_observation",
+        "n|rel|public.archive_relation_observation_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_relation_revision"],
+      "writes": [
+        "s|tbl|public.archive_relation_revision",
+        "n|tbl|public.archive_relation_revision",
+        "e|tbl|public.archive_relation_revision",
+        "n|rel|public.archive_relation_revision",
+        "n|type|public.archive_relation_revision",
+        "n|rel|public.archive_relation_revision_pkey",
+        "n|rel|public.archive_relation_revision_relation_id_state_hash_key",
+        "n|rel|public.archive_relation_revision_relation_id_relation_revision_id_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_relation"],
+      "writes": [
+        "s|tbl|public.archive_relation",
+        "n|tbl|public.archive_relation",
+        "e|tbl|public.archive_relation",
+        "n|rel|public.archive_relation",
+        "n|type|public.archive_relation",
+        "n|rel|public.archive_relation_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_request_receipt"],
+      "writes": [
+        "s|tbl|public.archive_request_receipt",
+        "n|tbl|public.archive_request_receipt",
+        "e|tbl|public.archive_request_receipt",
+        "n|rel|public.archive_request_receipt",
+        "n|type|public.archive_request_receipt",
+        "n|rel|public.archive_request_receipt_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_resource"],
+      "writes": [
+        "s|tbl|public.archive_resource",
+        "n|tbl|public.archive_resource",
+        "e|tbl|public.archive_resource",
+        "n|rel|public.archive_resource",
+        "n|type|public.archive_resource",
+        "n|rel|public.archive_resource_pkey",
+        "n|rel|public.archive_resource_storage_key_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_revision_resource"],
+      "writes": [
+        "s|tbl|public.archive_revision_resource",
+        "n|tbl|public.archive_revision_resource",
+        "e|tbl|public.archive_revision_resource",
+        "n|rel|public.archive_revision_resource",
+        "n|type|public.archive_revision_resource",
+        "n|rel|public.archive_revision_resource_pkey",
+        "n|rel|public.archive_revision_resource_revision_id_ordinal_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_revision"],
+      "writes": [
+        "s|tbl|public.archive_revision",
+        "n|tbl|public.archive_revision",
+        "e|tbl|public.archive_revision",
+        "n|rel|public.archive_revision",
+        "n|type|public.archive_revision",
+        "n|rel|public.archive_revision_pkey",
+        "n|rel|public.archive_revision_item_id_state_hash_key",
+        "n|rel|public.archive_revision_item_id_revision_id_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "archive_write_clock"],
+      "writes": [
+        "s|tbl|public.archive_write_clock",
+        "n|tbl|public.archive_write_clock",
+        "e|tbl|public.archive_write_clock",
+        "n|rel|public.archive_write_clock",
+        "n|type|public.archive_write_clock",
+        "n|rel|public.archive_write_clock_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "bin_configurations"],
+      "writes": [
+        "s|tbl|public.bin_configurations",
+        "n|tbl|public.bin_configurations",
+        "e|tbl|public.bin_configurations",
+        "n|rel|public.bin_configurations",
+        "n|type|public.bin_configurations",
+        "n|rel|public.bin_configurations_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "manual_runs"],
+      "writes": [
+        "s|tbl|public.manual_runs",
+        "n|tbl|public.manual_runs",
+        "e|tbl|public.manual_runs",
+        "n|rel|public.manual_runs",
+        "n|type|public.manual_runs",
+        "n|rel|public.manual_runs_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "runtime_connections"],
+      "writes": [
+        "s|tbl|public.runtime_connections",
+        "n|tbl|public.runtime_connections",
+        "e|tbl|public.runtime_connections",
+        "n|rel|public.runtime_connections",
+        "n|type|public.runtime_connections",
+        "n|rel|public.runtime_connections_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_commit",
+        "archive_commit_id_bin_seq_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_commit_id_bin_seq_idx",
+        "n|idx|public.archive_commit_id_bin_seq_idx",
+        "e|idx|public.archive_commit_id_bin_seq_idx",
+        "n|rel|public.archive_commit_id_bin_seq_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_commit.commit_id",
+        "n|col|public.archive_commit.bin_id",
+        "n|col|public.archive_commit.archive_seq"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_commit",
+        "archive_commit_bin_sequence_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_commit_bin_sequence_idx",
+        "n|idx|public.archive_commit_bin_sequence_idx",
+        "e|idx|public.archive_commit_bin_sequence_idx",
+        "n|rel|public.archive_commit_bin_sequence_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_commit.bin_id",
+        "n|col|public.archive_commit.archive_seq"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_item_observation_gap",
+        "archive_item_observation_gap_item_commit_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_item_observation_gap_item_commit_idx",
+        "n|idx|public.archive_item_observation_gap_item_commit_idx",
+        "e|idx|public.archive_item_observation_gap_item_commit_idx",
+        "n|rel|public.archive_item_observation_gap_item_commit_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_item_observation_gap",
+        "n|sch|public",
+        "n|col|public.archive_item_observation_gap.item_id",
+        "n|col|public.archive_item_observation_gap.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_observation",
+        "archive_observation_item_commit_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_observation_item_commit_idx",
+        "n|idx|public.archive_observation_item_commit_idx",
+        "e|idx|public.archive_observation_item_commit_idx",
+        "n|rel|public.archive_observation_item_commit_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_observation",
+        "n|sch|public",
+        "n|col|public.archive_observation.item_id",
+        "n|col|public.archive_observation.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation_observation_gap",
+        "archive_relation_observation_gap_from_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_observation_gap_from_idx",
+        "n|idx|public.archive_relation_observation_gap_from_idx",
+        "e|idx|public.archive_relation_observation_gap_from_idx",
+        "n|rel|public.archive_relation_observation_gap_from_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation_gap",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation_gap.from_item_id",
+        "n|col|public.archive_relation_observation_gap.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation_observation_gap",
+        "archive_relation_observation_gap_to_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_observation_gap_to_idx",
+        "n|idx|public.archive_relation_observation_gap_to_idx",
+        "e|idx|public.archive_relation_observation_gap_to_idx",
+        "n|rel|public.archive_relation_observation_gap_to_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation_gap",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation_gap.target_item_id",
+        "n|col|public.archive_relation_observation_gap.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation_observation_gap",
+        "archive_relation_observation_gap_id_commit_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_observation_gap_id_commit_idx",
+        "n|idx|public.archive_relation_observation_gap_id_commit_idx",
+        "e|idx|public.archive_relation_observation_gap_id_commit_idx",
+        "n|rel|public.archive_relation_observation_gap_id_commit_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation_gap",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation_gap.relation_id",
+        "n|col|public.archive_relation_observation_gap.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation_observation",
+        "archive_relation_observation_latest_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_observation_latest_idx",
+        "n|idx|public.archive_relation_observation_latest_idx",
+        "e|idx|public.archive_relation_observation_latest_idx",
+        "n|rel|public.archive_relation_observation_latest_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation.relation_id",
+        "n|col|public.archive_relation_observation.bin_id",
+        "n|col|public.archive_relation_observation.archive_seq",
+        "n|col|public.archive_relation_observation.ordinal",
+        "n|col|public.archive_relation_observation.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation",
+        "archive_relation_from_item_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_from_item_idx",
+        "n|idx|public.archive_relation_from_item_idx",
+        "e|idx|public.archive_relation_from_item_idx",
+        "n|rel|public.archive_relation_from_item_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|col|public.archive_relation.from_item_id",
+        "n|col|public.archive_relation.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_relation",
+        "archive_relation_to_item_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_relation_to_item_idx",
+        "n|idx|public.archive_relation_to_item_idx",
+        "e|idx|public.archive_relation_to_item_idx",
+        "n|rel|public.archive_relation_to_item_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|col|public.archive_relation.target_item_id",
+        "n|col|public.archive_relation.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_resource",
+        "archive_resource_digest_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_resource_digest_idx",
+        "n|idx|public.archive_resource_digest_idx",
+        "e|idx|public.archive_resource_digest_idx",
+        "n|rel|public.archive_resource_digest_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_resource",
+        "n|sch|public",
+        "n|col|public.archive_resource.sha256",
+        "n|col|public.archive_resource.byte_size"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_resource",
+        "archive_resource_cleanup_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_resource_cleanup_idx",
+        "n|idx|public.archive_resource_cleanup_idx",
+        "e|idx|public.archive_resource_cleanup_idx",
+        "n|rel|public.archive_resource_cleanup_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_resource",
+        "n|sch|public",
+        "n|col|public.archive_resource.uploaded_at"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_revision_resource",
+        "archive_revision_resource_resource_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_revision_resource_resource_idx",
+        "n|idx|public.archive_revision_resource_resource_idx",
+        "e|idx|public.archive_revision_resource_resource_idx",
+        "n|rel|public.archive_revision_resource_resource_idx"
+      ],
+      "reads": [
+        "n|tbl|public.archive_revision_resource",
+        "n|sch|public",
+        "n|col|public.archive_revision_resource.resource_id",
+        "n|col|public.archive_revision_resource.revision_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "archive_revision",
+        "archive_revision_search_text_trgm_idx"
+      ],
+      "writes": [
+        "s|idx|public.archive_revision_search_text_trgm_idx",
+        "n|idx|public.archive_revision_search_text_trgm_idx",
+        "e|idx|public.archive_revision_search_text_trgm_idx",
+        "n|rel|public.archive_revision_search_text_trgm_idx"
+      ],
+      "reads": ["n|tbl|public.archive_revision", "n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "manual_runs",
+        "manual_runs_bin_queue_idx"
+      ],
+      "writes": [
+        "s|idx|public.manual_runs_bin_queue_idx",
+        "n|idx|public.manual_runs_bin_queue_idx",
+        "e|idx|public.manual_runs_bin_queue_idx",
+        "n|rel|public.manual_runs_bin_queue_idx"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.bin_id",
+        "n|col|public.manual_runs.created_at",
+        "n|col|public.manual_runs.run_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "manual_runs",
+        "manual_runs_one_executing_bin_idx"
+      ],
+      "writes": [
+        "s|idx|public.manual_runs_one_executing_bin_idx",
+        "n|idx|public.manual_runs_one_executing_bin_idx",
+        "e|idx|public.manual_runs_one_executing_bin_idx",
+        "n|rel|public.manual_runs_one_executing_bin_idx"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.bin_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_item_observation_gap"],
+      "writes": [
+        "s|fk|public.archive_item_observation_gap.archive_item_observation_gap_T3HeKGOQ3cZv_fkey",
+        "n|fk|public.archive_item_observation_gap.archive_item_observation_gap_T3HeKGOQ3cZv_fkey",
+        "e|fk|public.archive_item_observation_gap.archive_item_observation_gap_T3HeKGOQ3cZv_fkey",
+        "n|con|public.archive_item_observation_gap.archive_item_observation_gap_T3HeKGOQ3cZv_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_item_observation_gap",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_item_observation_gap.commit_id",
+        "n|col|public.archive_commit.commit_id",
+        "e|uniqueness|public.archive_commit.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_item_observation_gap"],
+      "writes": [
+        "s|fk|public.archive_item_observation_gap.archive_item_observation_gap_kyK0FxbeSzP0_fkey",
+        "n|fk|public.archive_item_observation_gap.archive_item_observation_gap_kyK0FxbeSzP0_fkey",
+        "e|fk|public.archive_item_observation_gap.archive_item_observation_gap_kyK0FxbeSzP0_fkey",
+        "n|con|public.archive_item_observation_gap.archive_item_observation_gap_kyK0FxbeSzP0_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_item_observation_gap",
+        "n|sch|public",
+        "n|tbl|public.archive_item_deletion",
+        "n|sch|public",
+        "n|col|public.archive_item_observation_gap.item_id",
+        "n|col|public.archive_item_deletion.item_id",
+        "e|uniqueness|public.archive_item_deletion.item_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_observation"],
+      "writes": [
+        "s|fk|public.archive_observation.archive_observation_commit_id_archive_commit_commit_id_fkey",
+        "n|fk|public.archive_observation.archive_observation_commit_id_archive_commit_commit_id_fkey",
+        "e|fk|public.archive_observation.archive_observation_commit_id_archive_commit_commit_id_fkey",
+        "n|con|public.archive_observation.archive_observation_commit_id_archive_commit_commit_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_observation.commit_id",
+        "n|col|public.archive_commit.commit_id",
+        "e|uniqueness|public.archive_commit.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_observation"],
+      "writes": [
+        "s|fk|public.archive_observation.archive_observation_item_id_archive_item_item_id_fkey",
+        "n|fk|public.archive_observation.archive_observation_item_id_archive_item_item_id_fkey",
+        "e|fk|public.archive_observation.archive_observation_item_id_archive_item_item_id_fkey",
+        "n|con|public.archive_observation.archive_observation_item_id_archive_item_item_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_item",
+        "n|sch|public",
+        "n|col|public.archive_observation.item_id",
+        "n|col|public.archive_item.item_id",
+        "e|uniqueness|public.archive_item.item_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_observation"],
+      "writes": [
+        "s|fk|public.archive_observation.archive_observation_CbOC21ZZ2owS_fkey",
+        "n|fk|public.archive_observation.archive_observation_CbOC21ZZ2owS_fkey",
+        "e|fk|public.archive_observation.archive_observation_CbOC21ZZ2owS_fkey",
+        "n|con|public.archive_observation.archive_observation_CbOC21ZZ2owS_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_revision",
+        "n|sch|public",
+        "n|col|public.archive_observation.item_id",
+        "n|col|public.archive_observation.revision_id",
+        "n|col|public.archive_revision.item_id",
+        "n|col|public.archive_revision.revision_id",
+        "e|uniqueness|public.archive_revision.item_id.revision_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": [
+        "table",
+        "public",
+        "archive_relation_observation_gap"
+      ],
+      "writes": [
+        "s|fk|public.archive_relation_observation_gap.archive_relation_observation_gap_bzqp1pxC1qK8_fkey",
+        "n|fk|public.archive_relation_observation_gap.archive_relation_observation_gap_bzqp1pxC1qK8_fkey",
+        "e|fk|public.archive_relation_observation_gap.archive_relation_observation_gap_bzqp1pxC1qK8_fkey",
+        "n|con|public.archive_relation_observation_gap.archive_relation_observation_gap_bzqp1pxC1qK8_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation_gap",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation_gap.commit_id",
+        "n|col|public.archive_commit.commit_id",
+        "e|uniqueness|public.archive_commit.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation_observation"],
+      "writes": [
+        "s|fk|public.archive_relation_observation.archive_relation_observation_cRQG0RHldkI4_fkey",
+        "n|fk|public.archive_relation_observation.archive_relation_observation_cRQG0RHldkI4_fkey",
+        "e|fk|public.archive_relation_observation.archive_relation_observation_cRQG0RHldkI4_fkey",
+        "n|con|public.archive_relation_observation.archive_relation_observation_cRQG0RHldkI4_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation.relation_id",
+        "n|col|public.archive_relation.relation_id",
+        "e|uniqueness|public.archive_relation.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation_observation"],
+      "writes": [
+        "s|fk|public.archive_relation_observation.archive_relation_observation_ayR75R0bkScT_fkey",
+        "n|fk|public.archive_relation_observation.archive_relation_observation_ayR75R0bkScT_fkey",
+        "e|fk|public.archive_relation_observation.archive_relation_observation_ayR75R0bkScT_fkey",
+        "n|con|public.archive_relation_observation.archive_relation_observation_ayR75R0bkScT_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation.commit_id",
+        "n|col|public.archive_relation_observation.bin_id",
+        "n|col|public.archive_relation_observation.archive_seq",
+        "n|col|public.archive_commit.commit_id",
+        "n|col|public.archive_commit.bin_id",
+        "n|col|public.archive_commit.archive_seq",
+        "e|uniqueness|public.archive_commit.archive_seq.bin_id.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation_observation"],
+      "writes": [
+        "s|fk|public.archive_relation_observation.archive_relation_observation_UwcY5ULnwpqc_fkey",
+        "n|fk|public.archive_relation_observation.archive_relation_observation_UwcY5ULnwpqc_fkey",
+        "e|fk|public.archive_relation_observation.archive_relation_observation_UwcY5ULnwpqc_fkey",
+        "n|con|public.archive_relation_observation.archive_relation_observation_UwcY5ULnwpqc_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_observation",
+        "n|sch|public",
+        "n|tbl|public.archive_relation_revision",
+        "n|sch|public",
+        "n|col|public.archive_relation_observation.relation_id",
+        "n|col|public.archive_relation_observation.relation_revision_id",
+        "n|col|public.archive_relation_revision.relation_id",
+        "n|col|public.archive_relation_revision.relation_revision_id",
+        "e|uniqueness|public.archive_relation_revision.relation_id.relation_revision_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation_revision"],
+      "writes": [
+        "s|fk|public.archive_relation_revision.archive_relation_revision_vqrF1nfEFjDx_fkey",
+        "n|fk|public.archive_relation_revision.archive_relation_revision_vqrF1nfEFjDx_fkey",
+        "e|fk|public.archive_relation_revision.archive_relation_revision_vqrF1nfEFjDx_fkey",
+        "n|con|public.archive_relation_revision.archive_relation_revision_vqrF1nfEFjDx_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation_revision",
+        "n|sch|public",
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|col|public.archive_relation_revision.relation_id",
+        "n|col|public.archive_relation.relation_id",
+        "e|uniqueness|public.archive_relation.relation_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation"],
+      "writes": [
+        "s|fk|public.archive_relation.archive_relation_from_item_id_archive_item_item_id_fkey",
+        "n|fk|public.archive_relation.archive_relation_from_item_id_archive_item_item_id_fkey",
+        "e|fk|public.archive_relation.archive_relation_from_item_id_archive_item_item_id_fkey",
+        "n|con|public.archive_relation.archive_relation_from_item_id_archive_item_item_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|tbl|public.archive_item",
+        "n|sch|public",
+        "n|col|public.archive_relation.from_item_id",
+        "n|col|public.archive_item.item_id",
+        "e|uniqueness|public.archive_item.item_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation"],
+      "writes": [
+        "s|fk|public.archive_relation.archive_relation_target_item_id_archive_item_item_id_fkey",
+        "n|fk|public.archive_relation.archive_relation_target_item_id_archive_item_item_id_fkey",
+        "e|fk|public.archive_relation.archive_relation_target_item_id_archive_item_item_id_fkey",
+        "n|con|public.archive_relation.archive_relation_target_item_id_archive_item_item_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|tbl|public.archive_item",
+        "n|sch|public",
+        "n|col|public.archive_relation.target_item_id",
+        "n|col|public.archive_item.item_id",
+        "e|uniqueness|public.archive_item.item_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_relation"],
+      "writes": [
+        "s|fk|public.archive_relation.archive_relation_created_seq_archive_commit_archive_seq_fkey",
+        "n|fk|public.archive_relation.archive_relation_created_seq_archive_commit_archive_seq_fkey",
+        "e|fk|public.archive_relation.archive_relation_created_seq_archive_commit_archive_seq_fkey",
+        "n|con|public.archive_relation.archive_relation_created_seq_archive_commit_archive_seq_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_relation",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_relation.created_seq",
+        "n|col|public.archive_commit.archive_seq",
+        "e|uniqueness|public.archive_commit.archive_seq"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_request_receipt"],
+      "writes": [
+        "s|fk|public.archive_request_receipt.archive_request_receipt_commit_id_archive_commit_commit_id_fkey",
+        "n|fk|public.archive_request_receipt.archive_request_receipt_commit_id_archive_commit_commit_id_fkey",
+        "e|fk|public.archive_request_receipt.archive_request_receipt_commit_id_archive_commit_commit_id_fkey",
+        "n|con|public.archive_request_receipt.archive_request_receipt_commit_id_archive_commit_commit_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_request_receipt",
+        "n|sch|public",
+        "n|tbl|public.archive_commit",
+        "n|sch|public",
+        "n|col|public.archive_request_receipt.commit_id",
+        "n|col|public.archive_commit.commit_id",
+        "e|uniqueness|public.archive_commit.commit_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_revision_resource"],
+      "writes": [
+        "s|fk|public.archive_revision_resource.archive_revision_resource_kkiObShf0M5C_fkey",
+        "n|fk|public.archive_revision_resource.archive_revision_resource_kkiObShf0M5C_fkey",
+        "e|fk|public.archive_revision_resource.archive_revision_resource_kkiObShf0M5C_fkey",
+        "n|con|public.archive_revision_resource.archive_revision_resource_kkiObShf0M5C_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_revision_resource",
+        "n|sch|public",
+        "n|tbl|public.archive_revision",
+        "n|sch|public",
+        "n|col|public.archive_revision_resource.revision_id",
+        "n|col|public.archive_revision.revision_id",
+        "e|uniqueness|public.archive_revision.revision_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_revision_resource"],
+      "writes": [
+        "s|fk|public.archive_revision_resource.archive_revision_resource_RIQKIIVHFSif_fkey",
+        "n|fk|public.archive_revision_resource.archive_revision_resource_RIQKIIVHFSif_fkey",
+        "e|fk|public.archive_revision_resource.archive_revision_resource_RIQKIIVHFSif_fkey",
+        "n|con|public.archive_revision_resource.archive_revision_resource_RIQKIIVHFSif_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_revision_resource",
+        "n|sch|public",
+        "n|tbl|public.archive_resource",
+        "n|sch|public",
+        "n|col|public.archive_revision_resource.resource_id",
+        "n|col|public.archive_resource.resource_id",
+        "e|uniqueness|public.archive_resource.resource_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "archive_revision"],
+      "writes": [
+        "s|fk|public.archive_revision.archive_revision_item_id_archive_item_item_id_fkey",
+        "n|fk|public.archive_revision.archive_revision_item_id_archive_item_item_id_fkey",
+        "e|fk|public.archive_revision.archive_revision_item_id_archive_item_item_id_fkey",
+        "n|con|public.archive_revision.archive_revision_item_id_archive_item_item_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.archive_revision",
+        "n|sch|public",
+        "n|tbl|public.archive_item",
+        "n|sch|public",
+        "n|col|public.archive_revision.item_id",
+        "n|col|public.archive_item.item_id",
+        "e|uniqueness|public.archive_item.item_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "runtime_connections"],
+      "writes": [
+        "s|fk|public.runtime_connections.runtime_connections_bin_id_bin_configurations_id_fkey",
+        "n|fk|public.runtime_connections.runtime_connections_bin_id_bin_configurations_id_fkey",
+        "e|fk|public.runtime_connections.runtime_connections_bin_id_bin_configurations_id_fkey",
+        "n|con|public.runtime_connections.runtime_connections_bin_id_bin_configurations_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.runtime_connections",
+        "n|sch|public",
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.runtime_connections.bin_id",
+        "n|col|public.bin_configurations.id",
+        "e|uniqueness|public.bin_configurations.id"
+      ]
+    }
+  ],
+  "ddl": [
+    {
+      "schema": "public",
+      "name": "archive_commit",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_item_deletion",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_item_observation_gap",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_item",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_observation",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_relation_observation_gap",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_relation_observation",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_relation_revision",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_relation",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_request_receipt",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_resource",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_revision_resource",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_revision",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "archive_write_clock",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "bin_configurations",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "manual_runs",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "name": "runtime_connections",
+      "isRlsEnabled": false,
+      "entityType": "tables"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_seq",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "bin_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "run_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "collector_version",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "observed_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "recorded_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "namespace",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "source_key",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "deletion_seq",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "ordinal",
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "namespace",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "source_key",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "ordinal",
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "revision_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "diagnostics",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "ordinal",
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "relation_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "from_item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "target_item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "ordinal",
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "relation_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "bin_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_seq",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "relation_revision_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "relation_revision_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "relation_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "state_hash",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "state_data",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "relation_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "from_item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "target_item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "target_source_ref",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "created_seq",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "request_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "payload_hash",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "commit_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "resource_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "sha256",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "media_type",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "byte_size",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "storage_key",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "status",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "uploaded_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "revision_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "resource_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "ordinal",
+      "type": "integer",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "revision_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "item_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "state_hash",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "state_data",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_write_clock",
+      "name": "clock_id",
+      "type": "smallint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_write_clock",
+      "name": "last_seq",
+      "type": "bigint",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "collector",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "identity_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "config",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "targets",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "status",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "run_id",
+      "type": "uuid",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "bin_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "identity_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "collector_snapshot",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "collector_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "collector_version",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "action",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "params",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "config_snapshot",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "targets_snapshot",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "status",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "runtime_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "completed_scopes",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "'[]'",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "failure",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "check_result",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "clock_timestamp()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "started_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "finished_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": false,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "bin_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "runtime_id",
+      "type": "text",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "collector",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "environment",
+      "type": "jsonb",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": null,
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "last_heartbeat_at",
+      "type": "timestamp with time zone",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "now()",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "disconnected",
+      "type": "boolean",
+      "typeSchema": null,
+      "notNull": true,
+      "dimensions": 0,
+      "default": "false",
+      "generated": null,
+      "identity": null,
+      "entityType": "columns"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_commit_id_bin_seq_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "commit_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "bin_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "archive_seq",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_commit_bin_sequence_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "bin_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "archive_seq",
+          "isExpression": false,
+          "asc": false,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "archive_item_observation_gap_item_commit_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "commit_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_item_commit_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "commit_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_from_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "from_item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_to_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "target_item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": "(\"target_item_id\" is not null)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_id_commit_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "commit_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_latest_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "bin_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "archive_seq",
+          "isExpression": false,
+          "asc": false,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "ordinal",
+          "isExpression": false,
+          "asc": false,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "commit_id",
+          "isExpression": false,
+          "asc": false,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_from_item_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "from_item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_to_item_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "target_item_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "relation_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": "(\"target_item_id\" is not null)",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_digest_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "sha256",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "byte_size",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": "\"status\" = 'ready'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_cleanup_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "uploaded_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": "\"status\" = 'ready'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_resource_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "resource_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "revision_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_search_text_trgm_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "(\"state_data\"->'body'->>'searchText') gin_trgm_ops",
+          "isExpression": true,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "with": "",
+      "method": "gin",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "manual_runs_bin_queue_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "bin_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "created_at",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        },
+        {
+          "value": "run_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": false,
+      "where": "\"status\" = 'queued'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "manual_runs_one_executing_bin_idx",
+      "nameExplicit": true,
+      "columns": [
+        {
+          "value": "bin_id",
+          "isExpression": false,
+          "asc": true,
+          "nullsFirst": false,
+          "opclass": null
+        }
+      ],
+      "isUnique": true,
+      "where": "\"status\" = 'executing'",
+      "with": "",
+      "method": "btree",
+      "concurrently": false,
+      "entityType": "indexes"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "archive_item_observation_gap_T3HeKGOQ3cZv_fkey",
+      "nameExplicit": false,
+      "columns": ["commit_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["commit_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "archive_item_observation_gap_kyK0FxbeSzP0_fkey",
+      "nameExplicit": false,
+      "columns": ["item_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_item_deletion",
+      "columnsTo": ["item_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_commit_id_archive_commit_commit_id_fkey",
+      "nameExplicit": false,
+      "columns": ["commit_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["commit_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_item_id_archive_item_item_id_fkey",
+      "nameExplicit": false,
+      "columns": ["item_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_item",
+      "columnsTo": ["item_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_CbOC21ZZ2owS_fkey",
+      "nameExplicit": false,
+      "columns": ["item_id", "revision_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_revision",
+      "columnsTo": ["item_id", "revision_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_bzqp1pxC1qK8_fkey",
+      "nameExplicit": false,
+      "columns": ["commit_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["commit_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_cRQG0RHldkI4_fkey",
+      "nameExplicit": false,
+      "columns": ["relation_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_relation",
+      "columnsTo": ["relation_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_ayR75R0bkScT_fkey",
+      "nameExplicit": false,
+      "columns": ["commit_id", "bin_id", "archive_seq"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["commit_id", "bin_id", "archive_seq"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_UwcY5ULnwpqc_fkey",
+      "nameExplicit": false,
+      "columns": ["relation_id", "relation_revision_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_relation_revision",
+      "columnsTo": ["relation_id", "relation_revision_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "archive_relation_revision_vqrF1nfEFjDx_fkey",
+      "nameExplicit": false,
+      "columns": ["relation_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_relation",
+      "columnsTo": ["relation_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_from_item_id_archive_item_item_id_fkey",
+      "nameExplicit": false,
+      "columns": ["from_item_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_item",
+      "columnsTo": ["item_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_target_item_id_archive_item_item_id_fkey",
+      "nameExplicit": false,
+      "columns": ["target_item_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_item",
+      "columnsTo": ["item_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_created_seq_archive_commit_archive_seq_fkey",
+      "nameExplicit": false,
+      "columns": ["created_seq"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["archive_seq"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "archive_request_receipt_commit_id_archive_commit_commit_id_fkey",
+      "nameExplicit": false,
+      "columns": ["commit_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_commit",
+      "columnsTo": ["commit_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_kkiObShf0M5C_fkey",
+      "nameExplicit": false,
+      "columns": ["revision_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_revision",
+      "columnsTo": ["revision_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_RIQKIIVHFSif_fkey",
+      "nameExplicit": false,
+      "columns": ["resource_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_resource",
+      "columnsTo": ["resource_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_item_id_archive_item_item_id_fkey",
+      "nameExplicit": false,
+      "columns": ["item_id"],
+      "schemaTo": "public",
+      "tableTo": "archive_item",
+      "columnsTo": ["item_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "runtime_connections_bin_id_bin_configurations_id_fkey",
+      "nameExplicit": false,
+      "columns": ["bin_id"],
+      "schemaTo": "public",
+      "tableTo": "bin_configurations",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "entityType": "fks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "archive_item_observation_gap_pkey",
+      "columns": ["commit_id", "ordinal"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_pkey",
+      "columns": ["commit_id", "ordinal"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_pkey",
+      "columns": ["commit_id", "ordinal"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_pkey",
+      "columns": ["commit_id", "ordinal"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_pkey",
+      "columns": ["revision_id", "resource_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_commit_pkey",
+      "columns": ["commit_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "archive_item_deletion_pkey",
+      "columns": ["item_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "archive_item_pkey",
+      "columns": ["item_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "archive_relation_revision_pkey",
+      "columns": ["relation_revision_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_pkey",
+      "columns": ["relation_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "archive_request_receipt_pkey",
+      "columns": ["request_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_pkey",
+      "columns": ["resource_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_pkey",
+      "columns": ["revision_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_write_clock",
+      "name": "archive_write_clock_pkey",
+      "columns": ["clock_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "bin_configurations_pkey",
+      "columns": ["id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "manual_runs_pkey",
+      "columns": ["run_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "runtime_connections",
+      "name": "runtime_connections_pkey",
+      "columns": ["bin_id"],
+      "nameExplicit": false,
+      "entityType": "pks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item",
+      "name": "archive_item_namespace_source_key_key",
+      "nameExplicit": true,
+      "columns": ["namespace", "source_key"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_commit_id_item_id_key",
+      "nameExplicit": true,
+      "columns": ["commit_id", "item_id"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "archive_relation_revision_relation_id_state_hash_key",
+      "nameExplicit": true,
+      "columns": ["relation_id", "state_hash"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "archive_relation_revision_relation_id_relation_revision_id_key",
+      "nameExplicit": true,
+      "columns": ["relation_id", "relation_revision_id"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_revision_id_ordinal_key",
+      "nameExplicit": true,
+      "columns": ["revision_id", "ordinal"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_item_id_state_hash_key",
+      "nameExplicit": true,
+      "columns": ["item_id", "state_hash"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_item_id_revision_id_key",
+      "nameExplicit": true,
+      "columns": ["item_id", "revision_id"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_commit_archive_seq_key",
+      "nameExplicit": false,
+      "columns": ["archive_seq"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_storage_key_key",
+      "nameExplicit": false,
+      "columns": ["storage_key"],
+      "nullsNotDistinct": false,
+      "entityType": "uniques"
+    },
+    {
+      "schema": "public",
+      "table": "archive_commit",
+      "name": "archive_commit_archive_seq_check",
+      "value": "\"archive_seq\" > 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_deletion",
+      "name": "archive_item_deletion_deletion_seq_check",
+      "value": "\"deletion_seq\" > 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_item_observation_gap",
+      "name": "archive_item_observation_gap_ordinal_check",
+      "value": "\"ordinal\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_observation",
+      "name": "archive_observation_ordinal_check",
+      "value": "\"ordinal\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation_gap",
+      "name": "archive_relation_observation_gap_ordinal_check",
+      "value": "\"ordinal\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_observation",
+      "name": "archive_relation_observation_ordinal_check",
+      "value": "\"ordinal\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation_revision",
+      "name": "archive_relation_revision_state_hash_check",
+      "value": "length(\"state_hash\") = 64",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_relation",
+      "name": "archive_relation_target_check",
+      "value": "(\"target_item_id\" is null) <> (\"target_source_ref\" is null)",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_request_receipt",
+      "name": "archive_request_receipt_payload_hash_check",
+      "value": "length(\"payload_hash\") = 64",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_sha256_check",
+      "value": "length(\"sha256\") = 64",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_byte_size_check",
+      "value": "\"byte_size\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_resource",
+      "name": "archive_resource_status_check",
+      "value": "\"status\" in ('ready', 'deleting')",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision_resource",
+      "name": "archive_revision_resource_ordinal_check",
+      "value": "\"ordinal\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_revision",
+      "name": "archive_revision_state_hash_check",
+      "value": "length(\"state_hash\") = 64",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_write_clock",
+      "name": "archive_write_clock_clock_id_check",
+      "value": "\"clock_id\" = 1",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "archive_write_clock",
+      "name": "archive_write_clock_last_seq_check",
+      "value": "\"last_seq\" >= 0",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "bin_configurations",
+      "name": "bin_configurations_status_check",
+      "value": "\"status\" in ('active', 'disabled')",
+      "entityType": "checks"
+    },
+    {
+      "schema": "public",
+      "table": "manual_runs",
+      "name": "manual_runs_status_check",
+      "value": "\"status\" in ('queued', 'executing', 'completed', 'failed')",
+      "entityType": "checks"
+    }
+  ]
+}
