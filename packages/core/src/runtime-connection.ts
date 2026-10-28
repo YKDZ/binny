@@ -12,8 +12,8 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatInput,
 } from "@binny/contracts";
-import * as z from "zod";
 
+import { validateCollectorConfiguration } from "./bin-configuration.ts";
 import type { CoreDatabase } from "./database.ts";
 
 type RuntimeConnectionRow = {
@@ -111,23 +111,22 @@ function compatibilityError(
     };
   }
 
-  let runtimeConfigSchema: z.ZodType;
-  try {
-    runtimeConfigSchema = z.fromJSONSchema(runtimeCollector.configSchema);
-  } catch {
+  const configValidation = validateCollectorConfiguration(
+    runtimeCollector,
+    config,
+  );
+  if (configValidation?.code === "invalid_manifest") {
     return {
       code: "runtime_manifest_mismatch",
       message: "运行器提供的配置声明无法验证。",
-      path: ["collector", "configSchema"],
+      path: configValidation.path ?? ["collector", "configSchema"],
     };
   }
-  const configResult = runtimeConfigSchema.safeParse(config);
-  if (!configResult.success) {
-    const issue = configResult.error.issues[0];
+  if (configValidation !== undefined) {
     return {
       code: "runtime_configuration_incompatible",
       message: "已配置的长期配置不符合运行器当前采集器声明。",
-      path: ["config", ...pathParts(issue?.path ?? [])],
+      path: configValidation.path ?? ["config"],
     };
   }
 

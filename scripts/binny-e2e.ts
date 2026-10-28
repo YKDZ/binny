@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
+
 type ProcessResult = {
   readonly code: number;
   readonly stdout: string;
@@ -214,15 +216,14 @@ async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
   throw new Error("等待 HTTP API 和 PostgreSQL 就绪超时：\n" + lastFailure);
 }
 
-async function validateApiInput(_baseUrl: string): Promise<void> {
+async function validateApiInput(): Promise<void> {
   const probe = [
-    'fetch("http://127.0.0.1:3000/bins", {',
-    'method: "POST",',
-    'headers: { "content-type": "application/json" },',
-    "body: JSON.stringify({ id: 7 }),",
-    "}).then(async (response) => {",
-    "process.stdout.write(JSON.stringify({ status: response.status, body: await response.json() }));",
-    "}).catch((error) => { console.error(error); process.exitCode = 1; });",
+    "(async () => {",
+    'const bodies = [JSON.stringify({ id: 7 }), "{"];',
+    'const responses = await Promise.all(bodies.map((body) => fetch("http://127.0.0.1:3000/bins", { method: "POST", headers: { "content-type": "application/json" }, body })));',
+    "const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));",
+    "process.stdout.write(JSON.stringify(results));",
+    "})().catch((error) => { console.error(error); process.exitCode = 1; });",
   ].join("");
   const result = await run(
     "docker",
@@ -230,50 +231,63 @@ async function validateApiInput(_baseUrl: string): Promise<void> {
     { env: composeEnvironment() },
   );
   assert.equal(result.code, 0, result.stderr);
-  const response = JSON.parse(result.stdout) as {
+  const responses = JSON.parse(result.stdout) as readonly {
     readonly status: number;
     readonly body: {
       readonly error: {
         readonly code: string;
         readonly message: string;
-        readonly path: readonly (string | number)[];
+        readonly path?: readonly (string | number)[];
       };
     };
-  };
-  assert.equal(response.status, 400);
-  const body = response.body;
-  assert.equal(body.error.code, "invalid_input");
-  assert.deepEqual(body.error.path, ["id"]);
-  assert.match(body.error.message, /字段|标识/u);
+  }[];
+  const invalidField = responses[0];
+  const malformedJson = responses[1];
+  assert.ok(invalidField !== undefined && malformedJson !== undefined);
+  assert.equal(invalidField.status, 400);
+  assert.equal(invalidField.body.error.code, "invalid_input");
+  assert.deepEqual(invalidField.body.error.path, ["id"]);
+  assert.match(invalidField.body.error.message, /字段|标识/u);
+  assert.equal(malformedJson.status, 400);
+  assert.equal(malformedJson.body.error.code, "invalid_input");
+  assert.match(malformedJson.body.error.message, /JSON|格式/u);
+}
+
+async function createSdkManifest(): Promise<unknown> {
+  const program = [
+    'import { z } from "zod";',
+    'import { collectorManifest, defineCollector } from "./dist/index.js";',
+    "const collector = defineCollector({",
+    '  id: "rss",',
+    '  version: "1.0.0",',
+    "  configSchema: z.object({",
+    "    userAgent: z.string().min(1),",
+    "    key: z.string().regex(/^a/).regex(/z$/),",
+    "  }),",
+    "  actions: {",
+    '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
+    "  },",
+    "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
+    "});",
+    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+  ].join("\n");
+  const result = await run("pnpm", [
+    "--filter",
+    "@binny/collector-sdk",
+    "exec",
+    "node",
+    "--input-type=module",
+    "-e",
+    program,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return JSON.parse(result.stdout) as unknown;
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
-  const manifest = {
-    id: "rss",
-    version: "1.0.0",
-    configSchema: {
-      type: "object",
-      properties: { userAgent: { type: "string", minLength: 1 } },
-      required: ["userAgent"],
-      additionalProperties: false,
-    },
-    actions: {
-      collect: {
-        description: "读取并归档订阅源。",
-        params: {
-          type: "object",
-          properties: { limit: { type: "integer", minimum: 1 } },
-          required: ["limit"],
-          additionalProperties: false,
-        },
-      },
-    },
-    environment: {
-      browser: { required: false, profileReuseAfterRestart: false },
-    },
-  };
+  const manifest = await createSdkManifest();
   const manifestJson = JSON.stringify(manifest);
-  const initialConfig = JSON.stringify({ userAgent: "Binny E2E" });
+  const initialConfig = JSON.stringify({ userAgent: "Binny E2E", key: "az" });
   const initialTargets = JSON.stringify([
     { url: "https://example.test/one.xml" },
   ]);
@@ -359,6 +373,84 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   assert.deepEqual(invalidConfiguration.path, ["config", "userAgent"]);
   assert.match(invalidConfiguration.message, /长期配置/u);
 
+  const invalidRegexCreate = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "rss-regex-invalid",
+      collector: manifest,
+      identityId: "account-regex-invalid",
+      config: { userAgent: "Binny E2E", key: "ab" },
+      targets: [],
+    }),
+  });
+  assert.equal(invalidRegexCreate.status, 400);
+  const invalidRegexCreateBody = (await invalidRegexCreate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(invalidRegexCreateBody.error.code, "invalid_configuration");
+  assert.deepEqual(invalidRegexCreateBody.error.path, ["config", "key"]);
+  assert.match(invalidRegexCreateBody.error.message, /长期配置/u);
+
+  const validRegexCreate = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "rss-regex",
+      collector: manifest,
+      identityId: "account-regex",
+      config: { userAgent: "Binny E2E", key: "az" },
+      targets: [],
+    }),
+  });
+  assert.equal(validRegexCreate.status, 201);
+  const validRegexCreateBody = (await validRegexCreate.json()) as {
+    readonly config: { readonly key: string };
+  };
+  assert.equal(validRegexCreateBody.config.key, "az");
+
+  const invalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      config: { userAgent: "Binny E2E", key: "bz" },
+    }),
+  });
+  assert.equal(invalidRegexUpdate.status, 400);
+  const invalidRegexUpdateBody = (await invalidRegexUpdate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(invalidRegexUpdateBody.error.code, "invalid_configuration");
+  assert.deepEqual(invalidRegexUpdateBody.error.path, ["config", "key"]);
+
+  const afterInvalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex");
+  assert.equal(afterInvalidRegexUpdate.status, 200);
+  const afterInvalidRegexUpdateBody =
+    (await afterInvalidRegexUpdate.json()) as {
+      readonly config: { readonly key: string };
+    };
+  assert.equal(afterInvalidRegexUpdateBody.config.key, "az");
+
+  const validRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      config: { userAgent: "Binny E2E updated", key: "aaz" },
+    }),
+  });
+  assert.equal(validRegexUpdate.status, 200);
+  const validRegexUpdateBody = (await validRegexUpdate.json()) as {
+    readonly config: { readonly key: string };
+  };
+  assert.equal(validRegexUpdateBody.config.key, "aaz");
+
   const secondary = cliData<{
     readonly id: string;
     readonly identityId: string;
@@ -387,13 +479,17 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       readonly identityId: string;
     }[];
   }>(await cli(baseUrl, ["bin", "list"]), "listed");
-  assert.equal(listed.bins.length, 2);
+  assert.equal(listed.bins.length, 3);
   assert.deepEqual(listed.bins.map(({ identityId }) => identityId).toSorted(), [
     "account-one",
+    "account-regex",
     "account-two",
   ]);
 
-  const updatedConfig = JSON.stringify({ userAgent: "Binny E2E updated" });
+  const updatedConfig = JSON.stringify({
+    userAgent: "Binny E2E updated",
+    key: "aaz",
+  });
   const updatedTargets = JSON.stringify([
     { url: "https://example.test/one.xml" },
     { url: "https://example.test/extra.xml" },
@@ -466,6 +562,15 @@ async function verifyRestartAndRemoval(
   assert.equal(persisted.config.userAgent, "Binny E2E updated");
   assert.equal(persisted.targets.length, 2);
 
+  const persistedRegexConfiguration = cliData<{
+    readonly config: { readonly userAgent: string; readonly key: string };
+  }>(await cli(baseUrl, ["bin", "get", "rss-regex"]), "found");
+  assert.equal(
+    persistedRegexConfiguration.config.userAgent,
+    "Binny E2E updated",
+  );
+  assert.equal(persistedRegexConfiguration.config.key, "aaz");
+
   const enabled = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["bin", "enable", "rss-main"]),
     "enabled",
@@ -478,14 +583,16 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(removed, { removed: true, id: "rss-main" });
 
+  cliData(await cli(baseUrl, ["bin", "remove", "rss-regex"]), "removed");
+
   cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
+  cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
   cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
   const empty = cliData<{ readonly bins: readonly unknown[] }>(
     await cli(baseUrl, ["bin", "list"]),
     "listed",
   );
   assert.deepEqual(empty.bins, []);
-
   const archiveState = await archiveHttpStep("after-restart", baseUrl, archive);
   const { itemId, revisionId } = archiveIds(archive);
   const expectedArchive = archiveResponses(archiveState);
@@ -499,13 +606,13 @@ async function verifyRestartAndRemoval(
     "found",
   );
   assert.deepEqual(cliArchiveRevision, expectedArchive.revision);
-  await validateApiInput(baseUrl);
+  await validateApiInput();
 }
 
 async function main(): Promise<void> {
   const port = await reservePort();
   composePort = port;
-  const e2eHost = process.env.BINNY_E2E_HOST ?? "127.0.0.1";
+  const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
     path.join(tmpdir(), "binny02-compose-"),
@@ -539,6 +646,14 @@ async function main(): Promise<void> {
       port,
     );
     await waitForApiAndDatabase(baseUrl);
+    const isolatedClient = await verifyIsolatedApiConsumer({
+      repositoryRoot,
+      projectName,
+    });
+    assert.deepEqual(isolatedClient, {
+      health: "ok",
+      binIds: [],
+    });
     await verifyConfigurationJourney(baseUrl);
     const enabled = cliData<{ readonly status: string }>(
       await cli(baseUrl, ["bin", "enable", "rss-main"]),
@@ -548,7 +663,7 @@ async function main(): Promise<void> {
     const archive = await archiveHttpStep("submit", baseUrl);
     await verifyRestartAndRemoval(baseUrl, port, archive);
     process.stdout.write(
-      "Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+      "隔离客户端、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
     );
   } finally {
     const cleanup = await run(
