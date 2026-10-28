@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny04-" + process.pid.toString(10);
+const projectName = "binny05-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;
@@ -292,9 +292,12 @@ async function sdkResourceStep(baseUrl: string): Promise<string> {
 
 function archiveIds(state: string): {
   readonly itemId: string;
+  readonly relationItemId: string;
+  readonly relationCommitId: string;
   readonly revisionId: string;
   readonly commitId: string;
   readonly historicalAsOf: string;
+  readonly relationAsOf: string;
   readonly resourceItemId: string;
   readonly resourceRevisionId: string;
   readonly resourceId: string;
@@ -316,9 +319,12 @@ function archiveIds(state: string): {
   };
   return {
     itemId: readText("itemId"),
+    relationItemId: readText("relationItemId"),
+    relationCommitId: readText("relationCommitId"),
     revisionId: readText("revisionId"),
     commitId: readText("commitId"),
     historicalAsOf: readText("historicalAsOf"),
+    relationAsOf: readText("relationAsOf"),
     resourceItemId: readText("resourceItemId"),
     resourceRevisionId: readText("resourceRevisionId"),
     resourceId: readText("resourceId"),
@@ -344,6 +350,9 @@ function archiveResponses(response: string): {
   readonly firstTimelinePage: unknown;
   readonly secondTimelinePage: unknown;
   readonly commit: unknown;
+  readonly relationCommit: unknown;
+  readonly relationPage: unknown;
+  readonly relationTimelinePage: unknown;
 } {
   const parsed: unknown = JSON.parse(response);
   assert.ok(typeof parsed === "object" && parsed !== null);
@@ -357,7 +366,10 @@ function archiveResponses(response: string): {
       "historicalItem" in parsed &&
       "firstTimelinePage" in parsed &&
       "secondTimelinePage" in parsed &&
-      "commit" in parsed,
+      "commit" in parsed &&
+      "relationCommit" in parsed &&
+      "relationPage" in parsed &&
+      "relationTimelinePage" in parsed,
   );
   assert.ok(typeof parsed.sdkResourceMetadata === "object");
   assert.ok(parsed.sdkResourceMetadata !== null);
@@ -381,6 +393,9 @@ function archiveResponses(response: string): {
     firstTimelinePage: parsed.firstTimelinePage,
     secondTimelinePage: parsed.secondTimelinePage,
     commit: parsed.commit,
+    relationCommit: parsed.relationCommit,
+    relationPage: parsed.relationPage,
+    relationTimelinePage: parsed.relationTimelinePage,
   };
 }
 
@@ -503,7 +518,7 @@ async function restartServer(port: number): Promise<void> {
 
 function resourceUploadProcess(): ManagedProcess {
   const program = [
-    'const body = Buffer.from("binny04 interrupted resource publish");',
+    'const body = Buffer.from("binny05 interrupted resource publish");',
     'process.stdout.write("BINNY04_UPLOAD_STARTED\\n");',
     'const response = await fetch("http://127.0.0.1:3000/resources", { method: "POST", headers: { "content-type": "application/octet-stream" }, body });',
     'process.stdout.write("BINNY04_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
@@ -616,7 +631,7 @@ async function verifyResourceStorageInterruptions(
   }
 
   const referenceBytes = new TextEncoder().encode(
-    "binny04 committed upload survives interrupted reference registration",
+    "binny05 committed upload survives interrupted reference registration",
   );
   const uploadResponse = await fetch(baseUrl + "/resources", {
     method: "POST",
@@ -1083,9 +1098,12 @@ async function verifyRestartAndRemoval(
   );
   const {
     itemId,
+    relationItemId,
+    relationCommitId,
     revisionId,
     commitId,
     historicalAsOf,
+    relationAsOf,
     resourceItemId,
     resourceRevisionId,
     resourceMarkerItemId,
@@ -1143,10 +1161,10 @@ async function verifyRestartAndRemoval(
   assert.deepEqual(cliSdkItem, expectedArchive.sdkItem);
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny04-resource-cli-"),
+    path.join(tmpdir(), "binny05-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny04-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny05-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1213,6 +1231,46 @@ async function verifyRestartAndRemoval(
     "found",
   );
   assert.deepEqual(cliSecondTimelinePage, expectedArchive.secondTimelinePage);
+  const cliRelationPage = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "relations",
+      relationItemId,
+      "--bin",
+      "rss-main",
+      "--direction",
+      "outgoing",
+      "--as-of",
+      relationAsOf,
+      "--limit",
+      "10",
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliRelationPage, expectedArchive.relationPage);
+  const cliRelationTimelinePage = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "timeline",
+      relationItemId,
+      "--bin",
+      "rss-main",
+      "--as-of",
+      relationAsOf,
+      "--limit",
+      "100",
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    cliRelationTimelinePage,
+    expectedArchive.relationTimelinePage,
+  );
+  const cliRelationCommit = cliData<unknown>(
+    await cli(baseUrl, ["archive", "commit", relationCommitId]),
+    "found",
+  );
+  assert.deepEqual(cliRelationCommit, expectedArchive.relationCommit);
   const cliArchiveCommit = cliData<unknown>(
     await cli(baseUrl, ["archive", "commit", commitId]),
     "found",
@@ -1227,7 +1285,7 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny04-compose-"),
+    path.join(tmpdir(), "binny05-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";

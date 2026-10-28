@@ -6,6 +6,7 @@ import {
   registerPostgresJsonSchemaProjection,
   toPostgresJsonSchema,
   validatePostgresJsonText,
+  withPostgresJsonSchemaProjection,
 } from "./postgres-text.ts";
 
 export const binIdSchema = postgresTextSchema
@@ -38,10 +39,10 @@ const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
 );
 
 /** 线上 JSON 对象；配置本身由对应采集器声明的动态 JSON Schema 校验。 */
-export const jsonObjectSchema = jsonObjectBaseSchema.superRefine(
-  (object, context) => {
+export const jsonObjectSchema = withPostgresJsonSchemaProjection(
+  jsonObjectBaseSchema.superRefine((object, context) => {
     validatePostgresJsonText(object, context);
-  },
+  }),
 );
 
 registerPostgresJsonSchemaProjection(
@@ -70,45 +71,53 @@ export const collectorActionNameSchema = postgresTextSchema.regex(
   "动作名称必须使用小写字母、数字和连字符。",
 );
 
-export const collectorActionSchema = z.object({
-  description: postgresTextSchema.min(1, "动作说明不能为空。"),
-  params: jsonSchemaDocumentSchema,
-});
+export const collectorActionSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    description: postgresTextSchema.min(1, "动作说明不能为空。"),
+    params: jsonSchemaDocumentSchema,
+  }),
+);
 
-export const collectorManifestSchema = z.object({
-  id: collectorIdSchema,
-  version: postgresTextSchema.min(1, "采集器版本不能为空。"),
-  description: postgresTextSchema.optional(),
-  configSchema: jsonSchemaDocumentSchema,
-  actions: z.record(collectorActionNameSchema, collectorActionSchema),
-  environment: z.object({
-    browser: z.object({
-      required: z.boolean(),
-      profileReuseAfterRestart: z.boolean(),
-      profileReuseUnavailableReason: postgresTextSchema.optional(),
+export const collectorManifestSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: collectorIdSchema,
+    version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+    description: postgresTextSchema.optional(),
+    configSchema: jsonSchemaDocumentSchema,
+    actions: z.record(collectorActionNameSchema, collectorActionSchema),
+    environment: z.object({
+      browser: z.object({
+        required: z.boolean(),
+        profileReuseAfterRestart: z.boolean(),
+        profileReuseUnavailableReason: postgresTextSchema.optional(),
+      }),
     }),
   }),
-});
+);
 
-export const binCreateInputSchema = z.object({
-  id: binIdSchema,
-  collector: collectorManifestSchema,
-  identityId: identityIdSchema,
-  config: jsonObjectSchema,
-  targets: targetsSchema,
-});
+export const binCreateInputSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: binIdSchema,
+    collector: collectorManifestSchema,
+    identityId: identityIdSchema,
+    config: jsonObjectSchema,
+    targets: targetsSchema,
+  }),
+);
 
-export const binUpdateInputSchema = z
-  .object({
-    collector: collectorManifestSchema.optional(),
-    identityId: identityIdSchema.optional(),
-    config: jsonObjectSchema.optional(),
-    targets: targetsSchema.optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "至少提供一个需要修改的字段。",
-  });
+export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      collector: collectorManifestSchema.optional(),
+      identityId: identityIdSchema.optional(),
+      config: jsonObjectSchema.optional(),
+      targets: targetsSchema.optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "至少提供一个需要修改的字段。",
+    }),
+);
 
 export const binStatusSchema = z.enum(["active", "disabled"]);
 
@@ -128,12 +137,14 @@ export const runtimeEnvironmentSchema = z.object({
   }),
 });
 
-export const runtimeHeartbeatInputSchema = z.object({
-  protocolVersion: z.literal(runtimeProtocolVersion),
-  runtimeId: postgresTextSchema.min(1),
-  collector: collectorManifestSchema,
-  environment: runtimeEnvironmentSchema,
-});
+export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    protocolVersion: z.literal(runtimeProtocolVersion),
+    runtimeId: postgresTextSchema.min(1),
+    collector: collectorManifestSchema,
+    environment: runtimeEnvironmentSchema,
+  }),
+);
 
 export const runtimeDisconnectInputSchema = z.object({
   runtimeId: postgresTextSchema.min(1),
@@ -168,17 +179,19 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
   }),
 ]);
 
-export const binConfigurationSchema = z.object({
-  id: binIdSchema,
-  collector: collectorManifestSchema,
-  identityId: identityIdSchema,
-  config: jsonObjectSchema,
-  targets: targetsSchema,
-  status: binStatusSchema,
-  execution: runtimeExecutionSchema,
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
-});
+export const binConfigurationSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: binIdSchema,
+    collector: collectorManifestSchema,
+    identityId: identityIdSchema,
+    config: jsonObjectSchema,
+    targets: targetsSchema,
+    status: binStatusSchema,
+    execution: runtimeExecutionSchema,
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+  }),
+);
 
 export const binErrorSchema = z.object({
   error: z.object({

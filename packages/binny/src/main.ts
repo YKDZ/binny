@@ -10,6 +10,7 @@ import {
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveRelationPageSchema,
   archiveResourceMetadataSchema,
   archiveRevisionReadSchema,
   archiveSnapshotSequenceSchema,
@@ -156,7 +157,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "archive",
-        description: "读取已归档资料和不可变内容版本。",
+        description: "读取归档资料、对象关系和观察历史。",
       },
       ...command("binList")({
         kind: "command",
@@ -615,6 +616,86 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的时间线读取状态。");
+        },
+      }),
+      ...command("archiveRelations")({
+        kind: "command",
+        parent: "archive",
+        name: "relations",
+        description: "按方向、bin 和归档截点读取对象关系。",
+        fields: {
+          itemId: { kind: "positional", description: "归档条目 ID" },
+          binId: {
+            kind: "valueOption",
+            longOption: "--bin",
+            description: "读取这个 bin 所知的关系状态",
+          },
+          direction: {
+            kind: "valueOption",
+            longOption: "--direction",
+            description: "关系方向：outgoing 或 incoming",
+          },
+          asOf: {
+            kind: "valueOption",
+            longOption: "--as-of",
+            description: "固定关系与目标解析的归档截点",
+          },
+          limit: {
+            kind: "valueOption",
+            longOption: "--limit",
+            description: "每页关系数量（1 到 100）",
+          },
+          cursor: {
+            kind: "valueOption",
+            longOption: "--cursor",
+            description: "继续读取上一页返回的游标",
+          },
+        },
+        input: z.object({
+          itemId: archiveIdentifierSchema,
+          binId: binIdSchema,
+          direction: z.enum(["outgoing", "incoming"]),
+          asOf: archiveSnapshotSequenceSchema.optional(),
+          limit: z
+            .string()
+            .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
+            .optional(),
+          cursor: z.string().min(1).max(4096).optional(),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "一页入向或出向关系",
+              exitCode: 0,
+              schema: archiveRelationPageSchema,
+              text: (page) => outputText("对象关系", page),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.items[":itemId"].relations.$get({
+              param: { itemId: input.itemId },
+              query: {
+                binId: input.binId,
+                direction: input.direction,
+                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+                ...(input.limit === undefined ? {} : { limit: input.limit }),
+                ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+              },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的关系读取状态。");
         },
       }),
       ...command("archiveRevision")({

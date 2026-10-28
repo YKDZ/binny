@@ -5,6 +5,8 @@ import {
   archiveItemReadSchema,
   archiveResourceMetadataSchema,
   archiveItemReadQuerySchema,
+  archiveRelationPageSchema,
+  archiveRelationReadQuerySchema,
   archiveRevisionReadSchema,
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
@@ -191,6 +193,51 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
       },
     )
     .get(
+      "/archives/items/:itemId/relations",
+      zValidator(
+        "param",
+        z.object({ itemId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("query", archiveRelationReadQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const query = c.req.valid("query");
+        const result = await operations.getArchiveRelations(
+          c.req.valid("param").itemId,
+          {
+            binId: query.binId,
+            direction: query.direction,
+            ...(query.asOf === undefined ? {} : { asOf: query.asOf }),
+            ...(query.limit === undefined
+              ? {}
+              : { limit: Number(query.limit) }),
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+          },
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
       "/archives/items/:itemId/timeline",
       zValidator(
         "param",
@@ -305,9 +352,11 @@ export const archiveApiSchemas: {
   readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
   readonly timelineQuery: Record<string, unknown>;
+  readonly relationQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
   readonly resource: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
+  readonly relationPage: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
   submitInput: toArchiveJsonSchema(archiveSubmissionInputSchema, "input"),
@@ -315,9 +364,11 @@ export const archiveApiSchemas: {
   itemQuery: toArchiveJsonSchema(archiveItemReadQuerySchema, "input"),
   item: toArchiveJsonSchema(archiveItemReadSchema, "output"),
   timelineQuery: toArchiveJsonSchema(archiveTimelineQuerySchema, "input"),
+  relationQuery: toArchiveJsonSchema(archiveRelationReadQuerySchema, "input"),
   revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
   resource: toArchiveJsonSchema(archiveResourceMetadataSchema, "output"),
   timeline: toArchiveJsonSchema(archiveTimelinePageSchema, "output"),
+  relationPage: toArchiveJsonSchema(archiveRelationPageSchema, "output"),
   error: toArchiveJsonSchema(archiveErrorSchema, "output"),
 };
 

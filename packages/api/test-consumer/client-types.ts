@@ -89,6 +89,7 @@ async function checkPublicArchiveContract(): Promise<void> {
           },
         },
       ],
+      relations: [],
     },
   });
 
@@ -96,6 +97,7 @@ async function checkPublicArchiveContract(): Promise<void> {
     const commit = await submission.json();
     void commit.archiveSeq;
     void commit.items[0]?.revisionId;
+    void commit.relations[0]?.relationId;
   } else if (
     submission.status === 400 ||
     submission.status === 404 ||
@@ -137,9 +139,12 @@ async function checkPublicArchiveContract(): Promise<void> {
   if (timeline.status === 200) {
     const page = await timeline.json();
     void page.nextCursor;
-    void page.observations[0]?.sourceModifiedAt;
-    // @ts-expect-error Timeline observations do not invent revision fields.
-    void page.observations[0]?.stateHash;
+    const event = page.events[0];
+    if (event?.kind === "item") void event.sourceModifiedAt;
+    if (event?.kind === "relation" && event.status === "observed")
+      void event.state.cascade;
+    // @ts-expect-error Timeline events do not invent state hash fields.
+    void event?.stateHash;
   } else if (
     timeline.status === 400 ||
     timeline.status === 404 ||
@@ -155,6 +160,7 @@ async function checkPublicArchiveContract(): Promise<void> {
     const commit = await commitRead.json();
     void commit.recordedAt;
     void commit.items[0]?.revisionId;
+    void commit.relations[0]?.status;
   } else if (
     commitRead.status === 400 ||
     commitRead.status === 404 ||
@@ -176,6 +182,55 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await revision.json()).error.message;
   }
 
+  const relations = await client.archives.items[":itemId"].relations.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { direction: "outgoing", binId: "rss-main", limit: "20" },
+  });
+  if (relations.status === 200) {
+    const page = await relations.json();
+    void page.snapshot.asOf;
+    const relation = page.relations[0];
+    if (relation?.status === "observed") {
+      void relation.state.name;
+      void relation.observation.recordedAt;
+    }
+    if (relation?.status === "withdrawn") void relation.observation.commitId;
+    if (relation?.status === "unknown") void relation.from.status;
+    if (relation?.to.kind === "sourceRef") void relation.to.sourceRef;
+  } else if (
+    relations.status === 400 ||
+    relations.status === 404 ||
+    relations.status === 409
+  ) {
+    void (await relations.json()).error.code;
+  }
+
+  const relationOnly = await client.archives.$post({
+    json: {
+      requestId: "rss:relation-only",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "rss:relation:entry-7-reply-8",
+          value: {
+            from: { namespace: "rss.example", key: "entry/7" },
+            to: { sourceRef: "https://example.test/entry/8" },
+            name: "reply",
+            properties: { rank: 1 },
+            cascade: false,
+          },
+        },
+      ],
+    },
+  });
+  if (relationOnly.status === 201) {
+    const commit = await relationOnly.json();
+    void commit.items.length;
+    const relation = commit.relations[0];
+    if (relation?.status === "observed") void relation.state.properties?.rank;
+  }
+
   // @ts-expect-error 未知归档路由不能由正式客户端调用。
   void client.archives.unknown.$get();
   // @ts-expect-error 归档提交只接受正式契约声明的请求字段。
@@ -193,6 +248,30 @@ async function checkPublicArchiveContract(): Promise<void> {
     param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
     // @ts-expect-error 页大小也是传输查询字符串。
     query: { limit: 20 },
+  });
+  void client.archives.items[":itemId"].relations.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error Relation direction and page size use declared query strings.
+    query: { direction: "outgoing", binId: "rss-main", limit: 20 },
+  });
+  void client.archives.$post({
+    json: {
+      requestId: "rss:bad-relation-target",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "rss:bad-relation",
+          value: {
+            from: { namespace: "rss.example", key: "entry/7" },
+            // @ts-expect-error Endpoints must be a source key or explicit source reference.
+            to: "entry/8",
+            name: "reply",
+            cascade: false,
+          },
+        },
+      ],
+    },
   });
   // @ts-expect-error commit 路由没有 POST 方法。
   void client.archives.commits[":commitId"].$post();
