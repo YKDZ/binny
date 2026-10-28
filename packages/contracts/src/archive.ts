@@ -1,0 +1,316 @@
+import * as z from "zod";
+
+const nonEmptyText = z
+  .string()
+  .min(1, "字段不能为空。")
+  .max(4096, "字段不能超过 4096 个字符。")
+  .refine((value) => value.trim().length > 0, "字段不能为空。");
+
+const sourceKeySchema = z
+  .object({
+    namespace: nonEmptyText.max(256, "信源命名空间不能超过 256 个字符。"),
+    key: nonEmptyText.max(1024, "信源对象键不能超过 1024 个字符。"),
+  })
+  .strict();
+
+// JSON 整数必须能由 JavaScript Number 精确表示，避免读写时静默改值。
+const jsonNumberSchema = z
+  .number()
+  .finite()
+  .refine(
+    (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
+    "JSON 整数必须处于 JavaScript 安全整数范围内。",
+  );
+
+export type ArchiveJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly ArchiveJsonValue[]
+  | { readonly [key: string]: ArchiveJsonValue };
+
+const jsonValueSchema: z.ZodType<ArchiveJsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    jsonNumberSchema,
+    z.boolean(),
+    z.null(),
+    z.array(jsonValueSchema),
+    z.record(z.string(), jsonValueSchema),
+  ]),
+);
+
+const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
+
+const archiveBodySchema = z
+  .object({
+    html: z.string().optional(),
+    markdown: z.string().optional(),
+    text: z.string().optional(),
+    searchText: z.string().optional(),
+  })
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "正文至少需要提供一种表示。",
+  });
+
+const archiveMissingSchema = z
+  .object({
+    path: nonEmptyText.max(1024, "缺失字段路径不能超过 1024 个字符。"),
+    reason: nonEmptyText,
+  })
+  .strict();
+
+const archiveCaptureSchema = z
+  .object({
+    scope: jsonObjectSchema,
+    completeness: z.enum(["complete", "partial"]),
+    missing: z.array(archiveMissingSchema),
+  })
+  .strict()
+  .superRefine((capture, context) => {
+    if (capture.completeness === "partial" && capture.missing.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["missing"],
+        message: "部分资料必须说明缺失内容。",
+      });
+    }
+    if (capture.completeness === "complete" && capture.missing.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["missing"],
+        message: "完整资料不能声明缺失内容。",
+      });
+    }
+  });
+
+const archiveDiagnosticSchema = z
+  .object({
+    code: nonEmptyText.max(128, "诊断代码不能超过 128 个字符。"),
+    message: nonEmptyText,
+    details: jsonObjectSchema.optional(),
+    suggestion: nonEmptyText.optional(),
+  })
+  .strict();
+
+const binIdentifierSchema = z
+  .string()
+  .min(1, "bin 标识不能为空。")
+  .max(128, "bin 标识不能超过 128 个字符。")
+  .regex(
+    /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u,
+    "bin 标识只能包含字母、数字、点、下划线和连字符。",
+  );
+
+// 将显式来源时刻规范为 UTC；字段缺省时不代造来源时间。
+const timestampSchema = z.iso
+  .datetime({ offset: true })
+  .transform((value) => new Date(value).toISOString());
+
+const archiveItemFieldsSchema = z
+  .object({
+    sourceRef: nonEmptyText.optional(),
+    sourceModifiedAt: timestampSchema.optional(),
+    metadata: jsonObjectSchema.optional(),
+    properties: jsonObjectSchema.optional(),
+    body: archiveBodySchema.optional(),
+    capture: archiveCaptureSchema,
+  })
+  .strict();
+
+function hasReceivedMaterial(item: {
+  readonly metadata?: Record<string, unknown> | undefined;
+  readonly properties?: Record<string, unknown> | undefined;
+  readonly body?: object | undefined;
+}): boolean {
+  const hasMetadata =
+    item.metadata !== undefined && Object.keys(item.metadata).length > 0;
+  const hasProperties =
+    item.properties !== undefined && Object.keys(item.properties).length > 0;
+  // sourceRef 只定位出处，不能让未取得资料的失败形成空版本。
+  return hasMetadata || hasProperties || item.body !== undefined;
+}
+
+/** 保存已整理的资料状态；采集上下文和诊断不会因此生成新版本。 */
+export const archiveItemStateSchema = archiveItemFieldsSchema.refine(
+  hasReceivedMaterial,
+  {
+    path: ["body"],
+    message: "没有取得资料时不能创建空内容版本。",
+  },
+);
+
+/** 单对象提交必须携带稳定信源键，不能从正文推测身份。 */
+export const archiveItemInputSchema = archiveItemFieldsSchema
+  .extend({
+    sourceKey: sourceKeySchema,
+    diagnostics: z.array(archiveDiagnosticSchema).optional(),
+  })
+  .strict()
+  .refine(hasReceivedMaterial, {
+    path: ["body"],
+    message: "没有取得资料时不能创建空内容版本。",
+  });
+
+export type ArchiveItemState = z.infer<typeof archiveItemStateSchema>;
+export type ArchiveItemInput = z.infer<typeof archiveItemInputSchema>;
+
+/** 提交标识全局唯一；相同标识不得用于不同业务负载。 */
+export const archiveSubmissionInputSchema = z
+  .object({
+    requestId: nonEmptyText.max(256, "请求标识不能超过 256 个字符。"),
+    binId: binIdentifierSchema,
+    runId: nonEmptyText.max(128, "run 标识不能超过 128 个字符。").optional(),
+    collectorVersion: nonEmptyText
+      .max(256, "采集器版本不能超过 256 个字符。")
+      .optional(),
+    observedAt: timestampSchema.optional(),
+    items: z.array(archiveItemInputSchema).min(1).max(100),
+  })
+  .strict()
+  .superRefine((submission, context) => {
+    const sourceKeys = new Set<string>();
+    for (const [index, item] of submission.items.entries()) {
+      const identity = JSON.stringify([
+        item.sourceKey.namespace,
+        item.sourceKey.key,
+      ]);
+      if (sourceKeys.has(identity)) {
+        context.addIssue({
+          code: "custom",
+          path: ["items", index, "sourceKey"],
+          message: "同一批资料不能重复提交相同信源键。",
+        });
+      }
+      sourceKeys.add(identity);
+    }
+  });
+
+export type ArchiveSubmissionInput = z.infer<
+  typeof archiveSubmissionInputSchema
+>;
+
+export const archiveIdentifierSchema = z.string().uuid();
+const archiveIdSchema = archiveIdentifierSchema;
+// PostgreSQL BIGINT 序号以十进制文本传输，避免超出安全整数范围时舍入。
+const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
+const archiveStateHashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+
+const archiveCommitItemSchema = z
+  .object({
+    itemId: archiveIdSchema,
+    revisionId: archiveIdSchema,
+    sourceKey: sourceKeySchema,
+  })
+  .strict();
+
+const archiveObservationSchema = z
+  .object({
+    commitId: archiveIdSchema,
+    archiveSeq: archiveSequenceSchema,
+    binId: binIdentifierSchema,
+    runId: nonEmptyText.max(128).optional(),
+    collectorVersion: nonEmptyText.max(256).optional(),
+    revisionId: archiveIdSchema,
+    observedAt: timestampSchema,
+    recordedAt: timestampSchema,
+    diagnostics: z.array(archiveDiagnosticSchema).optional(),
+  })
+  .strict();
+
+const archiveViewSchema = z
+  .object({
+    binId: binIdentifierSchema,
+    archiveSeq: archiveSequenceSchema,
+    revisionId: archiveIdSchema,
+    observedAt: timestampSchema,
+    recordedAt: timestampSchema,
+    runId: nonEmptyText.max(128).optional(),
+    collectorVersion: nonEmptyText.max(256).optional(),
+    state: archiveItemStateSchema,
+    diagnostics: z.array(archiveDiagnosticSchema).optional(),
+  })
+  .strict();
+
+const archiveRevisionSummarySchema = z
+  .object({
+    revisionId: archiveIdSchema,
+    stateHash: archiveStateHashSchema,
+  })
+  .strict();
+
+/** 成功提交的动态表示；重复请求仍由当前归档数据生成响应。 */
+export const archiveCommitSchema = z
+  .object({
+    commitId: archiveIdSchema,
+    archiveSeq: archiveSequenceSchema,
+    binId: binIdentifierSchema,
+    runId: nonEmptyText.max(128).optional(),
+    collectorVersion: nonEmptyText.max(256).optional(),
+    observedAt: timestampSchema,
+    recordedAt: timestampSchema,
+    items: z.array(archiveCommitItemSchema),
+  })
+  .strict();
+
+/** 条目读取同时返回各 bin 当前视图和用于还原观察顺序的轻量记录。 */
+export const archiveItemReadSchema = z
+  .object({
+    itemId: archiveIdSchema,
+    sourceKey: sourceKeySchema,
+    views: z.array(archiveViewSchema),
+    revisions: z.array(archiveRevisionSummarySchema),
+    observations: z.array(archiveObservationSchema),
+  })
+  .strict();
+
+export const archiveRevisionReadSchema = z
+  .object({
+    revisionId: archiveIdSchema,
+    itemId: archiveIdSchema,
+    sourceKey: sourceKeySchema,
+    stateHash: archiveStateHashSchema,
+    state: archiveItemStateSchema,
+  })
+  .strict();
+
+export const archiveErrorSchema = z
+  .object({
+    error: z
+      .object({
+        code: z.enum([
+          "invalid_input",
+          "bin_not_found",
+          "archive_request_conflict",
+          "item_not_found",
+          "revision_not_found",
+        ]),
+        message: z.string(),
+        path: z.array(z.union([z.string(), z.number()])).optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export type ArchiveCommit = z.infer<typeof archiveCommitSchema>;
+export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
+export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
+export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
+export type ArchiveOperation<T> =
+  | { readonly ok: true; readonly value: T }
+  | {
+      readonly ok: false;
+      readonly status: 400 | 404 | 409;
+      readonly error: ArchiveError;
+    };
+export type ArchiveOperations = {
+  submitArchive(
+    input: ArchiveSubmissionInput,
+  ): Promise<ArchiveOperation<ArchiveCommit>>;
+  getArchiveItem(itemId: string): Promise<ArchiveOperation<ArchiveItemRead>>;
+  getArchiveRevision(
+    revisionId: string,
+  ): Promise<ArchiveOperation<ArchiveRevisionRead>>;
+};
