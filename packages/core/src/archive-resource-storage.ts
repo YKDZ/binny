@@ -11,19 +11,14 @@ import {
   type ArchiveOperation,
   type ArchiveResourceMetadata,
 } from "@binny/contracts";
+import { and, asc, eq, inArray, lte, notExists, sql } from "drizzle-orm";
 
 import { withArchiveWriteLock } from "./archive-lock.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import type { CoreDatabase } from "./database.ts";
+import { archiveResources, archiveRevisionResources } from "./schema.ts";
 
-type ResourceRow = {
-  readonly resource_id: string;
-  readonly sha256: string;
-  readonly media_type: string;
-  readonly byte_size: string;
-  readonly storage_key: string;
-  readonly status: "ready" | "deleting";
-};
+type ResourceRow = typeof archiveResources.$inferSelect;
 
 type StorageOptions = {
   readonly directory: string;
@@ -56,6 +51,8 @@ export type ArchiveResourceStorage = {
 const uploadFilePrefix = ".upload-";
 const resourceFilePattern = /^[0-9a-f-]{36}\.bin$/u;
 const copyChunkSize = 64 * 1024;
+// Drizzle 的 inArray 将每个 ID 展开为参数；分批避开 PostgreSQL 单条语句参数上限。
+const inArrayChunkSize = 5_000;
 
 function failure<T>(
   status: 400 | 404 | 409 | 503,
@@ -98,12 +95,12 @@ function resourcePath(directory: string, storageKey: string): string {
 function metadataFromRow(
   row: ResourceRow,
 ): ArchiveResourceMetadata | undefined {
-  const size = Number(row.byte_size);
+  const size = Number(row.byteSize);
   if (!Number.isSafeInteger(size) || size < 0) return undefined;
   const parsed = archiveResourceMetadataSchema.safeParse({
-    resourceId: row.resource_id,
+    resourceId: row.resourceId,
     sha256: row.sha256,
-    mediaType: row.media_type,
+    mediaType: row.mediaType,
     size,
   });
   return parsed.success ? parsed.data : undefined;
@@ -263,45 +260,73 @@ export function createArchiveResourceStorage(
     const deleting = await withArchiveWriteLock(
       database,
       async (transaction) => {
-        return await transaction<ResourceRow[]>`
-        SELECT
-          resource_id,
-          sha256,
-          media_type,
-          byte_size::text AS byte_size,
-          storage_key,
-          status
-        FROM archive_resource
-        WHERE resource_id = ANY(${transaction.array(uniqueResourceIds, 2950)})
-          AND status = 'deleting'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM archive_revision_resource AS reference
-            WHERE reference.resource_id = archive_resource.resource_id
-          )
-      `;
+        const rows: ResourceRow[] = [];
+        for (
+          let offset = 0;
+          offset < uniqueResourceIds.length;
+          offset += inArrayChunkSize
+        ) {
+          const resourceIdBatch = uniqueResourceIds.slice(
+            offset,
+            offset + inArrayChunkSize,
+          );
+          rows.push(
+            ...(await transaction
+              .select()
+              .from(archiveResources)
+              .where(
+                and(
+                  inArray(archiveResources.resourceId, resourceIdBatch),
+                  eq(archiveResources.status, "deleting"),
+                  notExists(
+                    transaction
+                      .select({
+                        resourceId: archiveRevisionResources.resourceId,
+                      })
+                      .from(archiveRevisionResources)
+                      .where(
+                        eq(
+                          archiveRevisionResources.resourceId,
+                          archiveResources.resourceId,
+                        ),
+                      ),
+                  ),
+                ),
+              )),
+          );
+        }
+        return rows;
       },
     );
 
     let directoryChanged = false;
     for (const row of deleting) {
-      await rm(resourcePath(directory, row.storage_key), { force: true });
+      await rm(resourcePath(directory, row.storageKey), { force: true });
       directoryChanged = true;
     }
     if (directoryChanged) await syncDirectory(directory);
 
-    await database.begin(async (transaction) => {
+    await database.transaction(async (transaction) => {
       for (const row of deleting) {
-        await transaction`
-          DELETE FROM archive_resource
-          WHERE resource_id = ${row.resource_id}
-            AND status = 'deleting'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM archive_revision_resource AS reference
-              WHERE reference.resource_id = archive_resource.resource_id
-            )
-        `;
+        await transaction.delete(archiveResources).where(
+          and(
+            eq(archiveResources.resourceId, row.resourceId),
+            eq(archiveResources.status, "deleting"),
+            notExists(
+              transaction
+                .select({
+                  resourceId: archiveRevisionResources.resourceId,
+                })
+                .from(archiveRevisionResources)
+                .where(
+                  eq(
+                    archiveRevisionResources.resourceId,
+                    archiveResources.resourceId,
+                  ),
+                ),
+            ),
+          ),
+        );
       }
     });
   }
@@ -310,42 +335,65 @@ export function createArchiveResourceStorage(
     const resourceIds = await withArchiveWriteLock(
       database,
       async (transaction) => {
-        await transaction`
-        UPDATE archive_resource
-        SET status = 'deleting'
-        WHERE status = 'ready'
-          AND uploaded_at <= clock_timestamp() - (
-            ${options.unreferencedAgeMs}::double precision * INTERVAL '1 millisecond'
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM archive_revision_resource AS reference
-            WHERE reference.resource_id = archive_resource.resource_id
-          )
-      `;
-        const rows = await transaction<{ readonly resource_id: string }[]>`
-        SELECT resource_id
-        FROM archive_resource
-        WHERE status = 'deleting'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM archive_revision_resource AS reference
-            WHERE reference.resource_id = archive_resource.resource_id
-          )
-      `;
-        return rows.map(({ resource_id }) => resource_id);
+        // 保留 PostgreSQL 墙钟时间与 interval 运算，避免应用主机时钟偏差。
+        await transaction
+          .update(archiveResources)
+          .set({ status: "deleting" })
+          .where(
+            and(
+              eq(archiveResources.status, "ready"),
+              lte(
+                archiveResources.uploadedAt,
+                sql`clock_timestamp() - (${options.unreferencedAgeMs}::double precision * interval '1 millisecond')`,
+              ),
+              notExists(
+                transaction
+                  .select({
+                    resourceId: archiveRevisionResources.resourceId,
+                  })
+                  .from(archiveRevisionResources)
+                  .where(
+                    eq(
+                      archiveRevisionResources.resourceId,
+                      archiveResources.resourceId,
+                    ),
+                  ),
+              ),
+            ),
+          );
+        const rows = await transaction
+          .select({ resourceId: archiveResources.resourceId })
+          .from(archiveResources)
+          .where(
+            and(
+              eq(archiveResources.status, "deleting"),
+              notExists(
+                transaction
+                  .select({
+                    resourceId: archiveRevisionResources.resourceId,
+                  })
+                  .from(archiveRevisionResources)
+                  .where(
+                    eq(
+                      archiveRevisionResources.resourceId,
+                      archiveResources.resourceId,
+                    ),
+                  ),
+              ),
+            ),
+          );
+        return rows.map(({ resourceId }) => resourceId);
       },
     );
     await collectUnreferencedResources(resourceIds);
 
     await withArchiveWriteLock(database, async (transaction) => {
       let directoryChanged = false;
-      const registered = await transaction<{ readonly storage_key: string }[]>`
-        SELECT storage_key
-        FROM archive_resource
-      `;
+      const registered = await transaction
+        .select({ storageKey: archiveResources.storageKey })
+        .from(archiveResources);
       const registeredKeys = new Set(
-        registered.map(({ storage_key }) => storage_key + ".bin"),
+        registered.map(({ storageKey }) => storageKey + ".bin"),
       );
       const files = await readdir(directory, { withFileTypes: true });
       for (const file of files) {
@@ -389,23 +437,20 @@ export function createArchiveResourceStorage(
       const stagedUpload = await writeStreamToFile(directory, body);
       staged = stagedUpload;
       return await withArchiveWriteLock(database, async (transaction) => {
-        const matching = await transaction<ResourceRow[]>`
-            SELECT
-              resource_id,
-              sha256,
-              media_type,
-              byte_size::text AS byte_size,
-              storage_key,
-              status
-            FROM archive_resource
-            WHERE sha256 = ${stagedUpload.sha256}
-              AND byte_size = ${stagedUpload.size}::bigint
-              AND status = 'ready'
-            ORDER BY resource_id
-          `;
+        const matching = await transaction
+          .select()
+          .from(archiveResources)
+          .where(
+            and(
+              eq(archiveResources.sha256, stagedUpload.sha256),
+              eq(archiveResources.byteSize, BigInt(stagedUpload.size)),
+              eq(archiveResources.status, "ready"),
+            ),
+          )
+          .orderBy(asc(archiveResources.resourceId));
         let missingFile: ResourceRow | undefined;
         for (const row of matching) {
-          const path = resourcePath(directory, row.storage_key);
+          const path = resourcePath(directory, row.storageKey);
           try {
             const file = await stat(path);
             if (file.size === stagedUpload.size) {
@@ -436,7 +481,7 @@ export function createArchiveResourceStorage(
           await publish(
             stagedUpload.temporaryPath,
             directory,
-            missingFile.storage_key,
+            missingFile.storageKey,
           );
           const metadata = metadataFromRow(missingFile);
           if (metadata === undefined) throw new Error("归档资源元信息无效。");
@@ -449,30 +494,17 @@ export function createArchiveResourceStorage(
         const resourceId = randomUUID();
         const storageKey = randomUUID();
         await publish(stagedUpload.temporaryPath, directory, storageKey);
-        const rows = await transaction<ResourceRow[]>`
-            INSERT INTO archive_resource (
-              resource_id,
-              sha256,
-              media_type,
-              byte_size,
-              storage_key,
-              status
-            ) VALUES (
-              ${resourceId},
-              ${stagedUpload.sha256},
-              ${checkedMediaType.data},
-              ${stagedUpload.size}::bigint,
-              ${storageKey},
-              'ready'
-            )
-            RETURNING
-              resource_id,
-              sha256,
-              media_type,
-              byte_size::text AS byte_size,
-              storage_key,
-              status
-          `;
+        const rows = await transaction
+          .insert(archiveResources)
+          .values({
+            resourceId,
+            sha256: stagedUpload.sha256,
+            mediaType: checkedMediaType.data,
+            byteSize: BigInt(stagedUpload.size),
+            storageKey,
+            status: "ready",
+          })
+          .returning();
         const row = rows[0];
         if (row === undefined) throw new Error("无法登记归档资源。");
         const metadata = metadataFromRow(row);
@@ -504,19 +536,12 @@ export function createArchiveResourceStorage(
     try {
       const result: ArchiveOperation<{
         readonly metadata: ArchiveResourceMetadata;
-      }> = await database.begin(async (transaction) => {
-        const rows = await transaction<ResourceRow[]>`
-          SELECT
-            resource_id,
-            sha256,
-            media_type,
-            byte_size::text AS byte_size,
-            storage_key,
-            status
-          FROM archive_resource
-          WHERE resource_id = ${checkedId.data}
-          FOR SHARE
-        `;
+      }> = await database.transaction(async (transaction) => {
+        const rows = await transaction
+          .select()
+          .from(archiveResources)
+          .where(eq(archiveResources.resourceId, checkedId.data))
+          .for("share");
         const row = rows[0];
         if (row === undefined || row.status !== "ready") {
           return failure(404, "resource_not_found", "没有找到这个归档资源。", [
@@ -526,10 +551,7 @@ export function createArchiveResourceStorage(
         const metadata = metadataFromRow(row);
         if (metadata === undefined) return storageFailure();
         try {
-          openedFile = await open(
-            resourcePath(directory, row.storage_key),
-            "r",
-          );
+          openedFile = await open(resourcePath(directory, row.storageKey), "r");
           const fileInfo = await openedFile.stat();
           if (fileInfo.size !== metadata.size) {
             await openedFile.close();
@@ -568,25 +590,22 @@ export function createArchiveResourceStorage(
     transaction: ArchiveTransaction,
     resourceId: string,
   ): Promise<boolean> {
-    const rows = await transaction<ResourceRow[]>`
-      SELECT
-        resource_id,
-        sha256,
-        media_type,
-        byte_size::text AS byte_size,
-        storage_key,
-        status
-      FROM archive_resource
-      WHERE resource_id = ${resourceId}
-        AND status = 'ready'
-    `;
+    const rows = await transaction
+      .select()
+      .from(archiveResources)
+      .where(
+        and(
+          eq(archiveResources.resourceId, resourceId),
+          eq(archiveResources.status, "ready"),
+        ),
+      );
     const row = rows[0];
     if (row === undefined) return false;
     const metadata = metadataFromRow(row);
     if (metadata === undefined) return false;
     try {
       return (
-        (await stat(resourcePath(directory, row.storage_key))).size ===
+        (await stat(resourcePath(directory, row.storageKey))).size ===
         metadata.size
       );
     } catch (error) {

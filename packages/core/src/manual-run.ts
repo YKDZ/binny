@@ -1,69 +1,58 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  binCreateInputSchema,
+  collectorManifestSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
+  manualRunCheckInputSchema,
   manualRunCheckResultSchema,
   manualRunErrorSchema,
   manualRunFailureSchema,
+  manualRunExecutionSchema,
   manualRunSchema,
   manualRunTriggerInputSchema,
-  type CollectorManifest,
-  type JsonObject,
+  runtimeHeartbeatTimeoutMs,
+  type ManualRunCommitLocator,
   type ManualRun,
   type ManualRunCompletion,
-  type ManualRunCheckInput,
   type ManualRunApiError,
-  type ManualRunExecution,
   type ManualRunFailure,
   type ManualRunOperation,
   type ManualRunOperations,
   type ManualRunResult,
 } from "@binny/contracts";
+import { and, eq, exists, gt, lt, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 
 import { validateCollectorActionParameters } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
 import { readRuntimeExecution } from "./runtime-connection.ts";
+import {
+  archiveCommits,
+  archiveObservations,
+  binConfigurations,
+  manualRuns,
+  runtimeConnections,
+} from "./schema.ts";
 
-type RunRow = {
-  readonly run_id: string;
-  readonly bin_id: string;
-  readonly collector_id: string;
-  readonly collector_version: string;
-  readonly action: string;
-  readonly status: ManualRun["status"];
-  readonly created_at: Date;
-  readonly started_at: Date | null;
-  readonly finished_at: Date | null;
-  readonly completed_scopes: readonly string[];
-  readonly failure: ManualRunFailure | null;
-  readonly check_result: ManualRunCheckInput | null;
-  readonly queue_reason: ManualRun["queueReason"] | null;
+const runSelection = {
+  runId: manualRuns.runId,
+  binId: manualRuns.binId,
+  collectorId: manualRuns.collectorId,
+  collectorVersion: manualRuns.collectorVersion,
+  action: manualRuns.action,
+  status: manualRuns.status,
+  createdAt: manualRuns.createdAt,
+  startedAt: manualRuns.startedAt,
+  finishedAt: manualRuns.finishedAt,
+  completedScopes: manualRuns.completedScopes,
+  failure: manualRuns.failure,
+  checkResult: manualRuns.checkResult,
 };
 
-type RunSnapshotRow = RunRow & {
-  readonly identity_id: string;
-  readonly collector_snapshot: CollectorManifest;
-  readonly config_snapshot: JsonObject;
-  readonly targets_snapshot: readonly unknown[];
-  readonly params: JsonObject;
-};
-
-type CommitLocatorRow = {
-  readonly commit_id: string;
-  readonly archive_seq: string;
-  readonly items: readonly {
-    readonly item_id: string | null;
-    readonly revision_id: string | null;
-  }[];
-};
-
-const tableName = "manual_runs";
-const jsonbType = 3802;
-
-function jsonbParameter(database: CoreDatabase, value: unknown) {
-  return database.typed(value, jsonbType);
-}
+const activeRuns = alias(manualRuns, "active_runs");
+const earlierRuns = alias(manualRuns, "earlier_runs");
 
 function failure<T>(
   status: 400 | 404 | 409,
@@ -101,103 +90,170 @@ async function readCommitLocators(
   runId: string,
   binId: string,
 ): Promise<ManualRunResult["commits"]> {
-  const rows = await database.unsafe<CommitLocatorRow[]>(
-    "SELECT c.commit_id, c.archive_seq::text AS archive_seq, " +
-      "COALESCE(jsonb_agg(jsonb_build_object('item_id', o.item_id, " +
-      "'revision_id', o.revision_id) ORDER BY o.ordinal) " +
-      "FILTER (WHERE o.item_id IS NOT NULL), '[]'::jsonb) AS items " +
-      "FROM archive_commit c " +
-      "LEFT JOIN archive_observation o ON o.commit_id = c.commit_id " +
-      "WHERE c.run_id = $1 AND c.bin_id = $2 " +
-      "GROUP BY c.commit_id, c.archive_seq ORDER BY c.archive_seq",
-    [runId, binId],
-  );
-  return rows.map((row) => ({
-    commitId: row.commit_id,
-    archiveSeq: row.archive_seq,
-    items: row.items.flatMap((item) =>
-      item.item_id === null || item.revision_id === null
-        ? []
-        : [{ itemId: item.item_id, revisionId: item.revision_id }],
-    ),
-  }));
+  const rows = await database
+    .select({
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      itemId: archiveObservations.itemId,
+      revisionId: archiveObservations.revisionId,
+    })
+    .from(archiveCommits)
+    .leftJoin(
+      archiveObservations,
+      eq(archiveObservations.commitId, archiveCommits.commitId),
+    )
+    .where(
+      and(eq(archiveCommits.runId, runId), eq(archiveCommits.binId, binId)),
+    )
+    .orderBy(archiveCommits.archiveSequence, archiveObservations.ordinal);
+
+  const commits = new Map<
+    string,
+    { archiveSeq: string; items: ManualRunCommitLocator["items"][number][] }
+  >();
+  for (const row of rows) {
+    const existing = commits.get(row.commitId);
+    const commit = existing ?? {
+      archiveSeq: row.archiveSequence.toString(),
+      items: [],
+    };
+    if (existing === undefined) commits.set(row.commitId, commit);
+    if (row.itemId !== null && row.revisionId !== null) {
+      commit.items.push({ itemId: row.itemId, revisionId: row.revisionId });
+    }
+  }
+  return Array.from(commits, ([commitId, value]) => ({ commitId, ...value }));
 }
 
 async function readRun(
-  database: CoreDatabase,
+  database: CoreDatabase | CoreTransaction,
   binId: string,
   runId: string,
-): Promise<RunRow | undefined> {
-  const rows = await database.unsafe<RunRow[]>(
-    "SELECT run_id, bin_id, collector_id, collector_version, action, status, " +
-      "created_at, started_at, finished_at, completed_scopes, failure, check_result, " +
-      "CASE WHEN status <> 'queued' THEN NULL " +
-      "WHEN NOT EXISTS (SELECT 1 FROM runtime_connections r " +
-      "WHERE r.bin_id = manual_runs.bin_id AND r.disconnected = false " +
-      "AND r.last_heartbeat_at > now() - interval '8 seconds') " +
-      "THEN 'runtime_offline' " +
-      "WHEN EXISTS (SELECT 1 FROM manual_runs active " +
-      "WHERE active.bin_id = manual_runs.bin_id AND active.status = 'executing') " +
-      "THEN 'earlier_run_active' " +
-      "WHEN EXISTS (SELECT 1 FROM manual_runs earlier " +
-      "WHERE earlier.bin_id = manual_runs.bin_id AND earlier.status = 'queued' " +
-      "AND (earlier.created_at, earlier.run_id) < (manual_runs.created_at, manual_runs.run_id)) " +
-      "THEN 'earlier_run_queued' ELSE NULL END AS queue_reason " +
-      "FROM " +
-      tableName +
-      " WHERE bin_id = $1 AND run_id = $2",
-    [binId, runId],
-  );
-  return rows[0];
+) {
+  const [row] = await database
+    .select({
+      ...runSelection,
+      runtimeOnline: exists(
+        database
+          .select({ binId: runtimeConnections.binId })
+          .from(runtimeConnections)
+          .where(
+            and(
+              eq(runtimeConnections.binId, manualRuns.binId),
+              eq(runtimeConnections.disconnected, false),
+              // 心跳时限依赖 PostgreSQL 服务端时钟，Drizzle 无原生 interval 算子。
+              gt(
+                runtimeConnections.lastHeartbeatAt,
+                sql`now() - ${runtimeHeartbeatTimeoutMs} * interval '1 millisecond'`,
+              ),
+            ),
+          ),
+      ),
+      earlierRunActive: exists(
+        database
+          .select({ runId: activeRuns.runId })
+          .from(activeRuns)
+          .where(
+            and(
+              eq(activeRuns.binId, manualRuns.binId),
+              eq(activeRuns.status, "executing"),
+            ),
+          ),
+      ),
+      earlierRunQueued: exists(
+        database
+          .select({ runId: earlierRuns.runId })
+          .from(earlierRuns)
+          .where(
+            and(
+              eq(earlierRuns.binId, manualRuns.binId),
+              eq(earlierRuns.status, "queued"),
+              or(
+                lt(earlierRuns.createdAt, manualRuns.createdAt),
+                and(
+                  eq(earlierRuns.createdAt, manualRuns.createdAt),
+                  lt(earlierRuns.runId, manualRuns.runId),
+                ),
+              ),
+            ),
+          ),
+      ),
+    })
+    .from(manualRuns)
+    .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)));
+  if (row === undefined) return undefined;
+
+  const queueReason =
+    row.status !== "queued"
+      ? null
+      : !row.runtimeOnline
+        ? "runtime_offline"
+        : row.earlierRunActive
+          ? "earlier_run_active"
+          : row.earlierRunQueued
+            ? "earlier_run_queued"
+            : null;
+  return { ...row, queueReason };
 }
+
+type RunRow = NonNullable<Awaited<ReturnType<typeof readRun>>>;
+type RunOutputRow = Pick<RunRow, keyof typeof runSelection> & {
+  readonly queueReason: RunRow["queueReason"];
+};
 
 async function rowToRun(
   database: CoreDatabase | CoreTransaction,
-  row: RunRow,
+  row: RunOutputRow,
 ): Promise<ManualRun> {
-  const commits = await readCommitLocators(database, row.run_id, row.bin_id);
+  const commits = await readCommitLocators(database, row.runId, row.binId);
   const hasResult = row.status === "completed" || row.status === "failed";
   if (
     row.action === "check" &&
     row.status === "completed" &&
-    row.check_result === null
+    row.checkResult === null
   ) {
     throw new Error("已完成的 check 运行缺少诊断结果。");
   }
-  if (row.check_result !== null && row.finished_at === null) {
+  if (row.checkResult !== null && row.finishedAt === null) {
     throw new Error("check 诊断结果缺少检查完成时间。");
   }
+  const failureValue =
+    row.failure === null ? null : manualRunFailureSchema.parse(row.failure);
+  const checkInput =
+    row.checkResult === null
+      ? null
+      : manualRunCheckInputSchema.parse(row.checkResult);
   const checkResult =
-    row.check_result === null || row.finished_at === null
+    checkInput === null || row.finishedAt === null
       ? undefined
       : manualRunCheckResultSchema.parse({
-          ...row.check_result,
-          checkedAt: row.finished_at.toISOString(),
+          ...checkInput,
+          checkedAt: row.finishedAt.toISOString(),
         });
   return manualRunSchema.parse({
-    runId: row.run_id,
-    binId: row.bin_id,
+    runId: row.runId,
+    binId: row.binId,
     action: row.action,
-    collectorId: row.collector_id,
-    collectorVersion: row.collector_version,
+    collectorId: row.collectorId,
+    collectorVersion: row.collectorVersion,
     status: row.status,
-    ...(row.queue_reason === null ? {} : { queueReason: row.queue_reason }),
-    createdAt: row.created_at.toISOString(),
-    ...(row.started_at === null
+    ...(row.queueReason === null ? {} : { queueReason: row.queueReason }),
+    createdAt: row.createdAt.toISOString(),
+    ...(row.startedAt === null
       ? {}
-      : { startedAt: row.started_at.toISOString() }),
-    ...(row.finished_at === null
+      : { startedAt: row.startedAt.toISOString() }),
+    ...(row.finishedAt === null
       ? {}
-      : { finishedAt: row.finished_at.toISOString() }),
+      : { finishedAt: row.finishedAt.toISOString() }),
     ...(!hasResult
       ? {}
       : {
           result: {
-            completedScopes: row.completed_scopes,
+            completedScopes: row.completedScopes,
             commits,
             ...(checkResult === undefined ? {} : { check: checkResult }),
-            stopReason: statusReason(row.failure),
-            ...(row.failure === null ? {} : { error: row.failure }),
+            stopReason: statusReason(failureValue),
+            ...(failureValue === null ? {} : { error: failureValue }),
           },
         }),
   });
@@ -219,22 +275,19 @@ export function createManualRunStore(
         );
       }
 
-      return await database.begin(async (transaction) => {
-        const bins = await transaction.unsafe<
-          {
-            readonly id: string;
-            readonly collector: CollectorManifest;
-            readonly identity_id: string;
-            readonly config: JsonObject;
-            readonly targets: readonly unknown[];
-            readonly status: "active" | "disabled";
-          }[]
-        >(
-          "SELECT id, collector, identity_id, config, targets, status " +
-            "FROM bin_configurations WHERE id = $1 FOR SHARE",
-          [binId],
-        );
-        const bin = bins[0];
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({
+            id: binConfigurations.id,
+            collector: binConfigurations.collector,
+            identityId: binConfigurations.identityId,
+            config: binConfigurations.config,
+            targets: binConfigurations.targets,
+            status: binConfigurations.status,
+          })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("share");
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
         if (bin.status === "disabled")
@@ -245,8 +298,15 @@ export function createManualRunStore(
             ["binId"],
           );
 
+        const configuredBin = binCreateInputSchema.parse({
+          id: bin.id,
+          collector: bin.collector,
+          identityId: bin.identityId,
+          config: bin.config,
+          targets: bin.targets,
+        });
         const action = validateCollectorActionParameters(
-          bin.collector,
+          configuredBin.collector,
           checked.data.action,
           checked.data.params,
         );
@@ -264,31 +324,27 @@ export function createManualRunStore(
         }
 
         const runId = randomUUID();
-        const rows = await transaction.unsafe<RunRow[]>(
-          "INSERT INTO " +
-            tableName +
-            " (run_id, bin_id, identity_id, collector_snapshot, collector_id, " +
-            "collector_version, action, params, config_snapshot, targets_snapshot, status) " +
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued') " +
-            "RETURNING run_id, bin_id, collector_id, collector_version, action, status, " +
-            "created_at, started_at, finished_at, completed_scopes, failure, " +
-            "NULL AS check_result, NULL AS queue_reason",
-          [
+        const [row] = await transaction
+          .insert(manualRuns)
+          .values({
             runId,
             binId,
-            bin.identity_id,
-            jsonbParameter(database, bin.collector),
-            bin.collector.id,
-            bin.collector.version,
-            checked.data.action,
-            jsonbParameter(database, checked.data.params),
-            jsonbParameter(database, bin.config),
-            jsonbParameter(database, bin.targets),
-          ],
-        );
-        const row = rows[0];
+            identityId: configuredBin.identityId,
+            collectorSnapshot: configuredBin.collector,
+            collectorId: configuredBin.collector.id,
+            collectorVersion: configuredBin.collector.version,
+            action: checked.data.action,
+            params: checked.data.params,
+            configSnapshot: configuredBin.config,
+            targetsSnapshot: configuredBin.targets,
+            status: "queued",
+          })
+          .returning(runSelection);
         if (row === undefined) throw new Error("运行创建后没有返回记录。");
-        return { ok: true, value: await rowToRun(transaction, row) };
+        return {
+          ok: true,
+          value: await rowToRun(transaction, { ...row, queueReason: null }),
+        };
       });
     },
 
@@ -311,19 +367,16 @@ export function createManualRunStore(
         );
       }
 
-      return await database.begin(async (transaction) => {
-        const bins = await transaction.unsafe<
-          {
-            readonly id: string;
-            readonly status: "active" | "disabled";
-            readonly collector: CollectorManifest;
-          }[]
-        >(
-          "SELECT id, status, collector FROM bin_configurations " +
-            "WHERE id = $1 FOR UPDATE",
-          [binId],
-        );
-        const bin = bins[0];
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({
+            id: binConfigurations.id,
+            status: binConfigurations.status,
+            collector: binConfigurations.collector,
+          })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
 
@@ -332,39 +385,44 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
-        const active = await transaction.unsafe<{ readonly run_id: string }[]>(
-          "SELECT run_id FROM " +
-            tableName +
-            " WHERE bin_id = $1 AND status = 'executing' LIMIT 1",
-          [binId],
-        );
-        if (active.length > 0) return { ok: true, value: null };
+        const collector = collectorManifestSchema.parse(bin.collector);
+        const [active] = await transaction
+          .select({ runId: manualRuns.runId })
+          .from(manualRuns)
+          .where(
+            and(
+              eq(manualRuns.binId, binId),
+              eq(manualRuns.status, "executing"),
+            ),
+          )
+          .limit(1);
+        if (active !== undefined) return { ok: true, value: null };
 
-        const pending = await transaction.unsafe<RunSnapshotRow[]>(
-          "SELECT run_id, bin_id, identity_id, collector_snapshot, collector_id, " +
-            "collector_version, action, params, config_snapshot, targets_snapshot, " +
-            "status, created_at, started_at, finished_at, completed_scopes, failure, " +
-            "check_result, " +
-            "NULL AS queue_reason FROM " +
-            tableName +
-            " WHERE bin_id = $1 AND status = 'queued' " +
-            "ORDER BY created_at, run_id FOR UPDATE SKIP LOCKED LIMIT 1",
-          [binId],
-        );
-        const run = pending[0];
+        const [run] = await transaction
+          .select({
+            ...runSelection,
+            identityId: manualRuns.identityId,
+            collectorSnapshot: manualRuns.collectorSnapshot,
+            params: manualRuns.params,
+            configSnapshot: manualRuns.configSnapshot,
+            targetsSnapshot: manualRuns.targetsSnapshot,
+          })
+          .from(manualRuns)
+          .where(
+            and(eq(manualRuns.binId, binId), eq(manualRuns.status, "queued")),
+          )
+          .orderBy(manualRuns.createdAt, manualRuns.runId)
+          .for("update", { skipLocked: true })
+          .limit(1);
         if (run === undefined) return { ok: true, value: null };
 
         // collector 更新后，排队中的旧动作不能被新版本代码误执行。
-        const snapshotMatches = await transaction.unsafe<
-          { readonly matches: boolean }[]
-        >(
-          "SELECT collector_snapshot = $2 AS matches FROM " +
-            tableName +
-            " WHERE run_id = $1",
-          [run.run_id, jsonbParameter(database, bin.collector)],
-        );
-        if (snapshotMatches[0]?.matches !== true) {
-          await failOneQueuedRun(transaction, run.run_id, {
+        const [snapshot] = await transaction
+          .select({ matches: eq(manualRuns.collectorSnapshot, collector) })
+          .from(manualRuns)
+          .where(eq(manualRuns.runId, run.runId));
+        if (snapshot?.matches !== true) {
+          await failOneQueuedRun(transaction, run.runId, {
             code: "collector_changed_before_execution",
             message: "采集器清单在运行排队期间发生变化，本次动作没有执行。",
             impact: "本次运行未执行。",
@@ -383,54 +441,52 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
-        const execution = await transaction.unsafe<
-          {
-            readonly runtime_id: string | null;
-            readonly runtime_collector: CollectorManifest | null;
-          }[]
-        >(
-          "SELECT runtime_id, collector AS runtime_collector " +
-            "FROM runtime_connections WHERE bin_id = $1",
-          [binId],
+        const runCollector = collectorManifestSchema.parse(
+          run.collectorSnapshot,
         );
-        const runtimeConnection = execution[0];
-        if (runtimeConnection?.runtime_id !== checked.data.runtimeId) {
+        const [runtimeConnection] = await transaction
+          .select({
+            runtimeId: runtimeConnections.runtimeId,
+            matches: eq(runtimeConnections.collector, runCollector),
+          })
+          .from(runtimeConnections)
+          .where(eq(runtimeConnections.binId, binId));
+        if (
+          runtimeConnection === undefined ||
+          runtimeConnection.runtimeId !== checked.data.runtimeId ||
+          runtimeConnection.matches !== true
+        ) {
           return { ok: true, value: null };
         }
-        if (runtimeConnection.runtime_collector === null)
-          return { ok: true, value: null };
 
-        const runtimeMatches = await transaction.unsafe<
-          { readonly matches: boolean }[]
-        >("SELECT $1::jsonb = $2::jsonb AS matches", [
-          jsonbParameter(database, runtimeConnection.runtime_collector),
-          jsonbParameter(database, run.collector_snapshot),
-        ]);
-        if (runtimeMatches[0]?.matches !== true)
-          return { ok: true, value: null };
+        const [updated] = await transaction
+          .update(manualRuns)
+          .set({
+            status: "executing",
+            runtimeId: checked.data.runtimeId,
+            // 运行开始时间使用 PostgreSQL 墙钟，而非事务开始时间。
+            startedAt: sql`clock_timestamp()`,
+          })
+          .where(
+            and(
+              eq(manualRuns.runId, run.runId),
+              eq(manualRuns.status, "queued"),
+            ),
+          )
+          .returning({ runId: manualRuns.runId });
+        if (updated === undefined) return { ok: true, value: null };
 
-        const updated = await transaction.unsafe<RunRow[]>(
-          "UPDATE " +
-            tableName +
-            " SET status = 'executing', runtime_id = $2, started_at = clock_timestamp() " +
-            "WHERE run_id = $1 AND status = 'queued' RETURNING run_id, bin_id, " +
-            "collector_id, collector_version, action, status, created_at, started_at, " +
-            "finished_at, completed_scopes, failure, check_result, NULL AS queue_reason",
-          [run.run_id, checked.data.runtimeId],
-        );
-        if (updated[0] === undefined) return { ok: true, value: null };
-
-        const value: ManualRunExecution = {
-          runId: run.run_id,
-          binId: run.bin_id,
-          identityId: run.identity_id,
-          collectorId: run.collector_id,
-          collectorVersion: run.collector_version,
+        const value = manualRunExecutionSchema.parse({
+          runId: run.runId,
+          binId: run.binId,
+          identityId: run.identityId,
+          collectorId: run.collectorId,
+          collectorVersion: run.collectorVersion,
           action: run.action,
           params: run.params,
-          config: run.config_snapshot,
-          targets: [...run.targets_snapshot],
-        };
+          config: run.configSnapshot,
+          targets: run.targetsSnapshot,
+        });
         return { ok: true, value };
       });
     },
@@ -447,90 +503,81 @@ export function createManualRunStore(
         );
       }
 
-      const completionResult = await database.begin<ManualRunOperation<string>>(
-        async (transaction) => {
-          const rows = await transaction.unsafe<
-            {
-              readonly status: ManualRun["status"];
-              readonly action: string;
-              readonly runtime_id: string | null;
-            }[]
-          >(
-            "SELECT status, action, runtime_id FROM " +
-              tableName +
-              " WHERE bin_id = $1 AND run_id = $2 FOR UPDATE",
-            [binId, runId],
+      const completionResult = await database.transaction<
+        ManualRunOperation<string>
+      >(async (transaction) => {
+        const [current] = await transaction
+          .select({
+            status: manualRuns.status,
+            action: manualRuns.action,
+            runtimeId: manualRuns.runtimeId,
+          })
+          .from(manualRuns)
+          .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)))
+          .for("update");
+        if (current === undefined)
+          return failure(404, "run_not_found", "没有找到这个运行。", ["runId"]);
+        if (current.status !== "executing")
+          return failure(
+            409,
+            "run_not_executing",
+            "这个运行当前不能提交结果。",
+            ["runId"],
           );
-          const current = rows[0];
-          if (current === undefined)
-            return failure(404, "run_not_found", "没有找到这个运行。", [
-              "runId",
-            ]);
-          if (current.status !== "executing")
-            return failure(
-              409,
-              "run_not_executing",
-              "这个运行当前不能提交结果。",
-              ["runId"],
-            );
-          if (current.runtime_id !== checked.data.runtimeId)
-            return failure(
-              409,
-              "runtime_mismatch",
-              "运行器不能提交其他运行器的结果。",
-              ["runtimeId"],
-            );
+        if (current.runtimeId !== checked.data.runtimeId)
+          return failure(
+            409,
+            "runtime_mismatch",
+            "运行器不能提交其他运行器的结果。",
+            ["runtimeId"],
+          );
 
-          const completion: ManualRunCompletion = checked.data.completion;
-          if (
-            current.action === "check" &&
-            completion.status === "completed" &&
-            completion.check === undefined
-          ) {
-            return failure(
-              400,
-              "invalid_input",
-              "check 必须提交结构化诊断结果。",
-              ["completion", "check"],
-            );
-          }
-          if (
-            current.action !== "check" &&
-            completion.status === "completed" &&
-            completion.check !== undefined
-          ) {
-            return failure(
-              400,
-              "invalid_input",
-              "只有 check 动作可以提交可用性诊断结果。",
-              ["completion", "check"],
-            );
-          }
-          const runFailure =
-            completion.status === "failed"
-              ? serializeFailure(completion.error)
-              : null;
-          await transaction.unsafe(
-            "UPDATE " +
-              tableName +
-              " SET status = $3, completed_scopes = $4, failure = $5, " +
-              "check_result = $6, finished_at = clock_timestamp() " +
-              "WHERE run_id = $1 AND bin_id = $2",
-            [
-              runId,
-              binId,
-              completion.status,
-              jsonbParameter(database, completion.completedScopes),
-              runFailure === null ? null : jsonbParameter(database, runFailure),
+        const completion: ManualRunCompletion = checked.data.completion;
+        if (
+          current.action === "check" &&
+          completion.status === "completed" &&
+          completion.check === undefined
+        ) {
+          return failure(
+            400,
+            "invalid_input",
+            "check 必须提交结构化诊断结果。",
+            ["completion", "check"],
+          );
+        }
+        if (
+          current.action !== "check" &&
+          completion.status === "completed" &&
+          completion.check !== undefined
+        ) {
+          return failure(
+            400,
+            "invalid_input",
+            "只有 check 动作可以提交可用性诊断结果。",
+            ["completion", "check"],
+          );
+        }
+        const runFailure =
+          completion.status === "failed"
+            ? serializeFailure(completion.error)
+            : null;
+        await transaction
+          .update(manualRuns)
+          .set({
+            status: completion.status,
+            completedScopes: completion.completedScopes,
+            failure: runFailure,
+            checkResult:
               completion.status === "completed" &&
               completion.check !== undefined
-                ? jsonbParameter(database, completion.check)
+                ? completion.check
                 : null,
-            ],
-          );
-          return { ok: true as const, value: runId };
-        },
-      );
+            // 结果终结时间使用 PostgreSQL 墙钟，而非事务开始时间。
+            finishedAt: sql`clock_timestamp()`,
+          })
+          .where(and(eq(manualRuns.runId, runId), eq(manualRuns.binId, binId)));
+        return { ok: true as const, value: runId };
+      });
       if (!completionResult.ok) return completionResult;
       const row = await readRun(database, binId, completionResult.value);
       if (row === undefined) throw new Error("运行结果提交后记录意外消失。");
@@ -544,13 +591,15 @@ async function failOneQueuedRun(
   runId: string,
   failureValue: ManualRunFailure,
 ): Promise<void> {
-  await transaction.unsafe(
-    "UPDATE " +
-      tableName +
-      " SET status = 'failed', failure = $2, finished_at = clock_timestamp() " +
-      "WHERE run_id = $1 AND status = 'queued'",
-    [runId, transaction.json(failureValue)],
-  );
+  await transaction
+    .update(manualRuns)
+    .set({
+      status: "failed",
+      failure: failureValue,
+      // 运行终结时间使用 PostgreSQL 墙钟，而非事务开始时间。
+      finishedAt: sql`clock_timestamp()`,
+    })
+    .where(and(eq(manualRuns.runId, runId), eq(manualRuns.status, "queued")));
 }
 
 async function failQueuedRuns(
@@ -565,11 +614,13 @@ async function failQueuedRuns(
     suggestion: "重新启用后可创建新的运行。",
     requiresHuman: false,
   };
-  await transaction.unsafe(
-    "UPDATE " +
-      tableName +
-      " SET status = 'failed', failure = $2, finished_at = clock_timestamp() " +
-      "WHERE bin_id = $1 AND status = 'queued'",
-    [binId, transaction.json(failureValue)],
-  );
+  await transaction
+    .update(manualRuns)
+    .set({
+      status: "failed",
+      failure: failureValue,
+      // 运行终结时间使用 PostgreSQL 墙钟，而非事务开始时间。
+      finishedAt: sql`clock_timestamp()`,
+    })
+    .where(and(eq(manualRuns.binId, binId), eq(manualRuns.status, "queued")));
 }
