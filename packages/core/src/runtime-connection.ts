@@ -14,16 +14,20 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatInput,
 } from "@binny/contracts";
+import {
+  binConfigurations,
+  runtimeConnections,
+  type Database,
+  type Transaction,
+} from "@binny/db";
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
-import type { CoreDatabase, CoreTransaction } from "./database.ts";
 import {
   confirmManualRunOwnerStopped,
   interruptExpiredManualRuns,
   interruptReplacedManualRuns,
 } from "./manual-run-fencing.ts";
-import { binConfigurations, runtimeConnections } from "./schema.ts";
 
 const runtimeSelection = {
   binId: binConfigurations.id,
@@ -223,7 +227,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
 }
 
 async function selectRuntimeConnection(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   binId: string,
 ) {
   const [row] = await database
@@ -242,7 +246,7 @@ type RuntimeConnectionRow = NonNullable<
 >;
 
 export async function readRuntimeExecution(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   binId: string,
 ): Promise<BinOperation<RuntimeExecution>> {
   const row = await selectRuntimeConnection(database, binId);
@@ -256,7 +260,7 @@ export async function readRuntimeExecution(
 }
 
 export function createRuntimeConnectionStore(
-  database: CoreDatabase,
+  database: Database,
 ): RuntimeConnectionOperations {
   return {
     async getExecution(binId) {

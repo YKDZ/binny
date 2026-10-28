@@ -22,6 +22,18 @@ import {
   type ArchiveSearchText,
 } from "@binny/contracts";
 import {
+  archiveCommits,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRevisions,
+  databaseErrorCode,
+  type Database,
+} from "@binny/db";
+import {
   and,
   asc,
   countDistinct,
@@ -52,17 +64,6 @@ import { alias } from "drizzle-orm/pg-core";
 import { canonicalJson, isoTimestamp, optionalText } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import { resolveSnapshot, type ResolvedSnapshot } from "./archive-read.ts";
-import { databaseErrorCode, type CoreDatabase } from "./database.ts";
-import {
-  archiveCommits,
-  archiveItems,
-  archiveObservations,
-  archiveRelationObservationGaps,
-  archiveRelationObservations,
-  archiveRelationRevisions,
-  archiveRelations,
-  archiveRevisions,
-} from "./schema.ts";
 
 type SearchInput = ReturnType<typeof archiveSearchInputSchema.parse>;
 type SearchResult = ReturnType<
@@ -2386,7 +2387,7 @@ async function readCurrentSearchPage(
 }
 
 export function createArchiveSearchOperation(
-  database: CoreDatabase,
+  database: Database,
 ): Pick<ArchiveOperations, "searchArchive"> {
   return {
     async searchArchive(

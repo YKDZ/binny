@@ -2,10 +2,9 @@
   "name": "@binny/core",
   "version": "0.0.0",
   "private": true,
-  "description": "归档、查询、删除、运行管理及 PostgreSQL 与资源存储实现。",
+  "description": "归档、查询、删除、运行管理及资源存储实现。",
   "files": [
-    "dist",
-    "migrations"
+    "dist"
   ],
   "type": "module",
   "imports": {
@@ -28,20 +27,18 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
-    "db:generate": "drizzle-kit generate --output json --config drizzle.config.ts",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
   },
   "dependencies": {
     "@binny/contracts": "workspace:*",
+    "@binny/db": "workspace:*",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
-    "drizzle-orm": "1.0.0-rc.5",
-    "postgres": "^3.4.9"
+    "drizzle-orm": "1.0.0-rc.5"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
-    "drizzle-kit": "1.0.0-rc.5",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",

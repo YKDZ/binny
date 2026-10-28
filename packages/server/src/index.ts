@@ -4,12 +4,11 @@ import { pathToFileURL } from "node:url";
 import { createApiRoutes } from "@binny/api/routes";
 import {
   createArchiveStore,
-  connectCoreDatabase,
   createBinConfigurationStore,
   createManualRunStore,
   createRuntimeConnectionStore,
-  migrateCoreDatabase,
 } from "@binny/core";
+import { connectDatabase, migrateDatabase } from "@binny/db";
 // 核心与 HTTP 的组装、配置及服务启动。
 import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
@@ -36,7 +35,7 @@ function environmentMilliseconds(
 export async function createServerRuntime(options: {
   readonly databaseUrl: string;
 }): Promise<ServerRuntime> {
-  const connection = connectCoreDatabase(options.databaseUrl);
+  const connection = connectDatabase(options.databaseUrl);
   const { database } = connection;
   const archives = createArchiveStore(database, {
     resourceDirectory:
@@ -55,7 +54,7 @@ export async function createServerRuntime(options: {
   const runtime = createRuntimeConnectionStore(database);
   const runs = createManualRunStore(database);
   try {
-    await migrateCoreDatabase(database);
+    await migrateDatabase(database);
     await archives.initializeResourceStorage();
   } catch (error) {
     try {

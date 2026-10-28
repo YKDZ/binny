@@ -11,6 +11,26 @@ import {
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
 import {
+  archiveCommits,
+  archiveItemDeletions,
+  archiveItemObservationGaps,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRequestReceipts,
+  archiveResources,
+  archiveRevisionResources,
+  archiveRevisions,
+  archiveWriteClock,
+  binConfigurations,
+  manualRuns,
+  type Database,
+  type Transaction,
+} from "@binny/db";
+import {
   and,
   asc,
   desc,
@@ -30,26 +50,7 @@ import {
 import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
-import type { CoreDatabase, CoreTransaction } from "./database.ts";
 import { lockManualRunForArchiveWrite } from "./manual-run-fencing.ts";
-import {
-  archiveCommits,
-  archiveItemDeletions,
-  archiveItemObservationGaps,
-  archiveItems,
-  archiveObservations,
-  archiveRelationObservationGaps,
-  archiveRelationObservations,
-  archiveRelationRevisions,
-  archiveRelations,
-  archiveRequestReceipts,
-  archiveResources,
-  archiveRevisionResources,
-  archiveRevisions,
-  archiveWriteClock,
-  binConfigurations,
-  manualRuns,
-} from "./schema.ts";
 
 // Drizzle 的 inArray 将每个 ID 展开为参数；分批避开 PostgreSQL 单条语句参数上限。
 const inArrayChunkSize = 5_000;
@@ -96,7 +97,7 @@ function sourceKeyIdentity(sourceKey: {
 }
 
 async function findCascadeItemIds(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   rootItemId: string,
 ): Promise<string[]> {
   const visited = new Set([rootItemId]);
@@ -204,7 +205,7 @@ async function findCascadeItemIds(
 }
 
 async function deleteArchiveItems(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   currentSequence: bigint,
   itemIds: readonly string[],
 ): Promise<{ readonly deletionSeq: string; readonly resourceIds: string[] }> {
@@ -401,7 +402,7 @@ export type ArchiveStore = ArchiveOperations & {
 
 /** 创建共享 PostgreSQL 与持久资源目录的原子归档操作。 */
 export function createArchiveStore(
-  database: CoreDatabase,
+  database: Database,
   options: ArchiveStoreOptions,
 ): ArchiveStore {
   const resourceStorage = createArchiveResourceStorage(database, {
