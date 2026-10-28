@@ -22,7 +22,15 @@ if (manifestJson === undefined)
 const manifest = collectorManifestSchema.parse(
   JSON.parse(manifestJson) as unknown,
 );
-const client = createApiClient(baseUrl);
+const requestTimeoutMs = 10_000;
+const client = createApiClient(baseUrl, {
+  fetch: (input, init) => {
+    const timeout = AbortSignal.timeout(requestTimeoutMs);
+    const signal =
+      init?.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
+    return fetch(input, { ...init, signal });
+  },
+});
 
 async function triggerRun(
   binId: string,
@@ -49,6 +57,164 @@ async function readRun(binId: string, runId: string): Promise<ManualRun> {
   if (response.status === 200) return await response.json();
   const result = await response.json();
   assert.fail(`运行读取失败：${result.error.code} ${result.error.message}`);
+}
+
+async function createConcurrencyBin(binId: string): Promise<void> {
+  const response = await client.bins.$post({
+    json: {
+      id: binId,
+      collector: manifest,
+      identityId: binId + "-identity",
+      config: { section: "concurrency" },
+      targets: [],
+    },
+  });
+  if (response.status === 201) return;
+  const result = await response.json();
+  assert.fail(`并发验收 bin 创建失败：${result.error.code}`);
+}
+
+async function heartbeat(binId: string, runtimeId: string): Promise<void> {
+  const response = await client.bins[":binId"].runtime.heartbeat.$post({
+    param: { binId },
+    json: {
+      protocolVersion: 1,
+      runtimeId,
+      collector: manifest,
+      environment: {
+        kind: "lightweight",
+        browser: { available: false, profileReuseAfterRestart: false },
+      },
+    },
+  });
+  if (response.status === 200) return;
+  const result = await response.json();
+  assert.fail(`并发验收 runtime 注册失败：${result.error.code}`);
+}
+
+async function claimRun(binId: string, runtimeId: string) {
+  const response = await client.bins[":binId"].runtime.runs.claim.$post({
+    param: { binId },
+    json: { runtimeId },
+  });
+  if (response.status === 200) return (await response.json()).run;
+  const result = await response.json();
+  assert.fail(`运行领取失败：${result.error.code} ${result.error.message}`);
+}
+
+async function completeRun(
+  binId: string,
+  runId: string,
+  runtimeId: string,
+): Promise<void> {
+  const response = await client.bins[":binId"].runtime.runs[
+    ":runId"
+  ].complete.$post({
+    param: { binId, runId },
+    json: {
+      runtimeId,
+      completion: { status: "completed", completedScopes: [] },
+    },
+  });
+  if (response.status === 200) return;
+  const result = await response.json();
+  assert.fail(`运行终结失败：${result.error.code} ${result.error.message}`);
+}
+
+async function removeConcurrencyBin(binId: string): Promise<void> {
+  const response = await client.bins[":binId"].$delete({ param: { binId } });
+  if (response.status === 200) return;
+  const result = await response.json();
+  assert.fail(`并发验收 bin 清理失败：${result.error.code}`);
+}
+
+async function verifyConcurrentRuns(): Promise<void> {
+  const firstBin = "binny15-pool-one";
+  const secondBin = "binny15-pool-two";
+  const firstRuntime = "binny15-pool-runtime-one";
+  const secondRuntime = "binny15-pool-runtime-two";
+  const firstKeys = Array.from(
+    { length: 16 },
+    (_, index) => "15-pool-one-" + String(index),
+  );
+  const secondKey = "15-pool-two";
+
+  await Promise.all([
+    createConcurrencyBin(firstBin),
+    createConcurrencyBin(secondBin),
+  ]);
+  const firstRuns = await Promise.all(
+    firstKeys.map((key) => triggerRun(firstBin, sourceRuntimeUrl, key, key)),
+  );
+  const secondRun = await triggerRun(
+    secondBin,
+    sourceRuntimeUrl,
+    secondKey,
+    secondKey,
+  );
+  const firstRunIds = firstRuns.map((run) => run.runId);
+  assert.equal(new Set(firstRunIds).size, 16);
+  assert.equal(new Set([...firstRunIds, secondRun.runId]).size, 17);
+
+  for (const runId of firstRunIds) {
+    const run = await readRun(firstBin, runId);
+    assert.equal(run.status, "queued");
+    assert.equal(run.queueReason, "runtime_offline");
+  }
+
+  await Promise.all([
+    heartbeat(firstBin, firstRuntime),
+    heartbeat(secondBin, secondRuntime),
+  ]);
+  const [firstClaims, secondClaim] = await Promise.all([
+    Promise.all(
+      Array.from({ length: 16 }, () => claimRun(firstBin, firstRuntime)),
+    ),
+    claimRun(secondBin, secondRuntime),
+  ]);
+  const firstClaimedRuns = firstClaims.filter((run) => run !== null);
+  assert.equal(firstClaimedRuns.length, 1);
+  const firstClaimed = firstClaimedRuns[0];
+  assert.ok(firstClaimed !== undefined);
+  assert.ok(firstRunIds.includes(firstClaimed.runId));
+  assert.equal(secondClaim?.binId, secondBin);
+
+  const firstStatuses = await Promise.all(
+    firstRunIds.map((runId) => readRun(firstBin, runId)),
+  );
+  assert.equal(
+    firstStatuses.filter((run) => run.status === "executing").length,
+    1,
+  );
+  assert.equal(
+    firstStatuses.filter((run) => run.status === "queued").length,
+    15,
+  );
+  await completeRun(firstBin, firstClaimed.runId, firstRuntime);
+  assert.ok(secondClaim !== null);
+  await completeRun(secondBin, secondClaim.runId, secondRuntime);
+
+  const completedRunIds = new Set([firstClaimed.runId]);
+  while (completedRunIds.size < firstRunIds.length) {
+    const next = await claimRun(firstBin, firstRuntime);
+    assert.ok(next !== null);
+    assert.ok(firstRunIds.includes(next.runId));
+    assert.equal(completedRunIds.has(next.runId), false);
+    assert.equal((await readRun(firstBin, next.runId)).status, "executing");
+    await completeRun(firstBin, next.runId, firstRuntime);
+    completedRunIds.add(next.runId);
+  }
+
+  for (const runId of firstRunIds) {
+    assert.equal((await readRun(firstBin, runId)).status, "completed");
+  }
+  assert.equal((await readRun(secondBin, secondRun.runId)).status, "completed");
+  assert.equal(await claimRun(firstBin, firstRuntime), null);
+  assert.equal(await claimRun(secondBin, secondRuntime), null);
+  await Promise.all([
+    removeConcurrencyBin(firstBin),
+    removeConcurrencyBin(secondBin),
+  ]);
 }
 
 async function sourceStatus(sourceUrl: string) {
@@ -402,6 +568,7 @@ async function verifyDisabledQueueBoundary(
 }
 
 async function main(): Promise<void> {
+  await verifyConcurrentRuns();
   await verifyDynamicValidation(sourceRuntimeUrl);
   const existingItemId = await verifySerialParallelAndSnapshot(
     sourceRuntimeUrl,

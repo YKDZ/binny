@@ -17,11 +17,11 @@ import {
   type ManualRunOperation,
   type ManualRunOperations,
   type ManualRunResult,
-  type RuntimeConnectionOperations,
 } from "@binny/contracts";
 
 import { validateCollectorActionParameters } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { readRuntimeExecution } from "./runtime-connection.ts";
 
 type RunRow = {
   readonly run_id: string;
@@ -94,7 +94,7 @@ function statusReason(failureValue: ManualRunFailure | null) {
 }
 
 async function readCommitLocators(
-  database: CoreDatabase,
+  database: CoreDatabase | CoreTransaction,
   runId: string,
   binId: string,
 ): Promise<ManualRunResult["commits"]> {
@@ -149,7 +149,7 @@ async function readRun(
 }
 
 async function rowToRun(
-  database: CoreDatabase,
+  database: CoreDatabase | CoreTransaction,
   row: RunRow,
 ): Promise<ManualRun> {
   const commits = await readCommitLocators(database, row.run_id, row.bin_id);
@@ -226,7 +226,6 @@ export async function initializeManualRunSchema(
 
 export function createManualRunStore(
   database: CoreDatabase,
-  runtime: RuntimeConnectionOperations,
 ): ManualRunOperations {
   return {
     async triggerRun(binId, input) {
@@ -309,7 +308,7 @@ export function createManualRunStore(
         );
         const row = rows[0];
         if (row === undefined) throw new Error("运行创建后没有返回记录。");
-        return { ok: true, value: await rowToRun(database, row) };
+        return { ok: true, value: await rowToRun(transaction, row) };
       });
     },
 
@@ -394,7 +393,7 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
-        const runtimeStatus = await runtime.getExecution(binId);
+        const runtimeStatus = await readRuntimeExecution(transaction, binId);
         if (
           !runtimeStatus.ok ||
           runtimeStatus.value.status !== "online" ||

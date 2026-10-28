@@ -55,7 +55,7 @@ export async function createServerRuntime(options: {
     ),
   });
   const runtime = createRuntimeConnectionStore(database);
-  const runs = createManualRunStore(database, runtime);
+  const runs = createManualRunStore(database);
   try {
     await initializeBinConfigurationSchema(database);
     await initializeArchiveSchema(database);
