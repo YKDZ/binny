@@ -10,7 +10,7 @@ import {
   type ArchiveRelationState,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
-import type postgres from "postgres";
+import { and, eq, inArray, notExists, or, sql } from "drizzle-orm";
 
 import { canonicalJson, failure, validationFailure } from "./archive-common.ts";
 import {
@@ -21,32 +21,27 @@ import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
 import type { CoreDatabase } from "./database.ts";
+import {
+  archiveCommits,
+  archiveItemDeletions,
+  archiveItemObservationGaps,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRequestReceipts,
+  archiveResources,
+  archiveRevisionResources,
+  archiveRevisions,
+  archiveWriteClock,
+  binConfigurations,
+  manualRuns,
+} from "./schema.ts";
 
-type ItemRow = {
-  readonly item_id: string;
-  readonly namespace: string;
-  readonly source_key: string;
-};
-
-type RevisionRow = {
-  readonly revision_id: string;
-  readonly state_hash: string;
-  readonly state_data: unknown;
-};
-
-type RelationIdentityRow = {
-  readonly relation_id: string;
-  readonly from_item_id: string;
-  readonly target_item_id: string | null;
-  readonly target_source_ref: string | null;
-  readonly created_seq: string;
-};
-
-type RelationRevisionRow = {
-  readonly relation_revision_id: string;
-  readonly state_hash: string;
-  readonly state_data: unknown;
-};
+// Drizzle 的 inArray 将每个 ID 展开为参数；分批避开 PostgreSQL 单条语句参数上限。
+const inArrayChunkSize = 5_000;
 
 type PreparedItem = {
   readonly itemId: string;
@@ -57,7 +52,6 @@ type PreparedItem = {
   readonly state: ReturnType<typeof archiveItemStateSchema.parse>;
   readonly diagnostics: ArchiveSubmissionInput["items"][number]["diagnostics"];
   readonly stateHash: string;
-  readonly stateJson: string;
 };
 
 type PreparedRelation = {
@@ -71,30 +65,6 @@ type PreparedRelation = {
   revisionId?: string;
   isNew: boolean;
 };
-
-function postgresJsonValue(value: unknown): postgres.JSONValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
-    return value;
-  if (typeof value === "number") {
-    if (
-      !Number.isFinite(value) ||
-      (Number.isInteger(value) && !Number.isSafeInteger(value))
-    ) {
-      throw new TypeError("归档 JSON 数字超出支持范围。");
-    }
-    return value;
-  }
-  if (Array.isArray(value))
-    return value.map((entry) => postgresJsonValue(entry));
-  if (typeof value === "object") {
-    const fields: [string, postgres.JSONValue][] = [];
-    for (const [key, entry] of Object.entries(value)) {
-      fields.push([key, postgresJsonValue(entry)]);
-    }
-    return Object.fromEntries(fields);
-  }
-  throw new TypeError("归档状态必须是 JSON 值。");
-}
 
 function hashJson(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -157,16 +127,16 @@ export function createArchiveStore(
       return await withArchiveWriteLock(
         database,
         async (transaction, currentSequence) => {
-          const receipts = await transaction<
-            { readonly payload_hash: string; readonly commit_id: string }[]
-          >`
-            SELECT payload_hash, commit_id
-            FROM archive_request_receipt
-            WHERE request_id = ${requestId}
-          `;
+          const receipts = await transaction
+            .select({
+              payloadHash: archiveRequestReceipts.payloadHash,
+              commitId: archiveRequestReceipts.commitId,
+            })
+            .from(archiveRequestReceipts)
+            .where(eq(archiveRequestReceipts.requestId, requestId));
           const receipt = receipts[0];
           if (receipt !== undefined) {
-            if (receipt.payload_hash !== payloadHash) {
+            if (receipt.payloadHash !== payloadHash) {
               return failure(
                 409,
                 "archive_request_conflict",
@@ -176,18 +146,16 @@ export function createArchiveStore(
             }
             return {
               ok: true,
-              value: await readCommit(transaction, receipt.commit_id),
+              value: await readCommit(transaction, receipt.commitId),
             };
           }
 
           if (submission.runId !== undefined) {
-            const matchingRuns = await transaction<
-              { readonly action: string }[]
-            >`
-              SELECT action
-              FROM manual_runs
-              WHERE run_id::text = ${submission.runId}
-            `;
+            // runId 在提交契约中是不透明文本；按 UUID 文本比较可保留无效格式只是不匹配的旧行为。
+            const matchingRuns = await transaction
+              .select({ action: manualRuns.action })
+              .from(manualRuns)
+              .where(eq(sql`${manualRuns.runId}::text`, submission.runId));
             if (matchingRuns[0]?.action === "check") {
               return failure(
                 409,
@@ -198,11 +166,10 @@ export function createArchiveStore(
             }
           }
 
-          const bins = await transaction<{ readonly id: string }[]>`
-            SELECT id
-            FROM bin_configurations
-            WHERE id = ${submission.binId}
-          `;
+          const bins = await transaction
+            .select({ id: binConfigurations.id })
+            .from(binConfigurations)
+            .where(eq(binConfigurations.id, submission.binId));
           if (bins[0] === undefined) {
             return failure(404, "bin_not_found", "没有找到提交所声明的 bin。", [
               "binId",
@@ -238,16 +205,17 @@ export function createArchiveStore(
           const preparedItems: PreparedItem[] = [];
           const itemIdsBySourceKey = new Map<string, string>();
           for (const item of submission.items) {
-            const identities = await transaction<
-              { readonly item_id: string }[]
-            >`
-              SELECT item_id
-              FROM archive_item
-              WHERE namespace = ${item.sourceKey.namespace}
-                AND source_key = ${item.sourceKey.key}
-            `;
+            const identities = await transaction
+              .select({ itemId: archiveItems.itemId })
+              .from(archiveItems)
+              .where(
+                and(
+                  eq(archiveItems.namespace, item.sourceKey.namespace),
+                  eq(archiveItems.sourceKey, item.sourceKey.key),
+                ),
+              );
             const isNew = identities[0] === undefined;
-            const itemId = identities[0]?.item_id ?? randomUUID();
+            const itemId = identities[0]?.itemId ?? randomUUID();
             itemIdsBySourceKey.set(sourceKeyIdentity(item.sourceKey), itemId);
 
             const state = stateForItem(item);
@@ -257,16 +225,23 @@ export function createArchiveStore(
               .digest("hex");
             const revisions = isNew
               ? []
-              : await transaction<RevisionRow[]>`
-                  SELECT revision_id, state_hash, state_data
-                  FROM archive_revision
-                  WHERE item_id = ${itemId}
-                    AND state_hash = ${stateHash}
-                `;
+              : await transaction
+                  .select({
+                    revisionId: archiveRevisions.revisionId,
+                    stateHash: archiveRevisions.stateHash,
+                    stateData: archiveRevisions.stateData,
+                  })
+                  .from(archiveRevisions)
+                  .where(
+                    and(
+                      eq(archiveRevisions.itemId, itemId),
+                      eq(archiveRevisions.stateHash, stateHash),
+                    ),
+                  );
             const existingRevision = revisions[0];
             if (
               existingRevision !== undefined &&
-              canonicalJson(existingRevision.state_data) !== stateJson
+              canonicalJson(existingRevision.stateData) !== stateJson
             ) {
               throw new Error("归档状态哈希冲突，不能复用现有版本。");
             }
@@ -274,12 +249,11 @@ export function createArchiveStore(
               itemId,
               isNew,
               isNewRevision: existingRevision === undefined,
-              revisionId: existingRevision?.revision_id ?? randomUUID(),
+              revisionId: existingRevision?.revisionId ?? randomUUID(),
               sourceKey: item.sourceKey,
               state,
               diagnostics: item.diagnostics,
               stateHash,
-              stateJson,
             });
           }
 
@@ -291,27 +265,29 @@ export function createArchiveStore(
               sourceKeyIdentity(sourceKey),
             );
             if (batchItemId !== undefined) return batchItemId;
-            const rows = await transaction<{ readonly item_id: string }[]>`
-              SELECT item_id
-              FROM archive_item
-              WHERE namespace = ${sourceKey.namespace}
-                AND source_key = ${sourceKey.key}
-            `;
-            return rows[0]?.item_id;
+            const rows = await transaction
+              .select({ itemId: archiveItems.itemId })
+              .from(archiveItems)
+              .where(
+                and(
+                  eq(archiveItems.namespace, sourceKey.namespace),
+                  eq(archiveItems.sourceKey, sourceKey.key),
+                ),
+              );
+            return rows[0]?.itemId;
           };
 
           const preparedRelations: PreparedRelation[] = [];
           for (const [index, inputRelation] of submission.relations.entries()) {
-            const existingRows = await transaction<RelationIdentityRow[]>`
-              SELECT
-                relation_id,
-                from_item_id,
-                target_item_id,
-                target_source_ref,
-                created_seq::text AS created_seq
-              FROM archive_relation
-              WHERE relation_id = ${inputRelation.relationId}
-            `;
+            const existingRows = await transaction
+              .select({
+                relationId: archiveRelations.relationId,
+                fromItemId: archiveRelations.fromItemId,
+                targetItemId: archiveRelations.targetItemId,
+                targetSourceRef: archiveRelations.targetSourceRef,
+              })
+              .from(archiveRelations)
+              .where(eq(archiveRelations.relationId, inputRelation.relationId));
             const existing = existingRows[0];
             if (inputRelation.value === null) {
               if (existing === undefined) {
@@ -325,9 +301,9 @@ export function createArchiveStore(
               preparedRelations.push({
                 relationId: inputRelation.relationId,
                 ordinal: preparedItems.length + index,
-                fromItemId: existing.from_item_id,
-                targetItemId: existing.target_item_id,
-                targetSourceRef: existing.target_source_ref,
+                fromItemId: existing.fromItemId,
+                targetItemId: existing.targetItemId,
+                targetSourceRef: existing.targetSourceRef,
                 state: null,
                 isNew: false,
               });
@@ -364,9 +340,9 @@ export function createArchiveStore(
 
             if (
               existing !== undefined &&
-              (existing.from_item_id !== fromItemId ||
-                existing.target_item_id !== targetItemId ||
-                existing.target_source_ref !== targetSourceRef)
+              (existing.fromItemId !== fromItemId ||
+                existing.targetItemId !== targetItemId ||
+                existing.targetSourceRef !== targetSourceRef)
             ) {
               return failure(
                 409,
@@ -391,44 +367,36 @@ export function createArchiveStore(
 
           for (const item of preparedItems) {
             if (item.isNew) {
-              await transaction`
-                INSERT INTO archive_item (item_id, namespace, source_key)
-                VALUES (
-                  ${item.itemId},
-                  ${item.sourceKey.namespace},
-                  ${item.sourceKey.key}
-                )
-              `;
+              await transaction.insert(archiveItems).values({
+                itemId: item.itemId,
+                namespace: item.sourceKey.namespace,
+                sourceKey: item.sourceKey.key,
+              });
             }
             if (item.isNewRevision) {
-              await transaction`
-                INSERT INTO archive_revision (
-                  revision_id,
-                  item_id,
-                  state_hash,
-                  state_data
-                ) VALUES (
-                  ${item.revisionId},
-                  ${item.itemId},
-                  ${item.stateHash},
-                  ${transaction.json(postgresJsonValue(item.state))}
-                )
-              `;
+              await transaction.insert(archiveRevisions).values({
+                revisionId: item.revisionId,
+                itemId: item.itemId,
+                stateHash: item.stateHash,
+                stateData: item.state,
+              });
             }
             for (const [ordinal, resource] of (
               item.state.resources ?? []
             ).entries()) {
-              await transaction`
-                INSERT INTO archive_revision_resource (
-                  revision_id,
-                  resource_id,
-                  ordinal
-                ) VALUES (
-                  ${item.revisionId},
-                  ${resource.resourceId},
-                  ${ordinal}
-                ) ON CONFLICT (revision_id, resource_id) DO NOTHING
-              `;
+              await transaction
+                .insert(archiveRevisionResources)
+                .values({
+                  revisionId: item.revisionId,
+                  resourceId: resource.resourceId,
+                  ordinal,
+                })
+                .onConflictDoNothing({
+                  target: [
+                    archiveRevisionResources.revisionId,
+                    archiveRevisionResources.resourceId,
+                  ],
+                });
             }
           }
 
@@ -436,52 +404,41 @@ export function createArchiveStore(
             transaction,
             currentSequence,
           );
+          const archiveSequence = BigInt(archiveSeq);
           const commitId = randomUUID();
-          const recordedRows = await transaction<
-            { readonly recorded_at: Date }[]
-          >`SELECT clock_timestamp() AS recorded_at`;
-          const recordedAt = recordedRows[0]?.recorded_at;
-          if (recordedAt === undefined) {
+          // PostgreSQL 的 now() 固定为事务开始时刻；归档记录时间沿用墙钟时间。
+          // 该 SQL 表达式没有时间列 codec，复用 recorded_at 列解码为 Date。
+          const recordedRows = await transaction
+            .select({
+              recordedAt: sql`clock_timestamp()`.mapWith(
+                archiveCommits.recordedAt,
+              ),
+            })
+            .from(archiveWriteClock);
+          const recordedAt = recordedRows[0]?.recordedAt;
+          if (!(recordedAt instanceof Date)) {
             throw new Error("无法读取归档记录时间。");
           }
 
-          await transaction`
-            INSERT INTO archive_commit (
-              commit_id,
-              archive_seq,
-              bin_id,
-              run_id,
-              collector_version,
-              observed_at,
-              recorded_at
-            ) VALUES (
-              ${commitId},
-              ${archiveSeq}::bigint,
-              ${submission.binId},
-              ${submission.runId ?? null},
-              ${submission.collectorVersion ?? null},
-              ${observedAt},
-              ${recordedAt}
-            )
-          `;
+          await transaction.insert(archiveCommits).values({
+            commitId,
+            archiveSequence,
+            binId: submission.binId,
+            runId: submission.runId ?? null,
+            collectorVersion: submission.collectorVersion ?? null,
+            observedAt: new Date(observedAt),
+            recordedAt,
+          });
 
           for (const relation of preparedRelations) {
             if (relation.isNew) {
-              await transaction`
-                INSERT INTO archive_relation (
-                  relation_id,
-                  from_item_id,
-                  target_item_id,
-                  target_source_ref,
-                  created_seq
-                ) VALUES (
-                  ${relation.relationId},
-                  ${relation.fromItemId},
-                  ${relation.targetItemId},
-                  ${relation.targetSourceRef},
-                  ${archiveSeq}::bigint
-                )
-              `;
+              await transaction.insert(archiveRelations).values({
+                relationId: relation.relationId,
+                fromItemId: relation.fromItemId,
+                targetItemId: relation.targetItemId,
+                targetSourceRef: relation.targetSourceRef,
+                createdSequence: archiveSequence,
+              });
             }
             if (relation.state !== null) {
               const stateHash = relation.stateHash;
@@ -489,90 +446,67 @@ export function createArchiveStore(
                 throw new Error("关系状态缺少规范化哈希。");
               }
               const stateJson = canonicalJson(relation.state);
-              const revisions = await transaction<RelationRevisionRow[]>`
-                SELECT relation_revision_id, state_hash, state_data
-                FROM archive_relation_revision
-                WHERE relation_id = ${relation.relationId}
-                  AND state_hash = ${stateHash}
-              `;
+              const revisions = await transaction
+                .select({
+                  relationRevisionId:
+                    archiveRelationRevisions.relationRevisionId,
+                  stateHash: archiveRelationRevisions.stateHash,
+                  stateData: archiveRelationRevisions.stateData,
+                })
+                .from(archiveRelationRevisions)
+                .where(
+                  and(
+                    eq(
+                      archiveRelationRevisions.relationId,
+                      relation.relationId,
+                    ),
+                    eq(archiveRelationRevisions.stateHash, stateHash),
+                  ),
+                );
               const existingRevision = revisions[0];
               if (existingRevision === undefined) {
                 relation.revisionId = randomUUID();
-                await transaction`
-                  INSERT INTO archive_relation_revision (
-                    relation_revision_id,
-                    relation_id,
-                    state_hash,
-                    state_data
-                  ) VALUES (
-                    ${relation.revisionId},
-                    ${relation.relationId},
-                    ${stateHash},
-                    ${transaction.json(postgresJsonValue(relation.state))}
-                  )
-                `;
+                await transaction.insert(archiveRelationRevisions).values({
+                  relationRevisionId: relation.revisionId,
+                  relationId: relation.relationId,
+                  stateHash,
+                  stateData: relation.state,
+                });
               } else {
-                if (canonicalJson(existingRevision.state_data) !== stateJson) {
+                if (canonicalJson(existingRevision.stateData) !== stateJson) {
                   throw new Error("关系状态哈希冲突，不能复用现有版本。");
                 }
-                relation.revisionId = existingRevision.relation_revision_id;
+                relation.revisionId = existingRevision.relationRevisionId;
               }
             }
           }
 
           for (const [ordinal, item] of preparedItems.entries()) {
-            await transaction`
-              INSERT INTO archive_observation (
-                commit_id,
-                ordinal,
-                item_id,
-                revision_id,
-                diagnostics
-              ) VALUES (
-                ${commitId},
-                ${ordinal},
-                ${item.itemId},
-                ${item.revisionId},
-                ${
-                  item.diagnostics === undefined
-                    ? null
-                    : transaction.json(postgresJsonValue(item.diagnostics))
-                }
-              )
-            `;
+            await transaction.insert(archiveObservations).values({
+              commitId,
+              ordinal,
+              itemId: item.itemId,
+              revisionId: item.revisionId,
+              diagnostics: item.diagnostics ?? null,
+            });
           }
 
           for (const relation of preparedRelations) {
-            await transaction`
-              INSERT INTO archive_relation_observation (
-                commit_id,
-                ordinal,
-                relation_id,
-                bin_id,
-                archive_seq,
-                relation_revision_id
-              ) VALUES (
-                ${commitId},
-                ${relation.ordinal},
-                ${relation.relationId},
-                ${submission.binId},
-                ${archiveSeq}::bigint,
-                ${relation.revisionId ?? null}
-              )
-            `;
+            await transaction.insert(archiveRelationObservations).values({
+              commitId,
+              ordinal: relation.ordinal,
+              relationId: relation.relationId,
+              binId: submission.binId,
+              archiveSequence,
+              relationRevisionId: relation.revisionId ?? null,
+            });
           }
 
-          await transaction`
-            INSERT INTO archive_request_receipt (
-              request_id,
-              payload_hash,
-              commit_id
-            ) VALUES (
-              ${requestId},
-              ${payloadHash},
-              ${commitId}
-            )
-          `;
+          await transaction.insert(archiveRequestReceipts).values({
+            requestId,
+            payloadHash,
+            commitId,
+          });
 
           return {
             ok: true,
@@ -596,21 +530,21 @@ export function createArchiveStore(
       const deletion = await withArchiveWriteLock(
         database,
         async (transaction, currentSequence) => {
-          const items = await transaction<ItemRow[]>`
-            SELECT item_id, namespace, source_key
-            FROM archive_item
-            WHERE item_id = ${checkedId.data}
-            FOR UPDATE
-          `;
+          const items = await transaction
+            .select({
+              itemId: archiveItems.itemId,
+              namespace: archiveItems.namespace,
+              sourceKey: archiveItems.sourceKey,
+            })
+            .from(archiveItems)
+            .where(eq(archiveItems.itemId, checkedId.data))
+            .for("update");
           const item = items[0];
           if (item === undefined) {
-            const previousDeletions = await transaction<
-              { readonly item_id: string }[]
-            >`
-              SELECT item_id
-              FROM archive_item_deletion
-              WHERE item_id = ${checkedId.data}
-            `;
+            const previousDeletions = await transaction
+              .select({ itemId: archiveItemDeletions.itemId })
+              .from(archiveItemDeletions)
+              .where(eq(archiveItemDeletions.itemId, checkedId.data));
             return {
               ok: false as const,
               operation:
@@ -630,139 +564,192 @@ export function createArchiveStore(
             };
           }
 
-          const relations = await transaction<
-            {
-              readonly relation_id: string;
-              readonly from_item_id: string;
-              readonly target_item_id: string | null;
-            }[]
-          >`
-            SELECT relation_id, from_item_id, target_item_id
-            FROM archive_relation
-            WHERE from_item_id = ${item.item_id}
-              OR target_item_id = ${item.item_id}
-            FOR UPDATE
-          `;
-          const relationIds = relations.map(({ relation_id }) => relation_id);
-          const resourceRows = await transaction<
-            { readonly resource_id: string }[]
-          >`
-            SELECT DISTINCT reference.resource_id
-            FROM archive_revision AS revision
-            JOIN archive_revision_resource AS reference
-              ON reference.revision_id = revision.revision_id
-            WHERE revision.item_id = ${item.item_id}
-          `;
-          const resourceIds = resourceRows.map(
-            ({ resource_id }) => resource_id,
-          );
+          const relations = await transaction
+            .select({ relationId: archiveRelations.relationId })
+            .from(archiveRelations)
+            .where(
+              or(
+                eq(archiveRelations.fromItemId, item.itemId),
+                eq(archiveRelations.targetItemId, item.itemId),
+              ),
+            )
+            .for("update");
+          const relationIds = relations.map(({ relationId }) => relationId);
+          const resourceRows = await transaction
+            .selectDistinct({
+              resourceId: archiveRevisionResources.resourceId,
+            })
+            .from(archiveRevisions)
+            .innerJoin(
+              archiveRevisionResources,
+              eq(
+                archiveRevisionResources.revisionId,
+                archiveRevisions.revisionId,
+              ),
+            )
+            .where(eq(archiveRevisions.itemId, item.itemId));
+          const resourceIds = resourceRows.map(({ resourceId }) => resourceId);
           const deletionSeq = await advanceArchiveSequence(
             transaction,
             currentSequence,
           );
 
-          await transaction`
-            INSERT INTO archive_item_deletion (
-              item_id,
-              namespace,
-              source_key,
-              deletion_seq
-            ) VALUES (
-              ${item.item_id},
-              ${item.namespace},
-              ${item.source_key},
-              ${deletionSeq}::bigint
-            )
-          `;
-          await transaction`
-            INSERT INTO archive_item_observation_gap (
-              commit_id,
-              ordinal,
-              item_id
-            )
-            SELECT commit_id, ordinal, item_id
-            FROM archive_observation
-            WHERE item_id = ${item.item_id}
-          `;
+          await transaction.insert(archiveItemDeletions).values({
+            itemId: item.itemId,
+            namespace: item.namespace,
+            sourceKey: item.sourceKey,
+            deletionSequence: BigInt(deletionSeq),
+          });
+          await transaction.insert(archiveItemObservationGaps).select((query) =>
+            query
+              .select({
+                commitId: archiveObservations.commitId,
+                ordinal: archiveObservations.ordinal,
+                itemId: archiveObservations.itemId,
+              })
+              .from(archiveObservations)
+              .where(eq(archiveObservations.itemId, item.itemId)),
+          );
           if (relationIds.length > 0) {
-            await transaction`
-              INSERT INTO archive_relation_observation_gap (
-                commit_id,
-                ordinal,
-                relation_id,
-                from_item_id,
-                target_item_id
-              )
-              SELECT
-                observation.commit_id,
-                observation.ordinal,
-                relation.relation_id,
-                relation.from_item_id,
-                relation.target_item_id
-              FROM archive_relation_observation AS observation
-              JOIN archive_relation AS relation
-                ON relation.relation_id = observation.relation_id
-              WHERE relation.relation_id = ANY(
-                ${transaction.array(relationIds, 25)}
-              )
-            `;
-            await transaction`
-              DELETE FROM archive_relation_observation AS observation
-              USING archive_relation AS relation
-              WHERE relation.relation_id = observation.relation_id
-                AND relation.relation_id = ANY(
-                  ${transaction.array(relationIds, 25)}
-                )
-            `;
-            await transaction`
-              DELETE FROM archive_relation_revision
-              WHERE relation_id = ANY(${transaction.array(relationIds, 25)})
-            `;
-            await transaction`
-              DELETE FROM archive_relation
-              WHERE relation_id = ANY(${transaction.array(relationIds, 25)})
-            `;
+            for (
+              let offset = 0;
+              offset < relationIds.length;
+              offset += inArrayChunkSize
+            ) {
+              const relationIdBatch = relationIds.slice(
+                offset,
+                offset + inArrayChunkSize,
+              );
+              await transaction
+                .insert(archiveRelationObservationGaps)
+                .select((query) =>
+                  query
+                    .select({
+                      commitId: archiveRelationObservations.commitId,
+                      ordinal: archiveRelationObservations.ordinal,
+                      relationId: archiveRelations.relationId,
+                      fromItemId: archiveRelations.fromItemId,
+                      targetItemId: archiveRelations.targetItemId,
+                    })
+                    .from(archiveRelationObservations)
+                    .innerJoin(
+                      archiveRelations,
+                      eq(
+                        archiveRelations.relationId,
+                        archiveRelationObservations.relationId,
+                      ),
+                    )
+                    .where(
+                      inArray(archiveRelations.relationId, relationIdBatch),
+                    ),
+                );
+            }
+            for (
+              let offset = 0;
+              offset < relationIds.length;
+              offset += inArrayChunkSize
+            ) {
+              const relationIdBatch = relationIds.slice(
+                offset,
+                offset + inArrayChunkSize,
+              );
+              await transaction
+                .delete(archiveRelationObservations)
+                .where(
+                  inArray(
+                    archiveRelationObservations.relationId,
+                    relationIdBatch,
+                  ),
+                );
+            }
+            for (
+              let offset = 0;
+              offset < relationIds.length;
+              offset += inArrayChunkSize
+            ) {
+              const relationIdBatch = relationIds.slice(
+                offset,
+                offset + inArrayChunkSize,
+              );
+              await transaction
+                .delete(archiveRelationRevisions)
+                .where(
+                  inArray(archiveRelationRevisions.relationId, relationIdBatch),
+                );
+            }
+            for (
+              let offset = 0;
+              offset < relationIds.length;
+              offset += inArrayChunkSize
+            ) {
+              const relationIdBatch = relationIds.slice(
+                offset,
+                offset + inArrayChunkSize,
+              );
+              await transaction
+                .delete(archiveRelations)
+                .where(inArray(archiveRelations.relationId, relationIdBatch));
+            }
           }
-          await transaction`
-            DELETE FROM archive_observation
-            WHERE item_id = ${item.item_id}
-          `;
-          await transaction`
-            DELETE FROM archive_revision_resource
-            WHERE revision_id IN (
-              SELECT revision_id
-              FROM archive_revision
-              WHERE item_id = ${item.item_id}
-            )
-          `;
-          await transaction`
-            DELETE FROM archive_revision
-            WHERE item_id = ${item.item_id}
-          `;
-          await transaction`
-            DELETE FROM archive_item
-            WHERE item_id = ${item.item_id}
-          `;
+          await transaction
+            .delete(archiveObservations)
+            .where(eq(archiveObservations.itemId, item.itemId));
+          await transaction
+            .delete(archiveRevisionResources)
+            .where(
+              inArray(
+                archiveRevisionResources.revisionId,
+                transaction
+                  .select({ revisionId: archiveRevisions.revisionId })
+                  .from(archiveRevisions)
+                  .where(eq(archiveRevisions.itemId, item.itemId)),
+              ),
+            );
+          await transaction
+            .delete(archiveRevisions)
+            .where(eq(archiveRevisions.itemId, item.itemId));
+          await transaction
+            .delete(archiveItems)
+            .where(eq(archiveItems.itemId, item.itemId));
           if (resourceIds.length > 0) {
-            await transaction`
-              UPDATE archive_resource
-              SET status = 'deleting'
-              WHERE resource_id = ANY(
-                ${transaction.array(resourceIds, 2950)}
-              )
-                AND status = 'ready'
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM archive_revision_resource AS reference
-                  WHERE reference.resource_id = archive_resource.resource_id
-                )
-            `;
+            for (
+              let offset = 0;
+              offset < resourceIds.length;
+              offset += inArrayChunkSize
+            ) {
+              const resourceIdBatch = resourceIds.slice(
+                offset,
+                offset + inArrayChunkSize,
+              );
+              await transaction
+                .update(archiveResources)
+                .set({ status: "deleting" })
+                .where(
+                  and(
+                    inArray(archiveResources.resourceId, resourceIdBatch),
+                    eq(archiveResources.status, "ready"),
+                    notExists(
+                      transaction
+                        .select({
+                          resourceId: archiveRevisionResources.resourceId,
+                        })
+                        .from(archiveRevisionResources)
+                        .where(
+                          eq(
+                            archiveRevisionResources.resourceId,
+                            archiveResources.resourceId,
+                          ),
+                        ),
+                    ),
+                  ),
+                );
+            }
           }
 
           return {
             ok: true as const,
             value: archiveItemDeletionResultSchema.parse({
-              itemId: item.item_id,
+              itemId: item.itemId,
               deletionSeq,
               deleted: true,
             }),
