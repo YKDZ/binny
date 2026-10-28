@@ -43,13 +43,6 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
-    "test:e2e": {
-      "dependsOn": [],
-      "inputs": [],
-      "outputs": [],
-      "cache": false,
-      "tags": ["quality:heavy"]
-    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "inputs": [],

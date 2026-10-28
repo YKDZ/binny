@@ -38,6 +38,12 @@
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]
+    },
+    "test:client-types": {
+      "dependsOn": ["build"],
+      "inputs": ["package.json", "test-consumer/**", "src/**"],
+      "outputs": [],
+      "tags": ["quality:heavy"]
     }
   }
 }

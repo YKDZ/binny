@@ -3,18 +3,20 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "format:check": "oxfmt --list-different --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
-    "format:write": "oxfmt --write --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
+    "format:check": "oxfmt --list-different --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
+    "format:write": "oxfmt --write --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
     "lint": "oxlint --quiet --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template",
     "lint:fix": "oxlint --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template --fix",
     "typecheck": "tsc --build --noEmit --pretty false",
     "check": "node --conditions=source scripts/task-gates.ts check",
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",
+    "test:binny:e2e": "node --conditions=source scripts/binny-e2e.ts",
     "fix": "node --conditions=source scripts/task-gates.ts fix",
     "boundaries": "turbo boundaries",
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",
-    "publication:publish": "changeset publish --from-pack-dir .changeset/packed"
+    "publication:publish": "changeset publish --from-pack-dir .changeset/packed",
+    "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:./packages/tooling-config",

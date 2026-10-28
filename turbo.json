@@ -36,6 +36,22 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
+    "//#test:binny:e2e": {
+      "dependsOn": ["@binny/binny#build"],
+      "inputs": [
+        "compose.yaml",
+        "Dockerfile",
+        "scripts/binny-e2e.ts",
+        "packages/api/src/**",
+        "packages/binny/src/**",
+        "packages/contracts/src/**",
+        "packages/core/src/**",
+        "packages/server/src/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
     "//#publication:pack": {
       "tags": ["work:release"],
       "cache": false
@@ -43,6 +59,23 @@
     "//#publication:publish": {
       "tags": ["work:release"],
       "cache": false
+    },
+    "//#test:lightweight-image": {
+      "inputs": [
+        "scripts/test-lightweight-image.ts",
+        ".dockerignore",
+        "packages/collector-runtime/Dockerfile.lightweight",
+        "packages/collector-runtime/**",
+        "packages/collector-sdk/**",
+        "packages/api/**",
+        "packages/contracts/**",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
     }
   },
   "boundaries": {
