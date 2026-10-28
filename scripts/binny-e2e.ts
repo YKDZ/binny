@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny05-" + process.pid.toString(10);
+const projectName = "binny06-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 let composeOverrideFile = "";
 let composePort = 0;
@@ -438,9 +438,49 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
   );
   const lock = startManagedProcess("docker", postgresExecArgs([]));
   lock.write(
-    `BEGIN;\nLOCK TABLE ${table} IN SHARE MODE;\nSELECT 'BINNY04_LOCK_HELD';\n`,
+    `BEGIN;\nLOCK TABLE ${table} IN SHARE MODE;\nSELECT 'BINNY06_LOCK_HELD';\n`,
   );
-  await lock.waitForMarker("BINNY04_LOCK_HELD");
+  await lock.waitForMarker("BINNY06_LOCK_HELD");
+  let released = false;
+  return {
+    async release() {
+      if (released) return;
+      released = true;
+      lock.write("COMMIT;\n\\q\n");
+      const result = await lock.waitForClose();
+      assert.equal(result.code, 0, result.stderr);
+    },
+  };
+}
+
+async function holdArchiveWriteClockLock(): Promise<HeldTableLock> {
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    "BEGIN;\nSELECT last_seq FROM archive_write_clock WHERE clock_id = 1 FOR UPDATE;\nSELECT 'BINNY06_CLOCK_HELD';\n",
+  );
+  await lock.waitForMarker("BINNY06_CLOCK_HELD");
+  let released = false;
+  return {
+    async release() {
+      if (released) return;
+      released = true;
+      lock.write("COMMIT;\n\\q\n");
+      const result = await lock.waitForClose();
+      assert.equal(result.code, 0, result.stderr);
+    },
+  };
+}
+
+async function holdResourceKeyShareLock(
+  resourceId: string,
+): Promise<HeldTableLock> {
+  assert.match(resourceId, /^[0-9a-f-]{36}$/u);
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    `BEGIN;\nSELECT resource_id FROM archive_resource WHERE resource_id = '${resourceId}' FOR KEY SHARE;\nSELECT 'BINNY06_RESOURCE_LOCK_HELD';\n`,
+  );
+  await lock.waitForMarker("BINNY06_RESOURCE_LOCK_HELD");
+  assert.ok(lock.stdout().includes(resourceId));
   let released = false;
   return {
     async release() {
@@ -492,6 +532,7 @@ async function waitFor<T>(
 async function waitForBlockedQuery(
   port: number,
   queryFragment: string,
+  minimumCount = 1,
 ): Promise<void> {
   await waitFor(
     async () => {
@@ -504,7 +545,7 @@ async function waitForBlockedQuery(
       );
       return Number(result.stdout.trim());
     },
-    (count) => count > 0,
+    (count) => count >= minimumCount,
     `PostgreSQL 等待 ${queryFragment} 锁`,
   );
 }
@@ -516,12 +557,14 @@ async function restartServer(port: number): Promise<void> {
   );
 }
 
-function resourceUploadProcess(): ManagedProcess {
+function resourceUploadProcess(
+  content = "binny06 interrupted resource publish",
+): ManagedProcess {
   const program = [
-    'const body = Buffer.from("binny05 interrupted resource publish");',
-    'process.stdout.write("BINNY04_UPLOAD_STARTED\\n");',
+    `const body = Buffer.from(${JSON.stringify(content)});`,
+    'process.stdout.write("BINNY06_UPLOAD_STARTED\\n");',
     'const response = await fetch("http://127.0.0.1:3000/resources", { method: "POST", headers: { "content-type": "application/octet-stream" }, body });',
-    'process.stdout.write("BINNY04_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
+    'process.stdout.write("BINNY06_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
   ].join("\n");
   return startManagedProcess("docker", [
     ...composePrefix(),
@@ -532,6 +575,21 @@ function resourceUploadProcess(): ManagedProcess {
     "--input-type=module",
     "-e",
     program,
+  ]);
+}
+
+function archiveDeleteProcess(itemId: string): ManagedProcess {
+  assert.match(itemId, /^[0-9a-f-]{36}$/u);
+  return startManagedProcess("docker", [
+    ...composePrefix(),
+    "exec",
+    "--no-TTY",
+    "server",
+    "node",
+    "packages/binny/dist/cli.js",
+    "archive",
+    "delete",
+    itemId,
   ]);
 }
 
@@ -556,9 +614,9 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
     ],
   });
   const program = [
-    'process.stdout.write("BINNY04_REFERENCE_STARTED\\n");',
+    'process.stdout.write("BINNY06_REFERENCE_STARTED\\n");',
     `const response = await fetch("http://127.0.0.1:3000/archives", { method: "POST", headers: { "content-type": "application/json" }, body: ${JSON.stringify(request)} });`,
-    'process.stdout.write("BINNY04_REFERENCE_RESPONSE " + response.status + " " + await response.text() + "\\n");',
+    'process.stdout.write("BINNY06_REFERENCE_RESPONSE " + response.status + " " + await response.text() + "\\n");',
   ].join("\n");
   return startManagedProcess("docker", [
     ...composePrefix(),
@@ -584,7 +642,7 @@ async function verifyResourceStorageInterruptions(
   try {
     publishLock = await holdTableShareLock("archive_resource");
     publishRequest = resourceUploadProcess();
-    await publishRequest.waitForMarker("BINNY04_UPLOAD_STARTED");
+    await publishRequest.waitForMarker("BINNY06_UPLOAD_STARTED");
     const publishedFiles = await waitFor(
       () => resourceFiles(port),
       (files) => files.some((file) => !filesBeforePublish.includes(file)),
@@ -597,7 +655,7 @@ async function verifyResourceStorageInterruptions(
     const publishedFile = newPublishedFiles[0];
     assert.ok(publishedFile);
     await waitForBlockedQuery(port, "INSERT INTO archive_resource");
-    assert.doesNotMatch(publishRequest.stdout(), /BINNY04_UPLOAD_RESPONSE/u);
+    assert.doesNotMatch(publishRequest.stdout(), /BINNY06_UPLOAD_RESPONSE/u);
 
     await compose(["kill", "-s", "SIGKILL", "server"], port);
     publishServerNeedsRestart = true;
@@ -631,7 +689,7 @@ async function verifyResourceStorageInterruptions(
   }
 
   const referenceBytes = new TextEncoder().encode(
-    "binny05 committed upload survives interrupted reference registration",
+    "binny06 committed upload survives interrupted reference registration",
   );
   const uploadResponse = await fetch(baseUrl + "/resources", {
     method: "POST",
@@ -651,11 +709,11 @@ async function verifyResourceStorageInterruptions(
   try {
     referenceLock = await holdTableShareLock("archive_revision_resource");
     referenceRequest = archiveReferenceProcess(uploaded.resourceId);
-    await referenceRequest.waitForMarker("BINNY04_REFERENCE_STARTED");
+    await referenceRequest.waitForMarker("BINNY06_REFERENCE_STARTED");
     await waitForBlockedQuery(port, "INSERT INTO archive_revision_resource");
     assert.doesNotMatch(
       referenceRequest.stdout(),
-      /BINNY04_REFERENCE_RESPONSE/u,
+      /BINNY06_REFERENCE_RESPONSE/u,
     );
 
     await compose(["kill", "-s", "SIGKILL", "server"], port);
@@ -710,6 +768,204 @@ async function verifyResourceStorageInterruptions(
     composeEnvironment().BINNY_RESOURCE_UNREFERENCED_AGE_MS,
   );
   await new Promise((resolveGrace) => setTimeout(resolveGrace, gracePeriodMs));
+  await verifyArchiveDeleteRollbackAfterCrash(baseUrl, port, archive);
+}
+
+async function verifyArchiveDeleteRollbackAfterCrash(
+  baseUrl: string,
+  port: number,
+  archive: string,
+): Promise<void> {
+  const { resourceItemId, resourceId, repairedResourceId } =
+    archiveIds(archive);
+  let resourceLock: HeldTableLock | undefined;
+  let deleteRequest: ManagedProcess | undefined;
+  let serverNeedsRestart = false;
+  try {
+    resourceLock = await holdTableShareLock("archive_resource");
+    deleteRequest = archiveDeleteProcess(resourceItemId);
+    await waitForBlockedQuery(port, "UPDATE archive_resource");
+    assert.equal(deleteRequest.child.exitCode, null);
+
+    await compose(["kill", "-s", "SIGKILL", "server"], port);
+    serverNeedsRestart = true;
+    await resourceLock.release();
+    resourceLock = undefined;
+    const interruptedDelete = await deleteRequest.waitForClose();
+    assert.notEqual(interruptedDelete.code, 0);
+    await restartServer(port);
+    serverNeedsRestart = false;
+    await waitForApiAndDatabase(baseUrl);
+
+    const itemRead = await fetch(baseUrl + "/archives/items/" + resourceItemId);
+    assert.equal(itemRead.status, 200, await itemRead.text());
+    for (const [resourceIdToCheck, content] of [
+      [resourceId, "binny media bytes v1"],
+      [repairedResourceId, "binny media bytes v2"],
+    ] as const) {
+      const resourceRead = await fetch(
+        baseUrl + "/resources/" + resourceIdToCheck,
+      );
+      assert.equal(resourceRead.status, 200);
+      assert.deepEqual(
+        new Uint8Array(await resourceRead.arrayBuffer()),
+        new TextEncoder().encode(content),
+      );
+    }
+  } finally {
+    if (
+      deleteRequest !== undefined &&
+      deleteRequest.child.exitCode === null &&
+      !serverNeedsRestart
+    ) {
+      await compose(["kill", "-s", "SIGKILL", "server"], port);
+      serverNeedsRestart = true;
+    }
+    if (resourceLock !== undefined) await resourceLock.release();
+    if (deleteRequest !== undefined && deleteRequest.child.exitCode === null) {
+      await deleteRequest.waitForClose();
+    }
+    if (serverNeedsRestart) await restartServer(port);
+  }
+}
+
+function processResponse<T>(
+  result: ProcessResult,
+  marker: string,
+): { readonly status: number; readonly body: T } {
+  const line = result.stdout
+    .split(/\r?\n/u)
+    .find((candidate) => candidate.startsWith(marker + " "));
+  assert.ok(line, result.stdout + result.stderr);
+  const separator = line.indexOf(" ", marker.length + 1);
+  assert.notEqual(separator, -1, line);
+  return {
+    status: Number(line.slice(marker.length + 1, separator)),
+    body: JSON.parse(line.slice(separator + 1)) as T,
+  };
+}
+
+async function verifyDeleteUploadAndFileCleanupRace(
+  baseUrl: string,
+  port: number,
+  archive: string,
+): Promise<void> {
+  const { resourceItemId, repairedResourceId } = archiveIds(archive);
+  const filesBeforeDelete = await resourceFiles(port);
+  let resourceLock: HeldTableLock | undefined;
+  let clockLock: HeldTableLock | undefined;
+  let deleteRequest: ManagedProcess | undefined;
+  let uploadRequest: ManagedProcess | undefined;
+  let referenceRequest: ManagedProcess | undefined;
+  let serverNeedsRestart = false;
+  try {
+    resourceLock = await holdResourceKeyShareLock(repairedResourceId);
+    clockLock = await holdArchiveWriteClockLock();
+    deleteRequest = archiveDeleteProcess(resourceItemId);
+    await waitForBlockedQuery(port, "archive_write_clock");
+
+    uploadRequest = resourceUploadProcess("binny media bytes v2");
+    await uploadRequest.waitForMarker("BINNY06_UPLOAD_STARTED");
+    await waitFor(
+      () => resourceFiles(port),
+      (files) => files.some((file) => file.startsWith(".upload-")),
+      "并发上传完成暂存并等待归档写门",
+    );
+    await waitForBlockedQuery(port, "archive_write_clock", 2);
+    await clockLock.release();
+    clockLock = undefined;
+
+    await uploadRequest.waitForMarker("BINNY06_UPLOAD_RESPONSE");
+    const uploadResult = await uploadRequest.waitForClose();
+    assert.equal(uploadResult.code, 0, uploadResult.stderr);
+    const uploaded = processResponse<{ readonly resourceId: string }>(
+      uploadResult,
+      "BINNY06_UPLOAD_RESPONSE",
+    );
+    assert.equal(uploaded.status, 201, JSON.stringify(uploaded.body));
+    assert.notEqual(uploaded.body.resourceId, repairedResourceId);
+
+    referenceRequest = archiveReferenceProcess(uploaded.body.resourceId);
+    await referenceRequest.waitForMarker("BINNY06_REFERENCE_STARTED");
+    await referenceRequest.waitForMarker("BINNY06_REFERENCE_RESPONSE");
+    const referenceResult = await referenceRequest.waitForClose();
+    assert.equal(referenceResult.code, 0, referenceResult.stderr);
+    const referenced = processResponse<{ readonly items: readonly unknown[] }>(
+      referenceResult,
+      "BINNY06_REFERENCE_RESPONSE",
+    );
+    assert.equal(referenced.status, 201, JSON.stringify(referenced.body));
+
+    await waitForBlockedQuery(port, "DELETE FROM archive_resource");
+    assert.equal(deleteRequest.child.exitCode, null);
+    const filesAfterUnlink = await resourceFiles(port);
+    const removedFiles = filesBeforeDelete.filter(
+      (file) => !filesAfterUnlink.includes(file),
+    );
+    const addedFiles = filesAfterUnlink.filter(
+      (file) => !filesBeforeDelete.includes(file),
+    );
+    assert.equal(removedFiles.length, 1, JSON.stringify(removedFiles));
+    assert.match(removedFiles[0] ?? "", /^[0-9a-f-]{36}\.bin$/u);
+    assert.equal(addedFiles.length, 1, JSON.stringify(addedFiles));
+    assert.match(addedFiles[0] ?? "", /^[0-9a-f-]{36}\.bin$/u);
+
+    const oldResource = await fetch(
+      baseUrl + "/resources/" + repairedResourceId,
+    );
+    assert.equal(oldResource.status, 404, await oldResource.text());
+    const newResource = await fetch(
+      baseUrl + "/resources/" + uploaded.body.resourceId,
+    );
+    assert.equal(newResource.status, 200);
+    assert.deepEqual(
+      new Uint8Array(await newResource.arrayBuffer()),
+      new TextEncoder().encode("binny media bytes v2"),
+    );
+
+    await compose(["kill", "-s", "SIGKILL", "server"], port);
+    serverNeedsRestart = true;
+    await resourceLock.release();
+    resourceLock = undefined;
+    const interruptedDelete = await deleteRequest.waitForClose();
+    assert.notEqual(interruptedDelete.code, 0);
+    await restartServer(port);
+    serverNeedsRestart = false;
+    await waitForApiAndDatabase(baseUrl);
+
+    cliFailure(
+      await cli(baseUrl, ["archive", "item", resourceItemId]),
+      "item_deleted",
+    );
+    const oldResourceAfterRestart = await fetch(
+      baseUrl + "/resources/" + repairedResourceId,
+    );
+    assert.equal(oldResourceAfterRestart.status, 404);
+    const newResourceAfterRestart = await fetch(
+      baseUrl + "/resources/" + uploaded.body.resourceId,
+    );
+    assert.equal(newResourceAfterRestart.status, 200);
+    assert.deepEqual(
+      new Uint8Array(await newResourceAfterRestart.arrayBuffer()),
+      new TextEncoder().encode("binny media bytes v2"),
+    );
+  } finally {
+    const activeProcess = [deleteRequest, uploadRequest, referenceRequest].some(
+      (process) => process !== undefined && process.child.exitCode === null,
+    );
+    if (activeProcess && !serverNeedsRestart) {
+      await compose(["kill", "-s", "SIGKILL", "server"], port);
+      serverNeedsRestart = true;
+    }
+    if (clockLock !== undefined) await clockLock.release();
+    if (resourceLock !== undefined) await resourceLock.release();
+    for (const child of [deleteRequest, uploadRequest, referenceRequest]) {
+      if (child !== undefined && child.child.exitCode === null) {
+        await child.waitForClose();
+      }
+    }
+    if (serverNeedsRestart) await restartServer(port);
+  }
 }
 
 async function validateApiInput(): Promise<void> {
@@ -1074,22 +1330,6 @@ async function verifyRestartAndRemoval(
   );
   assert.equal(enabled.status, "active");
 
-  const removed = cliData<{ readonly removed: boolean; readonly id: string }>(
-    await cli(baseUrl, ["bin", "remove", "rss-main"]),
-    "removed",
-  );
-  assert.deepEqual(removed, { removed: true, id: "rss-main" });
-
-  cliData(await cli(baseUrl, ["bin", "remove", "rss-regex"]), "removed");
-
-  cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
-  cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
-  cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
-  const empty = cliData<{ readonly bins: readonly unknown[] }>(
-    await cli(baseUrl, ["bin", "list"]),
-    "listed",
-  );
-  assert.deepEqual(empty.bins, []);
   const archiveState = await archiveHttpStep(
     "after-restart",
     baseUrl,
@@ -1161,10 +1401,10 @@ async function verifyRestartAndRemoval(
   assert.deepEqual(cliSdkItem, expectedArchive.sdkItem);
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny05-resource-cli-"),
+    path.join(tmpdir(), "binny06-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny05-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny06-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1277,6 +1517,37 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(cliArchiveCommit, expectedArchive.commit);
   await validateApiInput();
+
+  const cliDeletion = cliData<{
+    readonly itemId: string;
+    readonly deletionSeq: string;
+    readonly deleted: true;
+  }>(
+    await cli(baseUrl, ["archive", "delete", resourceMarkerItemId]),
+    "deleted",
+  );
+  assert.equal(cliDeletion.itemId, resourceMarkerItemId);
+  assert.equal(cliDeletion.deleted, true);
+  cliFailure(
+    await cli(baseUrl, ["archive", "item", resourceMarkerItemId]),
+    "item_deleted",
+  );
+  await verifyDeleteUploadAndFileCleanupRace(baseUrl, port, archive);
+
+  const removed = cliData<{ readonly removed: boolean; readonly id: string }>(
+    await cli(baseUrl, ["bin", "remove", "rss-main"]),
+    "removed",
+  );
+  assert.deepEqual(removed, { removed: true, id: "rss-main" });
+  cliData(await cli(baseUrl, ["bin", "remove", "rss-regex"]), "removed");
+  cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
+  cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
+  cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
+  const empty = cliData<{ readonly bins: readonly unknown[] }>(
+    await cli(baseUrl, ["bin", "list"]),
+    "listed",
+  );
+  assert.deepEqual(empty.bins, []);
 }
 
 async function main(): Promise<void> {
@@ -1285,10 +1556,10 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny05-compose-"),
+    path.join(tmpdir(), "binny06-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.6.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -1332,7 +1603,14 @@ async function main(): Promise<void> {
       "enabled",
     );
     assert.equal(enabled.status, "active");
+    const resourceFilesBeforeArchive = await resourceFiles(port);
     const archive = await archiveHttpStep("submit", baseUrl);
+    const resourceFilesAfterArchive = await resourceFiles(port);
+    assert.equal(
+      resourceFilesAfterArchive.length - resourceFilesBeforeArchive.length,
+      4,
+      "五份新资源中只有仍被引用的四份应保留文件字节。",
+    );
     const sdkResource = await sdkResourceStep(baseUrl);
     await verifyResourceStorageInterruptions(baseUrl, port, archive);
     await verifyRestartAndRemoval(baseUrl, port, archive, sdkResource);

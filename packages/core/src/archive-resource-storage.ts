@@ -46,6 +46,9 @@ export type ArchiveResourceStorage = {
     transaction: ArchiveTransaction,
     resourceId: string,
   ) => Promise<boolean>;
+  readonly collectUnreferencedResources: (
+    resourceIds: readonly string[],
+  ) => Promise<void>;
   readonly initialize: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -251,9 +254,63 @@ export function createArchiveResourceStorage(
   let cleanupTimer: NodeJS.Timeout | undefined;
   let cleanupInFlight: Promise<void> | undefined;
 
+  async function collectUnreferencedResources(
+    resourceIds: readonly string[],
+  ): Promise<void> {
+    const uniqueResourceIds = [...new Set(resourceIds)];
+    if (uniqueResourceIds.length === 0) return;
+
+    const deleting = await withArchiveWriteLock(
+      database,
+      async (transaction) => {
+        return await transaction<ResourceRow[]>`
+        SELECT
+          resource_id,
+          sha256,
+          media_type,
+          byte_size::text AS byte_size,
+          storage_key,
+          status
+        FROM archive_resource
+        WHERE resource_id = ANY(${transaction.array(uniqueResourceIds, 2950)})
+          AND status = 'deleting'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM archive_revision_resource AS reference
+            WHERE reference.resource_id = archive_resource.resource_id
+          )
+      `;
+      },
+    );
+
+    let directoryChanged = false;
+    for (const row of deleting) {
+      await rm(resourcePath(directory, row.storage_key), { force: true });
+      directoryChanged = true;
+    }
+    if (directoryChanged) await syncDirectory(directory);
+
+    await database.begin(async (transaction) => {
+      for (const row of deleting) {
+        await transaction`
+          DELETE FROM archive_resource
+          WHERE resource_id = ${row.resource_id}
+            AND status = 'deleting'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM archive_revision_resource AS reference
+              WHERE reference.resource_id = archive_resource.resource_id
+            )
+        `;
+      }
+    });
+  }
+
   async function collectUnreferenced(): Promise<void> {
-    await withArchiveWriteLock(database, async (transaction) => {
-      await transaction`
+    const resourceIds = await withArchiveWriteLock(
+      database,
+      async (transaction) => {
+        await transaction`
         UPDATE archive_resource
         SET status = 'deleting'
         WHERE status = 'ready'
@@ -266,14 +323,8 @@ export function createArchiveResourceStorage(
             WHERE reference.resource_id = archive_resource.resource_id
           )
       `;
-      const deleting = await transaction<ResourceRow[]>`
-        SELECT
-          resource_id,
-          sha256,
-          media_type,
-          byte_size::text AS byte_size,
-          storage_key,
-          status
+        const rows = await transaction<{ readonly resource_id: string }[]>`
+        SELECT resource_id
         FROM archive_resource
         WHERE status = 'deleting'
           AND NOT EXISTS (
@@ -281,24 +332,14 @@ export function createArchiveResourceStorage(
             FROM archive_revision_resource AS reference
             WHERE reference.resource_id = archive_resource.resource_id
           )
-        FOR UPDATE
       `;
-      let directoryChanged = false;
-      for (const row of deleting) {
-        await rm(resourcePath(directory, row.storage_key), { force: true });
-        directoryChanged = true;
-        await transaction`
-          DELETE FROM archive_resource
-          WHERE resource_id = ${row.resource_id}
-            AND status = 'deleting'
-            AND NOT EXISTS (
-              SELECT 1
-              FROM archive_revision_resource AS reference
-              WHERE reference.resource_id = archive_resource.resource_id
-            )
-        `;
-      }
+        return rows.map(({ resource_id }) => resource_id);
+      },
+    );
+    await collectUnreferencedResources(resourceIds);
 
+    await withArchiveWriteLock(database, async (transaction) => {
+      let directoryChanged = false;
       const registered = await transaction<{ readonly storage_key: string }[]>`
         SELECT storage_key
         FROM archive_resource
@@ -577,5 +618,12 @@ export function createArchiveResourceStorage(
     await cleanupInFlight;
   }
 
-  return { upload, get, isAvailable, initialize, close };
+  return {
+    upload,
+    get,
+    isAvailable,
+    collectUnreferencedResources,
+    initialize,
+    close,
+  };
 }

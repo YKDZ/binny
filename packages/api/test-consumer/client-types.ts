@@ -196,7 +196,9 @@ async function checkPublicArchiveContract(): Promise<void> {
     }
     if (relation?.status === "withdrawn") void relation.observation.commitId;
     if (relation?.status === "unknown") void relation.from.status;
-    if (relation?.to.kind === "sourceRef") void relation.to.sourceRef;
+    if (relation !== undefined && relation.status !== "deleted") {
+      if (relation.to.kind === "sourceRef") void relation.to.sourceRef;
+    }
   } else if (
     relations.status === 400 ||
     relations.status === 404 ||

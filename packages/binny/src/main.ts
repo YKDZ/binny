@@ -10,6 +10,7 @@ import {
   archiveErrorSchema,
   archiveIdentifierSchema,
   archiveItemReadSchema,
+  archiveItemDeletionResultSchema,
   archiveRelationPageSchema,
   archiveResourceMetadataSchema,
   archiveRevisionReadSchema,
@@ -157,7 +158,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "archive",
-        description: "读取归档资料、对象关系和观察历史。",
+        description: "读取和删除归档资料、对象关系及观察历史。",
       },
       ...command("binList")({
         kind: "command",
@@ -542,6 +543,45 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档条目读取状态。");
+        },
+      }),
+      ...command("archiveDelete")({
+        kind: "command",
+        parent: "archive",
+        name: "delete",
+        description: "删除归档条目及其全部资料。",
+        fields: {
+          itemId: { kind: "positional", description: "归档条目 ID" },
+        },
+        input: z.object({ itemId: archiveIdentifierSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            deleted: {
+              description: "已删除的归档条目",
+              exitCode: 0,
+              schema: archiveItemDeletionResultSchema,
+              text: ({ itemId }) => text.line("已删除归档条目：" + itemId),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .archives.items[":itemId"].$delete({
+              param: { itemId: input.itemId },
+            });
+          if (response.status === 200)
+            return outcome.data.deleted(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409 ||
+            response.status === 503
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档条目删除状态。");
         },
       }),
       ...command("archiveTimeline")({
