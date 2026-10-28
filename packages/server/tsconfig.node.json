@@ -2,7 +2,9 @@
   "extends": "@binny/tooling-config/node.json",
   "compilerOptions": {
     "types": ["node"],
-    "declarationMap": false
+    "declarationMap": false,
+    // core 的公开数据库类型带入 RC 声明缺陷，仅跳过依赖声明自检，保留源码严格检查。
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts", "template/**/*.ts"]
 }

@@ -1,6 +1,8 @@
 import {
   collectorManifestSchema,
+  jsonObjectSchema,
   runtimeDisconnectInputSchema,
+  runtimeEnvironmentSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
   type BinError,
@@ -12,23 +14,23 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatInput,
 } from "@binny/contracts";
+import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { binConfigurations, runtimeConnections } from "./schema.ts";
 
-type RuntimeConnectionRow = {
-  readonly bin_id: string;
-  readonly configured_collector: CollectorManifest;
-  readonly config: JsonObject;
-  readonly runtime_id: string | null;
-  readonly runtime_collector: CollectorManifest | null;
-  readonly environment: RuntimeEnvironment | null;
-  readonly last_heartbeat_at: Date | null;
-  readonly disconnected: boolean | null;
+const runtimeSelection = {
+  binId: binConfigurations.id,
+  configuredCollector: binConfigurations.collector,
+  config: binConfigurations.config,
+  runtimeId: runtimeConnections.runtimeId,
+  runtimeCollector: runtimeConnections.collector,
+  environment: runtimeConnections.environment,
+  lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
+  disconnected: runtimeConnections.disconnected,
 };
 
-const tableName = "runtime_connections";
-const jsonbType = 3802;
 type RuntimeCompatibilityError = {
   readonly code:
     | "runtime_manifest_mismatch"
@@ -37,10 +39,6 @@ type RuntimeCompatibilityError = {
   readonly message: string;
   readonly path: (string | number)[];
 };
-
-function jsonbParameter(database: CoreDatabase, value: unknown) {
-  return database.typed(value, jsonbType);
-}
 
 function failure<T>(status: 400 | 404 | 409, error: BinError): BinOperation<T> {
   return { ok: false, status, error };
@@ -172,66 +170,69 @@ function offline(
   return {
     status: "offline",
     reason,
-    ...(row?.runtime_id === null || row?.runtime_id === undefined
+    ...(row?.runtimeId === null || row?.runtimeId === undefined
       ? {}
-      : { runtimeId: row.runtime_id }),
-    ...(row?.last_heartbeat_at === null || row?.last_heartbeat_at === undefined
+      : { runtimeId: row.runtimeId }),
+    ...(row?.lastHeartbeatAt === null || row?.lastHeartbeatAt === undefined
       ? {}
-      : { lastHeartbeatAt: row.last_heartbeat_at.toISOString() }),
+      : { lastHeartbeatAt: row.lastHeartbeatAt.toISOString() }),
   };
 }
 
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   if (
-    row.runtime_id === null ||
-    row.runtime_collector === null ||
+    row.runtimeId === null ||
+    row.runtimeCollector === null ||
     row.environment === null ||
-    row.last_heartbeat_at === null
+    row.lastHeartbeatAt === null
   ) {
     return offline("runtime_not_connected", row);
   }
 
   const error = compatibilityError(
-    row.configured_collector,
-    row.config,
-    row.runtime_collector,
-    row.environment,
+    collectorManifestSchema.parse(row.configuredCollector),
+    jsonObjectSchema.parse(row.config),
+    collectorManifestSchema.parse(row.runtimeCollector),
+    runtimeEnvironmentSchema.parse(row.environment),
   );
   if (error !== undefined) {
     return {
       status: "incompatible",
-      runtimeId: row.runtime_id,
-      lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+      runtimeId: row.runtimeId,
+      lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
       error,
     };
   }
   if (row.disconnected === true) return offline("runtime_not_connected", row);
-  if (Date.now() - row.last_heartbeat_at.getTime() > runtimeHeartbeatTimeoutMs)
+  if (Date.now() - row.lastHeartbeatAt.getTime() > runtimeHeartbeatTimeoutMs)
     return offline("heartbeat_expired", row);
 
   return {
     status: "online",
-    runtimeId: row.runtime_id,
-    environment: row.environment,
-    lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+    runtimeId: row.runtimeId,
+    environment: runtimeEnvironmentSchema.parse(row.environment),
+    lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
   };
 }
 
 async function selectRuntimeConnection(
   database: CoreDatabase | CoreTransaction,
   binId: string,
-): Promise<RuntimeConnectionRow | undefined> {
-  const rows = await database.unsafe<RuntimeConnectionRow[]>(
-    "SELECT b.id AS bin_id, b.collector AS configured_collector, b.config, " +
-      "r.runtime_id, r.collector AS runtime_collector, r.environment, " +
-      "r.last_heartbeat_at, r.disconnected FROM bin_configurations b " +
-      "LEFT JOIN " +
-      tableName +
-      " r ON r.bin_id = b.id WHERE b.id = $1",
-    [binId],
-  );
-  return rows[0];
+) {
+  const [row] = await database
+    .select(runtimeSelection)
+    .from(binConfigurations)
+    .leftJoin(
+      runtimeConnections,
+      eq(runtimeConnections.binId, binConfigurations.id),
+    )
+    .where(eq(binConfigurations.id, binId));
+  return row;
 }
+
+type RuntimeConnectionRow = NonNullable<
+  Awaited<ReturnType<typeof selectRuntimeConnection>>
+>;
 
 export async function readRuntimeExecution(
   database: CoreDatabase | CoreTransaction,
@@ -245,23 +246,6 @@ export async function readRuntimeExecution(
         path: ["binId"],
       })
     : { ok: true, value: rowExecution(row) };
-}
-
-export async function initializeRuntimeConnectionSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.unsafe(
-    "CREATE TABLE IF NOT EXISTS " +
-      tableName +
-      " (" +
-      "bin_id text PRIMARY KEY REFERENCES bin_configurations(id) ON DELETE CASCADE, " +
-      "runtime_id text NOT NULL, " +
-      "collector jsonb NOT NULL, " +
-      "environment jsonb NOT NULL, " +
-      "last_heartbeat_at timestamptz NOT NULL DEFAULT now(), " +
-      "disconnected boolean NOT NULL DEFAULT false" +
-      ")",
-  );
 }
 
 export function createRuntimeConnectionStore(
@@ -291,21 +275,26 @@ export function createRuntimeConnectionStore(
         });
       }
 
-      await database.unsafe(
-        "INSERT INTO " +
-          tableName +
-          " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected) " +
-          "VALUES ($1, $2, $3, $4, now(), false) " +
-          "ON CONFLICT (bin_id) DO UPDATE SET runtime_id = EXCLUDED.runtime_id, " +
-          "collector = EXCLUDED.collector, environment = EXCLUDED.environment, " +
-          "last_heartbeat_at = now(), disconnected = false",
-        [
+      await database
+        .insert(runtimeConnections)
+        .values({
           binId,
-          checked.data.runtimeId,
-          jsonbParameter(database, checked.data.collector),
-          jsonbParameter(database, checked.data.environment),
-        ],
-      );
+          runtimeId: checked.data.runtimeId,
+          collector: checked.data.collector,
+          environment: checked.data.environment,
+          disconnected: false,
+        })
+        .onConflictDoUpdate({
+          target: runtimeConnections.binId,
+          set: {
+            runtimeId: checked.data.runtimeId,
+            collector: checked.data.collector,
+            environment: checked.data.environment,
+            // 保持 PostgreSQL now() 的服务端时钟语义。
+            lastHeartbeatAt: sql`now()`,
+            disconnected: false,
+          },
+        });
 
       const row = await selectRuntimeConnection(database, binId);
       if (row === undefined) {
@@ -327,12 +316,15 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      await database.unsafe(
-        "UPDATE " +
-          tableName +
-          " SET disconnected = true WHERE bin_id = $1 AND runtime_id = $2",
-        [binId, checked.data.runtimeId],
-      );
+      await database
+        .update(runtimeConnections)
+        .set({ disconnected: true })
+        .where(
+          and(
+            eq(runtimeConnections.binId, binId),
+            eq(runtimeConnections.runtimeId, checked.data.runtimeId),
+          ),
+        );
       const current = await selectRuntimeConnection(database, binId);
       if (current === undefined) {
         return failure(404, {

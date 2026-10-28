@@ -2,6 +2,12 @@
   "extends": ["//"],
   "tags": ["library", "binny:core"],
   "tasks": {
+    "db:generate": {
+      "inputs": ["drizzle.config.ts", "src/schema.ts", "migrations/**"],
+      "outputs": ["migrations/**"],
+      "cache": false,
+      "tags": ["work:on-demand"]
+    },
     "build": {
       "dependsOn": ["^build"],
       "inputs": [],
