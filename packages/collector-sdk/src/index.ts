@@ -11,6 +11,7 @@ import {
   type ArchiveResourceReference,
   type ArchiveSubmissionInput,
   type ManualRunFailure,
+  type ManualRunCheckInput,
   postgresTextSchema,
 } from "@binny/contracts";
 import { z } from "zod";
@@ -112,16 +113,25 @@ export interface CollectorContext {
   };
 }
 
+export type CollectorCheckContext = Omit<CollectorContext, "archive">;
+
 export type CollectorEnvironment = CollectorManifest["environment"];
 
-export interface CollectorAction<TParams extends z.ZodType = z.ZodType> {
+export interface CollectorAction<
+  TParams extends z.ZodType = z.ZodType,
+  TContext = CollectorContext,
+  TResult = unknown,
+> {
   readonly description: string;
   readonly params: TParams;
-  execute(
-    context: CollectorContext,
-    params: z.output<TParams>,
-  ): Promise<unknown>;
+  execute(context: TContext, params: z.output<TParams>): Promise<TResult>;
 }
+
+type CollectorActionShape = {
+  readonly description: string;
+  readonly params: z.ZodType;
+  execute(context: never, params: never): Promise<unknown>;
+};
 
 export type CollectorActionResult = {
   readonly completedScopes: readonly string[];
@@ -135,8 +145,15 @@ export const collectorActionResultSchema = z
 
 /** 将单个动作与其 Zod 参数输出类型关联，供清单声明保持编译期类型。 */
 export function defineCollectorAction<TParams extends z.ZodType>(
-  action: CollectorAction<TParams>,
-): CollectorAction<TParams> {
+  action: CollectorAction<TParams, CollectorContext, unknown>,
+): CollectorAction<TParams, CollectorContext, unknown> {
+  return action;
+}
+
+/** 声明只能读取运行环境、不能提交归档的可用性检查动作。 */
+export function defineCollectorCheckAction<TParams extends z.ZodType>(
+  action: CollectorAction<TParams, CollectorCheckContext, ManualRunCheckInput>,
+): CollectorAction<TParams, CollectorCheckContext, ManualRunCheckInput> {
   return action;
 }
 
@@ -233,9 +250,15 @@ export function createCollectorContext(
 
 export interface CollectorDefinition<
   TConfig extends z.ZodType = z.ZodType,
-  TActions extends Readonly<Record<string, CollectorAction>> = Readonly<
-    Record<string, CollectorAction>
-  >,
+  TActions extends Readonly<Record<string, CollectorActionShape>> & {
+    readonly check: CollectorActionShape;
+  } = Readonly<Record<string, CollectorAction>> & {
+    readonly check: CollectorAction<
+      z.ZodType,
+      CollectorCheckContext,
+      ManualRunCheckInput
+    >;
+  },
 > {
   readonly id: string;
   readonly version: string;
@@ -245,20 +268,25 @@ export interface CollectorDefinition<
   readonly actions: TActions;
 }
 
-type CollectorActionShape = {
-  readonly description: string;
-  readonly params: z.ZodType;
-};
-
 type TypedCollectorActions<
-  TActions extends Readonly<Record<string, CollectorActionShape>>,
+  TActions extends Readonly<Record<string, CollectorActionShape>> & {
+    readonly check: CollectorActionShape;
+  },
 > = {
-  readonly [Name in keyof TActions]: CollectorAction<TActions[Name]["params"]>;
+  readonly [Name in keyof TActions]: Name extends "check"
+    ? CollectorAction<
+        TActions[Name]["params"],
+        CollectorCheckContext,
+        ManualRunCheckInput
+      >
+    : CollectorAction<TActions[Name]["params"], CollectorContext, unknown>;
 };
 
 export function defineCollector<
   TConfig extends z.ZodType,
-  TActions extends Readonly<Record<string, CollectorActionShape>>,
+  TActions extends Readonly<Record<string, CollectorActionShape>> & {
+    readonly check: CollectorActionShape;
+  },
 >(
   definition: Omit<
     CollectorDefinition<TConfig, TypedCollectorActions<TActions>>,
@@ -270,18 +298,27 @@ export function defineCollector<
   return definition;
 }
 
-export function collectorManifest(
-  definition: CollectorDefinition,
+export function collectorManifest<
+  TConfig extends z.ZodType,
+  TActions extends Readonly<Record<string, CollectorActionShape>> & {
+    readonly check: CollectorActionShape;
+  },
+>(
+  definition: CollectorDefinition<TConfig, TypedCollectorActions<TActions>>,
 ): CollectorManifest {
+  const manifestAction = (action: CollectorActionShape) => ({
+    description: action.description,
+    params: z.toJSONSchema(action.params, { io: "input" }),
+  });
   const actions = Object.fromEntries(
     Object.entries(definition.actions).map(([name, action]) => [
       name,
-      {
-        description: action.description,
-        params: z.toJSONSchema(action.params, { io: "input" }),
-      },
+      manifestAction(action),
     ]),
   );
+  const actionsWithRequiredCheck = Object.assign(actions, {
+    check: manifestAction(definition.actions.check),
+  });
 
   return {
     id: definition.id,
@@ -291,6 +328,6 @@ export function collectorManifest(
       : { description: definition.description }),
     environment: definition.environment,
     configSchema: z.toJSONSchema(definition.configSchema, { io: "input" }),
-    actions,
+    actions: actionsWithRequiredCheck,
   };
 }

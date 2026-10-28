@@ -16,7 +16,16 @@ export const sourceRequestSchema = z.object({
 });
 export const releaseInputSchema = z.object({
   gateKey: z.string().min(1),
-  disposition: z.enum(["material", "manual", "empty", "partial"]),
+  disposition: z.enum([
+    "material",
+    "manual",
+    "empty",
+    "partial",
+    "available",
+    "unavailable",
+    "unknown",
+    "execution-error",
+  ]),
 });
 export const sourceControlStatusSchema = z.object({
   arrivals: z.array(sourceRequestSchema),
@@ -24,10 +33,13 @@ export const sourceControlStatusSchema = z.object({
 });
 
 type SourceRequest = z.infer<typeof sourceRequestSchema>;
-type SourceDisposition = z.infer<typeof releaseInputSchema>["disposition"];
+export type SourceDisposition = z.infer<
+  typeof releaseInputSchema
+>["disposition"];
 type SourceArrival = SourceRequest;
 type PendingSourceRequest = {
   readonly request: SourceRequest;
+  readonly operation: "collect" | "check";
   readonly response: ServerResponse;
 };
 
@@ -52,13 +64,57 @@ function sendJson(
 
 function sourceMaterial(
   request: SourceRequest,
-  disposition: SourceDisposition,
+  disposition: Exclude<
+    SourceDisposition,
+    "available" | "unavailable" | "unknown" | "execution-error"
+  >,
 ): unknown {
   return {
     disposition,
     sourceKey: request.sourceKey,
     title: "受控资料 " + request.gateKey,
     text: "受控正文 " + request.gateKey,
+  };
+}
+
+function sourceCheck(
+  request: SourceRequest,
+  disposition: Exclude<
+    SourceDisposition,
+    "material" | "manual" | "empty" | "partial" | "execution-error"
+  >,
+): unknown {
+  const problem =
+    disposition === "available"
+      ? []
+      : [
+          {
+            code:
+              disposition === "unavailable"
+                ? "source_unavailable"
+                : "source_state_unknown",
+            message:
+              disposition === "unavailable"
+                ? "受控信源当前无法读取。"
+                : "受控信源没有提供足够信息判断是否可读取。",
+            impact: "当前范围 " + request.sourceKey + " 尚未确认可采集。",
+            suggestion:
+              disposition === "unavailable"
+                ? "检查信源连接和访问身份后重新触发 check。"
+                : "完成信源维护后重新触发 check 或 collect。",
+            requiresHuman: true,
+          },
+        ];
+  return {
+    availability: disposition,
+    scope: ["source/" + request.sourceKey],
+    basis:
+      disposition === "available"
+        ? "受控信源确认当前范围可读取。"
+        : disposition === "unavailable"
+          ? "受控信源明确拒绝读取当前范围。"
+          : "受控信源没有返回足够信息作出判断。",
+    problems: problem,
   };
 }
 
@@ -96,11 +152,38 @@ export async function startControlledSource(
         const waiting = pending.get(parsed.data.gateKey);
         if (waiting !== undefined) {
           pending.delete(parsed.data.gateKey);
-          sendJson(
-            waiting.response,
-            200,
-            sourceMaterial(waiting.request, parsed.data.disposition),
-          );
+          if (parsed.data.disposition === "execution-error") {
+            sendJson(waiting.response, 503, {
+              error: "受控信源未能完成请求。",
+            });
+          } else if (waiting.operation === "check") {
+            if (
+              parsed.data.disposition === "available" ||
+              parsed.data.disposition === "unavailable" ||
+              parsed.data.disposition === "unknown"
+            ) {
+              sendJson(
+                waiting.response,
+                200,
+                sourceCheck(waiting.request, parsed.data.disposition),
+              );
+            } else {
+              sendJson(waiting.response, 400, { error: "检查结果类型无效。" });
+            }
+          } else if (
+            parsed.data.disposition === "material" ||
+            parsed.data.disposition === "manual" ||
+            parsed.data.disposition === "empty" ||
+            parsed.data.disposition === "partial"
+          ) {
+            sendJson(
+              waiting.response,
+              200,
+              sourceMaterial(waiting.request, parsed.data.disposition),
+            );
+          } else {
+            sendJson(waiting.response, 400, { error: "采集结果类型无效。" });
+          }
         }
         sendJson(response, 200, { released: parsed.data.gateKey });
         return;
@@ -115,8 +198,17 @@ export async function startControlledSource(
         const sourceRequest = parsed.data;
         sourceArrivals.push(sourceRequest);
         const disposition = released.get(sourceRequest.gateKey);
-        if (disposition !== undefined) {
+        if (
+          disposition === "material" ||
+          disposition === "manual" ||
+          disposition === "empty" ||
+          disposition === "partial"
+        ) {
           sendJson(response, 200, sourceMaterial(sourceRequest, disposition));
+          return;
+        }
+        if (disposition !== undefined) {
+          sendJson(response, 400, { error: "采集结果类型无效。" });
           return;
         }
         if (pending.has(sourceRequest.gateKey)) {
@@ -125,6 +217,49 @@ export async function startControlledSource(
         }
         pending.set(sourceRequest.gateKey, {
           request: sourceRequest,
+          operation: "collect",
+          response,
+        });
+        response.once("close", () => {
+          const current = pending.get(sourceRequest.gateKey);
+          if (current?.response === response)
+            pending.delete(sourceRequest.gateKey);
+        });
+        return;
+      }
+
+      if (request.method === "POST" && request.url === "/source/check") {
+        const parsed = sourceRequestSchema.safeParse(await readJson(request));
+        if (!parsed.success) {
+          sendJson(response, 400, { error: "检查请求格式无效。" });
+          return;
+        }
+        const sourceRequest = parsed.data;
+        sourceArrivals.push(sourceRequest);
+        const disposition = released.get(sourceRequest.gateKey);
+        if (
+          disposition === "available" ||
+          disposition === "unavailable" ||
+          disposition === "unknown"
+        ) {
+          sendJson(response, 200, sourceCheck(sourceRequest, disposition));
+          return;
+        }
+        if (disposition === "execution-error") {
+          sendJson(response, 503, { error: "受控信源未能完成检查。" });
+          return;
+        }
+        if (disposition !== undefined) {
+          sendJson(response, 400, { error: "检查结果类型无效。" });
+          return;
+        }
+        if (pending.has(sourceRequest.gateKey)) {
+          sendJson(response, 409, { error: "信源范围已有等待中的请求。" });
+          return;
+        }
+        pending.set(sourceRequest.gateKey, {
+          request: sourceRequest,
+          operation: "check",
           response,
         });
         response.once("close", () => {

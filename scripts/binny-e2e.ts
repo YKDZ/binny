@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,13 +49,20 @@ function composePrefix(): readonly string[] {
 
 function composeEnvironment(): Readonly<Record<string, string>> {
   return {
-    BINNY_PORT: String(composePort),
     BINNY_IMAGE: imageName,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
-    BINNY15_SOURCE_HOST_PORT: String(manualRunSourcePort),
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
+}
+
+function apiBaseUrl(): string {
+  return (
+    "http://" +
+    (process.env.BINNY_E2E_HOST ?? "172.17.0.1") +
+    ":" +
+    String(composePort)
+  );
 }
 
 function run(
@@ -90,12 +96,9 @@ function run(
   });
 }
 
-async function compose(
-  args: readonly string[],
-  port: number,
-): Promise<ProcessResult> {
+async function compose(args: readonly string[]): Promise<ProcessResult> {
   const result = await run("docker", [...composePrefix(), ...args], {
-    env: { ...composeEnvironment(), BINNY_PORT: String(port) },
+    env: composeEnvironment(),
   });
   if (result.code !== 0) {
     throw new Error(
@@ -183,23 +186,6 @@ function startManagedProcess(
   };
 }
 
-async function reservePort(): Promise<number> {
-  const listener = createServer();
-  await new Promise<void>((resolveListen, reject) => {
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = listener.address();
-  assert.ok(address !== null && typeof address !== "string");
-  const port = address.port;
-  await new Promise<void>((resolveClose, reject) => {
-    listener.close((error) =>
-      error === undefined ? resolveClose() : reject(error),
-    );
-  });
-  return port;
-}
-
 async function cli(
   _baseUrl: string,
   args: readonly string[],
@@ -217,6 +203,25 @@ async function cli(
     ],
     { env: composeEnvironment() },
   );
+}
+
+async function publishedPort(
+  service: string,
+  containerPort: number,
+): Promise<number> {
+  const mapping = (
+    await compose(["port", service, String(containerPort)])
+  ).stdout.trim();
+  const portText = /:(\d+)$/u.exec(mapping)?.[1];
+  const port = Number(portText);
+  assert.ok(
+    portText !== undefined &&
+      Number.isInteger(port) &&
+      port > 0 &&
+      port <= 65_535,
+    `Compose 没有为 ${service}:${String(containerPort)} 返回有效宿主端口：${mapping}`,
+  );
+  return port;
 }
 
 function cliData<T>(result: ProcessResult, variant: string): T {
@@ -457,19 +462,16 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
   };
 }
 
-async function resourceFiles(port: number): Promise<readonly string[]> {
-  const result = await compose(
-    [
-      "exec",
-      "--no-TTY",
-      "server",
-      "node",
-      "--input-type=module",
-      "-e",
-      'import { readdir } from "node:fs/promises"; process.stdout.write(JSON.stringify(await readdir("/var/lib/binny/resources")));',
-    ],
-    port,
-  );
+async function resourceFiles(): Promise<readonly string[]> {
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    "server",
+    "node",
+    "--input-type=module",
+    "-e",
+    'import { readdir } from "node:fs/promises"; process.stdout.write(JSON.stringify(await readdir("/var/lib/binny/resources")));',
+  ]);
   const files: unknown = JSON.parse(result.stdout);
   assert.ok(Array.isArray(files));
   assert.ok(files.every((file) => typeof file === "string"));
@@ -493,10 +495,7 @@ async function waitFor<T>(
   );
 }
 
-async function waitForBlockedQuery(
-  port: number,
-  queryFragment: string,
-): Promise<void> {
+async function waitForBlockedQuery(queryFragment: string): Promise<void> {
   await waitFor(
     async () => {
       const result = await compose(
@@ -504,7 +503,6 @@ async function waitForBlockedQuery(
           "-c",
           `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%${queryFragment}%';`,
         ]).slice(composePrefix().length),
-        port,
       );
       return Number(result.stdout.trim());
     },
@@ -513,11 +511,10 @@ async function waitForBlockedQuery(
   );
 }
 
-async function restartServer(port: number): Promise<void> {
-  await compose(
-    ["up", "--detach", "--wait", "--wait-timeout", "90", "server"],
-    port,
-  );
+async function restartServer(): Promise<string> {
+  await compose(["up", "--detach", "--wait", "--wait-timeout", "90", "server"]);
+  composePort = await publishedPort("server", 3000);
+  return apiBaseUrl();
 }
 
 function resourceUploadProcess(): ManagedProcess {
@@ -578,10 +575,10 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
 
 async function verifyResourceStorageInterruptions(
   baseUrl: string,
-  port: number,
   archive: string,
-): Promise<void> {
-  const filesBeforePublish = await resourceFiles(port);
+): Promise<string> {
+  let currentBaseUrl = baseUrl;
+  const filesBeforePublish = await resourceFiles();
   let publishLock: HeldTableLock | undefined;
   let publishRequest: ManagedProcess | undefined;
   let publishServerNeedsRestart = false;
@@ -590,7 +587,7 @@ async function verifyResourceStorageInterruptions(
     publishRequest = resourceUploadProcess();
     await publishRequest.waitForMarker("BINNY04_UPLOAD_STARTED");
     const publishedFiles = await waitFor(
-      () => resourceFiles(port),
+      () => resourceFiles(),
       (files) => files.some((file) => !filesBeforePublish.includes(file)),
       "资源文件在登记前发布到持久目录",
     );
@@ -600,19 +597,19 @@ async function verifyResourceStorageInterruptions(
     assert.equal(newPublishedFiles.length, 1);
     const publishedFile = newPublishedFiles[0];
     assert.ok(publishedFile);
-    await waitForBlockedQuery(port, "INSERT INTO archive_resource");
+    await waitForBlockedQuery("INSERT INTO archive_resource");
     assert.doesNotMatch(publishRequest.stdout(), /BINNY04_UPLOAD_RESPONSE/u);
 
-    await compose(["kill", "-s", "SIGKILL", "server"], port);
+    await compose(["kill", "-s", "SIGKILL", "server"]);
     publishServerNeedsRestart = true;
     await publishLock.release();
     publishLock = undefined;
     const interruptedUpload = await publishRequest.waitForClose();
     assert.notEqual(interruptedUpload.code, 0);
-    await restartServer(port);
+    currentBaseUrl = await restartServer();
     publishServerNeedsRestart = false;
-    await waitForApiAndDatabase(baseUrl);
-    const filesAfterPublishRecovery = await resourceFiles(port);
+    await waitForApiAndDatabase(currentBaseUrl);
+    const filesAfterPublishRecovery = await resourceFiles();
     assert.ok(!filesAfterPublishRecovery.includes(publishedFile));
   } finally {
     if (
@@ -620,7 +617,7 @@ async function verifyResourceStorageInterruptions(
       publishRequest.child.exitCode === null
     ) {
       if (!publishServerNeedsRestart) {
-        await compose(["kill", "-s", "SIGKILL", "server"], port);
+        await compose(["kill", "-s", "SIGKILL", "server"]);
         publishServerNeedsRestart = true;
       }
     }
@@ -631,13 +628,13 @@ async function verifyResourceStorageInterruptions(
     ) {
       await publishRequest.waitForClose();
     }
-    if (publishServerNeedsRestart) await restartServer(port);
+    if (publishServerNeedsRestart) currentBaseUrl = await restartServer();
   }
 
   const referenceBytes = new TextEncoder().encode(
     "binny15 committed upload survives interrupted reference registration",
   );
-  const uploadResponse = await fetch(baseUrl + "/resources", {
+  const uploadResponse = await fetch(currentBaseUrl + "/resources", {
     method: "POST",
     headers: { "content-type": "application/octet-stream" },
     body: referenceBytes,
@@ -656,23 +653,23 @@ async function verifyResourceStorageInterruptions(
     referenceLock = await holdTableShareLock("archive_revision_resource");
     referenceRequest = archiveReferenceProcess(uploaded.resourceId);
     await referenceRequest.waitForMarker("BINNY04_REFERENCE_STARTED");
-    await waitForBlockedQuery(port, "INSERT INTO archive_revision_resource");
+    await waitForBlockedQuery("INSERT INTO archive_revision_resource");
     assert.doesNotMatch(
       referenceRequest.stdout(),
       /BINNY04_REFERENCE_RESPONSE/u,
     );
 
-    await compose(["kill", "-s", "SIGKILL", "server"], port);
+    await compose(["kill", "-s", "SIGKILL", "server"]);
     referenceServerNeedsRestart = true;
     await referenceLock.release();
     referenceLock = undefined;
     const interruptedReference = await referenceRequest.waitForClose();
     assert.notEqual(interruptedReference.code, 0);
-    await restartServer(port);
+    currentBaseUrl = await restartServer();
     referenceServerNeedsRestart = false;
-    await waitForApiAndDatabase(baseUrl);
+    await waitForApiAndDatabase(currentBaseUrl);
     const resourceRead = await fetch(
-      baseUrl + "/resources/" + uploaded.resourceId,
+      currentBaseUrl + "/resources/" + uploaded.resourceId,
     );
     assert.equal(resourceRead.status, 200);
     assert.deepEqual(
@@ -682,7 +679,7 @@ async function verifyResourceStorageInterruptions(
 
     const archiveIdsValue = archiveIds(archive);
     const historicalResource = await fetch(
-      baseUrl + "/resources/" + archiveIdsValue.resourceId,
+      currentBaseUrl + "/resources/" + archiveIdsValue.resourceId,
     );
     assert.equal(historicalResource.status, 200);
     assert.deepEqual(
@@ -696,7 +693,7 @@ async function verifyResourceStorageInterruptions(
       referenceRequest.child.exitCode === null
     ) {
       if (!referenceServerNeedsRestart) {
-        await compose(["kill", "-s", "SIGKILL", "server"], port);
+        await compose(["kill", "-s", "SIGKILL", "server"]);
         referenceServerNeedsRestart = true;
       }
     }
@@ -707,13 +704,14 @@ async function verifyResourceStorageInterruptions(
     ) {
       await referenceRequest.waitForClose();
     }
-    if (referenceServerNeedsRestart) await restartServer(port);
+    if (referenceServerNeedsRestart) currentBaseUrl = await restartServer();
   }
 
   const gracePeriodMs = Number(
     composeEnvironment().BINNY_RESOURCE_UNREFERENCED_AGE_MS,
   );
   await new Promise((resolveGrace) => setTimeout(resolveGrace, gracePeriodMs));
+  return currentBaseUrl;
 }
 
 async function validateApiInput(): Promise<void> {
@@ -756,7 +754,7 @@ async function validateApiInput(): Promise<void> {
 async function createSdkManifest(): Promise<unknown> {
   const program = [
     'import { z } from "zod";',
-    'import { collectorManifest, defineCollector } from "./dist/index.js";',
+    'import { collectorManifest, defineCollector, defineCollectorCheckAction } from "./dist/index.js";',
     "const collector = defineCollector({",
     '  id: "rss",',
     '  version: "1.0.0",',
@@ -765,6 +763,7 @@ async function createSdkManifest(): Promise<unknown> {
     "    key: z.string().regex(/^a/).regex(/z$/),",
     "  }),",
     "  actions: {",
+    '    check: defineCollectorCheckAction({ description: "检查测试信源配置。", params: z.object({}), execute: async () => ({ availability: "unknown", scope: ["test-source"], basis: "验收用 RSS 清单没有连接真实信源。", problems: [{ code: "test_source_unconfigured", message: "验收用 RSS 清单没有连接真实信源。", impact: "无法判断真实订阅源是否可用。", suggestion: "配置真实订阅源后重新触发 check。", requiresHuman: false }] }) }),',
     '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
     "  },",
     "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
@@ -869,11 +868,16 @@ async function waitForSourceArrival(
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
+  disposition:
+    | "material"
+    | "available"
+    | "unavailable"
+    | "unknown" = "material",
 ): Promise<void> {
   const response = await fetch(sourceUrl + "/control/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ gateKey, disposition: "material" }),
+    body: JSON.stringify({ gateKey, disposition }),
     signal: AbortSignal.timeout(3_000),
   });
   assert.equal(response.status, 200);
@@ -916,6 +920,16 @@ type ManualRunCliState = {
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
+    readonly check?: {
+      readonly availability: "available" | "unavailable" | "unknown";
+      readonly checkedAt: string;
+      readonly scope: readonly string[];
+      readonly basis: string;
+      readonly problems: readonly {
+        readonly suggestion: string;
+        readonly requiresHuman: boolean;
+      }[];
+    };
   };
 };
 
@@ -1030,6 +1044,105 @@ async function manualRunsCliStep(
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
+
+  const checkGateKey = "16-cli-check-unknown";
+  const checkTriggered = cliData<{
+    readonly runId: string;
+    readonly status: string;
+    readonly binId: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "check",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: checkGateKey,
+        sourceKey: "cli-check-scope",
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(checkTriggered.status, "queued");
+  await waitForSourceArrival(
+    sourceControlUrl,
+    checkGateKey,
+    checkTriggered.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, checkGateKey, "unknown");
+
+  const checkDeadline = Date.now() + 30_000;
+  let checkedRun: ManualRunCliState | undefined;
+  while (Date.now() < checkDeadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", "binny15-one", checkTriggered.runId]),
+      "found",
+    );
+    if (current.status === "completed" || current.status === "failed") {
+      checkedRun = current;
+      break;
+    }
+    await wait(100);
+  }
+  assert.ok(checkedRun !== undefined, "CLI 没有读取到 check 终结结果。");
+  assert.equal(checkedRun.status, "completed");
+  assert.equal(checkedRun.result?.check?.availability, "unknown");
+  assert.deepEqual(checkedRun.result?.commits, []);
+  assert.ok(
+    (checkedRun.result?.check?.problems[0]?.suggestion.length ?? 0) > 0,
+  );
+  assert.equal(checkedRun.result?.stopReason.code, "completed");
+
+  const followUpGateKey = "16-cli-collect-after-check";
+  const followUp = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: followUpGateKey,
+        sourceKey: "cli-after-check",
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    followUpGateKey,
+    followUp.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, followUpGateKey);
+  const followUpDeadline = Date.now() + 30_000;
+  let collectedAfterCheck: ManualRunCliState | undefined;
+  while (Date.now() < followUpDeadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", "binny15-one", followUp.runId]),
+      "found",
+    );
+    if (current.status === "completed" || current.status === "failed") {
+      collectedAfterCheck = current;
+      break;
+    }
+    await wait(100);
+  }
+  assert.ok(
+    collectedAfterCheck !== undefined,
+    "最近 check 结果之后没有产生新的 collect 运行结果。",
+  );
+  assert.equal(collectedAfterCheck.status, "completed");
+  assert.deepEqual(collectedAfterCheck.result?.completedScopes, [
+    "source/cli-after-check",
+  ]);
 }
 
 async function manualRunsHttpStep(
@@ -1104,7 +1217,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
     readonly environment: { readonly browser: { readonly required: boolean } };
     readonly execution: { readonly status: string };
   }>(await cli(baseUrl, ["bin", "actions", "rss-main"]), "discovered");
-  assert.deepEqual(Object.keys(discovered.actions), ["collect"]);
+  assert.deepEqual(Object.keys(discovered.actions), ["check", "collect"]);
   assert.equal(discovered.environment.browser.required, false);
   assert.equal(discovered.execution.status, "offline");
 
@@ -1313,18 +1426,19 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
 
 async function verifyRestartAndRemoval(
   baseUrl: string,
-  port: number,
   archive: string,
   sdkResource: string,
-): Promise<void> {
+): Promise<string> {
   const disabled = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["bin", "disable", "rss-main"]),
     "disabled",
   );
   assert.equal(disabled.status, "disabled");
-  await compose(["restart", "postgres"], port);
+  await compose(["restart", "postgres"]);
   await waitForApiAndDatabase(baseUrl);
-  await compose(["restart", "server"], port);
+  await compose(["restart", "server"]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
   const persisted = cliData<{
@@ -1575,10 +1689,7 @@ async function verifyRestartAndRemoval(
     );
     assert.equal(downloaded.mediaType, "image/svg+xml");
     assert.equal(downloaded.sha256, expectedArchive.sdkResourceMetadata.sha256);
-    await compose(
-      ["cp", `server:${containerResourcePath}`, localResourcePath],
-      port,
-    );
+    await compose(["cp", `server:${containerResourcePath}`, localResourcePath]);
     assert.deepEqual(
       await readFile(localResourcePath),
       Buffer.from("collector sdk image v1"),
@@ -1586,10 +1697,14 @@ async function verifyRestartAndRemoval(
   } finally {
     await rm(downloadDirectory, { recursive: true, force: true });
   }
-  await compose(
-    ["exec", "--no-TTY", "server", "rm", "-f", containerResourcePath],
-    port,
-  );
+  await compose([
+    "exec",
+    "--no-TTY",
+    "server",
+    "rm",
+    "-f",
+    containerResourcePath,
+  ]);
 
   const cliFirstTimelinePage = cliData<{ readonly nextCursor?: string }>(
     await cli(baseUrl, [
@@ -1664,14 +1779,10 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(cliArchiveCommit, expectedArchive.commit);
   await validateApiInput();
+  return baseUrl;
 }
 
 async function main(): Promise<void> {
-  const port = await reservePort();
-  composePort = port;
-  manualRunSourcePort = await reservePort();
-  const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
-  const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
     path.join(tmpdir(), "binny09-compose-"),
   );
@@ -1680,6 +1791,13 @@ async function main(): Promise<void> {
   await writeFile(
     composeOverrideFile,
     [
+      "services:",
+      "  server:",
+      "    ports: !override",
+      '      - "3000"',
+      "  manual-runs-source:",
+      "    ports: !override",
+      '      - "8081"',
       "networks:",
       "  default:",
       "    ipam:",
@@ -1692,22 +1810,22 @@ async function main(): Promise<void> {
   let acceptanceFailed = false;
   let acceptanceError: unknown;
   try {
-    await compose(
-      [
-        "up",
-        "--detach",
-        "--build",
-        "--wait",
-        "--wait-timeout",
-        "360",
-        "postgres",
-        "server",
-        "manual-runs-source",
-        "runtime-fifteen-one",
-        "runtime-fifteen-two",
-      ],
-      port,
-    );
+    await compose([
+      "up",
+      "--detach",
+      "--build",
+      "--wait",
+      "--wait-timeout",
+      "360",
+      "postgres",
+      "server",
+      "manual-runs-source",
+      "runtime-fifteen-one",
+      "runtime-fifteen-two",
+    ]);
+    composePort = await publishedPort("server", 3000);
+    manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
     const isolatedClient = await verifyIsolatedApiConsumer({
       repositoryRoot,
@@ -1735,8 +1853,8 @@ async function main(): Promise<void> {
     assert.equal(enabled.status, "active");
     const archive = await archiveHttpStep("submit", baseUrl);
     const sdkResource = await sdkResourceStep(baseUrl);
-    await verifyResourceStorageInterruptions(baseUrl, port, archive);
-    await verifyRestartAndRemoval(baseUrl, port, archive, sdkResource);
+    baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
+    baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
     process.stdout.write(
       "隔离客户端、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
     );

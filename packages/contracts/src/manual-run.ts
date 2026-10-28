@@ -49,12 +49,56 @@ export const manualRunFailureSchema = z
   })
   .strict();
 
+const manualRunCheckFieldsSchema = z
+  .object({
+    availability: z.enum(["available", "unavailable", "unknown"]),
+    scope: z.array(postgresTextSchema.min(1)),
+    basis: postgresTextSchema.min(1),
+    problems: z.array(
+      z
+        .object({
+          code: postgresTextSchema.min(1).max(128),
+          message: postgresTextSchema.min(1),
+          impact: postgresTextSchema.min(1),
+          path: failurePathSchema.optional(),
+          suggestion: postgresTextSchema.min(1),
+          requiresHuman: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+function requireCheckProblemWhenUnavailable(
+  check: z.infer<typeof manualRunCheckFieldsSchema>,
+  context: z.RefinementCtx,
+): void {
+  if (check.availability !== "available" && check.problems.length === 0) {
+    context.addIssue({
+      code: "custom",
+      path: ["problems"],
+      message: "不可用或无法判断时必须说明问题和处理建议。",
+    });
+  }
+}
+
+export const manualRunCheckInputSchema = withPostgresJsonSchemaProjection(
+  manualRunCheckFieldsSchema.superRefine(requireCheckProblemWhenUnavailable),
+);
+
+export const manualRunCheckResultSchema = withPostgresJsonSchemaProjection(
+  manualRunCheckFieldsSchema
+    .extend({ checkedAt: z.iso.datetime() })
+    .superRefine(requireCheckProblemWhenUnavailable),
+);
+
 export const manualRunCompletionSchema = z.discriminatedUnion("status", [
   withPostgresJsonSchemaProjection(
     z
       .object({
         status: z.literal("completed"),
         completedScopes: z.array(postgresTextSchema),
+        check: manualRunCheckInputSchema.optional(),
       })
       .strict(),
   ),
@@ -101,6 +145,7 @@ export const manualRunResultSchema = z
   .object({
     completedScopes: z.array(postgresTextSchema),
     commits: z.array(manualRunCommitLocatorSchema),
+    check: manualRunCheckResultSchema.optional(),
     stopReason: z
       .object({
         code: postgresTextSchema.min(1),
@@ -178,6 +223,8 @@ export type ManualRunFailure = z.infer<typeof manualRunFailureSchema>;
 export type ManualRunCompletion = z.infer<typeof manualRunCompletionSchema>;
 export type ManualRun = z.infer<typeof manualRunSchema>;
 export type ManualRunExecution = z.infer<typeof manualRunExecutionSchema>;
+export type ManualRunCheckInput = z.infer<typeof manualRunCheckInputSchema>;
+export type ManualRunCheckResult = z.infer<typeof manualRunCheckResultSchema>;
 export type ManualRunClaim = z.infer<typeof manualRunClaimSchema>;
 export type ManualRunCommitLocator = z.infer<
   typeof manualRunCommitLocatorSchema
