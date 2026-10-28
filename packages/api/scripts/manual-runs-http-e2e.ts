@@ -100,7 +100,11 @@ async function createConcurrencyBin(binId: string): Promise<void> {
   assert.fail(`并发验收 bin 创建失败：${result.error.code}`);
 }
 
-async function heartbeat(binId: string, runtimeId: string): Promise<void> {
+async function heartbeat(
+  binId: string,
+  runtimeId: string,
+  stoppedRunId?: string,
+): Promise<void> {
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
@@ -109,6 +113,7 @@ async function heartbeat(binId: string, runtimeId: string): Promise<void> {
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
+      ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
       collector: manifest,
       environment: {
         kind: "lightweight",
@@ -272,7 +277,7 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
     assert.equal(pendingStop.status, "cancelling");
     assert.equal(pendingStop.stopConfirmedAt, undefined);
 
-    await heartbeat(binId, runtimeId);
+    await heartbeat(binId, runtimeId, queued.runId);
     const stopped = await readRun(binId, queued.runId);
     assert.equal(stopped.status, "cancelled");
     assert.ok(stopped.stopConfirmedAt);

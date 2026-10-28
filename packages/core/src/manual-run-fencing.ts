@@ -126,52 +126,75 @@ export async function lockManualRunForArchiveWrite(
   return false;
 }
 
-/** 仅在 controller 已等待真实 worker 进程退出后，由 runtime heartbeat 调用。 */
+/** 仅在 controller 已等待指定 run 的真实 worker 退出后，由 runtime heartbeat 调用。 */
 export async function confirmManualRunOwnerStopped(
   transaction: CoreTransaction,
   binId: string,
   runtimeId: string,
-): Promise<void> {
-  const active = await transaction.unsafe<
+  runId: string,
+): Promise<boolean> {
+  const rows = await transaction.unsafe<
     {
-      readonly run_id: string;
-      readonly status: "executing" | "cancelling";
+      readonly status: string;
       readonly cancel_requested_at: Date | null;
+      readonly stop_confirmed_at: Date | null;
+      readonly failure: { readonly code?: unknown } | null;
     }[]
   >(
-    "SELECT run_id, status, cancel_requested_at FROM manual_runs " +
-      "WHERE bin_id = $1 AND runtime_id = $2 " +
-      "AND status IN ('executing', 'cancelling') FOR UPDATE",
-    [binId, runtimeId],
+    "SELECT status, cancel_requested_at, stop_confirmed_at, failure " +
+      "FROM manual_runs WHERE bin_id = $1 AND runtime_id = $2 AND run_id = $3 FOR UPDATE",
+    [binId, runtimeId, runId],
   );
-  for (const run of active) {
+  const run = rows[0];
+  if (run === undefined) return false;
+
+  let confirmed = run.stop_confirmed_at !== null;
+  if (run.status === "executing" || run.status === "cancelling") {
     await transaction.unsafe(
       "UPDATE manual_runs SET status = CASE WHEN cancel_requested_at IS NULL " +
         "THEN 'failed' ELSE 'cancelled' END, " +
         "failure = CASE WHEN cancel_requested_at IS NULL THEN $2 ELSE NULL END, " +
         "finished_at = clock_timestamp(), stop_confirmed_at = clock_timestamp() " +
-        "WHERE run_id = $1",
-      [run.run_id, transaction.json(interruptedFailure)],
+        "WHERE bin_id = $1 AND runtime_id = $3 AND run_id = $4 " +
+        "AND status IN ('executing', 'cancelling')",
+      [binId, transaction.json(interruptedFailure), runtimeId, runId],
     );
+    confirmed = true;
   }
-  await transaction.unsafe(
-    "UPDATE manual_runs SET status = CASE WHEN cancel_requested_at IS NULL " +
-      "THEN status ELSE 'cancelled' END, " +
-      "failure = CASE WHEN cancel_requested_at IS NULL THEN failure ELSE NULL END, " +
-      "finished_at = CASE WHEN cancel_requested_at IS NULL THEN finished_at ELSE clock_timestamp() END, " +
-      "stop_confirmed_at = clock_timestamp() " +
-      "WHERE bin_id = $1 AND runtime_id = $2 AND status = 'failed' " +
-      "AND failure->>'code' = 'runtime_interrupted' AND stop_confirmed_at IS NULL",
+  if (
+    run.status === "failed" &&
+    run.failure?.code === "runtime_interrupted" &&
+    run.stop_confirmed_at === null
+  ) {
+    const updated = await transaction.unsafe<{ readonly run_id: string }[]>(
+      "UPDATE manual_runs SET status = CASE WHEN cancel_requested_at IS NULL " +
+        "THEN status ELSE 'cancelled' END, " +
+        "failure = CASE WHEN cancel_requested_at IS NULL THEN failure ELSE NULL END, " +
+        "finished_at = CASE WHEN cancel_requested_at IS NULL THEN finished_at ELSE clock_timestamp() END, " +
+        "stop_confirmed_at = clock_timestamp() " +
+        "WHERE bin_id = $1 AND runtime_id = $2 AND run_id = $3 " +
+        "AND status = 'failed' AND failure->>'code' = 'runtime_interrupted' " +
+        "AND stop_confirmed_at IS NULL RETURNING run_id",
+      [binId, runtimeId, runId],
+    );
+    confirmed = updated.length > 0;
+  }
+  if (!confirmed) return false;
+
+  const unresolvedRuns = await transaction.unsafe<
+    { readonly run_id: string }[]
+  >(
+    "SELECT run_id FROM manual_runs WHERE bin_id = $1 AND (" +
+      "status IN ('executing', 'cancelling') OR " +
+      "(status = 'failed' AND failure->>'code' = 'runtime_interrupted' " +
+      "AND stop_confirmed_at IS NULL)) LIMIT 1",
+    [binId],
+  );
+  if (unresolvedRuns.length > 0) return false;
+  const owners = await transaction.unsafe<{ readonly bin_id: string }[]>(
+    "UPDATE runtime_connections SET owner_state = 'confirmed' " +
+      "WHERE bin_id = $1 AND runtime_id = $2 RETURNING bin_id",
     [binId, runtimeId],
   );
-  const stillActive = await transaction.unsafe<{ readonly run_id: string }[]>(
-    "SELECT run_id FROM manual_runs WHERE bin_id = $1 " +
-      "AND status IN ('executing', 'cancelling') LIMIT 1",
-    [binId],
-  );
-  if (stillActive.length > 0) return;
-  await transaction.unsafe(
-    "UPDATE runtime_connections SET owner_state = 'confirmed' WHERE bin_id = $1",
-    [binId],
-  );
+  return owners.length > 0;
 }

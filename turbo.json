@@ -42,12 +42,17 @@
         "@binny/binny#build",
         "@binny/collector-sdk#build"
       ],
-      "passThroughEnv": ["BINNY_E2E_HOST", "BINNY_E2E_SUBNET"],
+      "passThroughEnv": [
+        "BINNY_E2E_HOST",
+        "BINNY_E2E_SUBNET",
+        "BINNY_E2E_RUNTIME_SUBNET"
+      ],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
         "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
+        "scripts/binny-e2e-heartbeat-proxy.ts",
         "packages/api/package.json",
         "packages/api/src/**",
         "packages/api/scripts/**",

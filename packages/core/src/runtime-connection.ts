@@ -331,7 +331,11 @@ export function createRuntimeConnectionStore(
           current?.runtime_id != null &&
           current.runtime_id !== checked.data.runtimeId
         ) {
-          if (checked.data.activeRunId !== null || checked.data.claimInFlight) {
+          if (
+            checked.data.activeRunId !== null ||
+            checked.data.claimInFlight ||
+            checked.data.stoppedRunId !== undefined
+          ) {
             return failure(409, {
               code: "runtime_owner_mismatch",
               message: "新运行器尚未确认旧执行进程已经退出。",
@@ -344,16 +348,14 @@ export function createRuntimeConnectionStore(
             current.runtime_id,
           );
           ownerState = "confirmed";
-        } else if (
-          checked.data.activeRunId === null &&
-          !checked.data.claimInFlight
-        ) {
-          await confirmManualRunOwnerStopped(
+        } else if (checked.data.stoppedRunId !== undefined) {
+          const stopped = await confirmManualRunOwnerStopped(
             transaction,
             binId,
             checked.data.runtimeId,
+            checked.data.stoppedRunId,
           );
-          ownerState = "confirmed";
+          if (stopped) ownerState = "confirmed";
         }
 
         await transaction.unsafe(
@@ -403,11 +405,6 @@ export function createRuntimeConnectionStore(
             message: "没有找到这个 bin。",
             path: ["binId"],
           });
-        await confirmManualRunOwnerStopped(
-          transaction,
-          binId,
-          checked.data.runtimeId,
-        );
         await transaction.unsafe(
           "UPDATE " +
             tableName +

@@ -146,6 +146,7 @@ let heartbeatInFlight: Promise<void> | undefined;
 let runInFlight: Promise<void> | undefined;
 let activeWorker: ActionWorker | undefined;
 let activeRunId: string | null = null;
+let pendingStoppedRunId: string | undefined;
 let claimInFlight = false;
 let stopping: Promise<void> | undefined;
 let lastStatus: string | undefined;
@@ -394,15 +395,28 @@ async function awaitExecutionPermission(
 async function executeRun(run: ManualRunExecution): Promise<void> {
   const permission = await awaitExecutionPermission(run);
   if (permission === "terminal") return;
-  if (permission === "cancel") return;
+  if (permission === "cancel") {
+    await acknowledgeStoppedRun(run.runId);
+    return;
+  }
   if (permission === "shutdown") {
     const current = await readRun(run);
-    if (current?.status !== "cancelling")
+    if (current?.status === "cancelling") {
+      await acknowledgeStoppedRun(run.runId);
+    } else if (current?.status === "executing") {
       await finishRun(run, interruptFailure());
+    }
     return;
   }
 
   let worker: ActionWorker | undefined;
+  let workerStopped = false;
+  async function stopWorker(): Promise<void> {
+    if (worker === undefined || workerStopped) return;
+    await stopActionWorker(worker);
+    workerStopped = true;
+    if (activeWorker === worker) activeWorker = undefined;
+  }
   try {
     worker = startActionWorker();
     activeWorker = worker;
@@ -415,16 +429,22 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       })(),
     ]);
     const afterStart = await awaitExecutionPermission(run);
-    if (afterStart === "terminal") return;
+    if (afterStart === "terminal") {
+      await stopWorker();
+      await acknowledgeStoppedRun(run.runId);
+      return;
+    }
     if (afterStart === "cancel") {
-      await stopActionWorker(worker);
+      await stopWorker();
+      await acknowledgeStoppedRun(run.runId);
       return;
     }
     if (afterStart === "shutdown") {
-      await stopActionWorker(worker);
+      await stopWorker();
       const current = await readRun(run);
       if (current?.status !== "cancelling")
         await finishRun(run, interruptFailure());
+      await acknowledgeStoppedRun(run.runId);
       return;
     }
 
@@ -435,14 +455,15 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         delay(250).then(() => undefined),
       ]);
       if (outcome?.type === "completion") {
-        await stopActionWorker(worker);
+        await stopWorker();
         const current = await readRun(run);
         if (current?.status === "executing")
           await finishRun(run, outcome.completion);
+        await acknowledgeStoppedRun(run.runId);
         return;
       }
       if (outcome?.type === "exit") {
-        await stopActionWorker(worker);
+        await stopWorker();
         const current = await readRun(run);
         if (current?.status === "executing")
           await finishRun(run, {
@@ -456,52 +477,65 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
               requiresHuman: false,
             },
           });
+        await acknowledgeStoppedRun(run.runId);
         return;
       }
 
       const current = await readRun(run);
       if (current?.status === "cancelling") {
-        await stopActionWorker(worker);
+        await stopWorker();
+        await acknowledgeStoppedRun(run.runId);
         return;
       }
       if (current !== undefined && current.status !== "executing") {
-        await stopActionWorker(worker);
+        await stopWorker();
+        await acknowledgeStoppedRun(run.runId);
         return;
       }
       if (stopping !== undefined) {
-        await stopActionWorker(worker);
+        await stopWorker();
         const afterStop = await readRun(run);
         if (afterStop?.status !== "cancelling")
           await finishRun(run, interruptFailure());
+        await acknowledgeStoppedRun(run.runId);
         return;
       }
     }
   } catch (error) {
-    if (worker !== undefined) await stopActionWorker(worker);
+    await stopWorker();
     const current = await readRun(run);
     if (current?.status === "executing") {
-      await finishRun(run, {
-        status: "failed",
-        completedScopes: [],
-        error: {
-          code: "collector_process_start_failed",
-          message: "无法启动隔离的采集器执行进程。",
-          impact: "本次运行未执行。",
-          suggestion: "检查运行器镜像后重新触发。",
-          requiresHuman: false,
-        },
-      });
+      try {
+        await finishRun(run, {
+          status: "failed",
+          completedScopes: [],
+          error: {
+            code: "collector_process_start_failed",
+            message: "无法启动隔离的采集器执行进程。",
+            impact: "本次运行未执行。",
+            suggestion: "检查运行器镜像后重新触发。",
+            requiresHuman: false,
+          },
+        });
+      } catch (completionError) {
+        process.stderr.write(
+          `运行结果提交失败：run=${run.runId} ${completionError instanceof Error ? completionError.message : String(completionError)}\n`,
+        );
+      }
       process.stderr.write(
         `运行器无法启动采集器执行进程：run=${run.runId} ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
+    if (worker === undefined || workerStopped)
+      await acknowledgeStoppedRun(run.runId);
   } finally {
-    if (activeWorker === worker) activeWorker = undefined;
+    if (workerStopped && activeWorker === worker) activeWorker = undefined;
   }
 }
 
-async function heartbeat(): Promise<void> {
-  if (stopping !== undefined) return;
+async function heartbeat(allowStopping = false): Promise<void> {
+  if (stopping !== undefined && !allowStopping) return;
+  const stoppedRunId = pendingStoppedRunId;
   try {
     const response = await client.bins[":binId"].runtime.heartbeat.$post({
       param: { binId: runtimeBinId },
@@ -511,14 +545,22 @@ async function heartbeat(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId,
         claimInFlight,
+        ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
         collector: manifest,
         environment,
       },
     });
     if (response.status === 200) {
       const execution = await response.json();
+      if (stoppedRunId !== undefined && pendingStoppedRunId === stoppedRunId)
+        pendingStoppedRunId = undefined;
       logStatus(execution.status);
-      if (execution.status === "online" && !stopping) void pollRun();
+      if (
+        execution.status === "online" &&
+        stopping === undefined &&
+        pendingStoppedRunId === undefined
+      )
+        void pollRun();
     } else {
       const result = await response.json();
       logStatus(result.error.code, result.error.message);
@@ -530,9 +572,38 @@ async function heartbeat(): Promise<void> {
     );
   } finally {
     if (stopping === undefined) {
-      heartbeatTimer = setTimeout(startHeartbeat, heartbeatInterval);
+      heartbeatTimer = setTimeout(() => {
+        heartbeatTimer = undefined;
+        startHeartbeat();
+      }, heartbeatInterval);
     }
   }
+}
+
+async function sendHeartbeatNow(allowStopping = false): Promise<void> {
+  if (heartbeatTimer !== undefined) {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
+  while (heartbeatInFlight !== undefined) await heartbeatInFlight;
+  if (heartbeatTimer !== undefined) {
+    clearTimeout(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
+  if (stopping !== undefined && !allowStopping) return;
+  const current = heartbeat(allowStopping);
+  heartbeatInFlight = current;
+  try {
+    await current;
+  } finally {
+    if (heartbeatInFlight === current) heartbeatInFlight = undefined;
+  }
+}
+
+async function acknowledgeStoppedRun(runId: string): Promise<void> {
+  pendingStoppedRunId = runId;
+  if (activeRunId === runId) activeRunId = null;
+  await sendHeartbeatNow(stopping !== undefined);
 }
 
 async function pollRun(): Promise<void> {
@@ -551,11 +622,18 @@ async function pollRun(): Promise<void> {
         activeRunId = result.run.runId;
         const current = executeRun(result.run);
         runInFlight = current;
-        void current.finally(() => {
-          if (runInFlight === current) runInFlight = undefined;
-          if (activeRunId === result.run?.runId) activeRunId = null;
-          if (stopping === undefined) startHeartbeat();
-        });
+        void current.then(
+          () => {
+            if (runInFlight === current) runInFlight = undefined;
+            if (activeRunId === result.run?.runId) activeRunId = null;
+            if (stopping === undefined) startHeartbeat();
+          },
+          (error: unknown) => {
+            process.stderr.write(
+              `运行器尚未确认 worker 已停止：run=${result.run?.runId ?? "unknown"} ${error instanceof Error ? error.message : String(error)}；保留执行引用与 bin 占用。\n`,
+            );
+          },
+        );
         return;
       }
       case 400:
@@ -578,30 +656,19 @@ async function pollRun(): Promise<void> {
 }
 
 function startHeartbeat(): void {
+  if (stopping !== undefined || heartbeatInFlight !== undefined) return;
+  if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+  heartbeatTimer = undefined;
   const current = heartbeat();
   heartbeatInFlight = current;
-  void current.finally(() => {
-    if (heartbeatInFlight === current) heartbeatInFlight = undefined;
-  });
-}
-
-async function acknowledgeStoppedOwner(): Promise<void> {
-  try {
-    await client.bins[":binId"].runtime.heartbeat.$post({
-      param: { binId: runtimeBinId },
-      json: {
-        protocolVersion: runtimeProtocolVersion,
-        runtimeId,
-        ownerLockAcquired: true,
-        activeRunId: null,
-        claimInFlight: false,
-        collector: manifest,
-        environment,
-      },
-    });
-  } catch {
-    // heartbeat 过期后核心会保留未确认占用，直到新 owner 真正取得持久锁。
-  }
+  void current.then(
+    () => {
+      if (heartbeatInFlight === current) heartbeatInFlight = undefined;
+    },
+    () => {
+      if (heartbeatInFlight === current) heartbeatInFlight = undefined;
+    },
+  );
 }
 
 async function disconnect(): Promise<void> {
@@ -630,12 +697,11 @@ function shutdown(): Promise<void> {
   if (stopping !== undefined) return stopping;
   stopping = (async () => {
     if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
+    heartbeatTimer = undefined;
     if (heartbeatInFlight !== undefined) await heartbeatInFlight;
+    while (claimInFlight) await delay(25);
     if (activeWorker !== undefined) await stopActionWorker(activeWorker);
     if (runInFlight !== undefined) await runInFlight;
-    activeRunId = null;
-    claimInFlight = false;
-    await acknowledgeStoppedOwner();
     await disconnect();
     await closeServer();
   })();

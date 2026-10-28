@@ -148,6 +148,7 @@ export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
     ownerLockAcquired: z.literal(true),
     activeRunId: z.string().uuid().nullable(),
     claimInFlight: z.boolean(),
+    stoppedRunId: z.string().uuid().optional(),
     collector: collectorManifestSchema,
     environment: runtimeEnvironmentSchema,
   }),

@@ -23,6 +23,19 @@ type ManagedProcess = {
   readonly waitForClose: () => Promise<ProcessResult>;
 };
 
+type HeartbeatDelayProxy = {
+  readonly arm: (stoppedRunId: string) => Promise<void>;
+  readonly waitUntilHeld: () => Promise<number>;
+  readonly waitUntilTimedOut: () => Promise<number>;
+  readonly release: () => Promise<void>;
+};
+
+type HeartbeatDelayProxyStatus = {
+  readonly held: boolean;
+  readonly heldAt?: number;
+  readonly clientClosedAt?: number;
+};
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -34,6 +47,57 @@ const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
+
+function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
+  const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
+  const controlUrl = `http://${host}:${String(controlPort)}`;
+
+  async function readStatus(): Promise<HeartbeatDelayProxyStatus> {
+    const response = await fetch(controlUrl + "/control/status", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()) as HeartbeatDelayProxyStatus;
+  }
+
+  return {
+    async arm(stoppedRunId) {
+      const response = await fetch(controlUrl + "/control/arm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stoppedRunId }),
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async waitUntilHeld() {
+      const status = await waitFor(
+        readStatus,
+        (current) => current.held && typeof current.heldAt === "number",
+        "代理暂存的原生 idle heartbeat",
+      );
+      assert.ok(status.heldAt !== undefined);
+      return status.heldAt;
+    },
+    async waitUntilTimedOut() {
+      const status = await waitFor(
+        readStatus,
+        (current) => typeof current.clientClosedAt === "number",
+        "运行器 heartbeat 客户端超时",
+      );
+      assert.ok(status.clientClosedAt !== undefined);
+      return status.clientClosedAt;
+    },
+    async release() {
+      if (!(await readStatus()).held) return;
+      const response = await fetch(controlUrl + "/control/release", {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+      });
+      assert.equal(response.status, 200);
+    },
+  };
+}
 
 function composePrefix(): readonly string[] {
   return [
@@ -1037,6 +1101,7 @@ async function waitForCliManualRunState(
 async function manualRunsCliStep(
   baseUrl: string,
   manifest: unknown,
+  heartbeatProxy: HeartbeatDelayProxy,
 ): Promise<void> {
   const manifestJson = JSON.stringify(manifest);
   assert.ok(manifestJson !== undefined);
@@ -1245,6 +1310,115 @@ async function manualRunsCliStep(
     "source/cli-after-check",
   ]);
 
+  const heartbeatWarmGate = "18-heartbeat-warm-" + randomUUID();
+  const heartbeatWarmRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: heartbeatWarmGate,
+        sourceKey: heartbeatWarmGate,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    heartbeatWarmGate,
+    heartbeatWarmRun.runId,
+    "binny15-one",
+  );
+  const heartbeatNextGate = "18-heartbeat-next-" + randomUUID();
+  const heartbeatNextRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: heartbeatNextGate,
+        sourceKey: heartbeatNextGate,
+        waitAfterCommitMs: 60_000,
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(heartbeatNextRun.status, "queued");
+  await heartbeatProxy.arm(heartbeatWarmRun.runId);
+  await releaseSource(sourceControlUrl, heartbeatWarmGate);
+  await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    heartbeatWarmRun.runId,
+    ["completed"],
+  );
+  const delayedHeartbeatAt = await heartbeatProxy.waitUntilHeld();
+  const heartbeatClientClosedAt = await heartbeatProxy.waitUntilTimedOut();
+  assert.ok(
+    heartbeatClientClosedAt - delayedHeartbeatAt >= 2_500,
+    "运行器的原生心跳应在客户端超时后仍留在代理中。",
+  );
+  const heartbeatNextExecuting = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    heartbeatNextRun.runId,
+    ["executing"],
+  );
+  assert.equal(heartbeatNextExecuting.status, "executing");
+  await waitForSourceArrival(
+    sourceControlUrl,
+    heartbeatNextGate,
+    heartbeatNextRun.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, heartbeatNextGate, "slow");
+  await waitForSourceMarker(
+    sourceControlUrl,
+    heartbeatNextRun.runId,
+    heartbeatNextGate,
+    "committed",
+  );
+  const heartbeatWorker = (
+    await runtimeProcessSnapshot("runtime-fifteen-one")
+  ).find((process) => process.command.includes("worker.js"));
+  assert.ok(heartbeatWorker, "延迟心跳时应有新的真实 worker 正在运行。");
+  const heartbeatCancel = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "cancel",
+      "binny15-one",
+      heartbeatNextRun.runId,
+    ]),
+    "cancellation",
+  );
+  assert.equal(heartbeatCancel.status, "cancelling");
+  assert.equal(heartbeatCancel.stopConfirmedAt, undefined);
+  await heartbeatProxy.release();
+  const heartbeatCancelled = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    heartbeatNextRun.runId,
+    ["cancelled"],
+  );
+  assert.ok(heartbeatCancelled.stopConfirmedAt);
+  assert.equal(heartbeatCancelled.result?.commits.length, 1);
+  const heartbeatStoppedProcesses = await runtimeProcessSnapshot(
+    "runtime-fifteen-one",
+  );
+  assert.equal(
+    heartbeatStoppedProcesses.some(
+      (process) => process.pgid === heartbeatWorker.pgid,
+    ),
+    false,
+    "迟到的旧 idle heartbeat 不能确认新 run，停止确认必须晚于 worker 退出。",
+  );
+
   const slowGateKey = "18-cli-slow-stop";
   const slowRun = cliData<ManualRunCliState>(
     await cli(baseUrl, [
@@ -1428,7 +1602,7 @@ async function manualRunControllerPartitionStep(): Promise<void> {
   const containers = await compose(["ps", "-q", "runtime-fifteen-two"]);
   const containerId = containers.stdout.trim().split("\n")[0];
   assert.ok(containerId);
-  const networkName = projectName + "_default";
+  const networkName = projectName + "_runtime";
   const detached = await run(
     "docker",
     ["network", "disconnect", networkName, containerId],
@@ -2102,28 +2276,61 @@ async function main(): Promise<void> {
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.18.0/24";
-  await writeFile(
-    composeOverrideFile,
-    [
-      "services:",
-      "  server:",
-      "    ports: !override",
-      '      - "3000"',
-      "  manual-runs-source:",
-      "    ports: !override",
-      '      - "8081"',
-      "networks:",
-      "  default:",
-      "    ipam:",
-      "      config:",
-      `        - subnet: ${e2eSubnet}`,
-      "",
-    ].join("\n"),
-  );
+  const runtimeSubnet =
+    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.134.0/24";
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
+  let heartbeatProxy: HeartbeatDelayProxy | undefined;
   try {
+    await writeFile(
+      composeOverrideFile,
+      [
+        "services:",
+        "  server:",
+        "    ports: !override",
+        '      - "3000"',
+        "  manual-runs-source:",
+        "    ports: !override",
+        '      - "8081"',
+        "    networks:",
+        "      - default",
+        "      - runtime",
+        "  runtime-fifteen-one:",
+        "    environment:",
+        "      BINNY_API_URL: http://heartbeat-proxy:8082",
+        "    networks:",
+        "      - runtime",
+        "  runtime-fifteen-two:",
+        "    environment:",
+        "      BINNY_API_URL: http://heartbeat-proxy:8082",
+        "    networks:",
+        "      - runtime",
+        "  heartbeat-proxy:",
+        `    image: ${imageName}`,
+        "    command:",
+        "      - node",
+        "      - scripts/binny-e2e-heartbeat-proxy.ts",
+        "    ports:",
+        '      - "8083"',
+        "    depends_on:",
+        "      server:",
+        "        condition: service_started",
+        "    networks:",
+        "      - default",
+        "      - runtime",
+        "networks:",
+        "  default:",
+        "    ipam:",
+        "      config:",
+        `        - subnet: ${e2eSubnet}`,
+        "  runtime:",
+        "    ipam:",
+        "      config:",
+        `        - subnet: ${runtimeSubnet}`,
+        "",
+      ].join("\n"),
+    );
     await compose([
       "up",
       "--detach",
@@ -2136,9 +2343,14 @@ async function main(): Promise<void> {
       "manual-runs-source",
       "runtime-fifteen-one",
       "runtime-fifteen-two",
+      "heartbeat-proxy",
     ]);
     composePort = await publishedPort("server", 3000);
     manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    const activeHeartbeatProxy = createHeartbeatDelayProxy(
+      await publishedPort("heartbeat-proxy", 8083),
+    );
+    heartbeatProxy = activeHeartbeatProxy;
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
     const isolatedClient = await verifyIsolatedApiConsumer({
@@ -2151,7 +2363,7 @@ async function main(): Promise<void> {
     });
     await verifyConfigurationJourney(baseUrl);
     const manualRunManifest = await createRuntimeFixtureManifest();
-    await manualRunsCliStep(baseUrl, manualRunManifest);
+    await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
     await manualRunControllerPartitionStep();
     await manualRunsHttpStep(baseUrl, manualRunManifest);
     for (const binId of ["binny15-one", "binny15-two"]) {
@@ -2185,6 +2397,14 @@ async function main(): Promise<void> {
       "Compose 验收失败日志：\n" + logs.stdout + logs.stderr,
     );
   } finally {
+    if (heartbeatProxy !== undefined) {
+      try {
+        await heartbeatProxy.release();
+      } catch (error) {
+        cleanupError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
     const cleanup = await run(
       "docker",
       [
