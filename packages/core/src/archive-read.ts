@@ -18,6 +18,22 @@ import {
   type ArchiveRelationEntry,
   type ArchiveRelationOptions,
 } from "@binny/contracts";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  lte,
+  min,
+  notExists,
+  or,
+  sql,
+  type AnyColumn,
+} from "drizzle-orm";
+import { alias, unionAll } from "drizzle-orm/pg-core";
 
 import {
   failure,
@@ -27,128 +43,42 @@ import {
 } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import type { CoreDatabase } from "./database.ts";
-
-type CommitRow = {
-  readonly commit_id: string;
-  readonly archive_seq: string;
-  readonly bin_id: string;
-  readonly run_id: string | null;
-  readonly collector_version: string | null;
-  readonly observed_at: Date;
-  readonly recorded_at: Date;
-};
-
-type ClockRow = {
-  readonly last_seq: string;
-};
-
-type CommitItemRow = {
-  readonly item_id: string;
-  readonly revision_id: string;
-  readonly namespace: string;
-  readonly source_key: string;
-};
-
-type CommitItemGapRow = {
-  readonly item_id: string;
-  readonly ordinal: number;
-  readonly namespace: string;
-  readonly source_key: string;
-};
-
-type CommitRelationGapRow = {
-  readonly relation_id: string;
-  readonly ordinal: number;
-};
-
-type ItemRow = {
-  readonly item_id: string;
-  readonly namespace: string;
-  readonly source_key: string;
-};
-
-type RevisionRow = {
-  readonly revision_id: string;
-  readonly state_hash: string;
-  readonly state_data: unknown;
-};
-
-type ViewRow = CommitRow & {
-  readonly revision_id: string;
-  readonly diagnostics: unknown;
-  readonly state_data: unknown;
-};
-
-type ObservationRow = CommitRow & {
-  readonly revision_id: string;
-  readonly diagnostics: unknown;
-  readonly ordinal: number;
-  readonly source_modified_at: string | null;
-};
-
-type TimelineRow = CommitRow & {
-  readonly kind: "item" | "relation" | "gap";
-  readonly item_id: string | null;
-  readonly relation_id: string | null;
-  readonly relation_revision_id: string | null;
-  readonly relation_state_data: unknown;
-  readonly revision_id: string | null;
-  readonly ordinal: number;
-  readonly source_modified_at: string | null;
-  readonly gap_subject_kind: "item" | "relation" | null;
-  readonly gap_namespace: string | null;
-  readonly gap_source_key: string | null;
-};
-
-type RelationIdentityRow = {
-  readonly relation_id: string;
-  readonly from_item_id: string;
-  readonly target_item_id: string | null;
-  readonly target_source_ref: string | null;
-  readonly created_seq: string;
-};
-
-type RelationReadRow = RelationIdentityRow & {
-  readonly state_status: "observed" | "withdrawn" | "unknown" | "deleted";
-  readonly relation_revision_id: string | null;
-  readonly state_data: unknown;
-  readonly relation_commit_id: string | null;
-  readonly relation_archive_seq: string | null;
-  readonly relation_ordinal: number | null;
-  readonly relation_observed_at: Date | null;
-  readonly relation_recorded_at: Date | null;
-  readonly relation_run_id: string | null;
-  readonly relation_collector_version: string | null;
-};
-
-type EndpointRow = ItemRow & {
-  readonly revision_id: string | null;
-};
+import {
+  archiveCommits,
+  archiveItemDeletions,
+  archiveItemObservationGaps,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRevisions,
+  archiveWriteClock,
+} from "./schema.ts";
 
 export type ResolvedSnapshot = {
   readonly asOf: string;
   readonly mode: "current" | "asOf";
 };
 
-type RevisionReadRow = RevisionRow & ItemRow;
-
+/**
+ * 读取调用者须先用 repeatable read、read only 配置事务；本函数在该快照中读取写时钟。
+ */
 export async function resolveSnapshot(
   transaction: ArchiveTransaction,
   requestedAsOf?: string,
 ): Promise<ArchiveOperation<ResolvedSnapshot>> {
-  // 先读共享写时钟以固定可重复读快照；以后提交的观察序号一定大于此截点。
-  await transaction.unsafe(
-    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-  );
-  const clocks = await transaction<ClockRow[]>`
-    SELECT last_seq::text AS last_seq
-    FROM archive_write_clock
-    WHERE clock_id = 1
-  `;
-  const currentSequence = clocks[0]?.last_seq;
+  const clocks = await transaction
+    .select({ lastSequence: archiveWriteClock.lastSequence })
+    .from(archiveWriteClock)
+    .where(eq(archiveWriteClock.clockId, 1))
+    .limit(1);
+  const currentSequence = clocks[0]?.lastSequence;
   if (currentSequence === undefined) {
     throw new Error("归档写入时钟尚未初始化。");
   }
+  const currentSequenceText = currentSequence.toString();
   const checkedAsOf =
     requestedAsOf === undefined
       ? undefined
@@ -161,8 +91,8 @@ export async function resolveSnapshot(
       })),
     );
   }
-  const asOf = checkedAsOf?.data ?? currentSequence;
-  if (BigInt(asOf) > BigInt(currentSequence)) {
+  const asOf = checkedAsOf?.data ?? currentSequenceText;
+  if (BigInt(asOf) > currentSequence) {
     return failure(400, "invalid_input", "归档截点不能晚于当前已记录的资料。", [
       "asOf",
     ]);
@@ -218,102 +148,150 @@ function optionalDiagnostics(value: unknown): {
   return value === null ? {} : { diagnostics: value };
 }
 
+function nullableColumn<TColumn extends AnyColumn>(
+  column: TColumn,
+  aliasName: string,
+) {
+  // UNION 分支会以 NULL 补齐该列；保留原列解码器并显式标记可空性。
+  return sql`${column}`.mapWith(column).nullable().as(aliasName);
+}
+
+function nullColumn<TColumn extends AnyColumn>(
+  decoder: TColumn,
+  aliasName: string,
+) {
+  // RC 没有无表空值选择器；此处只生成 UNION 所需的 NULL 列，并沿用目标列解码器。
+  return sql`NULL`.mapWith(decoder).nullable().as(aliasName);
+}
+
+function textLiteral(value: string) {
+  // UNION 事件类型用固定文本标记；解码时验证该常量仍与构造值一致。
+  return sql`${value}::text`.mapWith((result) => {
+    if (typeof result !== "string" || result !== value) {
+      throw new TypeError("数据库返回了意外的固定文本值。");
+    }
+    return value;
+  });
+}
+
+function withArchiveReadTransaction<T>(
+  database: CoreDatabase,
+  operation: (transaction: ArchiveTransaction) => Promise<T>,
+): Promise<T> {
+  return database.transaction(operation, {
+    isolationLevel: "repeatable read",
+    accessMode: "read only",
+  });
+}
+
 export async function readCommit(
   transaction: ArchiveTransaction,
   commitId: string,
 ): Promise<ArchiveCommit> {
-  const rows = await transaction<CommitRow[]>`
-    SELECT
-      commit_id,
-      archive_seq::text AS archive_seq,
-      bin_id,
-      run_id,
-      collector_version,
-      observed_at,
-      recorded_at
-    FROM archive_commit
-    WHERE commit_id = ${commitId}
-  `;
-  const row = rows[0];
-  if (row === undefined) {
+  const commitRows = await transaction
+    .select({
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+    })
+    .from(archiveCommits)
+    .where(eq(archiveCommits.commitId, commitId))
+    .limit(1);
+  const commit = commitRows[0];
+  if (commit === undefined) {
     throw new Error("幂等回执引用的归档提交不存在。");
   }
 
-  const items = await transaction<CommitItemRow[]>`
-    SELECT
-      observation.item_id,
-      observation.revision_id,
-      item.namespace,
-      item.source_key
-    FROM archive_observation AS observation
-    JOIN archive_item AS item ON item.item_id = observation.item_id
-    WHERE observation.commit_id = ${commitId}
-    ORDER BY observation.ordinal
-  `;
-  const relations = await transaction<
-    {
-      readonly relation_id: string;
-      readonly ordinal: number;
-      readonly relation_revision_id: string | null;
-      readonly state_data: unknown;
-    }[]
-  >`
-    SELECT
-      observation.relation_id,
-      observation.ordinal,
-      observation.relation_revision_id,
-      revision.state_data
-    FROM archive_relation_observation AS observation
-    LEFT JOIN archive_relation_revision AS revision
-      ON revision.relation_id = observation.relation_id
-      AND revision.relation_revision_id = observation.relation_revision_id
-    WHERE observation.commit_id = ${commitId}
-    ORDER BY observation.ordinal
-  `;
-  const itemGaps = await transaction<CommitItemGapRow[]>`
-    SELECT
-      gap.item_id,
-      gap.ordinal,
-      deletion.namespace,
-      deletion.source_key
-    FROM archive_item_observation_gap AS gap
-    JOIN archive_item_deletion AS deletion ON deletion.item_id = gap.item_id
-    WHERE gap.commit_id = ${commitId}
-    ORDER BY gap.ordinal
-  `;
-  const relationGaps = await transaction<CommitRelationGapRow[]>`
-    SELECT relation_id, ordinal
-    FROM archive_relation_observation_gap
-    WHERE commit_id = ${commitId}
-    ORDER BY ordinal
-  `;
+  const items = await transaction
+    .select({
+      itemId: archiveObservations.itemId,
+      revisionId: archiveObservations.revisionId,
+      namespace: archiveItems.namespace,
+      sourceKey: archiveItems.sourceKey,
+    })
+    .from(archiveObservations)
+    .innerJoin(
+      archiveItems,
+      eq(archiveItems.itemId, archiveObservations.itemId),
+    )
+    .where(eq(archiveObservations.commitId, commitId))
+    .orderBy(asc(archiveObservations.ordinal));
+  const relations = await transaction
+    .select({
+      relationId: archiveRelationObservations.relationId,
+      ordinal: archiveRelationObservations.ordinal,
+      relationRevisionId: archiveRelationObservations.relationRevisionId,
+      stateData: archiveRelationRevisions.stateData,
+    })
+    .from(archiveRelationObservations)
+    .leftJoin(
+      archiveRelationRevisions,
+      and(
+        eq(
+          archiveRelationRevisions.relationId,
+          archiveRelationObservations.relationId,
+        ),
+        eq(
+          archiveRelationRevisions.relationRevisionId,
+          archiveRelationObservations.relationRevisionId,
+        ),
+      ),
+    )
+    .where(eq(archiveRelationObservations.commitId, commitId))
+    .orderBy(asc(archiveRelationObservations.ordinal));
+  const itemGaps = await transaction
+    .select({
+      itemId: archiveItemObservationGaps.itemId,
+      ordinal: archiveItemObservationGaps.ordinal,
+      namespace: archiveItemDeletions.namespace,
+      sourceKey: archiveItemDeletions.sourceKey,
+    })
+    .from(archiveItemObservationGaps)
+    .innerJoin(
+      archiveItemDeletions,
+      eq(archiveItemDeletions.itemId, archiveItemObservationGaps.itemId),
+    )
+    .where(eq(archiveItemObservationGaps.commitId, commitId))
+    .orderBy(asc(archiveItemObservationGaps.ordinal));
+  const relationGaps = await transaction
+    .select({
+      relationId: archiveRelationObservationGaps.relationId,
+      ordinal: archiveRelationObservationGaps.ordinal,
+    })
+    .from(archiveRelationObservationGaps)
+    .where(eq(archiveRelationObservationGaps.commitId, commitId))
+    .orderBy(asc(archiveRelationObservationGaps.ordinal));
 
   return archiveCommitSchema.parse({
-    commitId: row.commit_id,
-    archiveSeq: row.archive_seq,
-    binId: row.bin_id,
-    ...optionalText("runId", row.run_id),
-    ...optionalText("collectorVersion", row.collector_version),
-    observedAt: isoTimestamp(row.observed_at),
-    recordedAt: isoTimestamp(row.recorded_at),
+    commitId: commit.commitId,
+    archiveSeq: commit.archiveSequence.toString(),
+    binId: commit.binId,
+    ...optionalText("runId", commit.runId),
+    ...optionalText("collectorVersion", commit.collectorVersion),
+    observedAt: isoTimestamp(commit.observedAt),
+    recordedAt: isoTimestamp(commit.recordedAt),
     items: items.map((item) => ({
-      itemId: item.item_id,
-      revisionId: item.revision_id,
-      sourceKey: { namespace: item.namespace, key: item.source_key },
+      itemId: item.itemId,
+      revisionId: item.revisionId,
+      sourceKey: { namespace: item.namespace, key: item.sourceKey },
     })),
     relations: relations.map((relation) =>
-      relation.relation_revision_id === null
+      relation.relationRevisionId === null
         ? {
-            relationId: relation.relation_id,
+            relationId: relation.relationId,
             ordinal: relation.ordinal,
             status: "withdrawn" as const,
           }
         : {
-            relationId: relation.relation_id,
+            relationId: relation.relationId,
             ordinal: relation.ordinal,
             status: "observed" as const,
-            revisionId: relation.relation_revision_id,
-            state: relation.state_data,
+            revisionId: relation.relationRevisionId,
+            state: relation.stateData,
           },
     ),
     ...(itemGaps.length === 0 && relationGaps.length === 0
@@ -321,12 +299,12 @@ export async function readCommit(
       : {
           gaps: {
             items: itemGaps.map((item) => ({
-              itemId: item.item_id,
+              itemId: item.itemId,
               ordinal: item.ordinal,
-              sourceKey: { namespace: item.namespace, key: item.source_key },
+              sourceKey: { namespace: item.namespace, key: item.sourceKey },
             })),
             relations: relationGaps.map((relation) => ({
-              relationId: relation.relation_id,
+              relationId: relation.relationId,
               ordinal: relation.ordinal,
             })),
           },
@@ -340,18 +318,22 @@ async function readItem(
   snapshot: ResolvedSnapshot,
   binId?: string,
 ): Promise<ArchiveOperation<ArchiveItemRead>> {
-  const items = await transaction<ItemRow[]>`
-    SELECT item_id, namespace, source_key
-    FROM archive_item
-    WHERE item_id = ${itemId}
-  `;
+  const items = await transaction
+    .select({
+      itemId: archiveItems.itemId,
+      namespace: archiveItems.namespace,
+      sourceKey: archiveItems.sourceKey,
+    })
+    .from(archiveItems)
+    .where(eq(archiveItems.itemId, itemId))
+    .limit(1);
   const item = items[0];
   if (item === undefined) {
-    const deletions = await transaction<{ readonly item_id: string }[]>`
-      SELECT item_id
-      FROM archive_item_deletion
-      WHERE item_id = ${itemId}
-    `;
+    const deletions = await transaction
+      .select({ itemId: archiveItemDeletions.itemId })
+      .from(archiveItemDeletions)
+      .where(eq(archiveItemDeletions.itemId, itemId))
+      .limit(1);
     if (deletions[0] !== undefined) {
       return failure(
         404,
@@ -363,122 +345,176 @@ async function readItem(
     return failure(404, "item_not_found", "没有找到这个归档条目。", ["itemId"]);
   }
 
-  const visibleRows = await transaction<{ readonly item_id: string }[]>`
-    SELECT observation.item_id
-    FROM archive_observation AS observation
-    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-    WHERE observation.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-    LIMIT 1
-  `;
+  const asOf = BigInt(snapshot.asOf);
+  const visibleRows = await transaction
+    .select({ itemId: archiveObservations.itemId })
+    .from(archiveObservations)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveObservations.commitId),
+    )
+    .where(
+      and(
+        eq(archiveObservations.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+      ),
+    )
+    .limit(1);
   if (visibleRows[0] === undefined) {
     return failure(404, "item_not_found", "这个条目在所选归档截点尚未记录。", [
       "itemId",
     ]);
   }
 
-  const revisionRows = await transaction<
-    { readonly revision_id: string; readonly state_hash: string }[]
-  >`
-    SELECT
-      revision.revision_id,
-      revision.state_hash,
-      MIN(commit.archive_seq) AS first_archive_seq
-    FROM archive_revision AS revision
-    JOIN archive_observation AS observation
-      ON observation.item_id = revision.item_id
-      AND observation.revision_id = revision.revision_id
-    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-    WHERE observation.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-    GROUP BY revision.revision_id, revision.state_hash
-    ORDER BY first_archive_seq, revision.revision_id
-  `;
-  const observationRows = await transaction<ObservationRow[]>`
-    SELECT
-      commit.commit_id,
-      commit.archive_seq::text AS archive_seq,
-      commit.bin_id,
-      commit.run_id,
-      commit.collector_version,
-      commit.observed_at,
-      commit.recorded_at,
-      observation.revision_id,
-      observation.diagnostics,
-      observation.ordinal,
-      revision.state_data->>'sourceModifiedAt' AS source_modified_at
-    FROM archive_observation AS observation
-    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-    JOIN archive_revision AS revision
-      ON revision.item_id = observation.item_id
-      AND revision.revision_id = observation.revision_id
-    WHERE observation.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-    ORDER BY commit.archive_seq, observation.ordinal, commit.commit_id
-  `;
-  const viewRows = await transaction<ViewRow[]>`
-    SELECT DISTINCT ON (commit.bin_id)
-      commit.commit_id,
-      commit.archive_seq::text AS archive_seq,
-      commit.bin_id,
-      commit.run_id,
-      commit.collector_version,
-      commit.observed_at,
-      commit.recorded_at,
-      observation.revision_id,
-      observation.diagnostics,
-      revision.state_data
-    FROM archive_observation AS observation
-    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-    JOIN archive_revision AS revision
-      ON revision.item_id = observation.item_id
-      AND revision.revision_id = observation.revision_id
-    WHERE observation.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-    ORDER BY
-      commit.bin_id,
-      commit.archive_seq DESC,
-      observation.ordinal DESC,
-      commit.commit_id DESC
-  `;
+  const revisionRows = await transaction
+    .select({
+      revisionId: archiveRevisions.revisionId,
+      stateHash: archiveRevisions.stateHash,
+      firstArchiveSequence: min(archiveCommits.archiveSequence),
+    })
+    .from(archiveRevisions)
+    .innerJoin(
+      archiveObservations,
+      and(
+        eq(archiveObservations.itemId, archiveRevisions.itemId),
+        eq(archiveObservations.revisionId, archiveRevisions.revisionId),
+      ),
+    )
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveObservations.commitId),
+    )
+    .where(
+      and(
+        eq(archiveObservations.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    )
+    .groupBy(archiveRevisions.revisionId, archiveRevisions.stateHash)
+    .orderBy(
+      min(archiveCommits.archiveSequence),
+      asc(archiveRevisions.revisionId),
+    );
+
+  // Drizzle RC 没有 JSON 文本提取构建器；这里只保留单个投影表达式。
+  const sourceModifiedAt =
+    sql`${archiveRevisions.stateData}->>'sourceModifiedAt'`
+      .mapWith(archiveCommits.binId)
+      .nullable()
+      .as("sourceModifiedAt");
+  const observationRows = await transaction
+    .select({
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      revisionId: archiveObservations.revisionId,
+      diagnostics: archiveObservations.diagnostics,
+      ordinal: archiveObservations.ordinal,
+      sourceModifiedAt,
+    })
+    .from(archiveObservations)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveObservations.commitId),
+    )
+    .innerJoin(
+      archiveRevisions,
+      and(
+        eq(archiveRevisions.itemId, archiveObservations.itemId),
+        eq(archiveRevisions.revisionId, archiveObservations.revisionId),
+      ),
+    )
+    .where(
+      and(
+        eq(archiveObservations.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    )
+    .orderBy(
+      asc(archiveCommits.archiveSequence),
+      asc(archiveObservations.ordinal),
+      asc(archiveCommits.commitId),
+    );
+
+  const viewRows = await transaction
+    .selectDistinctOn([archiveCommits.binId], {
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      revisionId: archiveObservations.revisionId,
+      diagnostics: archiveObservations.diagnostics,
+      stateData: archiveRevisions.stateData,
+    })
+    .from(archiveObservations)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveObservations.commitId),
+    )
+    .innerJoin(
+      archiveRevisions,
+      and(
+        eq(archiveRevisions.itemId, archiveObservations.itemId),
+        eq(archiveRevisions.revisionId, archiveObservations.revisionId),
+      ),
+    )
+    .where(
+      and(
+        eq(archiveObservations.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    )
+    .orderBy(
+      asc(archiveCommits.binId),
+      desc(archiveCommits.archiveSequence),
+      desc(archiveObservations.ordinal),
+      desc(archiveCommits.commitId),
+    );
 
   return {
     ok: true,
     value: archiveItemReadSchema.parse({
-      itemId: item.item_id,
-      sourceKey: { namespace: item.namespace, key: item.source_key },
+      itemId: item.itemId,
+      sourceKey: { namespace: item.namespace, key: item.sourceKey },
       snapshot,
       views: viewRows.map((row) => ({
-        binId: row.bin_id,
-        archiveSeq: row.archive_seq,
-        revisionId: row.revision_id,
-        observedAt: isoTimestamp(row.observed_at),
-        recordedAt: isoTimestamp(row.recorded_at),
-        ...optionalText("runId", row.run_id),
-        ...optionalText("collectorVersion", row.collector_version),
-        state: row.state_data,
+        binId: row.binId,
+        archiveSeq: row.archiveSequence.toString(),
+        revisionId: row.revisionId,
+        observedAt: isoTimestamp(row.observedAt),
+        recordedAt: isoTimestamp(row.recordedAt),
+        ...optionalText("runId", row.runId),
+        ...optionalText("collectorVersion", row.collectorVersion),
+        state: row.stateData,
         ...optionalDiagnostics(row.diagnostics),
       })),
       revisions: revisionRows.map((revision) => ({
-        revisionId: revision.revision_id,
-        stateHash: revision.state_hash,
+        revisionId: revision.revisionId,
+        stateHash: revision.stateHash,
       })),
       observations: observationRows.map((row) => ({
-        commitId: row.commit_id,
-        archiveSeq: row.archive_seq,
+        commitId: row.commitId,
+        archiveSeq: row.archiveSequence.toString(),
         ordinal: row.ordinal,
-        binId: row.bin_id,
-        revisionId: row.revision_id,
-        ...(row.source_modified_at === null
+        binId: row.binId,
+        revisionId: row.revisionId,
+        ...(row.sourceModifiedAt === null
           ? {}
-          : { sourceModifiedAt: row.source_modified_at }),
-        observedAt: isoTimestamp(row.observed_at),
-        recordedAt: isoTimestamp(row.recorded_at),
-        ...optionalText("runId", row.run_id),
-        ...optionalText("collectorVersion", row.collector_version),
+          : { sourceModifiedAt: row.sourceModifiedAt }),
+        observedAt: isoTimestamp(row.observedAt),
+        recordedAt: isoTimestamp(row.recordedAt),
+        ...optionalText("runId", row.runId),
+        ...optionalText("collectorVersion", row.collectorVersion),
         ...optionalDiagnostics(row.diagnostics),
       })),
     }),
@@ -497,180 +533,339 @@ async function readTimelinePage(
 ): Promise<
   ArchiveOperation<ReturnType<typeof archiveTimelinePageSchema.parse>>
 > {
-  const visibleRows = await transaction<{ readonly item_id: string }[]>`
-    SELECT ${itemId}::uuid AS item_id
-    FROM archive_observation AS observation
-    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-    WHERE observation.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-    UNION ALL
-    SELECT ${itemId}::uuid AS item_id
-    FROM archive_relation_observation AS observation
-    JOIN archive_relation AS relation
-      ON relation.relation_id = observation.relation_id
-    WHERE (
-      relation.from_item_id = ${itemId}
-      OR relation.target_item_id = ${itemId}
-    )
-      AND observation.archive_seq <= ${snapshot.asOf}::bigint
-    UNION ALL
-    SELECT ${itemId}::uuid AS item_id
-    FROM archive_item_observation_gap AS gap
-    JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-    WHERE gap.item_id = ${itemId}
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-    UNION ALL
-    SELECT ${itemId}::uuid AS item_id
-    FROM archive_relation_observation_gap AS gap
-    JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-    WHERE (
-      gap.from_item_id = ${itemId}
-      OR gap.target_item_id = ${itemId}
-    )
-      AND commit.archive_seq <= ${snapshot.asOf}::bigint
-    LIMIT 1
-  `;
+  const asOf = BigInt(snapshot.asOf);
+  const visible = or(
+    exists(
+      transaction
+        .select({ itemId: archiveObservations.itemId })
+        .from(archiveObservations)
+        .innerJoin(
+          archiveCommits,
+          eq(archiveCommits.commitId, archiveObservations.commitId),
+        )
+        .where(
+          and(
+            eq(archiveObservations.itemId, itemId),
+            lte(archiveCommits.archiveSequence, asOf),
+          ),
+        ),
+    ),
+    exists(
+      transaction
+        .select({ relationId: archiveRelations.relationId })
+        .from(archiveRelationObservations)
+        .innerJoin(
+          archiveRelations,
+          eq(
+            archiveRelations.relationId,
+            archiveRelationObservations.relationId,
+          ),
+        )
+        .where(
+          and(
+            or(
+              eq(archiveRelations.fromItemId, itemId),
+              eq(archiveRelations.targetItemId, itemId),
+            ),
+            lte(archiveRelationObservations.archiveSequence, asOf),
+          ),
+        ),
+    ),
+    exists(
+      transaction
+        .select({ itemId: archiveItemObservationGaps.itemId })
+        .from(archiveItemObservationGaps)
+        .innerJoin(
+          archiveCommits,
+          eq(archiveCommits.commitId, archiveItemObservationGaps.commitId),
+        )
+        .where(
+          and(
+            eq(archiveItemObservationGaps.itemId, itemId),
+            lte(archiveCommits.archiveSequence, asOf),
+          ),
+        ),
+    ),
+    exists(
+      transaction
+        .select({ relationId: archiveRelationObservationGaps.relationId })
+        .from(archiveRelationObservationGaps)
+        .innerJoin(
+          archiveCommits,
+          eq(archiveCommits.commitId, archiveRelationObservationGaps.commitId),
+        )
+        .where(
+          and(
+            or(
+              eq(archiveRelationObservationGaps.fromItemId, itemId),
+              eq(archiveRelationObservationGaps.targetItemId, itemId),
+            ),
+            lte(archiveCommits.archiveSequence, asOf),
+          ),
+        ),
+    ),
+  );
+  const visibleRows = await transaction
+    .select({ clockId: archiveWriteClock.clockId })
+    .from(archiveWriteClock)
+    .where(visible)
+    .limit(1);
   if (visibleRows[0] === undefined) {
     return failure(404, "item_not_found", "这个条目在所选归档截点尚未记录。", [
       "itemId",
     ]);
   }
 
-  const rows = await transaction<TimelineRow[]>`
-    SELECT event.*
-    FROM (
-      SELECT
-        'item'::text AS kind,
-        commit.commit_id,
-        commit.archive_seq::text AS archive_seq,
-        commit.bin_id,
-        commit.run_id,
-        commit.collector_version,
-        commit.observed_at,
-        commit.recorded_at,
-        observation.item_id,
-        NULL::text AS relation_id,
-        NULL::uuid AS relation_revision_id,
-        NULL::jsonb AS relation_state_data,
-        observation.revision_id,
-        observation.ordinal,
-        revision.state_data->>'sourceModifiedAt' AS source_modified_at,
-        NULL::text AS gap_subject_kind,
-        NULL::text AS gap_namespace,
-        NULL::text AS gap_source_key
-      FROM archive_observation AS observation
-      JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-      JOIN archive_revision AS revision
-        ON revision.item_id = observation.item_id
-        AND revision.revision_id = observation.revision_id
-      WHERE observation.item_id = ${itemId}
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
-        AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-
-      UNION ALL
-
-      SELECT
-        'relation'::text AS kind,
-        commit.commit_id,
-        commit.archive_seq::text AS archive_seq,
-        commit.bin_id,
-        commit.run_id,
-        commit.collector_version,
-        commit.observed_at,
-        commit.recorded_at,
-        NULL::uuid AS item_id,
-        observation.relation_id,
-        observation.relation_revision_id,
-        relation_revision.state_data AS relation_state_data,
-        observation.relation_revision_id AS revision_id,
-        observation.ordinal,
-        NULL::text AS source_modified_at,
-        NULL::text AS gap_subject_kind,
-        NULL::text AS gap_namespace,
-        NULL::text AS gap_source_key
-      FROM archive_relation_observation AS observation
-      JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
-      JOIN archive_relation AS relation
-        ON relation.relation_id = observation.relation_id
-      LEFT JOIN archive_relation_revision AS relation_revision
-        ON relation_revision.relation_id = observation.relation_id
-        AND relation_revision.relation_revision_id = observation.relation_revision_id
-      WHERE (
-        relation.from_item_id = ${itemId}
-        OR relation.target_item_id = ${itemId}
-      )
-        AND observation.archive_seq <= ${snapshot.asOf}::bigint
-        AND (${binId ?? null}::text IS NULL OR observation.bin_id = ${binId ?? null})
-
-      UNION ALL
-
-      SELECT
-        'gap'::text AS kind,
-        commit.commit_id,
-        commit.archive_seq::text AS archive_seq,
-        commit.bin_id,
-        commit.run_id,
-        commit.collector_version,
-        commit.observed_at,
-        commit.recorded_at,
-        gap.item_id AS item_id,
-        NULL::text AS relation_id,
-        NULL::uuid AS relation_revision_id,
-        NULL::jsonb AS relation_state_data,
-        NULL::uuid AS revision_id,
-        gap.ordinal,
-        NULL::text AS source_modified_at,
-        'item'::text AS gap_subject_kind,
-        deletion.namespace AS gap_namespace,
-        deletion.source_key AS gap_source_key
-      FROM archive_item_observation_gap AS gap
-      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-      JOIN archive_item_deletion AS deletion ON deletion.item_id = gap.item_id
-      WHERE gap.item_id = ${itemId}
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
-        AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-
-      UNION ALL
-
-      SELECT
-        'gap'::text AS kind,
-        commit.commit_id,
-        commit.archive_seq::text AS archive_seq,
-        commit.bin_id,
-        commit.run_id,
-        commit.collector_version,
-        commit.observed_at,
-        commit.recorded_at,
-        NULL::uuid AS item_id,
-        gap.relation_id,
-        NULL::uuid AS relation_revision_id,
-        NULL::jsonb AS relation_state_data,
-        NULL::uuid AS revision_id,
-        gap.ordinal,
-        NULL::text AS source_modified_at,
-        'relation'::text AS gap_subject_kind,
-        NULL::text AS gap_namespace,
-        NULL::text AS gap_source_key
-      FROM archive_relation_observation_gap AS gap
-      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-      WHERE (
-        gap.from_item_id = ${itemId}
-        OR gap.target_item_id = ${itemId}
-      )
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
-        AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
-    ) AS event
-    WHERE (
-      ${after?.archiveSeq ?? null}::bigint IS NULL
-      OR (event.archive_seq::bigint, event.ordinal, event.commit_id) > (
-        ${after?.archiveSeq ?? null}::bigint,
-        ${after?.ordinal ?? null}::integer,
-        ${after?.commitId ?? null}::uuid
-      )
+  const itemEvents = transaction
+    .select({
+      kind: textLiteral("item").as("kind"),
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      itemId: nullableColumn(archiveObservations.itemId, "itemId"),
+      relationId: nullColumn(archiveRelations.relationId, "relationId"),
+      relationRevisionId: nullColumn(
+        archiveRelationObservations.relationRevisionId,
+        "relationRevisionId",
+      ),
+      relationStateData: nullColumn(
+        archiveRelationRevisions.stateData,
+        "relationStateData",
+      ),
+      revisionId: nullableColumn(archiveObservations.revisionId, "revisionId"),
+      ordinal: archiveObservations.ordinal,
+      // RC 没有 JSON 文本提取构建器；只对来源时间字段保留局部运算符。
+      sourceModifiedAt: sql`${archiveRevisions.stateData}->>'sourceModifiedAt'`
+        .mapWith(archiveCommits.binId)
+        .nullable()
+        .as("sourceModifiedAt"),
+      gapSubjectKind: nullColumn(
+        archiveRelationObservationGaps.relationId,
+        "gapSubjectKind",
+      ),
+      gapNamespace: nullColumn(archiveItems.namespace, "gapNamespace"),
+      gapSourceKey: nullColumn(archiveItems.sourceKey, "gapSourceKey"),
+    })
+    .from(archiveObservations)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveObservations.commitId),
     )
-    ORDER BY event.archive_seq::bigint, event.ordinal, event.commit_id
-    LIMIT ${limit + 1}
-  `;
+    .innerJoin(
+      archiveRevisions,
+      and(
+        eq(archiveRevisions.itemId, archiveObservations.itemId),
+        eq(archiveRevisions.revisionId, archiveObservations.revisionId),
+      ),
+    )
+    .where(
+      and(
+        eq(archiveObservations.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    );
+
+  const relationEvents = transaction
+    .select({
+      kind: textLiteral("relation").as("kind"),
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      itemId: nullColumn(archiveItems.itemId, "itemId"),
+      relationId: nullableColumn(
+        archiveRelationObservations.relationId,
+        "relationId",
+      ),
+      relationRevisionId: nullableColumn(
+        archiveRelationObservations.relationRevisionId,
+        "relationRevisionId",
+      ),
+      relationStateData: nullableColumn(
+        archiveRelationRevisions.stateData,
+        "relationStateData",
+      ),
+      revisionId: nullableColumn(
+        archiveRelationObservations.relationRevisionId,
+        "revisionId",
+      ),
+      ordinal: archiveRelationObservations.ordinal,
+      sourceModifiedAt: nullColumn(archiveCommits.binId, "sourceModifiedAt"),
+      gapSubjectKind: nullColumn(
+        archiveRelationObservationGaps.relationId,
+        "gapSubjectKind",
+      ),
+      gapNamespace: nullColumn(archiveItems.namespace, "gapNamespace"),
+      gapSourceKey: nullColumn(archiveItems.sourceKey, "gapSourceKey"),
+    })
+    .from(archiveRelationObservations)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveRelationObservations.commitId),
+    )
+    .innerJoin(
+      archiveRelations,
+      eq(archiveRelations.relationId, archiveRelationObservations.relationId),
+    )
+    .leftJoin(
+      archiveRelationRevisions,
+      and(
+        eq(
+          archiveRelationRevisions.relationId,
+          archiveRelationObservations.relationId,
+        ),
+        eq(
+          archiveRelationRevisions.relationRevisionId,
+          archiveRelationObservations.relationRevisionId,
+        ),
+      ),
+    )
+    .where(
+      and(
+        or(
+          eq(archiveRelations.fromItemId, itemId),
+          eq(archiveRelations.targetItemId, itemId),
+        ),
+        lte(archiveRelationObservations.archiveSequence, asOf),
+        binId === undefined
+          ? undefined
+          : eq(archiveRelationObservations.binId, binId),
+      ),
+    );
+
+  const itemGapEvents = transaction
+    .select({
+      kind: textLiteral("gap").as("kind"),
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      itemId: nullableColumn(archiveItemObservationGaps.itemId, "itemId"),
+      relationId: nullColumn(archiveRelations.relationId, "relationId"),
+      relationRevisionId: nullColumn(
+        archiveRelationObservations.relationRevisionId,
+        "relationRevisionId",
+      ),
+      relationStateData: nullColumn(
+        archiveRelationRevisions.stateData,
+        "relationStateData",
+      ),
+      revisionId: nullColumn(archiveObservations.revisionId, "revisionId"),
+      ordinal: archiveItemObservationGaps.ordinal,
+      sourceModifiedAt: nullColumn(archiveCommits.binId, "sourceModifiedAt"),
+      gapSubjectKind: textLiteral("item").as("gapSubjectKind"),
+      gapNamespace: nullableColumn(
+        archiveItemDeletions.namespace,
+        "gapNamespace",
+      ),
+      gapSourceKey: nullableColumn(
+        archiveItemDeletions.sourceKey,
+        "gapSourceKey",
+      ),
+    })
+    .from(archiveItemObservationGaps)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveItemObservationGaps.commitId),
+    )
+    .innerJoin(
+      archiveItemDeletions,
+      eq(archiveItemDeletions.itemId, archiveItemObservationGaps.itemId),
+    )
+    .where(
+      and(
+        eq(archiveItemObservationGaps.itemId, itemId),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    );
+
+  const relationGapEvents = transaction
+    .select({
+      kind: textLiteral("gap").as("kind"),
+      commitId: archiveCommits.commitId,
+      archiveSequence: archiveCommits.archiveSequence,
+      binId: archiveCommits.binId,
+      runId: archiveCommits.runId,
+      collectorVersion: archiveCommits.collectorVersion,
+      observedAt: archiveCommits.observedAt,
+      recordedAt: archiveCommits.recordedAt,
+      itemId: nullColumn(archiveItems.itemId, "itemId"),
+      relationId: nullableColumn(
+        archiveRelationObservationGaps.relationId,
+        "relationId",
+      ),
+      relationRevisionId: nullColumn(
+        archiveRelationObservations.relationRevisionId,
+        "relationRevisionId",
+      ),
+      relationStateData: nullColumn(
+        archiveRelationRevisions.stateData,
+        "relationStateData",
+      ),
+      revisionId: nullColumn(archiveObservations.revisionId, "revisionId"),
+      ordinal: archiveRelationObservationGaps.ordinal,
+      sourceModifiedAt: nullColumn(archiveCommits.binId, "sourceModifiedAt"),
+      gapSubjectKind: textLiteral("relation").as("gapSubjectKind"),
+      gapNamespace: nullColumn(archiveItems.namespace, "gapNamespace"),
+      gapSourceKey: nullColumn(archiveItems.sourceKey, "gapSourceKey"),
+    })
+    .from(archiveRelationObservationGaps)
+    .innerJoin(
+      archiveCommits,
+      eq(archiveCommits.commitId, archiveRelationObservationGaps.commitId),
+    )
+    .where(
+      and(
+        or(
+          eq(archiveRelationObservationGaps.fromItemId, itemId),
+          eq(archiveRelationObservationGaps.targetItemId, itemId),
+        ),
+        lte(archiveCommits.archiveSequence, asOf),
+        binId === undefined ? undefined : eq(archiveCommits.binId, binId),
+      ),
+    );
+
+  const events = transaction
+    .$with("timeline_events")
+    .as(unionAll(itemEvents, relationEvents, itemGapEvents, relationGapEvents));
+  const afterCursor =
+    after === undefined
+      ? undefined
+      : or(
+          gt(events.archiveSequence, BigInt(after.archiveSeq)),
+          and(
+            eq(events.archiveSequence, BigInt(after.archiveSeq)),
+            gt(events.ordinal, after.ordinal),
+          ),
+          and(
+            eq(events.archiveSequence, BigInt(after.archiveSeq)),
+            eq(events.ordinal, after.ordinal),
+            gt(events.commitId, after.commitId),
+          ),
+        );
+  const rows = await transaction
+    .with(events)
+    .select()
+    .from(events)
+    .where(afterCursor)
+    .orderBy(
+      asc(events.archiveSequence),
+      asc(events.ordinal),
+      asc(events.commitId),
+    )
+    .limit(limit + 1);
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const last = pageRows.at(-1);
@@ -682,9 +877,9 @@ async function readTimelinePage(
           binId: binId ?? null,
           snapshot: { asOf: snapshot.asOf, mode: "asOf" },
           after: {
-            archiveSeq: last.archive_seq,
+            archiveSeq: last.archiveSequence.toString(),
             ordinal: last.ordinal,
-            commitId: last.commit_id,
+            commitId: last.commitId,
           },
         })
       : undefined;
@@ -696,58 +891,84 @@ async function readTimelinePage(
       snapshot,
       events: pageRows.map((row) => {
         const metadata = {
-          commitId: row.commit_id,
-          archiveSeq: row.archive_seq,
+          commitId: row.commitId,
+          archiveSeq: row.archiveSequence.toString(),
           ordinal: row.ordinal,
-          binId: row.bin_id,
-          ...optionalText("runId", row.run_id),
-          ...optionalText("collectorVersion", row.collector_version),
-          observedAt: isoTimestamp(row.observed_at),
-          recordedAt: isoTimestamp(row.recorded_at),
+          binId: row.binId,
+          ...optionalText("runId", row.runId),
+          ...optionalText("collectorVersion", row.collectorVersion),
+          observedAt: isoTimestamp(row.observedAt),
+          recordedAt: isoTimestamp(row.recordedAt),
         };
         if (row.kind === "item") {
+          if (row.itemId === null || row.revisionId === null) {
+            throw new Error("条目时间线事件缺少条目或内容版本。");
+          }
           return {
             ...metadata,
             kind: "item" as const,
-            itemId: row.item_id!,
-            revisionId: row.revision_id!,
-            ...(row.source_modified_at === null
+            itemId: row.itemId,
+            revisionId: row.revisionId,
+            ...(row.sourceModifiedAt === null
               ? {}
-              : { sourceModifiedAt: row.source_modified_at }),
+              : { sourceModifiedAt: row.sourceModifiedAt }),
           };
         }
         if (row.kind === "gap") {
-          const subject =
-            row.gap_subject_kind === "item"
-              ? {
-                  kind: "item" as const,
-                  itemId: row.item_id!,
-                  sourceKey: {
-                    namespace: row.gap_namespace!,
-                    key: row.gap_source_key!,
-                  },
-                }
-              : {
-                  kind: "relation" as const,
-                  relationId: row.relation_id!,
-                };
-          return { ...metadata, kind: "gap" as const, subject };
+          if (row.gapSubjectKind === "item") {
+            if (
+              row.itemId === null ||
+              row.gapNamespace === null ||
+              row.gapSourceKey === null
+            ) {
+              throw new Error("条目删除缺口缺少来源身份。");
+            }
+            return {
+              ...metadata,
+              kind: "gap" as const,
+              subject: {
+                kind: "item" as const,
+                itemId: row.itemId,
+                sourceKey: {
+                  namespace: row.gapNamespace,
+                  key: row.gapSourceKey,
+                },
+              },
+            };
+          }
+          if (row.gapSubjectKind !== "relation" || row.relationId === null) {
+            throw new Error("关系删除缺口缺少关系身份。");
+          }
+          return {
+            ...metadata,
+            kind: "gap" as const,
+            subject: {
+              kind: "relation" as const,
+              relationId: row.relationId,
+            },
+          };
         }
-        if (row.relation_revision_id === null) {
+        if (row.kind !== "relation" || row.relationId === null) {
+          throw new Error("关系时间线事件缺少关系身份。");
+        }
+        if (row.relationRevisionId === null) {
           return {
             ...metadata,
             kind: "relation" as const,
-            relationId: row.relation_id!,
+            relationId: row.relationId,
             status: "withdrawn" as const,
           };
+        }
+        if (row.relationStateData === null) {
+          throw new Error("已观察关系缺少不可变关系版本。");
         }
         return {
           ...metadata,
           kind: "relation" as const,
-          relationId: row.relation_id!,
+          relationId: row.relationId,
           status: "observed" as const,
-          revisionId: row.relation_revision_id,
-          state: row.relation_state_data,
+          revisionId: row.relationRevisionId,
+          state: row.relationStateData,
         };
       }),
       ...(nextCursor === undefined ? {} : { nextCursor }),
@@ -766,135 +987,203 @@ async function readRelationsPage(
 ): Promise<
   ArchiveOperation<ReturnType<typeof archiveRelationPageSchema.parse>>
 > {
-  const rows = await transaction<RelationReadRow[]>`
-    WITH relevant_relation_ids AS (
-      SELECT relation.relation_id
-      FROM archive_relation AS relation
-      WHERE (
-        (${direction}::text = 'outgoing' AND relation.from_item_id = ${itemId})
-        OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
-      )
-        AND relation.created_seq <= ${snapshot.asOf}::bigint
-      UNION ALL
-      SELECT gap.relation_id
-      FROM archive_relation_observation_gap AS gap
-      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-      WHERE (
-        (${direction}::text = 'outgoing' AND gap.from_item_id = ${itemId})
-        OR (${direction}::text = 'incoming' AND gap.target_item_id = ${itemId})
-      )
-        AND commit.bin_id = ${binId}
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
-    ), gaps AS (
-      SELECT DISTINCT ON (gap.relation_id)
-        gap.relation_id,
-        gap.from_item_id,
-        gap.target_item_id,
-        NULL::text AS target_source_ref,
-        commit.archive_seq::text AS created_seq,
-        'deleted'::text AS state_status,
-        NULL::uuid AS relation_revision_id,
-        NULL::jsonb AS state_data,
-        commit.commit_id AS relation_commit_id,
-        commit.archive_seq::text AS relation_archive_seq,
-        gap.ordinal AS relation_ordinal,
-        commit.observed_at AS relation_observed_at,
-        commit.recorded_at AS relation_recorded_at,
-        commit.run_id AS relation_run_id,
-        commit.collector_version AS relation_collector_version
-      FROM archive_relation_observation_gap AS gap
-      JOIN archive_commit AS commit ON commit.commit_id = gap.commit_id
-      WHERE gap.relation_id IN (
-        SELECT relation_id FROM relevant_relation_ids
-      )
-        AND commit.bin_id = ${binId}
-        AND commit.archive_seq <= ${snapshot.asOf}::bigint
-        AND NOT EXISTS (
-          SELECT 1
-          FROM archive_relation_observation AS later
-          WHERE later.relation_id = gap.relation_id
-            AND later.bin_id = ${binId}
-            AND later.archive_seq > commit.archive_seq
-            AND later.archive_seq <= ${snapshot.asOf}::bigint
-        )
-      ORDER BY
-        gap.relation_id,
-        commit.archive_seq DESC,
-        gap.ordinal DESC,
-        gap.commit_id DESC
-    ), active AS (
-      SELECT
-        relation.relation_id,
-        relation.from_item_id,
-        relation.target_item_id,
-        relation.target_source_ref,
-        relation.created_seq::text AS created_seq,
-        CASE
-          WHEN latest.commit_id IS NULL THEN 'unknown'
-          WHEN latest.relation_revision_id IS NULL THEN 'withdrawn'
-          ELSE 'observed'
-        END AS state_status,
-        latest.relation_revision_id,
-        revision.state_data,
-        latest.commit_id AS relation_commit_id,
-        latest.archive_seq::text AS relation_archive_seq,
-        latest.ordinal AS relation_ordinal,
-        latest.observed_at AS relation_observed_at,
-        latest.recorded_at AS relation_recorded_at,
-        latest.run_id AS relation_run_id,
-        latest.collector_version AS relation_collector_version
-      FROM archive_relation AS relation
-      LEFT JOIN LATERAL (
-        SELECT
-          observation.commit_id,
-          observation.archive_seq,
-          observation.ordinal,
-          observation.relation_revision_id,
-          commit.observed_at,
-          commit.recorded_at,
-          commit.run_id,
-          commit.collector_version
-        FROM archive_relation_observation AS observation
-        JOIN archive_commit AS commit
-          ON commit.commit_id = observation.commit_id
-        WHERE observation.relation_id = relation.relation_id
-          AND observation.bin_id = ${binId}
-          AND observation.archive_seq <= ${snapshot.asOf}::bigint
-        ORDER BY
-          observation.archive_seq DESC,
-          observation.ordinal DESC,
-          observation.commit_id DESC
-        LIMIT 1
-      ) AS latest ON TRUE
-      LEFT JOIN archive_relation_revision AS revision
-        ON revision.relation_id = relation.relation_id
-        AND revision.relation_revision_id = latest.relation_revision_id
-      WHERE (
-        (${direction}::text = 'outgoing' AND relation.from_item_id = ${itemId})
-        OR (${direction}::text = 'incoming' AND relation.target_item_id = ${itemId})
-      )
-        AND relation.created_seq <= ${snapshot.asOf}::bigint
-        AND NOT EXISTS (
-          SELECT 1
-          FROM gaps
-          WHERE gaps.relation_id = relation.relation_id
-        )
-    ), candidates AS (
-      SELECT * FROM active
-      UNION ALL
-      SELECT * FROM gaps
-      WHERE (
-        (${direction}::text = 'outgoing' AND from_item_id = ${itemId})
-        OR (${direction}::text = 'incoming' AND target_item_id = ${itemId})
-      )
+  const asOf = BigInt(snapshot.asOf);
+  const gap = alias(archiveRelationObservationGaps, "gap");
+  const gapCommit = alias(archiveCommits, "gap_commit");
+  const laterObservation = alias(
+    archiveRelationObservations,
+    "later_observation",
+  );
+  const latestObservation = alias(
+    archiveRelationObservations,
+    "latest_observation",
+  );
+  const latestCommit = alias(archiveCommits, "latest_commit");
+  const latest = transaction
+    .select({
+      commitId: latestObservation.commitId,
+      archiveSequence: latestObservation.archiveSequence,
+      ordinal: latestObservation.ordinal,
+      relationRevisionId: latestObservation.relationRevisionId,
+      observedAt: latestCommit.observedAt,
+      recordedAt: latestCommit.recordedAt,
+      runId: latestCommit.runId,
+      collectorVersion: latestCommit.collectorVersion,
+    })
+    .from(latestObservation)
+    .innerJoin(
+      latestCommit,
+      eq(latestCommit.commitId, latestObservation.commitId),
     )
-    SELECT *
-    FROM candidates
-    WHERE ${after ?? null}::text IS NULL OR relation_id > ${after ?? null}
-    ORDER BY relation_id
-    LIMIT ${limit + 1}
-  `;
+    .where(
+      and(
+        eq(latestObservation.relationId, archiveRelations.relationId),
+        eq(latestObservation.binId, binId),
+        lte(latestObservation.archiveSequence, asOf),
+      ),
+    )
+    .orderBy(
+      desc(latestObservation.archiveSequence),
+      desc(latestObservation.ordinal),
+      desc(latestObservation.commitId),
+    )
+    .limit(1)
+    .as("latest_relation_observation");
 
+  const laterObservations = transaction
+    .select({ relationId: laterObservation.relationId })
+    .from(laterObservation)
+    .where(
+      and(
+        eq(laterObservation.relationId, gap.relationId),
+        eq(laterObservation.binId, binId),
+        gt(laterObservation.archiveSequence, gapCommit.archiveSequence),
+        lte(laterObservation.archiveSequence, asOf),
+      ),
+    );
+  const currentGaps = transaction
+    .select({ relationId: gap.relationId })
+    .from(gap)
+    .innerJoin(gapCommit, eq(gapCommit.commitId, gap.commitId))
+    .where(
+      and(
+        eq(gap.relationId, archiveRelations.relationId),
+        eq(gapCommit.binId, binId),
+        lte(gapCommit.archiveSequence, asOf),
+        notExists(laterObservations),
+      ),
+    );
+
+  const gapRows = transaction
+    .selectDistinctOn([gap.relationId], {
+      kind: textLiteral("deleted").as("kind"),
+      relationId: gap.relationId,
+      fromItemId: nullableColumn(gap.fromItemId, "fromItemId"),
+      targetItemId: nullableColumn(gap.targetItemId, "targetItemId"),
+      targetSourceRef: nullColumn(
+        archiveRelations.targetSourceRef,
+        "targetSourceRef",
+      ),
+      relationRevisionId: nullColumn(
+        archiveRelationObservations.relationRevisionId,
+        "relationRevisionId",
+      ),
+      stateData: nullColumn(archiveRelationRevisions.stateData, "stateData"),
+      relationCommitId: nullableColumn(gapCommit.commitId, "relationCommitId"),
+      // UNION CTE 的可空 lateral bigint 类型在此 RC 无法推导；转为 text 并用实际文本解码器保留精度。
+      relationArchiveSequence: sql`${gapCommit.archiveSequence}::text`
+        .mapWith(archiveCommits.binId)
+        .nullable()
+        .as("relationArchiveSequence"),
+      relationOrdinal: nullableColumn(gap.ordinal, "relationOrdinal"),
+      relationObservedAt: nullableColumn(
+        gapCommit.observedAt,
+        "relationObservedAt",
+      ),
+      relationRecordedAt: nullableColumn(
+        gapCommit.recordedAt,
+        "relationRecordedAt",
+      ),
+      relationRunId: nullableColumn(gapCommit.runId, "relationRunId"),
+      relationCollectorVersion: nullableColumn(
+        gapCommit.collectorVersion,
+        "relationCollectorVersion",
+      ),
+    })
+    .from(gap)
+    .innerJoin(gapCommit, eq(gapCommit.commitId, gap.commitId))
+    .where(
+      and(
+        direction === "outgoing"
+          ? eq(gap.fromItemId, itemId)
+          : eq(gap.targetItemId, itemId),
+        eq(gapCommit.binId, binId),
+        lte(gapCommit.archiveSequence, asOf),
+        notExists(laterObservations),
+      ),
+    )
+    .orderBy(
+      gap.relationId,
+      desc(gapCommit.archiveSequence),
+      desc(gap.ordinal),
+      desc(gap.commitId),
+    );
+
+  const activeRows = transaction
+    .select({
+      kind: textLiteral("active").as("kind"),
+      relationId: archiveRelations.relationId,
+      fromItemId: nullableColumn(archiveRelations.fromItemId, "fromItemId"),
+      targetItemId: nullableColumn(
+        archiveRelations.targetItemId,
+        "targetItemId",
+      ),
+      targetSourceRef: nullableColumn(
+        archiveRelations.targetSourceRef,
+        "targetSourceRef",
+      ),
+      relationRevisionId: nullableColumn(
+        latest.relationRevisionId,
+        "relationRevisionId",
+      ),
+      stateData: nullableColumn(
+        archiveRelationRevisions.stateData,
+        "stateData",
+      ),
+      relationCommitId: nullableColumn(latest.commitId, "relationCommitId"),
+      // 与删除缺口分支使用相同的精确十进制序号表示。
+      relationArchiveSequence: sql`${latest.archiveSequence}::text`
+        .mapWith(archiveCommits.binId)
+        .nullable()
+        .as("relationArchiveSequence"),
+      relationOrdinal: nullableColumn(latest.ordinal, "relationOrdinal"),
+      relationObservedAt: nullableColumn(
+        latest.observedAt,
+        "relationObservedAt",
+      ),
+      relationRecordedAt: nullableColumn(
+        latest.recordedAt,
+        "relationRecordedAt",
+      ),
+      relationRunId: nullableColumn(latest.runId, "relationRunId"),
+      relationCollectorVersion: nullableColumn(
+        latest.collectorVersion,
+        "relationCollectorVersion",
+      ),
+    })
+    .from(archiveRelations)
+    // RC 的 lateral join 要求显式 on 表达式；true 表示保留子查询的单行或空结果。
+    .leftJoinLateral(latest, sql`true`)
+    .leftJoin(
+      archiveRelationRevisions,
+      and(
+        eq(archiveRelationRevisions.relationId, archiveRelations.relationId),
+        eq(
+          archiveRelationRevisions.relationRevisionId,
+          latest.relationRevisionId,
+        ),
+      ),
+    )
+    .where(
+      and(
+        direction === "outgoing"
+          ? eq(archiveRelations.fromItemId, itemId)
+          : eq(archiveRelations.targetItemId, itemId),
+        lte(archiveRelations.createdSequence, asOf),
+        notExists(currentGaps),
+      ),
+    );
+
+  const candidates = transaction
+    .$with("relation_candidates")
+    .as(unionAll(activeRows, gapRows));
+  const rows = await transaction
+    .with(candidates)
+    .select()
+    .from(candidates)
+    .where(after === undefined ? undefined : gt(candidates.relationId, after))
+    .orderBy(asc(candidates.relationId))
+    .limit(limit + 1);
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   const last = pageRows.at(-1);
@@ -906,62 +1195,84 @@ async function readRelationsPage(
           binId,
           direction,
           snapshot: { asOf: snapshot.asOf, mode: "asOf" },
-          after: { relationId: last.relation_id },
+          after: { relationId: last.relationId },
         })
       : undefined;
 
   const endpointIds = [
     ...new Set(
-      pageRows.flatMap((row) =>
-        row.state_status === "deleted"
-          ? []
-          : row.target_item_id === null
-            ? [row.from_item_id]
-            : [row.from_item_id, row.target_item_id],
-      ),
+      pageRows.flatMap((row) => {
+        if (row.kind === "deleted") return [];
+        if (row.fromItemId === null) {
+          throw new Error("关系来源端点缺少身份。");
+        }
+        return row.targetItemId === null
+          ? [row.fromItemId]
+          : [row.fromItemId, row.targetItemId];
+      }),
     ),
   ];
+  const latestItemObservation = alias(
+    archiveObservations,
+    "latest_item_observation",
+  );
+  const latestItemCommit = alias(archiveCommits, "latest_item_commit");
+  const latestItem = transaction
+    .select({ revisionId: latestItemObservation.revisionId })
+    .from(latestItemObservation)
+    .innerJoin(
+      latestItemCommit,
+      eq(latestItemCommit.commitId, latestItemObservation.commitId),
+    )
+    .where(
+      and(
+        eq(latestItemObservation.itemId, archiveItems.itemId),
+        eq(latestItemCommit.binId, binId),
+        lte(latestItemCommit.archiveSequence, asOf),
+      ),
+    )
+    .orderBy(
+      desc(latestItemCommit.archiveSequence),
+      desc(latestItemObservation.ordinal),
+      desc(latestItemCommit.commitId),
+    )
+    .limit(1)
+    .as("latest_item_view");
   const endpointRows =
     endpointIds.length === 0
       ? []
-      : await transaction<EndpointRow[]>`
-          SELECT
-            item.item_id,
-            item.namespace,
-            item.source_key,
-            latest.revision_id
-          FROM archive_item AS item
-          LEFT JOIN LATERAL (
-            SELECT observation.revision_id
-            FROM archive_observation AS observation
-            JOIN archive_commit AS commit
-              ON commit.commit_id = observation.commit_id
-            WHERE observation.item_id = item.item_id
-              AND commit.bin_id = ${binId}
-              AND commit.archive_seq <= ${snapshot.asOf}::bigint
-            ORDER BY
-              commit.archive_seq DESC,
-              observation.ordinal DESC,
-              commit.commit_id DESC
-            LIMIT 1
-          ) AS latest ON TRUE
-          WHERE item.item_id = ANY(${transaction.array(endpointIds, 2950)})
-        `;
+      : await transaction
+          .select({
+            itemId: archiveItems.itemId,
+            namespace: archiveItems.namespace,
+            sourceKey: archiveItems.sourceKey,
+            revisionId: latestItem.revisionId,
+          })
+          .from(archiveItems)
+          .leftJoinLateral(latestItem, sql`true`)
+          .where(inArray(archiveItems.itemId, endpointIds));
   const endpoints = new Map(
-    endpointRows.map((row) => [row.item_id, row] as const),
+    endpointRows.map((row) => [row.itemId, row] as const),
   );
 
   const relations: ArchiveRelationEntry[] = pageRows.map((row) => {
-    const stateStatus = row.state_status;
+    const stateStatus =
+      row.kind === "deleted"
+        ? "deleted"
+        : row.relationCommitId === null
+          ? "unknown"
+          : row.relationRevisionId === null
+            ? "withdrawn"
+            : "observed";
     const relationObservation = () => {
-      const relationCommitId = row.relation_commit_id;
-      const relationArchiveSeq = row.relation_archive_seq;
-      const relationOrdinal = row.relation_ordinal;
-      const relationObservedAt = row.relation_observed_at;
-      const relationRecordedAt = row.relation_recorded_at;
+      const relationCommitId = row.relationCommitId;
+      const relationArchiveSequence = row.relationArchiveSequence;
+      const relationOrdinal = row.relationOrdinal;
+      const relationObservedAt = row.relationObservedAt;
+      const relationRecordedAt = row.relationRecordedAt;
       if (
         relationCommitId === null ||
-        relationArchiveSeq === null ||
+        relationArchiveSequence === null ||
         relationOrdinal === null ||
         relationObservedAt === null ||
         relationRecordedAt === null
@@ -970,43 +1281,51 @@ async function readRelationsPage(
       }
       return {
         commitId: relationCommitId,
-        archiveSeq: relationArchiveSeq,
+        archiveSeq: relationArchiveSequence,
         ordinal: relationOrdinal,
         observedAt: isoTimestamp(relationObservedAt),
         recordedAt: isoTimestamp(relationRecordedAt),
-        ...optionalText("runId", row.relation_run_id),
-        ...optionalText("collectorVersion", row.relation_collector_version),
+        ...optionalText("runId", row.relationRunId),
+        ...optionalText("collectorVersion", row.relationCollectorVersion),
       };
     };
-    if (row.state_status === "deleted") {
+    if (stateStatus === "deleted") {
       return archiveRelationEntrySchema.parse({
-        relationId: row.relation_id,
+        relationId: row.relationId,
         status: "deleted",
         observation: relationObservation(),
       });
     }
-    const fromRow = endpoints.get(row.from_item_id);
+    const fromItemId = row.fromItemId;
+    if (fromItemId === null) {
+      throw new Error("关系来源端点在读取期间消失。");
+    }
+    const fromRow = endpoints.get(fromItemId);
     if (fromRow === undefined) {
       throw new Error("关系来源端点在读取期间消失。");
     }
-    const endpoint = (item: EndpointRow) => ({
+    const endpoint = (item: typeof fromRow) => ({
       kind: "item" as const,
-      itemId: item.item_id,
-      sourceKey: { namespace: item.namespace, key: item.source_key },
+      itemId: item.itemId,
+      sourceKey: { namespace: item.namespace, key: item.sourceKey },
       status:
-        item.revision_id === null
-          ? ("unknown" as const)
-          : ("observed" as const),
-      ...(item.revision_id === null ? {} : { revisionId: item.revision_id }),
+        item.revisionId === null ? ("unknown" as const) : ("observed" as const),
+      ...(item.revisionId === null ? {} : { revisionId: item.revisionId }),
     });
+    const targetItemId = row.targetItemId;
+    const targetSourceRef = row.targetSourceRef;
     const to =
-      row.target_item_id === null
-        ? {
-            kind: "sourceRef" as const,
-            sourceRef: row.target_source_ref!,
-          }
+      targetItemId === null
+        ? targetSourceRef === null
+          ? (() => {
+              throw new Error("关系目标缺少条目或来源引用。");
+            })()
+          : {
+              kind: "sourceRef" as const,
+              sourceRef: targetSourceRef,
+            }
         : (() => {
-            const targetRow = endpoints.get(row.target_item_id);
+            const targetRow = endpoints.get(targetItemId);
             if (targetRow === undefined) {
               throw new Error("关系目标端点在读取期间消失。");
             }
@@ -1014,7 +1333,7 @@ async function readRelationsPage(
           })();
     if (stateStatus === "unknown") {
       return archiveRelationEntrySchema.parse({
-        relationId: row.relation_id,
+        relationId: row.relationId,
         status: stateStatus,
         from: endpoint(fromRow),
         to,
@@ -1022,24 +1341,25 @@ async function readRelationsPage(
     }
     if (stateStatus === "withdrawn") {
       return archiveRelationEntrySchema.parse({
-        relationId: row.relation_id,
+        relationId: row.relationId,
         status: stateStatus,
         from: endpoint(fromRow),
         to,
         observation: relationObservation(),
       });
     }
-    const revisionId = row.relation_revision_id;
-    if (revisionId === null) {
+    const revisionId = row.relationRevisionId;
+    const stateData = row.stateData;
+    if (revisionId === null || stateData === null) {
       throw new Error("已观察关系缺少不可变关系版本。");
     }
     return archiveRelationEntrySchema.parse({
-      relationId: row.relation_id,
-      status: stateStatus,
+      relationId: row.relationId,
+      status: "observed",
       from: endpoint(fromRow),
       to,
       revisionId,
-      state: archiveRelationStateSchema.parse(row.state_data),
+      state: archiveRelationStateSchema.parse(stateData),
       observation: relationObservation(),
     });
   });
@@ -1090,7 +1410,7 @@ export function createArchiveReadOperations(
           })),
         );
       }
-      return await database.begin(async (transaction) => {
+      return await withArchiveReadTransaction(database, async (transaction) => {
         const snapshot = await resolveSnapshot(transaction, options?.asOf);
         if (!snapshot.ok) return snapshot;
         return await readItem(
@@ -1160,18 +1480,20 @@ export function createArchiveReadOperations(
       }
 
       const requestedAsOf = cursor?.snapshot.asOf ?? options.asOf;
-      return await database.begin(async (transaction) => {
+      return await withArchiveReadTransaction(database, async (transaction) => {
         const snapshot = await resolveSnapshot(transaction, requestedAsOf);
         if (!snapshot.ok) return snapshot;
-        const items = await transaction<{ readonly item_id: string }[]>`
-          SELECT item_id
-          FROM archive_item
-          WHERE item_id = ${checkedId.data}
-          UNION ALL
-          SELECT item_id
-          FROM archive_item_deletion
-          WHERE item_id = ${checkedId.data}
-        `;
+        const items = await transaction
+          .select({ itemId: archiveItems.itemId })
+          .from(archiveItems)
+          .where(eq(archiveItems.itemId, checkedId.data))
+          .unionAll(
+            transaction
+              .select({ itemId: archiveItemDeletions.itemId })
+              .from(archiveItemDeletions)
+              .where(eq(archiveItemDeletions.itemId, checkedId.data)),
+          )
+          .limit(1);
         if (items[0] === undefined) {
           return failure(404, "item_not_found", "没有找到这个归档条目。", [
             "itemId",
@@ -1199,22 +1521,23 @@ export function createArchiveReadOperations(
           })),
         );
       }
-      return await database.begin(async (transaction) => {
-        await transaction.unsafe(
-          "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        );
-        const rows = await transaction<RevisionReadRow[]>`
-          SELECT
-            revision.revision_id,
-            revision.state_hash,
-            revision.state_data,
-            item.item_id,
-            item.namespace,
-            item.source_key
-          FROM archive_revision AS revision
-          JOIN archive_item AS item ON item.item_id = revision.item_id
-          WHERE revision.revision_id = ${checkedId.data}
-        `;
+      return await withArchiveReadTransaction(database, async (transaction) => {
+        const rows = await transaction
+          .select({
+            revisionId: archiveRevisions.revisionId,
+            stateHash: archiveRevisions.stateHash,
+            stateData: archiveRevisions.stateData,
+            itemId: archiveItems.itemId,
+            namespace: archiveItems.namespace,
+            sourceKey: archiveItems.sourceKey,
+          })
+          .from(archiveRevisions)
+          .innerJoin(
+            archiveItems,
+            eq(archiveItems.itemId, archiveRevisions.itemId),
+          )
+          .where(eq(archiveRevisions.revisionId, checkedId.data))
+          .limit(1);
         const row = rows[0];
         if (row === undefined) {
           return failure(404, "revision_not_found", "没有找到这个内容版本。", [
@@ -1224,11 +1547,11 @@ export function createArchiveReadOperations(
         return {
           ok: true,
           value: archiveRevisionReadSchema.parse({
-            revisionId: row.revision_id,
-            itemId: row.item_id,
-            sourceKey: { namespace: row.namespace, key: row.source_key },
-            stateHash: row.state_hash,
-            state: row.state_data,
+            revisionId: row.revisionId,
+            itemId: row.itemId,
+            sourceKey: { namespace: row.namespace, key: row.sourceKey },
+            stateHash: row.stateHash,
+            state: row.stateData,
           }),
         };
       });
@@ -1301,7 +1624,7 @@ export function createArchiveReadOperations(
 
       const binId = cursor?.binId ?? checkedBinId?.data;
       const requestedAsOf = cursor?.snapshot.asOf ?? options?.asOf;
-      return await database.begin(async (transaction) => {
+      return await withArchiveReadTransaction(database, async (transaction) => {
         const snapshot = await resolveSnapshot(transaction, requestedAsOf);
         if (!snapshot.ok) return snapshot;
         if (
@@ -1333,15 +1656,12 @@ export function createArchiveReadOperations(
           })),
         );
       }
-      return await database.begin(async (transaction) => {
-        await transaction.unsafe(
-          "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        );
-        const rows = await transaction<{ readonly commit_id: string }[]>`
-          SELECT commit_id
-          FROM archive_commit
-          WHERE commit_id = ${checkedId.data}
-        `;
+      return await withArchiveReadTransaction(database, async (transaction) => {
+        const rows = await transaction
+          .select({ commitId: archiveCommits.commitId })
+          .from(archiveCommits)
+          .where(eq(archiveCommits.commitId, checkedId.data))
+          .limit(1);
         if (rows[0] === undefined) {
           return failure(404, "commit_not_found", "没有找到这个归档提交。", [
             "commitId",
