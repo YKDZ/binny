@@ -165,13 +165,8 @@ function nullColumn<TColumn extends AnyColumn>(
 }
 
 function textLiteral(value: string) {
-  // UNION 事件类型用固定文本标记；解码时验证该常量仍与构造值一致。
-  return sql`${value}::text`.mapWith((result) => {
-    if (typeof result !== "string" || result !== value) {
-      throw new TypeError("数据库返回了意外的固定文本值。");
-    }
-    return value;
-  });
+  // UNION／CTE 沿用左分支 decoder；所有文本标记共用实际文本列 decoder，公开结果由契约解析。
+  return sql`${value}::text`.mapWith(archiveCommits.binId);
 }
 
 function withArchiveReadTransaction<T>(
