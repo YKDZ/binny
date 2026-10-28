@@ -13,6 +13,7 @@ import {
   archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
+import type { ArchiveSearchFilter, ArchiveSearchInput } from "@binny/contracts";
 import type { AnySchema } from "ajv/dist/2020.js";
 import * as z from "zod";
 
@@ -2966,6 +2967,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
       {
         sourceKey: { namespace: "e2e", key: "search-page-a" },
         sourceModifiedAt: "2026-10-28T04:00:00.000Z",
+        properties: { rank: 1 },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -2983,6 +2985,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
       {
         sourceKey: { namespace: "e2e", key: "search-page-b" },
         sourceModifiedAt: "2026-10-28T04:00:00.000Z",
+        properties: { rank: 1 },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -2998,6 +3001,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-null-time" },
+        properties: { rank: "0" },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -3010,8 +3014,21 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   const baseQuery = {
     scope: { kind: "current" as const, binId: "rss-main" },
     text: { kind: "literal" as const, value: "稳定分页唯一needle" },
-    select: ["runId" as const],
+    select: [
+      "runId" as const,
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["rank"],
+      },
+    ],
     orderBy: [
+      {
+        field: "properties" as const,
+        path: ["rank"],
+        valueType: "number" as const,
+        direction: "asc" as const,
+      },
       { field: "sourceModifiedAt" as const, direction: "asc" as const },
       { field: "sourceKey.key" as const, direction: "asc" as const },
     ],
@@ -3031,27 +3048,42 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal(firstPage.results[0]?.matches[0]?.sourceRef, undefined);
   assert.equal(firstPage.results[0]?.matches[0]?.completeness, undefined);
   assert.equal(firstPage.results[0]?.matches[0]?.hit?.context, undefined);
+  assert.deepEqual(firstPage.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["rank"],
+      exists: true,
+      value: 1,
+    },
+  ]);
   assert.ok(firstPage.nextCursor);
 
-  await submitArchive(client, {
-    requestId: "e2e:archive:search-page-c",
-    binId: "rss-main",
-    items: [
-      {
-        sourceKey: { namespace: "e2e", key: "search-page-c" },
-        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
-        body: { searchText: "稳定分页唯一needle" },
-        capture: {
-          scope: { case: "search-page" },
-          completeness: "complete",
-          missing: [],
+  const [pageC, secondResponse, concurrentSecondResponse] = await Promise.all([
+    submitArchive(client, {
+      requestId: "e2e:archive:search-page-c",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "search-page-c" },
+          sourceModifiedAt: "2026-10-28T04:00:00.000Z",
+          properties: { rank: 0 },
+          body: { searchText: "稳定分页唯一needle" },
+          capture: {
+            scope: { case: "search-page" },
+            completeness: "complete",
+            missing: [],
+          },
         },
-      },
-    ],
-  });
-  const secondResponse = await client.archives.search.$post({
-    json: { ...baseQuery, cursor: firstPage.nextCursor },
-  });
+      ],
+    }),
+    client.archives.search.$post({
+      json: { ...baseQuery, cursor: firstPage.nextCursor },
+    }),
+    client.archives.search.$post({
+      json: { ...baseQuery, cursor: firstPage.nextCursor },
+    }),
+  ]);
+  assert.ok(pageC.items[0]);
   if (secondResponse.status !== 200) {
     throw new Error("搜索后续页面失败：" + (await secondResponse.text()));
   }
@@ -3060,6 +3092,14 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal(secondPage.results[0]?.itemId, pageB.items[0]?.itemId);
   assert.ok(secondPage.nextCursor);
   assert.equal(secondPage.snapshot.asOf, firstPage.snapshot.asOf);
+  if (concurrentSecondResponse.status !== 200) {
+    throw new Error(
+      "并发搜索后续页面失败：" + (await concurrentSecondResponse.text()),
+    );
+  }
+  const concurrentSecondPage = await concurrentSecondResponse.json();
+  assert.deepEqual(concurrentSecondPage.results, secondPage.results);
+  assert.equal(concurrentSecondPage.snapshot.asOf, firstPage.snapshot.asOf);
 
   const thirdResponse = await client.archives.search.$post({
     json: { ...baseQuery, cursor: secondPage.nextCursor },
@@ -3072,6 +3112,14 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal(thirdPage.results[0]?.itemId, pageNullTime.items[0]?.itemId);
   assert.equal(thirdPage.nextCursor, undefined);
   assert.equal(thirdPage.snapshot.asOf, firstPage.snapshot.asOf);
+  assert.deepEqual(thirdPage.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["rank"],
+      exists: true,
+      value: "0",
+    },
+  ]);
 
   const mismatchedCursor = await client.archives.search.$post({
     json: {
@@ -3110,6 +3158,820 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal((await overBudget.json()).error.code, "query_budget_exceeded");
 }
 
+async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const searchJsonPage = async (
+    json: Parameters<ArchiveClient["archives"]["search"]["$post"]>[0]["json"],
+  ) => {
+    const response = await client.archives.search.$post({ json });
+    if (response.status !== 200) {
+      throw new Error("JSON 路径查询失败：" + (await response.text()));
+    }
+    return response.json();
+  };
+  const numberLow = "json-number-low";
+  const numberHigh = "json-number-high";
+  const stringValue = "json-string";
+  const missingValue = "json-missing";
+  const prototypeValue = "json-prototype";
+  const keys = [numberLow, numberHigh, stringValue, missingValue];
+  const searchFixturePage = (
+    condition: ArchiveSearchFilter,
+    select: ArchiveSearchInput["select"] = ["sourceKey"],
+  ) =>
+    searchJsonPage({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "in",
+            values: keys,
+          },
+          condition,
+        ],
+      },
+      select,
+      orderBy: [{ field: "sourceKey.key" }],
+      limit: 10,
+    });
+  const nestedPrototypeValue: unknown = JSON.parse(
+    '{"__proto__":{"marker":1,"nested":{"__proto__":"preserve"}}}',
+  );
+  assert.ok(
+    typeof nestedPrototypeValue === "object" && nestedPrototypeValue !== null,
+  );
+  const prototypePropertiesSource: unknown = JSON.parse(
+    '{"__proto__":{"score":12}}',
+  );
+  assert.ok(
+    typeof prototypePropertiesSource === "object" &&
+      prototypePropertiesSource !== null,
+  );
+  const prototypeProperties: Record<string, unknown> = {
+    ...prototypePropertiesSource,
+    custom: nestedPrototypeValue,
+  };
+  assert.equal(Object.hasOwn(prototypeProperties, "__proto__"), true);
+  await submitArchive(client, {
+    requestId: "e2e:archive:search-json-path-filter",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: numberLow },
+        properties: {
+          profile: {
+            score: 2,
+            nullable: null,
+            active: true,
+            details: { name: "低", flags: ["a", 3] },
+          },
+          events: [{ score: 4 }, { score: 9 }],
+        },
+        metadata: { stats: { views: 7 } },
+        capture: {
+          scope: { case: "json-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: numberHigh },
+        properties: { profile: { score: 10, nullable: null, active: false } },
+        capture: {
+          scope: { case: "json-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: stringValue },
+        properties: {
+          profile: { score: "10", nullable: "not null", active: true },
+        },
+        capture: {
+          scope: { case: "json-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: missingValue },
+        properties: { profile: { active: true } },
+        capture: {
+          scope: { case: "json-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: prototypeValue },
+        properties: prototypeProperties,
+        capture: {
+          scope: { case: "json-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  const schemas = compilePublishedSchemas();
+  const query = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    where: {
+      type: "and" as const,
+      conditions: [
+        {
+          type: "field" as const,
+          field: "sourceKey.key" as const,
+          operator: "in" as const,
+          values: keys,
+        },
+        {
+          type: "json" as const,
+          field: "properties" as const,
+          path: ["profile", "score"],
+          valueType: "number" as const,
+          operator: "gte" as const,
+          value: 2,
+        },
+      ],
+    },
+    select: [
+      "sourceKey" as const,
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["profile", "score"],
+      },
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["profile", "nullable"],
+      },
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["profile", "details"],
+      },
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["events", 1, "score"],
+      },
+    ],
+    orderBy: [
+      {
+        field: "properties" as const,
+        path: ["profile", "score"],
+        valueType: "number" as const,
+        direction: "asc" as const,
+      },
+      { field: "sourceKey.key" as const, direction: "asc" as const },
+    ],
+    limit: 10,
+  };
+  assert.equal(schemas.apiInput(query), true);
+  assert.equal(schemas.standardInput(query), true);
+  const response = await client.archives.search.$post({ json: query });
+  if (response.status !== 200) {
+    throw new Error("JSON 路径数值过滤失败：" + (await response.text()));
+  }
+  const page = await response.json();
+  assert.equal(
+    schemas.apiOutput(page),
+    true,
+    JSON.stringify(schemas.apiOutput.errors),
+  );
+  assert.equal(
+    schemas.standardOutput(page),
+    true,
+    JSON.stringify(schemas.standardOutput.errors),
+  );
+  assert.deepEqual(
+    page.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberLow, numberHigh],
+  );
+  assert.deepEqual(page.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["profile", "score"],
+      exists: true,
+      value: 2,
+    },
+    {
+      field: "properties",
+      path: ["profile", "nullable"],
+      exists: true,
+      value: null,
+    },
+    {
+      field: "properties",
+      path: ["profile", "details"],
+      exists: true,
+      value: { name: "低", flags: ["a", 3] },
+    },
+    {
+      field: "properties",
+      path: ["events", 1, "score"],
+      exists: true,
+      value: 9,
+    },
+  ]);
+
+  const nullPage = await searchFixturePage(
+    {
+      type: "json",
+      field: "properties",
+      path: ["profile", "nullable"],
+      valueType: "null",
+      operator: "eq",
+      value: null,
+    },
+    [
+      "sourceKey",
+      { type: "json", field: "properties", path: ["profile", "nullable"] },
+    ],
+  );
+  assert.deepEqual(
+    nullPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, numberLow],
+  );
+  assert.deepEqual(nullPage.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["profile", "nullable"],
+      exists: true,
+      value: null,
+    },
+  ]);
+
+  const existsPage = await searchFixturePage({
+    type: "json",
+    field: "properties",
+    path: ["profile", "nullable"],
+    operator: "exists",
+    value: true,
+  });
+  assert.deepEqual(
+    existsPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, numberLow, stringValue],
+  );
+
+  const missingPage = await searchFixturePage(
+    {
+      type: "json",
+      field: "properties",
+      path: ["profile", "score"],
+      operator: "exists",
+      value: false,
+    },
+    [
+      "sourceKey",
+      { type: "json", field: "properties", path: ["profile", "score"] },
+    ],
+  );
+  assert.deepEqual(
+    missingPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [missingValue],
+  );
+  assert.deepEqual(missingPage.results[0]?.matches[0]?.json, [
+    {
+      field: "properties",
+      path: ["profile", "score"],
+      exists: false,
+    },
+  ]);
+
+  const notPage = await searchFixturePage({
+    type: "not",
+    condition: {
+      type: "json",
+      field: "properties",
+      path: ["profile", "score"],
+      valueType: "number",
+      operator: "eq",
+      value: 2,
+    },
+  });
+  assert.deepEqual(
+    notPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [missingValue, numberHigh, stringValue],
+  );
+
+  const rangePage = await searchFixturePage({
+    type: "json",
+    field: "properties",
+    path: ["profile", "score"],
+    valueType: "number",
+    operator: "between",
+    lower: 2,
+    upper: 10,
+  });
+  assert.deepEqual(
+    rangePage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, numberLow],
+  );
+
+  const collectionPage = await searchFixturePage({
+    type: "json",
+    field: "properties",
+    path: ["profile", "score"],
+    valueType: "number",
+    operator: "in",
+    values: [2, 10],
+  });
+  assert.deepEqual(
+    collectionPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, numberLow],
+  );
+
+  const stringComparePage = await searchFixturePage({
+    type: "json",
+    field: "properties",
+    path: ["profile", "nullable"],
+    valueType: "string",
+    operator: "eq",
+    value: "not null",
+  });
+  assert.deepEqual(
+    stringComparePage.results.map(({ sourceKey }) => sourceKey?.key),
+    [stringValue],
+  );
+
+  const notInPage = await searchFixturePage({
+    type: "json",
+    field: "properties",
+    path: ["profile", "score"],
+    valueType: "number",
+    operator: "notIn",
+    values: [2],
+  });
+  assert.deepEqual(
+    notInPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh],
+  );
+
+  const composedPage = await searchFixturePage({
+    type: "or",
+    conditions: [
+      {
+        type: "json",
+        field: "properties",
+        path: ["profile", "score"],
+        valueType: "number",
+        operator: "eq",
+        value: 2,
+      },
+      {
+        type: "json",
+        field: "properties",
+        path: ["profile", "active"],
+        valueType: "boolean",
+        operator: "eq",
+        value: false,
+      },
+    ],
+  });
+  assert.deepEqual(
+    composedPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, numberLow],
+  );
+
+  const nestedPathPage = await searchJsonPage({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "json",
+          field: "metadata",
+          path: ["stats", "views"],
+          valueType: "number",
+          operator: "eq",
+          value: 7,
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["events", 1, "score"],
+          valueType: "number",
+          operator: "eq",
+          value: 9,
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["profile", "details", "flags"],
+          valueType: "array",
+          operator: "eq",
+          value: ["a", 3],
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["profile", "details"],
+          valueType: "object",
+          operator: "eq",
+          value: { name: "低", flags: ["a", 3] },
+        },
+      ],
+    },
+    select: ["sourceKey"],
+    limit: 10,
+  });
+  assert.deepEqual(
+    nestedPathPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberLow],
+  );
+
+  const prototypePage = await searchJsonPage({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: prototypeValue,
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["__proto__", "score"],
+          valueType: "number",
+          operator: "eq",
+          value: 12,
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["custom"],
+          valueType: "object",
+          operator: "eq",
+          value: nestedPrototypeValue,
+        },
+      ],
+    },
+    select: [
+      "sourceKey",
+      { type: "json", field: "properties", path: ["__proto__"] },
+      { type: "json", field: "properties", path: ["custom"] },
+    ],
+    limit: 10,
+  });
+  assert.deepEqual(
+    prototypePage.results.map(({ sourceKey }) => sourceKey?.key),
+    [prototypeValue],
+  );
+  const prototypeJson = prototypePage.results[0]?.matches[0]?.json;
+  assert.deepEqual(prototypeJson, [
+    {
+      field: "properties",
+      path: ["__proto__"],
+      exists: true,
+      value: { score: 12 },
+    },
+    {
+      field: "properties",
+      path: ["custom"],
+      exists: true,
+      value: nestedPrototypeValue,
+    },
+  ]);
+  const projectedPrototypeValue = prototypeJson?.[1]?.value;
+  assert.ok(
+    typeof projectedPrototypeValue === "object" &&
+      projectedPrototypeValue !== null &&
+      !Array.isArray(projectedPrototypeValue),
+  );
+  assert.equal(Object.hasOwn(projectedPrototypeValue, "__proto__"), true);
+  const projectedOwnPrototype = Object.getOwnPropertyDescriptor(
+    projectedPrototypeValue,
+    "__proto__",
+  )?.value;
+  assert.ok(
+    typeof projectedOwnPrototype === "object" &&
+      projectedOwnPrototype !== null &&
+      !Array.isArray(projectedOwnPrototype),
+  );
+  const projectedNestedValue =
+    "nested" in projectedOwnPrototype
+      ? projectedOwnPrototype.nested
+      : undefined;
+  assert.ok(
+    typeof projectedNestedValue === "object" &&
+      projectedNestedValue !== null &&
+      !Array.isArray(projectedNestedValue),
+  );
+  assert.equal(Object.hasOwn(projectedNestedValue, "__proto__"), true);
+
+  const numericSortPage = await searchJsonPage({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: keys,
+    },
+    select: ["sourceKey"],
+    orderBy: [
+      {
+        field: "properties",
+        path: ["profile", "score"],
+        valueType: "number",
+      },
+      { field: "sourceKey.key" },
+    ],
+    limit: 10,
+  });
+  assert.deepEqual(
+    numericSortPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberLow, numberHigh, missingValue, stringValue],
+  );
+
+  const stringSortPage = await searchJsonPage({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: keys,
+    },
+    select: ["sourceKey"],
+    orderBy: [
+      {
+        field: "properties",
+        path: ["profile", "nullable"],
+        valueType: "string",
+      },
+      { field: "sourceKey.key" },
+    ],
+    limit: 10,
+  });
+  assert.deepEqual(
+    stringSortPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [stringValue, missingValue, numberHigh, numberLow],
+  );
+
+  const booleanSortPage = await searchJsonPage({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: keys,
+    },
+    select: ["sourceKey"],
+    orderBy: [
+      {
+        field: "properties",
+        path: ["profile", "active"],
+        valueType: "boolean",
+      },
+      { field: "sourceKey.key" },
+    ],
+    limit: 10,
+  });
+  assert.deepEqual(
+    booleanSortPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [numberHigh, missingValue, numberLow, stringValue],
+  );
+
+  const cursorRunId = randomUUID();
+  const cursorKeys = [
+    "json-cursor-a:" + cursorRunId,
+    "json-cursor-b:" + cursorRunId,
+    "json-cursor-c:" + cursorRunId,
+    "json-cursor-d:" + cursorRunId,
+  ];
+  const cursorCommit = await submitArchive(client, {
+    requestId: "e2e:archive:search-json-cursor-delete:" + cursorRunId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[0]! },
+        properties: { rank: 2 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[1]! },
+        properties: { rank: 10 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[2]! },
+        properties: { rank: 9 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[3]! },
+        properties: { rank: "not a number" },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const cursorAnchor = cursorCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cursorKeys[1],
+  );
+  assert.ok(cursorAnchor);
+  const cursorQuery = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    where: {
+      type: "field" as const,
+      field: "sourceKey.key" as const,
+      operator: "in" as const,
+      values: cursorKeys,
+    },
+    select: ["sourceKey" as const],
+    orderBy: [
+      {
+        field: "properties" as const,
+        path: ["rank"],
+        valueType: "number" as const,
+        direction: "desc" as const,
+      },
+      { field: "sourceKey.key" as const, direction: "asc" as const },
+    ],
+    limit: 1,
+  };
+  const cursorFirstPage = await searchJsonPage(cursorQuery);
+  assert.deepEqual(
+    cursorFirstPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[1]],
+  );
+  assert.ok(cursorFirstPage.nextCursor);
+
+  const cursorAnchorDeletion = await fetch(
+    baseUrl + "/archives/items/" + cursorAnchor.itemId,
+    { method: "DELETE" },
+  );
+  assert.equal(cursorAnchorDeletion.status, 200);
+  if (cursorAnchorDeletion.status !== 200) {
+    throw new Error("JSON 排序游标锚点硬删除失败。");
+  }
+
+  const retainedAtCursorSnapshot = await searchJsonPage({
+    ...cursorQuery,
+    scope: {
+      kind: "asOf",
+      binId: "rss-main",
+      asOf: cursorFirstPage.snapshot.asOf,
+    },
+    limit: 10,
+  });
+  assert.deepEqual(
+    retainedAtCursorSnapshot.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[2], cursorKeys[0], cursorKeys[3]],
+  );
+  assert.equal(retainedAtCursorSnapshot.nextCursor, undefined);
+
+  const deletedCursorResponse = await client.archives.search.$post({
+    json: { ...cursorQuery, cursor: cursorFirstPage.nextCursor },
+  });
+  assert.equal(deletedCursorResponse.status, 400);
+  if (deletedCursorResponse.status === 400) {
+    const deletedCursorError = await deletedCursorResponse.json();
+    assert.equal(deletedCursorError.error.code, "invalid_input");
+    assert.deepEqual(deletedCursorError.error.path, ["cursor"]);
+    assert.equal(
+      deletedCursorError.error.message,
+      "搜索游标已失效，请重新查询。",
+    );
+  }
+
+  const retainedAnchorQuery = {
+    ...cursorQuery,
+    where: {
+      type: "field" as const,
+      field: "sourceKey.key" as const,
+      operator: "in" as const,
+      values: [cursorKeys[2]!, cursorKeys[3]!],
+    },
+  };
+  const retainedAnchorPage = await searchJsonPage(retainedAnchorQuery);
+  assert.deepEqual(
+    retainedAnchorPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[2]],
+  );
+  assert.ok(retainedAnchorPage.nextCursor);
+  const tailAnchor = cursorCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cursorKeys[3],
+  );
+  assert.ok(tailAnchor);
+  const tailAnchorDeletion = await fetch(
+    baseUrl + "/archives/items/" + tailAnchor.itemId,
+    { method: "DELETE" },
+  );
+  assert.equal(tailAnchorDeletion.status, 200);
+  if (tailAnchorDeletion.status !== 200) {
+    throw new Error("JSON 排序游标尾项硬删除失败。");
+  }
+  const exhaustedCursorResponse = await client.archives.search.$post({
+    json: { ...retainedAnchorQuery, cursor: retainedAnchorPage.nextCursor },
+  });
+  assert.equal(exhaustedCursorResponse.status, 200);
+  if (exhaustedCursorResponse.status === 200) {
+    const exhaustedCursorPage = await exhaustedCursorResponse.json();
+    assert.deepEqual(exhaustedCursorPage.results, []);
+    assert.equal(exhaustedCursorPage.nextCursor, undefined);
+  }
+
+  const budgetPage = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "json",
+        field: "properties",
+        path: ["profile", "score"],
+        valueType: "number",
+        operator: "gte",
+        value: 0,
+      },
+      budgetMs: 1,
+      limit: 10,
+    },
+  });
+  assert.equal(budgetPage.status, 422);
+  if (budgetPage.status === 422) {
+    assert.equal((await budgetPage.json()).error.code, "query_budget_exceeded");
+  }
+
+  const unsafeNumberPage = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "json",
+        field: "properties",
+        path: ["profile", "score"],
+        valueType: "number",
+        operator: "eq",
+        value: Number.MAX_SAFE_INTEGER + 1,
+      },
+      limit: 10,
+    },
+  });
+  assert.equal(unsafeNumberPage.status, 400);
+
+  const reversedRangePage = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "json",
+        field: "properties",
+        path: ["profile", "score"],
+        valueType: "number",
+        operator: "between",
+        lower: 10,
+        upper: 2,
+      },
+      limit: 10,
+    },
+  });
+  assert.equal(reversedRangePage.status, 400);
+
+  const invalidTextKey: unknown = JSON.parse('{"\\u0000":"bad"}');
+  const invalidTextKeyPage = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "json",
+        field: "properties",
+        path: ["custom"],
+        valueType: "object",
+        operator: "eq",
+        value: invalidTextKey,
+      },
+      limit: 10,
+    },
+  });
+  assert.equal(invalidTextKeyPage.status, 400);
+  if (invalidTextKeyPage.status === 400) {
+    const invalidTextKeyError = await invalidTextKeyPage.json();
+    assert.equal(invalidTextKeyError.error.code, "invalid_input");
+    assert.ok(invalidTextKeyError.error.path?.includes("\u0000"));
+  }
+}
 async function verifyHardDeleteEntryPoint(
   client: ArchiveClient,
   baseUrl: string,
@@ -3638,6 +4500,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
     aba.revisionId,
     aba.historicalAsOf,
   );
+  await verifySearchJsonPathFilter(baseUrl);
   await verifySearchSourceViews(baseUrl);
   await verifySearchPagination(baseUrl);
   await verifyConcurrentArchiveIdentity(client);
