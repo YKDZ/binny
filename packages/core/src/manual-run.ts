@@ -22,23 +22,24 @@ import {
   type ManualRunOperations,
   type ManualRunResult,
 } from "@binny/contracts";
-import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
-import { alias } from "drizzle-orm/pg-core";
-
-import { validateCollectorActionParameters } from "./bin-configuration.ts";
-import type { CoreDatabase, CoreTransaction } from "./database.ts";
-import {
-  interruptExpiredManualRuns,
-  isRuntimeOwnerWritable,
-} from "./manual-run-fencing.ts";
-import { readRuntimeExecution } from "./runtime-connection.ts";
 import {
   archiveCommits,
   archiveObservations,
   binConfigurations,
   manualRuns,
   runtimeConnections,
-} from "./schema.ts";
+  type Database,
+  type Transaction,
+} from "@binny/db";
+import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+
+import { validateCollectorActionParameters } from "./bin-configuration.ts";
+import {
+  interruptExpiredManualRuns,
+  isRuntimeOwnerWritable,
+} from "./manual-run-fencing.ts";
+import { readRuntimeExecution } from "./runtime-connection.ts";
 
 const runSelection = {
   runId: manualRuns.runId,
@@ -101,7 +102,7 @@ function statusReason(
 }
 
 async function readCommitLocators(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   runId: string,
   binId: string,
 ): Promise<ManualRunResult["commits"]> {
@@ -141,7 +142,7 @@ async function readCommitLocators(
 }
 
 async function readRun(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   binId: string,
   runId: string,
 ) {
@@ -230,7 +231,7 @@ type RunOutputRow = Pick<RunRow, keyof typeof runSelection> & {
 };
 
 async function rowToRun(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   row: RunOutputRow,
 ): Promise<ManualRun> {
   const commits = await readCommitLocators(database, row.runId, row.binId);
@@ -296,9 +297,7 @@ async function rowToRun(
   });
 }
 
-export function createManualRunStore(
-  database: CoreDatabase,
-): ManualRunOperations {
+export function createManualRunStore(database: Database): ManualRunOperations {
   return {
     async triggerRun(binId, input) {
       const checked = manualRunTriggerInputSchema.safeParse(input);
@@ -719,7 +718,7 @@ export function createManualRunStore(
 }
 
 async function failOneQueuedRun(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   runId: string,
   failureValue: ManualRunFailure,
 ): Promise<void> {
@@ -735,7 +734,7 @@ async function failOneQueuedRun(
 }
 
 async function failQueuedRuns(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   binId: string,
   code: string,
 ): Promise<void> {

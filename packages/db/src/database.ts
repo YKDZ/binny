@@ -7,19 +7,16 @@ import postgres from "postgres";
 
 import { archiveWriteClock } from "./schema.ts";
 
-export type CoreDatabase = PostgresJsDatabase;
-export type CoreTransaction = Parameters<
-  Parameters<CoreDatabase["transaction"]>[0]
->[0];
+export type Database = PostgresJsDatabase;
+export type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
-export type CoreDatabaseConnection = {
-  readonly database: CoreDatabase;
+export type DatabaseConnection = {
+  readonly database: Database;
   readonly close: () => Promise<void>;
 };
 
-export function connectCoreDatabase(
-  connectionString: string,
-): CoreDatabaseConnection {
+/** 创建单一数据库连接池；服务关闭时调用返回的 close。 */
+export function connectDatabase(connectionString: string): DatabaseConnection {
   const client = postgres(connectionString, {
     max: 10,
     connect_timeout: 10,
@@ -32,6 +29,7 @@ export function connectCoreDatabase(
   };
 }
 
+/** 提取 Drizzle 包装链最内层驱动错误的 SQLSTATE。 */
 export function databaseErrorCode(error: unknown): string | undefined {
   if (error instanceof DrizzleQueryError) {
     return databaseErrorCode(error.cause);
@@ -42,9 +40,8 @@ export function databaseErrorCode(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-export async function migrateCoreDatabase(
-  database: CoreDatabase,
-): Promise<void> {
+/** 应用随包发布的迁移，并在迁移后安全种入归档写入时钟。 */
+export async function migrateDatabase(database: Database): Promise<void> {
   const migrationsFolder = fileURLToPath(
     new URL("../migrations/", import.meta.url),
   );

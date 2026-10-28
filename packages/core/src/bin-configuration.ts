@@ -10,6 +10,12 @@ import {
   type CollectorManifest,
   type JsonObject,
 } from "@binny/contracts";
+import {
+  binConfigurations,
+  databaseErrorCode,
+  manualRuns,
+  type Database,
+} from "@binny/db";
 import * as formats from "ajv-formats";
 import {
   Ajv2020,
@@ -18,9 +24,6 @@ import {
   type ValidateFunction,
 } from "ajv/dist/2020.js";
 import { and, eq, sql } from "drizzle-orm";
-
-import { databaseErrorCode, type CoreDatabase } from "./database.ts";
-import { binConfigurations, manualRuns } from "./schema.ts";
 
 const binSelection = {
   id: binConfigurations.id,
@@ -263,7 +266,7 @@ export function validateCollectorActionParameters(
   };
 }
 
-async function selectBin(database: CoreDatabase, id: string) {
+async function selectBin(database: Database, id: string) {
   const [row] = await database
     .select(binSelection)
     .from(binConfigurations)
@@ -295,7 +298,7 @@ function notFound<T>(_id: string): BinOperation<T> {
 }
 
 export function createBinConfigurationStore(
-  database: CoreDatabase,
+  database: Database,
 ): BinConfigurationOperations {
   return {
     async listBins() {

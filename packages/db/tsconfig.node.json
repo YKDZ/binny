@@ -1,0 +1,10 @@
+{
+  "extends": "@binny/tooling-config/node.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "declarationMap": false,
+    // Drizzle RC 的驱动声明缺少同级 peer；只跳过依赖声明自检，保留源码严格检查。
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "*.config.ts"]
+}

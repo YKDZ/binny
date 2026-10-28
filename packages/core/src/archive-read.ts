@@ -21,6 +21,20 @@ import {
   type ArchiveRelationOptions,
 } from "@binny/contracts";
 import {
+  archiveCommits,
+  archiveItemDeletions,
+  archiveItemObservationGaps,
+  archiveItems,
+  archiveObservations,
+  archiveRelationObservationGaps,
+  archiveRelationObservations,
+  archiveRelationRevisions,
+  archiveRelations,
+  archiveRevisions,
+  archiveWriteClock,
+  type Database,
+} from "@binny/db";
+import {
   and,
   asc,
   desc,
@@ -45,20 +59,6 @@ import {
   validationFailure,
 } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
-import type { CoreDatabase } from "./database.ts";
-import {
-  archiveCommits,
-  archiveItemDeletions,
-  archiveItemObservationGaps,
-  archiveItems,
-  archiveObservations,
-  archiveRelationObservationGaps,
-  archiveRelationObservations,
-  archiveRelationRevisions,
-  archiveRelations,
-  archiveRevisions,
-  archiveWriteClock,
-} from "./schema.ts";
 
 export type ResolvedSnapshot = {
   readonly asOf: string;
@@ -248,7 +248,7 @@ function textLiteral(value: string) {
 }
 
 function withArchiveReadTransaction<T>(
-  database: CoreDatabase,
+  database: Database,
   operation: (transaction: ArchiveTransaction) => Promise<T>,
 ): Promise<T> {
   return database.transaction(operation, {
@@ -1451,7 +1451,7 @@ async function readRelationsPage(
 }
 
 export function createArchiveReadOperations(
-  database: CoreDatabase,
+  database: Database,
 ): Pick<
   ArchiveOperations,
   | "getArchiveItem"

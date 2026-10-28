@@ -58,6 +58,7 @@ const projectName = "binny12-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
+let activeServerImage = imageName;
 let composeOverrideFile = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
@@ -148,7 +149,7 @@ function composePrefix(): readonly string[] {
 
 function composeEnvironment(): Readonly<Record<string, string>> {
   return {
-    BINNY_IMAGE: imageName,
+    BINNY_IMAGE: activeServerImage,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY18_STOP_GRACE_MS: "1500",
     BINNY22_RUNTIME_IMAGE: rssRuntimeImageName,
@@ -398,6 +399,325 @@ async function sdkResourceStep(baseUrl: string): Promise<string> {
   ]);
   assert.equal(result.code, 0, result.stderr + result.stdout);
   return result.stdout.trim();
+}
+
+async function imageId(image: string): Promise<string> {
+  const result = await run(
+    "docker",
+    ["image", "inspect", "--format", "{{.Id}}", image],
+    { env: composeEnvironment() },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function containerImageId(service: string): Promise<string> {
+  const containers = await compose(["ps", "-q", service]);
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId, `没有找到 Compose 服务 ${service} 的容器。`);
+  const result = await run(
+    "docker",
+    ["inspect", "--format", "{{.Image}}", containerId],
+    { env: composeEnvironment() },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function migrationHistory(): Promise<string> {
+  const result = await compose(
+    postgresExecArgs([
+      "-c",
+      "SELECT COALESCE(json_agg(json_build_object('id', id, 'hash', hash, 'created_at', created_at, 'name', name, 'applied_at', applied_at) ORDER BY id), '[]'::json)::text FROM drizzle.__drizzle_migrations;",
+    ]).slice(composePrefix().length),
+  );
+  const history = result.stdout.trim();
+  const records: unknown = JSON.parse(history);
+  assert.ok(Array.isArray(records));
+  assert.equal(records.length, 2, "基线库应保留两条既有迁移记录。");
+  return history;
+}
+
+async function seedUpgradeRun(
+  baseUrl: string,
+  manifest: unknown,
+): Promise<string> {
+  const binId = "rss-main";
+  const runtimeId = "binny36-upgrade-baseline-runtime";
+  const heartbeat = await fetch(`${baseUrl}/bins/${binId}/runtime/heartbeat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      protocolVersion: 3,
+      runtimeId,
+      ownerGeneration: "1",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      collector: manifest,
+      environment: {
+        kind: "lightweight",
+        browser: { available: false, profileReuseAfterRestart: false },
+      },
+    }),
+  });
+  assert.equal(heartbeat.status, 200, await heartbeat.clone().text());
+
+  const triggered = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({ limit: 1 }),
+    ]),
+    "triggered",
+  );
+  assert.equal(triggered.status, "queued");
+
+  const claimResponse = await fetch(
+    `${baseUrl}/bins/${binId}/runtime/runs/claim`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runtimeId }),
+    },
+  );
+  assert.equal(claimResponse.status, 200, await claimResponse.clone().text());
+  const claim: unknown = await claimResponse.json();
+  assert.ok(typeof claim === "object" && claim !== null && "run" in claim);
+  assert.ok(
+    typeof claim.run === "object" && claim.run !== null && "runId" in claim.run,
+  );
+  assert.equal(claim.run.runId, triggered.runId);
+
+  const completeResponse = await fetch(
+    `${baseUrl}/bins/${binId}/runtime/runs/${triggered.runId}/complete`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runtimeId,
+        completion: {
+          status: "completed",
+          completedScopes: ["baseline-upgrade"],
+        },
+      }),
+    },
+  );
+  assert.equal(
+    completeResponse.status,
+    200,
+    await completeResponse.clone().text(),
+  );
+  const completed = cliData<{
+    readonly status: string;
+    readonly result?: { readonly stopReason?: { readonly code?: string } };
+  }>(await cli(baseUrl, ["run", "get", binId, triggered.runId]), "found");
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.result?.stopReason?.code, "completed");
+  return triggered.runId;
+}
+
+async function verifyDatabasePackageUpgrade(): Promise<void> {
+  const baselineImage = process.env.BINNY_E2E_BASELINE_IMAGE;
+  if (baselineImage === undefined || baselineImage.length === 0) return;
+  const expectedBaselineId = process.env.BINNY_E2E_BASELINE_IMAGE_ID;
+  assert.ok(
+    expectedBaselineId !== undefined && expectedBaselineId.length > 0,
+    "指定旧正式镜像时必须同时提供冻结的 BINNY_E2E_BASELINE_IMAGE_ID。",
+  );
+
+  const taggedBaselineId = await imageId(baselineImage);
+  assert.equal(taggedBaselineId, expectedBaselineId);
+  const candidateImageId = await imageId(imageName);
+  assert.notEqual(candidateImageId, taggedBaselineId);
+
+  activeServerImage = baselineImage;
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "360",
+    "--no-build",
+    "postgres",
+    "server",
+  ]);
+  const runningBaselineId = await containerImageId("server");
+  assert.equal(runningBaselineId, expectedBaselineId);
+  composePort = await publishedPort("server", 3000);
+  let baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+
+  const manifest = await createSdkManifest();
+  await createRssBin(baseUrl, "rss-main", manifest, {
+    userAgent: "Binny E2E",
+    key: "az",
+  });
+  await createRssBin(baseUrl, "rss-secondary", manifest, {
+    userAgent: "Binny E2E",
+    key: "az",
+  });
+  const archive = await archiveHttpStep("submit", baseUrl);
+  const sdkResource = await sdkResourceStep(baseUrl);
+  const runId = await seedUpgradeRun(baseUrl, manifest);
+  const oldRun = cliData<{
+    readonly status: string;
+    readonly result?: { readonly stopReason?: { readonly code?: string } };
+  }>(await cli(baseUrl, ["run", "get", "rss-main", runId]), "found");
+  assert.equal(oldRun.status, "completed");
+  baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
+  assert.equal(await containerImageId("server"), expectedBaselineId);
+  const baselineHistory = await migrationHistory();
+
+  await compose(["stop", "server"]);
+  activeServerImage = imageName;
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "360",
+    "--no-build",
+    "--force-recreate",
+    "server",
+  ]);
+  const runningCandidateId = await containerImageId("server");
+  assert.equal(runningCandidateId, candidateImageId);
+  assert.notEqual(runningCandidateId, runningBaselineId);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+  assert.equal(await migrationHistory(), baselineHistory);
+
+  const archivePersistence = await archiveHttpStep(
+    "after-restart",
+    baseUrl,
+    archive,
+    sdkResource,
+  );
+  assert.ok(archivePersistence.length > 0);
+
+  const ids = archiveIds(archive);
+  const continuation = await fetch(baseUrl + "/archives", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "binny36:database-package-upgrade:" + randomUUID(),
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "aba-item" },
+          metadata: { title: "候选数据库包追加版本" },
+          body: { markdown: "候选数据库包写入的新正文" },
+          capture: {
+            scope: { case: "database-package-upgrade" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    }),
+  });
+  assert.equal(continuation.status, 201, await continuation.clone().text());
+  const continuationCommit = (await continuation.json()) as {
+    readonly items: readonly {
+      readonly itemId: string;
+      readonly revisionId: string;
+    }[];
+  };
+  const continuedItem = continuationCommit.items[0];
+  assert.ok(continuedItem);
+  assert.equal(continuedItem.itemId, ids.itemId);
+  assert.notEqual(continuedItem.revisionId, ids.revisionId);
+
+  const oldHistoricalView = await fetch(
+    `${baseUrl}/archives/items/${ids.itemId}?binId=rss-main&asOf=${encodeURIComponent(ids.historicalAsOf)}`,
+  );
+  assert.equal(oldHistoricalView.status, 200);
+  const oldHistoricalItem = (await oldHistoricalView.json()) as {
+    readonly views: readonly {
+      readonly state: { readonly body?: { readonly markdown?: string } };
+    }[];
+  };
+  assert.equal(oldHistoricalItem.views[0]?.state.body?.markdown, "正文 B");
+
+  const candidateRun = cliData<{ readonly status: string }>(
+    await cli(baseUrl, ["run", "get", "rss-main", runId]),
+    "found",
+  );
+  assert.equal(candidateRun.status, "completed");
+
+  await compose(["restart", "server"]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+  assert.equal(await containerImageId("server"), candidateImageId);
+  assert.equal(await migrationHistory(), baselineHistory);
+  const restartedRun = cliData<{ readonly status: string }>(
+    await cli(baseUrl, ["run", "get", "rss-main", runId]),
+    "found",
+  );
+  assert.equal(restartedRun.status, "completed");
+
+  const persistedArchiveResponse = await fetch(
+    `${baseUrl}/archives/items/${ids.itemId}`,
+  );
+  assert.equal(persistedArchiveResponse.status, 200);
+  const persistedArchive = (await persistedArchiveResponse.json()) as {
+    readonly views: readonly {
+      readonly state: { readonly body?: { readonly markdown?: string } };
+    }[];
+    readonly revisions: readonly unknown[];
+  };
+  assert.equal(
+    persistedArchive.views[0]?.state.body?.markdown,
+    "候选数据库包写入的新正文",
+  );
+  assert.equal(persistedArchive.revisions.length, 3);
+  const restartedHistoricalView = await fetch(
+    `${baseUrl}/archives/items/${ids.itemId}?binId=rss-main&asOf=${encodeURIComponent(ids.historicalAsOf)}`,
+  );
+  assert.equal(restartedHistoricalView.status, 200);
+  const restartedHistoricalItem = (await restartedHistoricalView.json()) as {
+    readonly views: readonly {
+      readonly state: { readonly body?: { readonly markdown?: string } };
+    }[];
+  };
+  assert.equal(
+    restartedHistoricalItem.views[0]?.state.body?.markdown,
+    "正文 B",
+  );
+  const persistedResource = await fetch(
+    `${baseUrl}/resources/${ids.resourceId}`,
+  );
+  assert.equal(persistedResource.status, 200);
+  assert.deepEqual(
+    new Uint8Array(await persistedResource.arrayBuffer()),
+    new TextEncoder().encode("binny media bytes v1"),
+  );
+
+  process.stdout.write(
+    "票 36 旧正式镜像升级证据：" +
+      JSON.stringify({
+        baselineImage,
+        baselineImageId: runningBaselineId,
+        candidateImage: imageName,
+        candidateImageId: runningCandidateId,
+        runId,
+        archiveItemId: ids.itemId,
+        candidateRevisionId: continuedItem.revisionId,
+        resourceId: ids.resourceId,
+        migrationHistory: JSON.parse(baselineHistory) as unknown,
+        candidateRestarted: true,
+      }) +
+      "\n",
+  );
 }
 
 function archiveIds(state: string): {
@@ -4316,6 +4636,18 @@ async function main(): Promise<void> {
     await compose(["build", "server"]);
     await compose(["build", "runtime-fifteen-one"]);
     await compose(["build", "runtime-rss"]);
+    if (
+      process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
+      process.env.BINNY_E2E_BASELINE_IMAGE.length > 0
+    ) {
+      await verifyDatabasePackageUpgrade();
+      await compose(["down", "--volumes", "--remove-orphans"]);
+      process.stdout.write("票 36 升级专用数据库与资源卷已清理。\n");
+    } else {
+      process.stdout.write(
+        "票 36 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
+      );
+    }
     await compose([
       "up",
       "--detach",
