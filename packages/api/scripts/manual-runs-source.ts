@@ -16,7 +16,7 @@ export const sourceRequestSchema = z.object({
 });
 export const releaseInputSchema = z.object({
   gateKey: z.string().min(1),
-  disposition: z.enum(["material", "manual", "empty"]),
+  disposition: z.enum(["material", "manual", "empty", "partial"]),
 });
 export const sourceControlStatusSchema = z.object({
   arrivals: z.array(sourceRequestSchema),

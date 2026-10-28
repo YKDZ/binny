@@ -62,7 +62,7 @@ async function sourceStatus(sourceUrl: string) {
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
-  disposition: "material" | "manual" | "empty" = "material",
+  disposition: "material" | "manual" | "empty" | "partial" = "material",
 ): Promise<void> {
   const response = await fetch(sourceUrl + "/control/release", {
     method: "POST",
@@ -298,6 +298,51 @@ async function verifyActionFailures(
       original.views[0]?.state.body?.text,
     );
     assert.equal(unchanged.views[0]?.revisionId, original.views[0]?.revisionId);
+  }
+
+  const partialKey = "15-http-partial";
+  const partial = await triggerRun(
+    "binny15-one",
+    runtimeSourceUrl,
+    partialKey,
+    "partial-before-manual",
+  );
+  await waitForArrival(controlSourceUrl, partialKey);
+  await releaseSource(controlSourceUrl, partialKey, "partial");
+  const failedPartial = await waitForRun(
+    "binny15-one",
+    partial.runId,
+    "failed",
+  );
+  assert.equal(failedPartial.result?.error?.code, "source_requires_human");
+  assert.equal(failedPartial.result?.commits.length, 1);
+  const savedCommit = failedPartial.result?.commits[0];
+  assert.ok(savedCommit !== undefined);
+  assert.equal(savedCommit.items.length, 1);
+  const savedItem = savedCommit.items[0];
+  assert.ok(savedItem !== undefined);
+
+  const savedCommitResponse = await client.archives.commits[":commitId"].$get({
+    param: { commitId: savedCommit.commitId },
+  });
+  assert.equal(savedCommitResponse.status, 200);
+  if (savedCommitResponse.status === 200) {
+    const archivedCommit = await savedCommitResponse.json();
+    assert.equal(archivedCommit.runId, partial.runId);
+    assert.equal(archivedCommit.binId, "binny15-one");
+    assert.equal(archivedCommit.collectorVersion, manifest.version);
+  }
+  const savedItemResponse = await client.archives.items[":itemId"].$get({
+    param: { itemId: savedItem.itemId },
+    query: {},
+  });
+  assert.equal(savedItemResponse.status, 200);
+  if (savedItemResponse.status === 200) {
+    const archivedItem = await savedItemResponse.json();
+    assert.equal(
+      archivedItem.views[0]?.state.body?.text,
+      "受控正文 " + partialKey,
+    );
   }
 }
 

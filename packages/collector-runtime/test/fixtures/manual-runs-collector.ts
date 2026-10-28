@@ -2,12 +2,13 @@ import {
   collectorActionError,
   defineCollector,
   defineCollectorAction,
+  type CollectorArchiveSubmission,
 } from "@binny/collector-sdk";
 import { z } from "zod";
 
 const configurationSchema = z.object({ section: z.string() });
 const sourceResultSchema = z.object({
-  disposition: z.enum(["material", "manual", "empty"]),
+  disposition: z.enum(["material", "manual", "empty", "partial"]),
   sourceKey: z.string(),
   title: z.string(),
   text: z.string(),
@@ -75,7 +76,8 @@ export default defineCollector({
         }
 
         const config = configurationSchema.parse(context.config);
-        await context.archive.submit({
+        const submission = {
+          requestId: "binny15:manual-run:" + context.runId,
           items: [
             {
               sourceKey: {
@@ -91,7 +93,23 @@ export default defineCollector({
               },
             },
           ],
-        });
+        } satisfies CollectorArchiveSubmission;
+        await context.archive.submit(submission);
+        if (source.disposition === "partial") {
+          // 同请求重放证明SDK复用02的幂等提交，再以失败结束本次run。
+          await context.archive.submit(submission);
+          throw collectorActionError({
+            code: "source_requires_human",
+            message: "后续信源范围要求人工处理后才能继续读取。",
+            impact:
+              "条目 " +
+              source.sourceKey +
+              " 已保存，后续范围没有写入本次归档。",
+            path: ["source", "title"],
+            suggestion: "完成信源验证后重新触发新的运行。",
+            requiresHuman: true,
+          });
+        }
         return { completedScopes: ["source/" + source.sourceKey] };
       },
     }),
