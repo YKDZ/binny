@@ -28,9 +28,10 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny10-" + process.pid.toString(10);
+const projectName = "binny10fix-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
+const rssRuntimeImageName = projectName + "-rss:local";
 let composeOverrideFile = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
@@ -51,6 +52,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: imageName,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
+    BINNY22_RUNTIME_IMAGE: rssRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -818,6 +820,344 @@ async function waitForRuntime(baseUrl: string, binId: string): Promise<void> {
     await wait(100);
   }
   assert.fail(`bin ${binId} 的运行器没有上线。`);
+}
+
+type RssRequestRecord = {
+  readonly path: string;
+  readonly ifNoneMatch?: string;
+  readonly ifModifiedSince?: string;
+};
+
+type RssControlState = {
+  readonly requests: readonly RssRequestRecord[];
+  readonly photoBytes: string;
+  readonly audioBytes: string;
+};
+
+type RssControlSource = {
+  readonly baseUrl: string;
+  readonly requests: () => Promise<readonly RssRequestRecord[]>;
+  readonly mediaBytes: () => Promise<{
+    readonly photoBytes: Buffer;
+    readonly audioBytes: Buffer;
+  }>;
+  readonly setRssVersion: (version: number) => Promise<void>;
+  readonly setAtomVersion: (version: number) => Promise<void>;
+  readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
+  readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
+  readonly setPhotoAvailable: (available: boolean) => Promise<void>;
+};
+
+async function createRssControlSource(port: number): Promise<RssControlSource> {
+  const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
+  const controlUrl = `http://${host}:${String(port)}`;
+  const baseUrl = "http://rss-e2e-source:8081";
+
+  async function readState(): Promise<RssControlState> {
+    const response = await fetch(controlUrl + "/control/state", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()) as RssControlState;
+  }
+
+  async function updateState(
+    value: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const response = await fetch(controlUrl + "/control/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+  }
+
+  const deadline = Date.now() + 30_000;
+  let ready = false;
+  let lastFailure = "受控信源 Compose 服务尚未启动。";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(controlUrl + "/health", {
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (response.status === 200) {
+        ready = true;
+        break;
+      }
+      lastFailure = `受控信源返回 HTTP ${String(response.status)}。`;
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    await wait(100);
+  }
+  assert.ok(ready, `受控信源没有在 Compose 随机宿主端口就绪：${lastFailure}`);
+  await readState();
+
+  return {
+    baseUrl,
+    async requests() {
+      return (await readState()).requests;
+    },
+    async mediaBytes() {
+      const current = await readState();
+      return {
+        photoBytes: Buffer.from(current.photoBytes, "base64"),
+        audioBytes: Buffer.from(current.audioBytes, "base64"),
+      };
+    },
+    async setRssVersion(version) {
+      await updateState({ rssVersion: version });
+    },
+    async setAtomVersion(version) {
+      await updateState({ atomVersion: version });
+    },
+    async setAtomTextMode(mode) {
+      await updateState({ atomTextMode: mode });
+    },
+    async setTemporaryAvailable(available) {
+      await updateState({ temporaryAvailable: available });
+    },
+    async setPhotoAvailable(available) {
+      await updateState({ photoAvailable: available });
+    },
+  };
+}
+
+type RssManualRun = {
+  readonly status: string;
+  readonly runId: string;
+  readonly binId: string;
+  readonly result?: {
+    readonly completedScopes: readonly string[];
+    readonly commits: readonly {
+      readonly items: readonly { readonly itemId: string }[];
+    }[];
+    readonly stopReason: { readonly code: string };
+    readonly error?: { readonly code: string; readonly message: string };
+    readonly check?: {
+      readonly availability: "available" | "unavailable" | "unknown";
+      readonly checkedAt: string;
+      readonly scope: readonly string[];
+      readonly basis: string;
+      readonly problems: readonly {
+        readonly code: string;
+        readonly message: string;
+        readonly suggestion: string;
+      }[];
+    };
+  };
+};
+
+async function createRssManifest(): Promise<unknown> {
+  const program = [
+    'import { collectorManifest } from "@binny/collector-sdk";',
+    'import collector from "@binny/collector-rss";',
+    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+  ].join("\n");
+  const result = await run("pnpm", [
+    "--silent",
+    "--filter",
+    "@binny/collector-rss",
+    "exec",
+    "node",
+    "--conditions=source",
+    "--input-type=module",
+    "-e",
+    program,
+  ]);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  return JSON.parse(result.stdout) as unknown;
+}
+
+async function createRssBin(
+  baseUrl: string,
+  binId: string,
+  manifest: unknown,
+  config: unknown,
+): Promise<void> {
+  const manifestJson = JSON.stringify(manifest);
+  const configJson = JSON.stringify(config);
+  assert.ok(manifestJson !== undefined && configJson !== undefined);
+  const created = cliData<{ readonly id: string }>(
+    await cli(baseUrl, [
+      "bin",
+      "create",
+      binId,
+      "--collector",
+      manifestJson,
+      "--identity",
+      binId + "-identity",
+      "--config",
+      configJson,
+      "--targets",
+      "[]",
+    ]),
+    "created",
+  );
+  assert.equal(created.id, binId);
+}
+
+async function waitForRuntimeHealth(service: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  const probe = [
+    "const response = await fetch('http://127.0.0.1:8080/health');",
+    'const body = await response.json(); if (!response.ok || body.process !== "ready") process.exit(1);',
+  ].join("\n");
+  let lastFailure = "运行器尚未启动。";
+  while (Date.now() < deadline) {
+    const result = await run(
+      "docker",
+      [
+        ...composePrefix(),
+        "exec",
+        "--no-TTY",
+        service,
+        "node",
+        "--input-type=module",
+        "-e",
+        probe,
+      ],
+      { env: composeEnvironment() },
+    );
+    if (result.code === 0) return;
+    lastFailure = result.stderr + result.stdout;
+    await wait(100);
+  }
+  assert.fail(`Compose 运行器 ${service} 没有就绪：${lastFailure}`);
+}
+
+async function triggerRssAction(
+  baseUrl: string,
+  binId: string,
+  action: "check" | "collect",
+  params: Readonly<Record<string, unknown>>,
+): Promise<RssManualRun> {
+  const triggered = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      action,
+      "--params",
+      JSON.stringify(params),
+    ]),
+    "triggered",
+  );
+  assert.equal(triggered.status, "queued");
+  const deadline = Date.now() + 60_000;
+  let latest: RssManualRun | undefined;
+  while (Date.now() < deadline) {
+    latest = cliData<RssManualRun>(
+      await cli(baseUrl, ["run", "get", binId, triggered.runId]),
+      "found",
+    );
+    if (latest.status === "completed" || latest.status === "failed")
+      return latest;
+    await wait(100);
+  }
+  assert.fail(`等待 RSS ${action} 运行终结超时：${JSON.stringify(latest)}`);
+}
+
+type RssArchiveRead = {
+  readonly itemId: string;
+  readonly sourceKey: { readonly namespace: string; readonly key: string };
+  readonly snapshot: unknown;
+  readonly views: readonly {
+    readonly binId: string;
+    readonly state: {
+      readonly body?: {
+        readonly html?: string;
+        readonly markdown?: string;
+        readonly text?: string;
+        readonly searchText?: string;
+      };
+      readonly metadata?: Record<string, unknown> & {
+        readonly item?: { readonly bodyType?: string } | null;
+      };
+      readonly resources?: readonly { readonly resourceId: string }[];
+      readonly capture: {
+        readonly completeness: "complete" | "partial";
+        readonly missing: readonly {
+          readonly path: string;
+          readonly reason: string;
+        }[];
+      };
+    };
+  }[];
+  readonly revisions: readonly unknown[];
+  readonly observations: readonly unknown[];
+};
+
+async function searchRssArchive(
+  baseUrl: string,
+  binId: string,
+  text: string,
+): Promise<
+  readonly {
+    readonly itemId: string;
+    readonly sourceKey?: { readonly namespace: string; readonly key: string };
+  }[]
+> {
+  const query = {
+    scope: { kind: "current", binId },
+    text: { kind: "literal", value: text },
+    select: ["sourceKey", "sourceRef", "capture.completeness"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 100,
+  };
+  const page = cliData<{
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly sourceKey?: { readonly namespace: string; readonly key: string };
+    }[];
+  }>(
+    await cli(baseUrl, ["archive", "search", "--query", JSON.stringify(query)]),
+    "found",
+  );
+  return page.results;
+}
+
+async function readRssArchive(
+  baseUrl: string,
+  binId: string,
+  text: string,
+): Promise<RssArchiveRead> {
+  const results = await searchRssArchive(baseUrl, binId, text);
+  assert.equal(results.length, 1, `归档正文检索「${text}」应命中一项。`);
+  const result = results[0];
+  assert.ok(result?.sourceKey !== undefined);
+  const item = cliData<RssArchiveRead>(
+    await cli(baseUrl, ["archive", "item", result.itemId, "--bin", binId]),
+    "found",
+  );
+  assert.deepEqual(item.sourceKey, result.sourceKey);
+  return item;
+}
+
+function rssArchiveView(
+  item: RssArchiveRead,
+  binId: string,
+): RssArchiveRead["views"][number]["state"] {
+  const view = item.views.find((entry) => entry.binId === binId);
+  assert.ok(view !== undefined, `归档条目没有 ${binId} 的视图。`);
+  return view.state;
+}
+
+async function readRssResource(
+  baseUrl: string,
+  resourceId: string,
+): Promise<Buffer> {
+  const response = await fetch(`${baseUrl}/resources/${resourceId}`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(response.status, 200);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  assert.ok(bytes.length > 0);
+  return bytes;
 }
 
 function sourceArrived(
@@ -1847,12 +2187,627 @@ async function verifyRestartAndRemoval(
   return baseUrl;
 }
 
+async function runRssAcceptance(
+  baseUrl: string,
+  source: RssControlSource,
+): Promise<void> {
+  const sourceMediaBytes = await source.mediaBytes();
+  const manifest = await createRssManifest();
+  const config = {
+    feeds: [
+      { id: "rss-main", url: source.baseUrl + "/rss" },
+      { id: "atom-main", url: source.baseUrl + "/atom" },
+      { id: "temporary", url: source.baseUrl + "/temporary" },
+      { id: "bad-identity", url: source.baseUrl + "/bad-identity" },
+      {
+        id: "real-feed-parser",
+        url: "https://github.com/rowanmanning/feed-parser/releases.atom",
+      },
+    ],
+  };
+  await Promise.all([
+    createRssBin(baseUrl, "binny22-one", manifest, config),
+    createRssBin(baseUrl, "binny22-two", manifest, config),
+  ]);
+  await Promise.all([
+    waitForRuntimeHealth("runtime-rss"),
+    waitForRuntimeHealth("runtime-rss-two"),
+    waitForRuntime(baseUrl, "binny22-one"),
+    waitForRuntime(baseUrl, "binny22-two"),
+  ]);
+
+  const initialRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
+    feedIds: ["rss-main", "atom-main", "temporary"],
+  });
+  const initialRequests = await source.requests();
+  const initialAtomRequest = initialRequests.find(
+    ({ path }) => path === "/atom",
+  );
+  assert.ok(initialAtomRequest !== undefined);
+  assert.equal(initialAtomRequest.ifModifiedSince, undefined);
+  process.stdout.write(
+    "票 22 受控信源首批运行结果：" +
+      JSON.stringify({ run: initialRun, requests: initialRequests }) +
+      "\n",
+  );
+  assert.equal(initialRun.status, "failed");
+  assert.equal(initialRun.result?.error?.code, "rss_collection_incomplete");
+
+  const rssItemV1 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 1",
+  );
+  assert.equal(rssItemV1.sourceKey.namespace, "rss:rss-main");
+  assert.equal(rssItemV1.sourceKey.key, "id:urn:binny:22:rss-item");
+  const rssV1 = rssArchiveView(rssItemV1, "binny22-one");
+  assert.equal(rssV1.capture.completeness, "complete");
+  assert.match(rssV1.body?.html ?? "", /RSS 正文版本 1/u);
+  assert.doesNotMatch(rssV1.body?.html ?? "", /RSS 摘要版本 1/u);
+  assert.match(rssV1.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.equal(rssV1.resources?.length, 2);
+  const rssResources = rssV1.resources ?? [];
+  const rssResourceBytes = await Promise.all(
+    rssResources.map(({ resourceId }) => readRssResource(baseUrl, resourceId)),
+  );
+  assert.ok(
+    rssResourceBytes.some((bytes) => bytes.equals(sourceMediaBytes.photoBytes)),
+    "RSS 图片资源应能通过公开 HTTP 归档端点读取为信源原始字节。",
+  );
+  assert.ok(
+    rssResourceBytes.some((bytes) => bytes.equals(sourceMediaBytes.audioBytes)),
+    "RSS enclosure 应能通过公开 HTTP 归档端点读取为信源原始字节。",
+  );
+
+  const rssSummary = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "只有摘要版本 1",
+  );
+  const summaryState = rssArchiveView(rssSummary, "binny22-one");
+  assert.equal(summaryState.capture.completeness, "partial");
+  assert.ok(
+    summaryState.capture.missing.some(({ reason }) =>
+      reason.includes("不能声称已取得全文"),
+    ),
+  );
+
+  const atomItemV1 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "Atom 全文版本 1",
+  );
+  assert.equal(atomItemV1.sourceKey.namespace, "rss:atom-main");
+  assert.equal(
+    atomItemV1.sourceKey.key,
+    "id:tag:example.test,2026:binny-22-atom",
+  );
+  const atomV1 = rssArchiveView(atomItemV1, "binny22-one");
+  assert.equal(atomV1.capture.completeness, "complete");
+  assert.match(atomV1.body?.html ?? "", /Atom 全文版本 1/u);
+  assert.equal(atomV1.resources?.length, 1);
+  assert.deepEqual(
+    await readRssResource(baseUrl, atomV1.resources?.[0]?.resourceId ?? ""),
+    sourceMediaBytes.photoBytes,
+  );
+
+  const literalWidgetMatches = await searchRssArchive(
+    baseUrl,
+    "binny22-one",
+    "<widget>",
+  );
+  assert.equal(
+    literalWidgetMatches.length,
+    6,
+    "RSS HTML 与 Atom text、HTML、XHTML 正文中的代码文字应能按字面标签搜索。",
+  );
+  const literalWidgetItems = await Promise.all(
+    literalWidgetMatches.map(async ({ itemId }) =>
+      cliData<RssArchiveRead>(
+        await cli(baseUrl, ["archive", "item", itemId, "--bin", "binny22-one"]),
+        "found",
+      ),
+    ),
+  );
+  assert.deepEqual(
+    new Set(literalWidgetItems.map(({ sourceKey }) => sourceKey.key)),
+    new Set([
+      "id:urn:binny:22:rss-item",
+      "id:urn:binny:22:rss-item-escaped",
+      "id:tag:example.test,2026:binny-22-atom",
+      "id:tag:example.test,2026:atom-text-explicit",
+      "id:tag:example.test,2026:atom-text-default",
+      "id:tag:example.test,2026:atom-html-literal",
+    ]),
+  );
+  const literalWidgetItemsByKey = new Map(
+    literalWidgetItems.map((item) => [item.sourceKey.key, item]),
+  );
+  for (const key of [
+    "id:tag:example.test,2026:atom-text-explicit",
+    "id:tag:example.test,2026:atom-text-default",
+  ]) {
+    const atomTextItem = literalWidgetItemsByKey.get(key);
+    assert.ok(atomTextItem !== undefined);
+    const state = rssArchiveView(atomTextItem, "binny22-one");
+    assert.equal(state.capture.completeness, "complete");
+    assert.equal(state.body?.text, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.searchText, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.html, "代码 &lt;widget&gt; 与 A &amp; B");
+    assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
+    assert.ok(
+      typeof state.metadata?.item === "object" && state.metadata.item !== null,
+    );
+    assert.equal(state.metadata?.item?.bodyType, "text");
+  }
+  const rssLiteralItem = literalWidgetItemsByKey.get(
+    "id:urn:binny:22:rss-item",
+  );
+  assert.ok(rssLiteralItem !== undefined);
+  const rssLiteralState = rssArchiveView(rssLiteralItem, "binny22-one");
+  assert.equal(rssLiteralState.capture.completeness, "complete");
+  assert.match(rssLiteralState.body?.text ?? "", /代码 <widget> 与 A & B/u);
+  assert.match(
+    rssLiteralState.body?.searchText ?? "",
+    /代码 <widget> 与 A & B/u,
+  );
+  assert.match(rssLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
+  const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
+    "id:urn:binny:22:rss-item-escaped",
+  );
+  assert.ok(rssEscapedLiteralItem !== undefined);
+  const rssEscapedLiteralState = rssArchiveView(
+    rssEscapedLiteralItem,
+    "binny22-one",
+  );
+  assert.equal(rssEscapedLiteralState.capture.completeness, "complete");
+  assert.equal(rssEscapedLiteralState.body?.text, "代码 <widget> 与 A & B");
+  assert.equal(
+    rssEscapedLiteralState.body?.searchText,
+    "代码 <widget> 与 A & B",
+  );
+  assert.match(rssEscapedLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
+  for (const [key, bodyType] of [
+    ["id:tag:example.test,2026:binny-22-atom", "xhtml"],
+    ["id:tag:example.test,2026:atom-html-literal", "html"],
+  ] as const) {
+    const atomMarkupItem = literalWidgetItemsByKey.get(key);
+    assert.ok(atomMarkupItem !== undefined);
+    const state = rssArchiveView(atomMarkupItem, "binny22-one");
+    assert.equal(state.capture.completeness, "complete");
+    assert.match(state.body?.text ?? "", /代码 <widget> 与 A & B/u);
+    assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
+    assert.match(state.body?.html ?? "", /&lt;widget&gt;/u);
+    assert.match(state.body?.markdown ?? "", /&lt;widget&gt;/u);
+    assert.equal(state.metadata?.item?.bodyType, bodyType);
+  }
+  const atomEntityTextMatches = await searchRssArchive(
+    baseUrl,
+    "binny22-one",
+    "&lt;widget&gt;",
+  );
+  assert.equal(atomEntityTextMatches.length, 1);
+  const atomEntityTextMatch = atomEntityTextMatches[0];
+  assert.ok(atomEntityTextMatch !== undefined);
+  const atomEntityTextItem = cliData<RssArchiveRead>(
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      atomEntityTextMatch.itemId,
+      "--bin",
+      "binny22-one",
+    ]),
+    "found",
+  );
+  const atomEntityTextState = rssArchiveView(atomEntityTextItem, "binny22-one");
+  assert.equal(
+    atomEntityTextItem.sourceKey.key,
+    "id:tag:example.test,2026:atom-text-entities",
+  );
+  assert.equal(atomEntityTextState.body?.text, "A &lt;widget&gt; &amp; B");
+  assert.equal(
+    atomEntityTextState.body?.searchText,
+    "A &lt;widget&gt; &amp; B",
+  );
+  assert.equal(
+    atomEntityTextState.body?.html,
+    "A &amp;lt;widget&amp;gt; &amp;amp; B",
+  );
+  assert.equal(
+    atomEntityTextState.body?.markdown,
+    "A &amp;lt;widget&amp;gt; &amp;amp; B",
+  );
+  const atomModeTextV1 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "语义固定内容",
+  );
+  assert.equal(atomModeTextV1.revisions.length, 1);
+  assert.equal(
+    rssArchiveView(atomModeTextV1, "binny22-one").metadata?.item?.bodyType,
+    "text",
+  );
+
+  await source.setRssVersion(2);
+  await source.setAtomVersion(2);
+  await source.setAtomTextMode("html");
+  await source.setTemporaryAvailable(true);
+  await compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--force-recreate",
+    "runtime-rss",
+  ]);
+  await waitForRuntimeHealth("runtime-rss");
+  await waitForRuntime(baseUrl, "binny22-one");
+  const afterRestart = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    {
+      feedIds: ["rss-main", "atom-main", "temporary"],
+    },
+  );
+  assert.equal(afterRestart.status, "completed");
+  const latestRequest = async (
+    pathname: string,
+  ): Promise<RssRequestRecord | undefined> =>
+    [...(await source.requests())]
+      .reverse()
+      .find((entry) => entry.path === pathname);
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-1"');
+  const atomRequestAfterRestart = await latestRequest("/atom");
+  assert.equal(atomRequestAfterRestart?.ifNoneMatch, undefined);
+  assert.match(atomRequestAfterRestart?.ifModifiedSince ?? "", /GMT$/u);
+  assert.equal((await latestRequest("/temporary"))?.ifNoneMatch, undefined);
+
+  const rssItemV2 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 2",
+  );
+  assert.equal(rssItemV2.itemId, rssItemV1.itemId);
+  assert.deepEqual(rssItemV2.sourceKey, rssItemV1.sourceKey);
+  assert.equal(rssItemV2.revisions.length, 2);
+  const atomModeHtmlV2 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "语义固定内容",
+  );
+  assert.equal(atomModeHtmlV2.itemId, atomModeTextV1.itemId);
+  assert.equal(
+    atomModeHtmlV2.revisions.length,
+    2,
+    "Atom 正文同值从 text 切换到 html 时应形成新的归档状态。",
+  );
+  assert.equal(
+    rssArchiveView(atomModeHtmlV2, "binny22-one").metadata?.item?.bodyType,
+    "html",
+  );
+  const stableItem = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 2",
+  );
+  const repeatedRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    {
+      feedIds: ["rss-main"],
+    },
+  );
+  assert.equal(repeatedRun.status, "completed");
+  assert.deepEqual(repeatedRun.result?.commits, []);
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    stableItem,
+  );
+  const stableAtomItem = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "Atom 全文版本 2",
+  );
+  const repeatedAtomRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["atom-main"] },
+  );
+  assert.equal(repeatedAtomRun.status, "completed");
+  assert.deepEqual(repeatedAtomRun.result?.commits, []);
+  assert.match((await latestRequest("/atom"))?.ifModifiedSince ?? "", /GMT$/u);
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "Atom 全文版本 2"),
+    stableAtomItem,
+  );
+
+  await source.setRssVersion(3);
+  const archiveBeforeCheck = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 2",
+  );
+  const mediaRequestCount = (await source.requests()).filter(({ path }) =>
+    path.startsWith("/media/"),
+  ).length;
+  const checkRun = await triggerRssAction(baseUrl, "binny22-one", "check", {
+    feedIds: ["rss-main"],
+  });
+  assert.equal(checkRun.status, "completed");
+  assert.equal(checkRun.result?.check?.availability, "available");
+  assert.deepEqual(checkRun.result?.check?.scope, ["rss-main"]);
+  assert.ok((checkRun.result?.check?.checkedAt.length ?? 0) > 0);
+  assert.ok(
+    checkRun.result?.check?.problems.some(
+      ({ code }) => code === "rss_feed_summary_only",
+    ),
+  );
+  assert.deepEqual(checkRun.result?.commits, []);
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
+  assert.equal(
+    (await source.requests()).filter(({ path }) => path.startsWith("/media/"))
+      .length,
+    mediaRequestCount,
+  );
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    archiveBeforeCheck,
+  );
+
+  const afterCheck = await triggerRssAction(baseUrl, "binny22-one", "collect", {
+    feedIds: ["rss-main"],
+  });
+  assert.equal(afterCheck.status, "completed");
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
+  const rssItemV3 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 3",
+  );
+  assert.equal(rssItemV3.itemId, rssItemV1.itemId);
+
+  await source.setRssVersion(4);
+  await source.setPhotoAvailable(false);
+  const partialMediaRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(partialMediaRun.status, "failed");
+  assert.equal(
+    partialMediaRun.result?.error?.code,
+    "rss_collection_incomplete",
+  );
+  const rssItemPartial = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 4",
+  );
+  assert.equal(rssItemPartial.itemId, rssItemV1.itemId);
+  const partialState = rssArchiveView(rssItemPartial, "binny22-one");
+  assert.equal(partialState.capture.completeness, "partial");
+  assert.ok(
+    partialState.capture.missing.some(
+      ({ path, reason }) =>
+        path.startsWith("media.") && reason.includes("本次未能取得或归档"),
+    ),
+  );
+  assert.equal(partialState.resources?.length, 1);
+  assert.doesNotMatch(partialState.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-3"');
+
+  await source.setPhotoAvailable(true);
+  const mediaRecovery = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(mediaRecovery.status, "completed");
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
+  const rssItemV4 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 4",
+  );
+  assert.equal(rssItemV4.itemId, rssItemV1.itemId);
+  const rssV4 = rssArchiveView(rssItemV4, "binny22-one");
+  assert.equal(rssV4.capture.completeness, "complete");
+  assert.equal(rssV4.resources?.length, 2);
+  assert.match(rssV4.body?.html ?? "", /binny:\/\/resource\//u);
+  const recoveredResourceBytes = await Promise.all(
+    (rssV4.resources ?? []).map(({ resourceId }) =>
+      readRssResource(baseUrl, resourceId),
+    ),
+  );
+  assert.ok(
+    recoveredResourceBytes.some((bytes) =>
+      bytes.equals(sourceMediaBytes.photoBytes),
+    ),
+  );
+  assert.ok(
+    recoveredResourceBytes.some((bytes) =>
+      bytes.equals(sourceMediaBytes.audioBytes),
+    ),
+  );
+
+  await source.setRssVersion(5);
+  await compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--force-recreate",
+    "runtime-rss",
+  ]);
+  await waitForRuntimeHealth("runtime-rss");
+  await waitForRuntime(baseUrl, "binny22-one");
+  const postMediaRestart = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(postMediaRestart.status, "completed");
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-4"');
+  const rssItemV5 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 5",
+  );
+  assert.equal(rssItemV5.itemId, rssItemV1.itemId);
+
+  const separateBinRun = await triggerRssAction(
+    baseUrl,
+    "binny22-two",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(separateBinRun.status, "completed");
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
+  const secondBinItemV5 = await readRssArchive(
+    baseUrl,
+    "binny22-two",
+    "RSS 正文版本 5",
+  );
+  assert.equal(secondBinItemV5.itemId, rssItemV1.itemId);
+  assert.deepEqual(secondBinItemV5.sourceKey, rssItemV1.sourceKey);
+
+  await source.setRssVersion(6);
+  await compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--force-recreate",
+    "runtime-rss-two",
+  ]);
+  await waitForRuntimeHealth("runtime-rss-two");
+  await waitForRuntime(baseUrl, "binny22-two");
+  const separateBinRestart = await triggerRssAction(
+    baseUrl,
+    "binny22-two",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(separateBinRestart.status, "completed");
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-5"');
+  const secondBinItemV6 = await readRssArchive(
+    baseUrl,
+    "binny22-two",
+    "RSS 正文版本 6",
+  );
+  assert.equal(secondBinItemV6.itemId, rssItemV1.itemId);
+
+  await source.setRssVersion(7);
+  const editedConfig = {
+    feeds: config.feeds.map((feed) =>
+      feed.id === "rss-main"
+        ? { ...feed, url: source.baseUrl + "/rss-edited" }
+        : feed,
+    ),
+  };
+  const updatedBin = cliData<{ readonly id: string }>(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny22-one",
+      "--config",
+      JSON.stringify(editedConfig),
+    ]),
+    "updated",
+  );
+  assert.equal(updatedBin.id, "binny22-one");
+  const afterUrlEdit = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(afterUrlEdit.status, "completed");
+  assert.equal((await latestRequest("/rss-edited"))?.ifNoneMatch, undefined);
+  const rssItemV7 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 7",
+  );
+  assert.equal(rssItemV7.itemId, rssItemV1.itemId);
+  assert.deepEqual(rssItemV7.sourceKey, rssItemV1.sourceKey);
+
+  const badIdentityCheck = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "check",
+    { feedIds: ["bad-identity"] },
+  );
+  assert.equal(badIdentityCheck.status, "completed");
+  assert.equal(badIdentityCheck.result?.check?.availability, "unavailable");
+  assert.deepEqual(badIdentityCheck.result?.check?.scope, ["bad-identity"]);
+  assert.ok(
+    badIdentityCheck.result?.check?.problems.some(
+      ({ code, suggestion }) =>
+        code === "rss_entry_identity_unavailable" && suggestion.length > 0,
+    ),
+  );
+  const badIdentityRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["bad-identity"] },
+  );
+  assert.equal(badIdentityRun.status, "failed");
+  assert.equal(badIdentityRun.result?.error?.code, "rss_collection_incomplete");
+  assert.equal(
+    (await searchRssArchive(baseUrl, "binny22-one", "坏身份正文不得进入归档"))
+      .length,
+    0,
+  );
+
+  const realFeedUrl =
+    "https://github.com/rowanmanning/feed-parser/releases.atom";
+  const realFeedCheck = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "check",
+    { feedIds: ["real-feed-parser"] },
+  );
+  assert.equal(realFeedCheck.status, "completed");
+  assert.deepEqual(realFeedCheck.result?.check?.scope, ["real-feed-parser"]);
+  process.stdout.write(
+    "票 22 真实 feed 兼容性结果：" +
+      JSON.stringify({
+        url: realFeedUrl,
+        environment: "Compose runtime-rss 正式轻量镜像",
+        action: "check",
+        scope: realFeedCheck.result?.check?.scope,
+        availability: realFeedCheck.result?.check?.availability,
+        checkedAt: realFeedCheck.result?.check?.checkedAt,
+        problems: realFeedCheck.result?.check?.problems,
+      }) +
+      "\n",
+  );
+
+  for (const binId of ["binny22-one", "binny22-two"]) {
+    const removed = cliData<{
+      readonly removed: boolean;
+      readonly id: string;
+    }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
+    assert.deepEqual(removed, { removed: true, id: binId });
+  }
+}
+
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny10-compose-"),
+    path.join(tmpdir(), "binny10fix-e2e-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.9.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -1861,6 +2816,9 @@ async function main(): Promise<void> {
       "    ports: !override",
       '      - "3000"',
       "  manual-runs-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "  rss-e2e-source:",
       "    ports: !override",
       '      - "8081"',
       "networks:",
@@ -1874,22 +2832,31 @@ async function main(): Promise<void> {
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
+  let rssControlSource: RssControlSource | undefined;
   try {
+    await compose(["build", "server"]);
+    await compose(["build", "runtime-fifteen-one"]);
+    await compose(["build", "runtime-rss"]);
     await compose([
       "up",
       "--detach",
-      "--build",
       "--wait",
       "--wait-timeout",
       "360",
       "postgres",
       "server",
       "manual-runs-source",
+      "rss-e2e-source",
       "runtime-fifteen-one",
       "runtime-fifteen-two",
+      "runtime-rss",
+      "runtime-rss-two",
     ]);
     composePort = await publishedPort("server", 3000);
     manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    rssControlSource = await createRssControlSource(
+      await publishedPort("rss-e2e-source", 8081),
+    );
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
     const isolatedClient = await verifyIsolatedApiConsumer({
@@ -1904,6 +2871,7 @@ async function main(): Promise<void> {
     const manualRunManifest = await createRuntimeFixtureManifest();
     await manualRunsCliStep(baseUrl, manualRunManifest);
     await manualRunsHttpStep(baseUrl, manualRunManifest);
+    await runRssAcceptance(baseUrl, rssControlSource);
     for (const binId of ["binny15-one", "binny15-two"]) {
       const removed = cliData<{
         readonly removed: boolean;
@@ -1921,7 +2889,7 @@ async function main(): Promise<void> {
     baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
     baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
     process.stdout.write(
-      "隔离客户端、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+      "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
     );
   } catch (error) {
     acceptanceFailed = true;
@@ -1941,6 +2909,8 @@ async function main(): Promise<void> {
         ...composePrefix(),
         "--profile",
         "binny15",
+        "--profile",
+        "binny22",
         "down",
         "--volumes",
         "--remove-orphans",
@@ -1954,7 +2924,7 @@ async function main(): Promise<void> {
     } else {
       const imageCleanup = await run(
         "docker",
-        ["image", "rm", imageName, runtimeImageName],
+        ["image", "rm", imageName, runtimeImageName, rssRuntimeImageName],
         { env: composeEnvironment() },
       );
       if (imageCleanup.code !== 0) {

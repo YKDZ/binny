@@ -40,6 +40,8 @@ ENV NODE_ENV=production
 ENV BINNY_COLLECTOR_ENTRY="/app/${BINNY_COLLECTOR_ENTRY}"
 WORKDIR /app
 COPY --from=build --chown=node:node /deploy /app
+RUN mkdir -p /var/lib/binny/collector-state \
+  && chown node:node /var/lib/binny/collector-state
 USER node
 EXPOSE 8080
 ENTRYPOINT ["node", "/app/binny-runtime/dist/entry.js"]
