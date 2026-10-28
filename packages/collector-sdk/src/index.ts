@@ -1,7 +1,8 @@
+import type { CollectorManifest } from "@binny/contracts";
 // 采集器声明、运行上下文和公共错误帮助。
 import { z } from "zod";
 
-export type JsonSchema = z.core.JSONSchema.BaseSchema;
+export type { CollectorManifest, JsonSchema } from "@binny/contracts";
 
 export interface CollectorContext {
   readonly binId: string;
@@ -9,13 +10,7 @@ export interface CollectorContext {
   readonly signal: AbortSignal;
 }
 
-export interface CollectorEnvironment {
-  readonly browser: {
-    readonly required: boolean;
-    readonly profileReuseAfterRestart: boolean;
-    readonly profileReuseUnavailableReason?: string;
-  };
-}
+export type CollectorEnvironment = CollectorManifest["environment"];
 
 export interface CollectorAction<TParams extends z.ZodType = z.ZodType> {
   readonly description: string;
@@ -38,23 +33,6 @@ export interface CollectorDefinition<
   readonly environment: CollectorEnvironment;
   readonly configSchema: TConfig;
   readonly actions: TActions;
-}
-
-export interface CollectorManifest {
-  readonly id: string;
-  readonly version: string;
-  readonly description?: string;
-  readonly environment: CollectorEnvironment;
-  readonly configSchema: JsonSchema;
-  readonly actions: Readonly<
-    Record<
-      string,
-      {
-        readonly description: string;
-        readonly params: JsonSchema;
-      }
-    >
-  >;
 }
 
 export function defineCollector<

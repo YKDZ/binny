@@ -72,6 +72,62 @@ export const binUpdateInputSchema = z
 
 export const binStatusSchema = z.enum(["active", "disabled"]);
 
+export const runtimeHeartbeatIntervalMs = 2_000;
+export const runtimeHeartbeatTimeoutMs = 8_000;
+export const runtimeProtocolVersion = 1;
+export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
+export type RuntimeEnvironmentKind = z.infer<
+  typeof runtimeEnvironmentKindSchema
+>;
+
+export const runtimeEnvironmentSchema = z.object({
+  kind: runtimeEnvironmentKindSchema,
+  browser: z.object({
+    available: z.boolean(),
+    profileReuseAfterRestart: z.boolean(),
+  }),
+});
+
+export const runtimeHeartbeatInputSchema = z.object({
+  protocolVersion: z.literal(runtimeProtocolVersion),
+  runtimeId: z.string().min(1),
+  collector: collectorManifestSchema,
+  environment: runtimeEnvironmentSchema,
+});
+
+export const runtimeDisconnectInputSchema = z.object({
+  runtimeId: z.string().min(1),
+});
+
+export const runtimeExecutionSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("online"),
+    runtimeId: z.string(),
+    environment: runtimeEnvironmentSchema,
+    lastHeartbeatAt: z.iso.datetime(),
+  }),
+  z.object({
+    status: z.literal("offline"),
+    reason: z.enum(["runtime_not_connected", "heartbeat_expired"]),
+    runtimeId: z.string().optional(),
+    lastHeartbeatAt: z.iso.datetime().optional(),
+  }),
+  z.object({
+    status: z.literal("incompatible"),
+    runtimeId: z.string(),
+    lastHeartbeatAt: z.iso.datetime(),
+    error: z.object({
+      code: z.enum([
+        "runtime_manifest_mismatch",
+        "runtime_configuration_incompatible",
+        "runtime_environment_incompatible",
+      ]),
+      message: z.string(),
+      path: z.array(z.union([z.string(), z.number()])),
+    }),
+  }),
+]);
+
 export const binConfigurationSchema = z.object({
   id: binIdSchema,
   collector: collectorManifestSchema,
@@ -79,10 +135,7 @@ export const binConfigurationSchema = z.object({
   config: jsonObjectSchema,
   targets: z.array(z.unknown()),
   status: binStatusSchema,
-  execution: z.object({
-    status: z.literal("unavailable"),
-    reason: z.literal("runtime_not_connected"),
-  }),
+  execution: runtimeExecutionSchema,
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
@@ -95,6 +148,9 @@ export const binErrorSchema = z.object({
       "invalid_configuration",
       "bin_already_exists",
       "bin_not_found",
+      "runtime_manifest_mismatch",
+      "runtime_configuration_incompatible",
+      "runtime_environment_incompatible",
     ]),
     message: z.string(),
     path: z.array(z.union([z.string(), z.number()])).optional(),
@@ -107,6 +163,12 @@ export type CollectorManifest = z.infer<typeof collectorManifestSchema>;
 export type BinCreateInput = z.infer<typeof binCreateInputSchema>;
 export type BinUpdateInput = z.infer<typeof binUpdateInputSchema>;
 export type BinConfiguration = z.infer<typeof binConfigurationSchema>;
+export type RuntimeEnvironment = z.infer<typeof runtimeEnvironmentSchema>;
+export type RuntimeHeartbeatInput = z.infer<typeof runtimeHeartbeatInputSchema>;
+export type RuntimeDisconnectInput = z.infer<
+  typeof runtimeDisconnectInputSchema
+>;
+export type RuntimeExecution = z.infer<typeof runtimeExecutionSchema>;
 export type BinError = z.infer<typeof binErrorSchema>["error"];
 export type BinOperation<T> =
   | { readonly ok: true; readonly value: T }
@@ -128,6 +190,18 @@ export type BinConfigurationOperations = {
     status: "active" | "disabled",
   ): Promise<BinOperation<BinConfiguration>>;
   removeBin(id: string): Promise<BinOperation<{ readonly id: string }>>;
+};
+
+export type RuntimeConnectionOperations = {
+  getExecution(id: string): Promise<BinOperation<RuntimeExecution>>;
+  heartbeat(
+    binId: string,
+    input: RuntimeHeartbeatInput,
+  ): Promise<BinOperation<RuntimeExecution>>;
+  disconnect(
+    binId: string,
+    input: RuntimeDisconnectInput,
+  ): Promise<BinOperation<RuntimeExecution>>;
 };
 
 /** 使用与运行时校验相同的 Zod 4 原生接口生成输入 JSON Schema。 */
