@@ -1,19 +1,21 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { readdir, realpath } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  collectorActionResultSchema,
-  createCollectorContext,
   collectorManifest,
-  isCollectorActionError,
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
+  manualRunCompletionSchema,
   runtimeHeartbeatIntervalMs,
   runtimeProtocolVersion,
   type ManualRunCompletion,
   type ManualRunExecution,
+  type ManualRun,
   type RuntimeEnvironment,
 } from "@binny/contracts";
 
@@ -27,6 +29,33 @@ const environmentKind = process.env.BINNY_RUNTIME_ENVIRONMENT ?? "lightweight";
 const heartbeatInterval = Number(
   process.env.BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS ??
     String(runtimeHeartbeatIntervalMs),
+);
+const ownerLockPath =
+  process.env.BINNY_RUNTIME_OWNER_LOCK_PATH ??
+  "/var/lib/binny/runtime/owner.lock";
+const workerEntry =
+  process.env.BINNY_RUNTIME_WORKER_ENTRY ??
+  fileURLToPath(
+    new URL(
+      import.meta.url.endsWith(".ts") ? "./worker.ts" : "./worker.js",
+      import.meta.url,
+    ),
+  );
+
+function positiveInteger(name: string, fallback: number, minimum = 0): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum)
+    throw new Error(`${name} 必须是大于等于 ${minimum} 的整数。`);
+  return parsed;
+}
+
+const stopGraceMs = positiveInteger("BINNY_RUNTIME_RUN_STOP_GRACE_MS", 2_000);
+const stopConfirmationLogMs = positiveInteger(
+  "BINNY_RUNTIME_STOP_CONFIRMATION_LOG_MS",
+  10_000,
+  1,
 );
 
 if (binId === undefined || binId.trim() === "") {
@@ -56,17 +85,40 @@ if (!Number.isInteger(heartbeatInterval) || heartbeatInterval < 250) {
   throw new Error("BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS 必须大于等于 250。");
 }
 
+async function findOwnerLockDescriptor(): Promise<number> {
+  let expectedPath: string;
+  try {
+    expectedPath = await realpath(ownerLockPath);
+  } catch {
+    throw new Error(
+      `运行器没有持有 owner lock：请用 flock 锁定 ${ownerLockPath} 后启动。`,
+    );
+  }
+  for (const entry of await readdir("/proc/self/fd")) {
+    const descriptor = Number(entry);
+    if (!Number.isInteger(descriptor)) continue;
+    try {
+      if ((await realpath(`/proc/self/fd/${entry}`)) === expectedPath)
+        return descriptor;
+    } catch {
+      // fd 列表可能在遍历时关闭临时描述符。
+    }
+  }
+  throw new Error(
+    `运行器没有持有 owner lock：请用 flock 锁定 ${ownerLockPath} 后启动。`,
+  );
+}
+
+const ownerLockDescriptor = await findOwnerLockDescriptor();
 const importedCollector = (await import(pathToFileURL(collectorPath).href)) as {
   readonly default?: CollectorDefinition;
   readonly collector?: CollectorDefinition;
 };
 const collector = importedCollector.default ?? importedCollector.collector;
-
-if (collector === undefined) {
+if (collector === undefined)
   throw new Error(
     `采集器模块 ${collectorPath} 必须导出 default 或 collector。`,
   );
-}
 
 const activeCollector: CollectorDefinition = collector;
 const manifest = collectorManifest(activeCollector);
@@ -82,17 +134,38 @@ const environment: RuntimeEnvironment = {
 const runtimeId = randomUUID();
 const server = createRuntimeServer({ collector: activeCollector });
 const client = createApiClient(apiUrl, {
-  fetch: (input, init) =>
-    fetch(input, {
-      ...init,
-      signal: AbortSignal.timeout(3_000),
-    }),
+  fetch: (input, init) => {
+    const timeout = AbortSignal.timeout(3_000);
+    const signal =
+      init?.signal == null ? timeout : AbortSignal.any([init.signal, timeout]);
+    return fetch(input, { ...init, signal });
+  },
 });
 let heartbeatTimer: NodeJS.Timeout | undefined;
 let heartbeatInFlight: Promise<void> | undefined;
 let runInFlight: Promise<void> | undefined;
+let activeWorker: ActionWorker | undefined;
+let activeRunId: string | null = null;
+let claimInFlight = false;
 let stopping: Promise<void> | undefined;
 let lastStatus: string | undefined;
+
+type WorkerOutcome =
+  | { readonly type: "completion"; readonly completion: ManualRunCompletion }
+  | {
+      readonly type: "exit";
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    };
+
+type ActionWorker = {
+  readonly child: ChildProcess;
+  readonly pid: number;
+  readonly ready: Promise<void>;
+  readonly outcome: Promise<WorkerOutcome>;
+  readonly closed: Promise<void>;
+  stopPromise?: Promise<void>;
+};
 
 function logStatus(status: string, detail?: string): void {
   if (lastStatus === status) return;
@@ -103,6 +176,330 @@ function logStatus(status: string, detail?: string): void {
   );
 }
 
+function parseWorkerMessage(value: unknown): unknown {
+  if (typeof value !== "string") return undefined;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function startActionWorker(): ActionWorker {
+  const child = spawn(process.execPath, [workerEntry], {
+    detached: true,
+    env: process.env,
+    stdio: ["ignore", "inherit", "inherit", "ipc", ownerLockDescriptor],
+  });
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("无法启动隔离的采集器执行进程。");
+
+  let resolveReady!: () => void;
+  let rejectReady!: (error: Error) => void;
+  let readyResolved = false;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  let resolveOutcome!: (outcome: WorkerOutcome) => void;
+  let outcomeResolved = false;
+  const outcome = new Promise<WorkerOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+  });
+
+  child.on("message", (value: unknown) => {
+    const message = parseWorkerMessage(value);
+    if (typeof message !== "object" || message === null || !("type" in message))
+      return;
+    if (message.type === "ready") {
+      readyResolved = true;
+      resolveReady();
+      return;
+    }
+    if (message.type !== "completion" || outcomeResolved) return;
+    const completion =
+      typeof message === "object" && "completion" in message
+        ? manualRunCompletionSchema.safeParse(message.completion)
+        : undefined;
+    if (completion === undefined || !completion.success) return;
+    outcomeResolved = true;
+    resolveOutcome({ type: "completion", completion: completion.data });
+  });
+  child.once("error", (error) => {
+    if (!readyResolved) rejectReady(error);
+    if (!outcomeResolved) {
+      outcomeResolved = true;
+      resolveOutcome({ type: "exit", code: 1, signal: null });
+    }
+  });
+  child.once("close", (code, signal) => {
+    if (!readyResolved)
+      rejectReady(new Error("采集器执行进程在启动完成前退出。"));
+    if (!outcomeResolved) {
+      outcomeResolved = true;
+      resolveOutcome({ type: "exit", code, signal });
+    }
+  });
+  return { child, pid, ready, outcome, closed };
+}
+
+function sendWorkerMessage(
+  worker: ActionWorker,
+  value: unknown,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (!worker.child.connected) {
+      reject(new Error("采集器执行进程 IPC 通道已经关闭。"));
+      return;
+    }
+    worker.child.send(JSON.stringify(value), (error) =>
+      error === null || error === undefined ? resolve() : reject(error),
+    );
+  });
+}
+
+function groupExists(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ESRCH"
+    )
+      return false;
+    return true;
+  }
+}
+
+function signalProcessGroup(
+  processGroupId: number,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    process.kill(-processGroupId, signal);
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ESRCH"
+    )
+      return;
+    process.stderr.write(
+      `无法向采集器进程组发送 ${signal}：${String(error)}；继续保留 bin 占用。\n`,
+    );
+  }
+}
+
+function stopActionWorker(worker: ActionWorker): Promise<void> {
+  if (worker.stopPromise !== undefined) return worker.stopPromise;
+  worker.stopPromise = (async () => {
+    const startedAt = Date.now();
+    const terminateAt = startedAt + stopGraceMs;
+    let killed = false;
+    let failureReported = false;
+    signalProcessGroup(worker.pid, "SIGTERM");
+    while (groupExists(worker.pid)) {
+      if (!killed && Date.now() >= terminateAt) {
+        killed = true;
+        signalProcessGroup(worker.pid, "SIGKILL");
+      }
+      if (!failureReported && Date.now() - startedAt >= stopConfirmationLogMs) {
+        failureReported = true;
+        process.stderr.write(
+          `采集器进程组仍未确认退出：pid=${worker.pid} bin=${binId}；运行继续占用 bin。\n`,
+        );
+      }
+      await delay(25);
+    }
+    await worker.closed;
+  })();
+  return worker.stopPromise;
+}
+
+async function readRun(
+  run: ManualRunExecution,
+): Promise<ManualRun | undefined> {
+  try {
+    const response = await client.bins[":binId"].runs[":runId"].$get({
+      param: { binId: runtimeBinId, runId: run.runId },
+    });
+    return response.status === 200 ? await response.json() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function interruptFailure(): ManualRunCompletion {
+  return {
+    status: "failed",
+    completedScopes: [],
+    error: {
+      code: "runtime_interrupted",
+      message: "运行器正在停止，本次动作没有恢复执行。",
+      impact: "本次运行已终结；之前提交的资料仍然保留。",
+      suggestion: "检查运行器后重新触发新的运行。",
+      requiresHuman: false,
+    },
+  };
+}
+
+async function finishRun(
+  run: ManualRunExecution,
+  completion: ManualRunCompletion,
+): Promise<void> {
+  const result = await client.bins[":binId"].runtime.runs[
+    ":runId"
+  ].complete.$post({
+    param: { binId: runtimeBinId, runId: run.runId },
+    json: { runtimeId, completion },
+  });
+  switch (result.status) {
+    case 200:
+      return;
+    case 400:
+    case 404:
+    case 409: {
+      const failure = await result.json();
+      process.stderr.write(
+        `运行结果未能写入：run=${run.runId} code=${failure.error.code} message=${failure.error.message}\n`,
+      );
+      return;
+    }
+  }
+}
+
+async function awaitExecutionPermission(
+  run: ManualRunExecution,
+): Promise<"execute" | "cancel" | "terminal" | "shutdown"> {
+  while (true) {
+    if (stopping !== undefined) return "shutdown";
+    const current = await readRun(run);
+    if (current === undefined) {
+      await delay(250);
+      continue;
+    }
+    if (current.status === "executing") return "execute";
+    if (current.status === "cancelling") return "cancel";
+    return "terminal";
+  }
+}
+
+async function executeRun(run: ManualRunExecution): Promise<void> {
+  const permission = await awaitExecutionPermission(run);
+  if (permission === "terminal") return;
+  if (permission === "cancel") return;
+  if (permission === "shutdown") {
+    const current = await readRun(run);
+    if (current?.status !== "cancelling")
+      await finishRun(run, interruptFailure());
+    return;
+  }
+
+  let worker: ActionWorker | undefined;
+  try {
+    worker = startActionWorker();
+    activeWorker = worker;
+    const readyDeadline = Date.now() + 10_000;
+    await Promise.race([
+      worker.ready,
+      (async () => {
+        while (Date.now() < readyDeadline) await delay(25);
+        throw new Error("采集器执行进程启动超时。");
+      })(),
+    ]);
+    const afterStart = await awaitExecutionPermission(run);
+    if (afterStart === "terminal") return;
+    if (afterStart === "cancel") {
+      await stopActionWorker(worker);
+      return;
+    }
+    if (afterStart === "shutdown") {
+      await stopActionWorker(worker);
+      const current = await readRun(run);
+      if (current?.status !== "cancelling")
+        await finishRun(run, interruptFailure());
+      return;
+    }
+
+    await sendWorkerMessage(worker, { type: "execute", run });
+    while (true) {
+      const outcome = await Promise.race([
+        worker.outcome,
+        delay(250).then(() => undefined),
+      ]);
+      if (outcome?.type === "completion") {
+        await stopActionWorker(worker);
+        const current = await readRun(run);
+        if (current?.status === "executing")
+          await finishRun(run, outcome.completion);
+        return;
+      }
+      if (outcome?.type === "exit") {
+        await stopActionWorker(worker);
+        const current = await readRun(run);
+        if (current?.status === "executing")
+          await finishRun(run, {
+            status: "failed",
+            completedScopes: [],
+            error: {
+              code: "collector_process_interrupted",
+              message: "采集器执行进程意外退出。",
+              impact: "本次运行未恢复执行；之前提交的资料仍然保留。",
+              suggestion: "检查采集器后重新触发新的运行。",
+              requiresHuman: false,
+            },
+          });
+        return;
+      }
+
+      const current = await readRun(run);
+      if (current?.status === "cancelling") {
+        await stopActionWorker(worker);
+        return;
+      }
+      if (current !== undefined && current.status !== "executing") {
+        await stopActionWorker(worker);
+        return;
+      }
+      if (stopping !== undefined) {
+        await stopActionWorker(worker);
+        const afterStop = await readRun(run);
+        if (afterStop?.status !== "cancelling")
+          await finishRun(run, interruptFailure());
+        return;
+      }
+    }
+  } catch (error) {
+    if (worker !== undefined) await stopActionWorker(worker);
+    const current = await readRun(run);
+    if (current?.status === "executing") {
+      await finishRun(run, {
+        status: "failed",
+        completedScopes: [],
+        error: {
+          code: "collector_process_start_failed",
+          message: "无法启动隔离的采集器执行进程。",
+          impact: "本次运行未执行。",
+          suggestion: "检查运行器镜像后重新触发。",
+          requiresHuman: false,
+        },
+      });
+      process.stderr.write(
+        `运行器无法启动采集器执行进程：run=${run.runId} ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  } finally {
+    if (activeWorker === worker) activeWorker = undefined;
+  }
+}
+
 async function heartbeat(): Promise<void> {
   if (stopping !== undefined) return;
   try {
@@ -111,6 +508,9 @@ async function heartbeat(): Promise<void> {
       json: {
         protocolVersion: runtimeProtocolVersion,
         runtimeId,
+        ownerLockAcquired: true,
+        activeRunId,
+        claimInFlight,
         collector: manifest,
         environment,
       },
@@ -118,7 +518,7 @@ async function heartbeat(): Promise<void> {
     if (response.status === 200) {
       const execution = await response.json();
       logStatus(execution.status);
-      if (execution.status === "online") void pollRun();
+      if (execution.status === "online" && !stopping) void pollRun();
     } else {
       const result = await response.json();
       logStatus(result.error.code, result.error.message);
@@ -135,123 +535,10 @@ async function heartbeat(): Promise<void> {
   }
 }
 
-function failureFrom(error: unknown) {
-  if (isCollectorActionError(error)) return error.failure;
-  return {
-    code: "collector_execution_failed",
-    message: "采集器动作执行失败。",
-    impact: "本次运行未能完成。",
-    requiresHuman: false,
-  } as const;
-}
-
-async function finishRun(
-  run: ManualRunExecution,
-  completion: ManualRunCompletion,
-): Promise<void> {
-  const response = await client.bins[":binId"].runtime.runs[
-    ":runId"
-  ].complete.$post({
-    param: { binId: runtimeBinId, runId: run.runId },
-    json: { runtimeId, completion },
-  });
-  switch (response.status) {
-    case 200:
-      return;
-    case 400:
-    case 404:
-    case 409: {
-      const result = await response.json();
-      process.stderr.write(
-        `运行结果未能写入：run=${run.runId} code=${result.error.code} message=${result.error.message}\n`,
-      );
-      return;
-    }
-  }
-}
-
-async function executeRun(run: ManualRunExecution): Promise<void> {
-  let completion: ManualRunCompletion;
-  const action = activeCollector.actions[run.action];
-  if (
-    run.collectorId !== manifest.id ||
-    run.collectorVersion !== manifest.version ||
-    action === undefined
-  ) {
-    completion = {
-      status: "failed",
-      completedScopes: [],
-      error: {
-        code: "collector_version_unavailable",
-        message: "当前运行器没有本次运行要求的采集器版本或动作。",
-        impact: "本次运行未执行。",
-        suggestion: "部署对应采集器版本后重新触发。",
-        requiresHuman: false,
-      },
-    };
-  } else {
-    const parsed = action.params.safeParse(run.params);
-    if (!parsed.success) {
-      const issue = parsed.error.issues[0];
-      completion = {
-        status: "failed",
-        completedScopes: [],
-        error: {
-          code: "invalid_action_parameters",
-          message: "本次动作参数不符合当前运行器声明。",
-          impact: "本次运行未执行。",
-          ...(issue === undefined
-            ? {}
-            : {
-                path: issue.path.map((part) =>
-                  typeof part === "symbol" ? String(part) : part,
-                ),
-              }),
-          requiresHuman: false,
-        },
-      };
-    } else {
-      try {
-        const result = await action.execute(
-          createCollectorContext(client, {
-            binId: run.binId,
-            identityId: run.identityId,
-            runId: run.runId,
-            collectorVersion: run.collectorVersion,
-            config: run.config,
-            targets: run.targets,
-            signal: new AbortController().signal,
-          }),
-          parsed.data,
-        );
-        const actionResult = collectorActionResultSchema.safeParse(result);
-        completion = {
-          status: "completed",
-          completedScopes: actionResult.success
-            ? actionResult.data.completedScopes
-            : [],
-        };
-      } catch (error) {
-        completion = {
-          status: "failed",
-          completedScopes: [],
-          error: failureFrom(error),
-        };
-      }
-    }
-  }
-
-  try {
-    await finishRun(run, completion);
-  } catch (error) {
-    process.stderr.write(
-      `运行结果暂时无法连接核心：run=${run.runId} ${error instanceof Error ? error.message : String(error)}\n`,
-    );
-  }
-}
-
 async function pollRun(): Promise<void> {
-  if (runInFlight !== undefined || stopping !== undefined) return;
+  if (runInFlight !== undefined || claimInFlight || stopping !== undefined)
+    return;
+  claimInFlight = true;
   try {
     const response = await client.bins[":binId"].runtime.runs.claim.$post({
       param: { binId: runtimeBinId },
@@ -261,10 +548,13 @@ async function pollRun(): Promise<void> {
       case 200: {
         const result = await response.json();
         if (result.run === null) return;
+        activeRunId = result.run.runId;
         const current = executeRun(result.run);
         runInFlight = current;
         void current.finally(() => {
           if (runInFlight === current) runInFlight = undefined;
+          if (activeRunId === result.run?.runId) activeRunId = null;
+          if (stopping === undefined) startHeartbeat();
         });
         return;
       }
@@ -282,6 +572,8 @@ async function pollRun(): Promise<void> {
     process.stderr.write(
       `运行器暂时无法领取任务：${error instanceof Error ? error.message : String(error)}\n`,
     );
+  } finally {
+    claimInFlight = false;
   }
 }
 
@@ -293,14 +585,38 @@ function startHeartbeat(): void {
   });
 }
 
+async function acknowledgeStoppedOwner(): Promise<void> {
+  try {
+    await client.bins[":binId"].runtime.heartbeat.$post({
+      param: { binId: runtimeBinId },
+      json: {
+        protocolVersion: runtimeProtocolVersion,
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        collector: manifest,
+        environment,
+      },
+    });
+  } catch {
+    // heartbeat 过期后核心会保留未确认占用，直到新 owner 真正取得持久锁。
+  }
+}
+
 async function disconnect(): Promise<void> {
   try {
     await client.bins[":binId"].runtime.disconnect.$post({
       param: { binId: runtimeBinId },
-      json: { runtimeId },
+      json: {
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+      },
     });
   } catch {
-    // API 不可达时，核心会通过心跳过期将运行器置为离线。
+    // API 不可达时保留核心中最后一次执行者与 run 的对应关系。
   }
 }
 
@@ -315,6 +631,11 @@ function shutdown(): Promise<void> {
   stopping = (async () => {
     if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
     if (heartbeatInFlight !== undefined) await heartbeatInFlight;
+    if (activeWorker !== undefined) await stopActionWorker(activeWorker);
+    if (runInFlight !== undefined) await runInFlight;
+    activeRunId = null;
+    claimInFlight = false;
+    await acknowledgeStoppedOwner();
     await disconnect();
     await closeServer();
   })();

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
-import { collectorManifestSchema, type ManualRun } from "@binny/contracts";
+import {
+  collectorManifestSchema,
+  type ArchiveSubmissionInput,
+  type ManualRun,
+} from "@binny/contracts";
 
 import { sourceControlStatusSchema } from "./manual-runs-source.ts";
 
@@ -78,8 +82,11 @@ async function heartbeat(binId: string, runtimeId: string): Promise<void> {
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
-      protocolVersion: 1,
+      protocolVersion: 2,
       runtimeId,
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
       collector: manifest,
       environment: {
         kind: "lightweight",
@@ -126,6 +133,146 @@ async function removeConcurrencyBin(binId: string): Promise<void> {
   if (response.status === 200) return;
   const result = await response.json();
   assert.fail(`并发验收 bin 清理失败：${result.error.code}`);
+}
+
+async function cancelRun(binId: string, runId: string) {
+  return await client.bins[":binId"].runs[":runId"].cancel.$post({
+    param: { binId, runId },
+  });
+}
+
+async function verifyQueuedCancellation(): Promise<void> {
+  const binId = "binny18-queued-cancel";
+  const runtimeId = "binny18-queued-cancel-runtime";
+  await createConcurrencyBin(binId);
+  try {
+    const queued = await triggerRun(
+      binId,
+      sourceRuntimeUrl,
+      "18-queued-cancel",
+      "queued-cancel",
+    );
+    assert.equal(queued.status, "queued");
+    const accepted = await cancelRun(binId, queued.runId);
+    assert.equal(accepted.status, 200);
+    if (accepted.status !== 200) return;
+    const cancelled = await accepted.json();
+    assert.equal(cancelled.status, "cancelled");
+    assert.ok(cancelled.finishedAt);
+    assert.equal(
+      cancelled.result?.stopReason.code,
+      "cancelled_before_execution",
+    );
+
+    await heartbeat(binId, runtimeId);
+    assert.equal(await claimRun(binId, runtimeId), null);
+    assert.equal((await readRun(binId, queued.runId)).status, "cancelled");
+  } finally {
+    await removeConcurrencyBin(binId);
+  }
+}
+
+async function verifyCancellationFencesLateWrites(): Promise<void> {
+  const binId = "binny18-fenced-cancel";
+  const runtimeId = "binny18-fenced-cancel-runtime";
+  await createConcurrencyBin(binId);
+  try {
+    await heartbeat(binId, runtimeId);
+    const queued = await triggerRun(
+      binId,
+      sourceRuntimeUrl,
+      "18-fenced-cancel",
+      "fenced-cancel",
+    );
+    const claimed = await claimRun(binId, runtimeId);
+    assert.equal(claimed?.runId, queued.runId);
+
+    const submission = {
+      requestId: "binny18-replay:" + queued.runId,
+      binId,
+      runId: queued.runId,
+      collectorVersion: manifest.version,
+      items: [
+        {
+          sourceKey: {
+            namespace: "binny18.cancellation",
+            key: queued.runId,
+          },
+          body: { text: "取消前已提交的资料。" },
+          capture: {
+            scope: { runId: queued.runId },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+      relations: [],
+    } satisfies ArchiveSubmissionInput;
+    const initialCommit = await client.archives.$post({ json: submission });
+    assert.equal(initialCommit.status, 201);
+    if (initialCommit.status !== 201) return;
+    const original = await initialCommit.json();
+
+    const accepted = await cancelRun(binId, queued.runId);
+    assert.equal(accepted.status, 200);
+    if (accepted.status !== 200) return;
+    assert.equal((await accepted.json()).status, "cancelling");
+
+    const replay = await client.archives.$post({ json: submission });
+    assert.equal(replay.status, 201);
+    if (replay.status === 201)
+      assert.equal((await replay.json()).commitId, original.commitId);
+
+    const lateWrite = await client.archives.$post({
+      json: { ...submission, requestId: submission.requestId + ":late" },
+    });
+    assert.equal(lateWrite.status, 409);
+    if (lateWrite.status === 409)
+      assert.equal((await lateWrite.json()).error.code, "run_not_writable");
+
+    const staleCompletion = await client.bins[":binId"].runtime.runs[
+      ":runId"
+    ].complete.$post({
+      param: { binId, runId: queued.runId },
+      json: {
+        runtimeId,
+        completion: { status: "completed", completedScopes: [] },
+      },
+    });
+    assert.equal(staleCompletion.status, 409);
+    if (staleCompletion.status === 409)
+      assert.equal(
+        (await staleCompletion.json()).error.code,
+        "run_cancellation_pending",
+      );
+
+    const pendingStop = await readRun(binId, queued.runId);
+    assert.equal(pendingStop.status, "cancelling");
+    assert.equal(pendingStop.stopConfirmedAt, undefined);
+
+    await heartbeat(binId, runtimeId);
+    const stopped = await readRun(binId, queued.runId);
+    assert.equal(stopped.status, "cancelled");
+    assert.ok(stopped.stopConfirmedAt);
+
+    const lateCompletion = await client.bins[":binId"].runtime.runs[
+      ":runId"
+    ].complete.$post({
+      param: { binId, runId: queued.runId },
+      json: {
+        runtimeId,
+        completion: { status: "completed", completedScopes: [] },
+      },
+    });
+    assert.equal(lateCompletion.status, 409);
+    if (lateCompletion.status === 409)
+      assert.equal(
+        (await lateCompletion.json()).error.code,
+        "run_not_executing",
+      );
+  } finally {
+    await removeConcurrencyBin(binId);
+  }
 }
 
 async function verifyConcurrentRuns(): Promise<void> {
@@ -568,6 +715,8 @@ async function verifyDisabledQueueBoundary(
 }
 
 async function main(): Promise<void> {
+  await verifyQueuedCancellation();
+  await verifyCancellationFencesLateWrites();
   await verifyConcurrentRuns();
   await verifyDynamicValidation(sourceRuntimeUrl);
   const existingItemId = await verifySerialParallelAndSnapshot(

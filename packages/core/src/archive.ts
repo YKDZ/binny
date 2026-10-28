@@ -43,6 +43,7 @@ import {
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import type { CoreDatabase } from "./database.ts";
+import { lockManualRunForArchiveWrite } from "./manual-run-fencing.ts";
 
 type CommitRow = {
   readonly commit_id: string;
@@ -2174,6 +2175,18 @@ export function createArchiveStore(
               ok: true,
               value: await readCommit(transaction, receipt.commit_id),
             };
+          }
+
+          if (
+            submission.runId !== undefined &&
+            !(await lockManualRunForArchiveWrite(transaction, submission.runId))
+          ) {
+            return failure(
+              409,
+              "run_not_writable",
+              "对应运行已终结或正在取消，不能再写入新的归档资料。",
+              ["runId"],
+            );
           }
 
           const bins = await transaction<{ readonly id: string }[]>`

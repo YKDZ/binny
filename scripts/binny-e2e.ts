@@ -29,7 +29,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny-v1-e2e-" + process.pid.toString(10);
+const projectName = "binny18-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -54,6 +54,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: imageName,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY15_SOURCE_HOST_PORT: String(manualRunSourcePort),
+    BINNY18_STOP_GRACE_MS: "1500",
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -869,14 +870,56 @@ async function waitForSourceArrival(
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
+  disposition:
+    | "material"
+    | "manual"
+    | "empty"
+    | "partial"
+    | "slow" = "material",
 ): Promise<void> {
   const response = await fetch(sourceUrl + "/control/release", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ gateKey, disposition: "material" }),
+    body: JSON.stringify({ gateKey, disposition }),
     signal: AbortSignal.timeout(3_000),
   });
   assert.equal(response.status, 200);
+}
+
+async function waitForSourceMarker(
+  sourceUrl: string,
+  runId: string,
+  gateKey: string,
+  marker: string,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(sourceUrl + "/control/arrivals", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const status: unknown = await response.json();
+    if (
+      typeof status === "object" &&
+      status !== null &&
+      "markers" in status &&
+      Array.isArray(status.markers) &&
+      status.markers.some(
+        (entry: unknown) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "runId" in entry &&
+          entry.runId === runId &&
+          "gateKey" in entry &&
+          entry.gateKey === gateKey &&
+          "marker" in entry &&
+          entry.marker === marker,
+      )
+    )
+      return;
+    await wait(50);
+  }
+  assert.fail(`运行没有写出信源标记：${marker}`);
 }
 
 function manualRunSourceRuntimeUrl(): string {
@@ -909,6 +952,11 @@ type ManualRunCliState = {
   readonly runId: string;
   readonly binId: string;
   readonly status: string;
+  readonly queueReason?:
+    | "runtime_offline"
+    | "earlier_run_active"
+    | "earlier_run_queued"
+    | "previous_execution_unconfirmed";
   readonly result?: {
     readonly completedScopes: readonly string[];
     readonly commits: readonly {
@@ -916,8 +964,63 @@ type ManualRunCliState = {
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
+    readonly error?: { readonly code: string };
   };
+  readonly cancellationRequestedAt?: string;
+  readonly stopConfirmedAt?: string;
 };
+
+async function waitForCliManualRunState(
+  baseUrl: string,
+  binId: string,
+  runId: string,
+  statuses: readonly string[],
+): Promise<ManualRunCliState> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, runId]),
+      "found",
+    );
+    if (statuses.includes(current.status)) return current;
+    await wait(50);
+  }
+  assert.fail(`运行没有进入预期状态：${statuses.join("/")}`);
+}
+
+async function runtimeProcessSnapshot(service: string): Promise<
+  readonly {
+    readonly pid: number;
+    readonly pgid: number;
+    readonly command: string;
+  }[]
+> {
+  const containers = await compose(["ps", "-q", service], composePort);
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId, `没有找到 Compose 服务 ${service} 的容器。`);
+  const processes = await run(
+    "docker",
+    ["top", containerId, "-eo", "pid,pgid,args"],
+    { env: composeEnvironment() },
+  );
+  assert.equal(processes.code, 0, processes.stderr);
+  return processes.stdout
+    .trim()
+    .split("\n")
+    .slice(1)
+    .flatMap((line) => {
+      const match = /^(\d+)\s+(\d+)\s+(.+)$/u.exec(line.trim());
+      return match === null
+        ? []
+        : [
+            {
+              pid: Number(match[1]),
+              pgid: Number(match[2]),
+              command: match[3]!,
+            },
+          ];
+    });
+}
 
 async function manualRunsCliStep(
   baseUrl: string,
@@ -1030,6 +1133,297 @@ async function manualRunsCliStep(
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
+
+  const slowGateKey = "18-cli-slow-stop";
+  const slowRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: slowGateKey,
+        sourceKey: "partial-before-cancel",
+        waitAfterCommitMs: 10_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    slowGateKey,
+    slowRun.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, slowGateKey, "slow");
+  await waitForSourceMarker(
+    sourceControlUrl,
+    slowRun.runId,
+    slowGateKey,
+    "committed",
+  );
+  const originalWorker = (
+    await runtimeProcessSnapshot("runtime-fifteen-one")
+  ).find((process) => process.command.includes("worker.js"));
+  assert.ok(originalWorker, "慢动作应由独立执行进程运行。");
+
+  const nextGateKey = "18-cli-next-after-stop";
+  const nextRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: nextGateKey,
+        sourceKey: "after-cancel",
+      }),
+    ]),
+    "triggered",
+  );
+  const queuedBehindSlowRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    "found",
+  );
+  assert.equal(queuedBehindSlowRun.status, "queued");
+  assert.equal(queuedBehindSlowRun.queueReason, "earlier_run_active");
+
+  const acceptedCancel = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "cancel", "binny15-one", slowRun.runId]),
+    "cancellation",
+  );
+  assert.equal(acceptedCancel.status, "cancelling");
+  assert.ok(acceptedCancel.cancellationRequestedAt);
+  assert.equal(acceptedCancel.stopConfirmedAt, undefined);
+  const stillQueued = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    "found",
+  );
+  assert.equal(stillQueued.status, "queued");
+  assert.equal(stillQueued.queueReason, "earlier_run_active");
+  assert.equal(
+    sourceArrived(
+      await (await fetch(sourceControlUrl + "/control/arrivals")).json(),
+      nextGateKey,
+    ),
+    false,
+  );
+
+  const cancelled = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    slowRun.runId,
+    ["cancelled"],
+  );
+  assert.ok(cancelled.stopConfirmedAt);
+  assert.equal(cancelled.result?.stopReason.code, "cancelled");
+  assert.equal(cancelled.result?.commits.length, 1);
+  const savedPartial = cancelled.result?.commits[0];
+  assert.ok(savedPartial);
+  const retainedCommit = cliData<{ readonly runId?: string }>(
+    await cli(baseUrl, ["archive", "commit", savedPartial.commitId]),
+    "found",
+  );
+  assert.equal(retainedCommit.runId, slowRun.runId);
+  const stoppedProcesses = await runtimeProcessSnapshot("runtime-fifteen-one");
+  assert.equal(
+    stoppedProcesses.some((process) => process.pgid === originalWorker.pgid),
+    false,
+    "取消完成后旧 worker 进程组必须已经退出。",
+  );
+  const sourceAfterStopResponse = await fetch(
+    sourceControlUrl + "/control/arrivals",
+  );
+  assert.equal(sourceAfterStopResponse.status, 200);
+  const sourceAfterStop: unknown = await sourceAfterStopResponse.json();
+  if (
+    typeof sourceAfterStop === "object" &&
+    sourceAfterStop !== null &&
+    "markers" in sourceAfterStop &&
+    Array.isArray(sourceAfterStop.markers)
+  ) {
+    assert.equal(
+      sourceAfterStop.markers.some(
+        (entry: unknown) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "runId" in entry &&
+          entry.runId === slowRun.runId &&
+          "marker" in entry &&
+          entry.marker === "after-stop-delay",
+      ),
+      false,
+    );
+  }
+
+  await waitForSourceArrival(
+    sourceControlUrl,
+    nextGateKey,
+    nextRun.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, nextGateKey);
+  const nextCompleted = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    nextRun.runId,
+    ["completed"],
+  );
+  assert.equal(nextCompleted.result?.stopReason.code, "completed");
+}
+
+async function manualRunControllerPartitionStep(
+  baseUrl: string,
+  sourceControlUrl: string,
+): Promise<void> {
+  const binId = "binny15-two";
+  const interruptedGateKey = "18-controller-link-loss";
+  const interrupted = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: interruptedGateKey,
+        sourceKey: "interrupted-before-source",
+        waitBeforeSourceMs: 30_000,
+      }),
+    ]),
+    "triggered",
+  );
+  const active = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    interrupted.runId,
+    ["executing"],
+  );
+  assert.equal(active.status, "executing");
+  const oldWorker = (await runtimeProcessSnapshot("runtime-fifteen-two")).find(
+    (process) => process.command.includes("worker.js"),
+  );
+  assert.ok(oldWorker, "失联验收应观察到真实执行子进程。");
+  const bin = cliData<{
+    readonly execution: { readonly runtimeId?: string };
+  }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  assert.ok(bin.execution.runtimeId);
+
+  const containers = await compose(
+    ["ps", "-q", "runtime-fifteen-two"],
+    composePort,
+  );
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId);
+  const networkName = projectName + "_default";
+  const detached = await run(
+    "docker",
+    ["network", "disconnect", networkName, containerId],
+    { env: composeEnvironment() },
+  );
+  assert.equal(detached.code, 0, detached.stderr);
+  let reconnected = false;
+  try {
+    const nextGateKey = "18-after-controller-link-loss";
+    const next = cliData<ManualRunCliState>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        binId,
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl: manualRunSourceRuntimeUrl(),
+          gateKey: nextGateKey,
+          sourceKey: "after-interruption",
+        }),
+      ]),
+      "triggered",
+    );
+    const stale = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      interrupted.runId,
+      ["failed"],
+    );
+    assert.equal(stale.result?.error?.code, "runtime_interrupted");
+    assert.equal(stale.stopConfirmedAt, undefined);
+    const stillQueued = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, next.runId]),
+      "found",
+    );
+    assert.equal(stillQueued.status, "queued");
+    assert.equal(stillQueued.queueReason, "previous_execution_unconfirmed");
+
+    const claim = await fetch(
+      baseUrl + "/bins/" + binId + "/runtime/runs/claim",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runtimeId: bin.execution.runtimeId }),
+      },
+    );
+    assert.equal(claim.status, 200);
+    assert.deepEqual(await claim.json(), { run: null });
+    const liveProcesses = await runtimeProcessSnapshot("runtime-fifteen-two");
+    assert.ok(
+      liveProcesses.some((process) => process.pgid === oldWorker.pgid),
+      "失联超时不能伪称旧执行进程已经退出。",
+    );
+
+    const attached = await run(
+      "docker",
+      ["network", "connect", networkName, containerId],
+      { env: composeEnvironment() },
+    );
+    assert.equal(attached.code, 0, attached.stderr);
+    reconnected = true;
+
+    await waitForSourceArrival(
+      sourceControlUrl,
+      nextGateKey,
+      next.runId,
+      binId,
+    );
+    const stopped = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      interrupted.runId,
+      ["failed"],
+    );
+    assert.ok(stopped.stopConfirmedAt);
+    const processesAfterAck = await runtimeProcessSnapshot(
+      "runtime-fifteen-two",
+    );
+    assert.equal(
+      processesAfterAck.some((process) => process.pgid === oldWorker.pgid),
+      false,
+      "恢复控制连接并收到停止确认后旧 worker 进程组应消失。",
+    );
+    await releaseSource(sourceControlUrl, nextGateKey);
+    const completedNext = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      next.runId,
+      ["completed"],
+    );
+    assert.equal(completedNext.result?.stopReason.code, "completed");
+  } finally {
+    if (!reconnected) {
+      const attached = await run(
+        "docker",
+        ["network", "connect", networkName, containerId],
+        { env: composeEnvironment() },
+      );
+      if (attached.code !== 0 && !attached.stderr.includes("already exists"))
+        process.stderr.write(attached.stderr);
+    }
+  }
 }
 
 async function manualRunsHttpStep(
@@ -1473,10 +1867,10 @@ async function verifyRestartAndRemoval(
   );
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny15fix-resource-cli-"),
+    path.join(tmpdir(), "binny18-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny15fix-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny18-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1598,10 +1992,10 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny15fix-compose-"),
+    path.join(tmpdir(), "binny18-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.18.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -1645,6 +2039,10 @@ async function main(): Promise<void> {
     await verifyConfigurationJourney(baseUrl);
     const manualRunManifest = await createRuntimeFixtureManifest();
     await manualRunsCliStep(baseUrl, manualRunManifest);
+    await manualRunControllerPartitionStep(
+      baseUrl,
+      manualRunSourceControlUrl(),
+    );
     await manualRunsHttpStep(baseUrl, manualRunManifest);
     for (const binId of ["binny15-one", "binny15-two"]) {
       const removed = cliData<{

@@ -561,6 +561,7 @@ export const archiveErrorSchema = z
           "invalid_input",
           "bin_not_found",
           "archive_request_conflict",
+          "run_not_writable",
           "item_not_found",
           "item_deleted",
           "revision_not_found",

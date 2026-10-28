@@ -16,11 +16,17 @@ export const sourceRequestSchema = z.object({
 });
 export const releaseInputSchema = z.object({
   gateKey: z.string().min(1),
-  disposition: z.enum(["material", "manual", "empty", "partial"]),
+  disposition: z.enum(["material", "manual", "empty", "partial", "slow"]),
+});
+export const markerInputSchema = z.object({
+  runId: z.string().uuid(),
+  gateKey: z.string().min(1),
+  marker: z.string().min(1),
 });
 export const sourceControlStatusSchema = z.object({
   arrivals: z.array(sourceRequestSchema),
   waiting: z.array(z.string()),
+  markers: z.array(markerInputSchema),
 });
 
 type SourceRequest = z.infer<typeof sourceRequestSchema>;
@@ -75,6 +81,7 @@ export async function startControlledSource(
   const sourceArrivals: SourceArrival[] = [];
   const released = new Map<string, SourceDisposition>();
   const pending = new Map<string, PendingSourceRequest>();
+  const markers: z.infer<typeof markerInputSchema>[] = [];
 
   const server = createServer((request, response) => {
     void (async () => {
@@ -82,7 +89,19 @@ export async function startControlledSource(
         sendJson(response, 200, {
           arrivals: sourceArrivals,
           waiting: [...pending.keys()],
+          markers,
         });
+        return;
+      }
+
+      if (request.method === "POST" && request.url === "/control/mark") {
+        const parsed = markerInputSchema.safeParse(await readJson(request));
+        if (!parsed.success) {
+          sendJson(response, 400, { error: "marker 请求格式无效。" });
+          return;
+        }
+        markers.push(parsed.data);
+        sendJson(response, 200, { recorded: true });
         return;
       }
 

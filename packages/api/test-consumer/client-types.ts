@@ -84,7 +84,9 @@ async function checkPublicManualRunContract(): Promise<void> {
   if (triggered.status === 202) {
     const run = await triggered.json();
     const returnedRunId: string = run.runId;
-    const status: "queued" | "executing" | "completed" | "failed" = run.status;
+    const status = run.status;
+    if (status === "cancelling") void run.cancellationRequestedAt;
+    if (status === "cancelled") void run.stopConfirmedAt;
     void returnedRunId;
     void status;
     // @ts-expect-error 触发成功响应不包含错误封装。
@@ -158,6 +160,32 @@ async function checkPublicManualRunContract(): Promise<void> {
     void (await completed.json()).error.code;
   }
 }
+
+async function checkPublicManualRunCancellationContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const response = await client.bins[":binId"].runs[":runId"].cancel.$post({
+    param: {
+      binId: "rss-main",
+      runId: "750e8400-e29b-41d4-a716-446655440000",
+    },
+  });
+  if (response.status === 200) {
+    const run = await response.json();
+    if (run.status === "cancelling") void run.cancellationRequestedAt;
+    if (run.status === "cancelled") void run.stopConfirmedAt;
+  } else if (
+    response.status === 400 ||
+    response.status === 404 ||
+    response.status === 409
+  ) {
+    const error = await response.json();
+    void error.error.code;
+    // @ts-expect-error 取消失败响应不能读取运行数据。
+    void error.runId;
+  }
+}
+
+void checkPublicManualRunCancellationContract;
 
 void checkPublicManualRunContract;
 

@@ -284,7 +284,13 @@ async function postHeartbeat(
     {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ protocolVersion: 1, ...input }),
+      body: JSON.stringify({
+        protocolVersion: 2,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        ...input,
+      }),
     },
   );
   return {
@@ -302,7 +308,12 @@ async function postDisconnect(
     {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ runtimeId }),
+      body: JSON.stringify({
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+      }),
     },
   );
   return {
@@ -337,7 +348,7 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 1);
+  assert.equal(runtimeOneManifest.protocolVersion, 2);
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 

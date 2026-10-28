@@ -7,6 +7,7 @@ import {
   manualRunFailureSchema,
   manualRunSchema,
   manualRunTriggerInputSchema,
+  runtimeHeartbeatTimeoutMs,
   type CollectorManifest,
   type JsonObject,
   type ManualRun,
@@ -21,6 +22,7 @@ import {
 
 import { validateCollectorActionParameters } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { interruptExpiredManualRuns } from "./manual-run-fencing.ts";
 import { readRuntimeExecution } from "./runtime-connection.ts";
 
 type RunRow = {
@@ -33,6 +35,8 @@ type RunRow = {
   readonly created_at: Date;
   readonly started_at: Date | null;
   readonly finished_at: Date | null;
+  readonly cancellation_requested_at: Date | null;
+  readonly stop_confirmed_at: Date | null;
   readonly completed_scopes: readonly string[];
   readonly failure: ManualRunFailure | null;
   readonly queue_reason: ManualRun["queueReason"] | null;
@@ -87,7 +91,18 @@ function serializeFailure(value: ManualRunFailure): ManualRunFailure {
   return manualRunFailureSchema.parse(value);
 }
 
-function statusReason(failureValue: ManualRunFailure | null) {
+function statusReason(
+  status: ManualRun["status"],
+  failureValue: ManualRunFailure | null,
+  startedAt: Date | null,
+) {
+  if (status === "cancelled")
+    return startedAt === null
+      ? {
+          code: "cancelled_before_execution",
+          message: "排队运行已取消，没有启动执行进程。",
+        }
+      : { code: "cancelled", message: "执行进程已停止，运行取消完成。" };
   return failureValue === null
     ? { code: "completed", message: "动作已完成。" }
     : { code: failureValue.code, message: failureValue.message };
@@ -121,20 +136,25 @@ async function readCommitLocators(
 }
 
 async function readRun(
-  database: CoreDatabase,
+  database: CoreDatabase | CoreTransaction,
   binId: string,
   runId: string,
 ): Promise<RunRow | undefined> {
   const rows = await database.unsafe<RunRow[]>(
     "SELECT run_id, bin_id, collector_id, collector_version, action, status, " +
-      "created_at, started_at, finished_at, completed_scopes, failure, " +
+      "created_at, started_at, finished_at, cancel_requested_at AS cancellation_requested_at, " +
+      "stop_confirmed_at, completed_scopes, failure, " +
       "CASE WHEN status <> 'queued' THEN NULL " +
+      "WHEN EXISTS (SELECT 1 FROM runtime_connections owner " +
+      "WHERE owner.bin_id = manual_runs.bin_id AND owner.owner_state = 'unconfirmed') " +
+      "THEN 'previous_execution_unconfirmed' " +
       "WHEN NOT EXISTS (SELECT 1 FROM runtime_connections r " +
       "WHERE r.bin_id = manual_runs.bin_id AND r.disconnected = false " +
       "AND r.last_heartbeat_at > now() - interval '8 seconds') " +
       "THEN 'runtime_offline' " +
       "WHEN EXISTS (SELECT 1 FROM manual_runs active " +
-      "WHERE active.bin_id = manual_runs.bin_id AND active.status = 'executing') " +
+      "WHERE active.bin_id = manual_runs.bin_id " +
+      "AND active.status IN ('executing', 'cancelling')) " +
       "THEN 'earlier_run_active' " +
       "WHEN EXISTS (SELECT 1 FROM manual_runs earlier " +
       "WHERE earlier.bin_id = manual_runs.bin_id AND earlier.status = 'queued' " +
@@ -153,7 +173,10 @@ async function rowToRun(
   row: RunRow,
 ): Promise<ManualRun> {
   const commits = await readCommitLocators(database, row.run_id, row.bin_id);
-  const hasResult = row.status === "completed" || row.status === "failed";
+  const hasResult =
+    row.status === "completed" ||
+    row.status === "failed" ||
+    row.status === "cancelled";
   return manualRunSchema.parse({
     runId: row.run_id,
     binId: row.bin_id,
@@ -162,6 +185,14 @@ async function rowToRun(
     collectorVersion: row.collector_version,
     status: row.status,
     ...(row.queue_reason === null ? {} : { queueReason: row.queue_reason }),
+    ...(row.cancellation_requested_at === null
+      ? {}
+      : {
+          cancellationRequestedAt: row.cancellation_requested_at.toISOString(),
+        }),
+    ...(row.stop_confirmed_at === null
+      ? {}
+      : { stopConfirmedAt: row.stop_confirmed_at.toISOString() }),
     createdAt: row.created_at.toISOString(),
     ...(row.started_at === null
       ? {}
@@ -175,7 +206,7 @@ async function rowToRun(
           result: {
             completedScopes: row.completed_scopes,
             commits,
-            stopReason: statusReason(row.failure),
+            stopReason: statusReason(row.status, row.failure, row.started_at),
             ...(row.failure === null ? {} : { error: row.failure }),
           },
         }),
@@ -200,14 +231,36 @@ export async function initializeManualRunSchema(
         "params jsonb NOT NULL, " +
         "config_snapshot jsonb NOT NULL, " +
         "targets_snapshot jsonb NOT NULL, " +
-        "status text NOT NULL CHECK (status IN ('queued', 'executing', 'completed', 'failed')), " +
+        "status text NOT NULL CHECK (status IN ('queued', 'executing', 'cancelling', 'completed', 'failed', 'cancelled')), " +
         "runtime_id text, " +
         "completed_scopes jsonb NOT NULL DEFAULT '[]'::jsonb, " +
         "failure jsonb, " +
+        "cancel_requested_at timestamptz, " +
+        "stop_confirmed_at timestamptz, " +
         "created_at timestamptz NOT NULL DEFAULT clock_timestamp(), " +
         "started_at timestamptz, " +
         "finished_at timestamptz" +
         ")",
+    );
+    await transaction.unsafe(
+      "ALTER TABLE " +
+        tableName +
+        " ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz",
+    );
+    await transaction.unsafe(
+      "ALTER TABLE " +
+        tableName +
+        " ADD COLUMN IF NOT EXISTS stop_confirmed_at timestamptz",
+    );
+    await transaction.unsafe(
+      "ALTER TABLE " +
+        tableName +
+        " DROP CONSTRAINT IF EXISTS manual_runs_status_check",
+    );
+    await transaction.unsafe(
+      "ALTER TABLE " +
+        tableName +
+        " ADD CONSTRAINT manual_runs_status_check CHECK (status IN ('queued', 'executing', 'cancelling', 'completed', 'failed', 'cancelled'))",
     );
     await transaction.unsafe(
       "CREATE INDEX IF NOT EXISTS manual_runs_bin_queue_idx " +
@@ -216,10 +269,21 @@ export async function initializeManualRunSchema(
         " (bin_id, created_at, run_id) WHERE status = 'queued'",
     );
     await transaction.unsafe(
-      "CREATE UNIQUE INDEX IF NOT EXISTS manual_runs_one_executing_bin_idx " +
+      "DROP INDEX IF EXISTS manual_runs_one_executing_bin_idx",
+    );
+    await transaction.unsafe(
+      "CREATE UNIQUE INDEX manual_runs_one_executing_bin_idx " +
         "ON " +
         tableName +
-        " (bin_id) WHERE status = 'executing'",
+        " (bin_id) WHERE status IN ('executing', 'cancelling')",
+    );
+    await transaction.unsafe(
+      "UPDATE runtime_connections SET owner_state = 'unconfirmed' " +
+        "WHERE EXISTS (SELECT 1 FROM " +
+        tableName +
+        " run " +
+        "WHERE run.bin_id = runtime_connections.bin_id " +
+        "AND run.status IN ('executing', 'cancelling'))",
     );
   });
 }
@@ -252,7 +316,7 @@ export function createManualRunStore(
           }[]
         >(
           "SELECT id, collector, identity_id, config, targets, status " +
-            "FROM bin_configurations WHERE id = $1 FOR SHARE",
+            "FROM bin_configurations WHERE id = $1 FOR UPDATE",
           [binId],
         );
         const bin = bins[0];
@@ -265,6 +329,8 @@ export function createManualRunStore(
             "这个 bin 已停用，不能触发新的运行。",
             ["binId"],
           );
+
+        await interruptExpiredManualRuns(transaction, binId);
 
         const action = validateCollectorActionParameters(
           bin.collector,
@@ -292,7 +358,8 @@ export function createManualRunStore(
             "collector_version, action, params, config_snapshot, targets_snapshot, status) " +
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued') " +
             "RETURNING run_id, bin_id, collector_id, collector_version, action, status, " +
-            "created_at, started_at, finished_at, completed_scopes, failure, NULL AS queue_reason",
+            "created_at, started_at, finished_at, NULL AS cancellation_requested_at, " +
+            "NULL AS stop_confirmed_at, completed_scopes, failure, NULL AS queue_reason",
           [
             runId,
             binId,
@@ -313,10 +380,63 @@ export function createManualRunStore(
     },
 
     async getRun(binId, runId) {
-      const row = await readRun(database, binId, runId);
-      return row === undefined
-        ? failure(404, "run_not_found", "没有找到这个运行。", ["runId"])
-        : { ok: true, value: await rowToRun(database, row) };
+      return await database.begin(async (transaction) => {
+        await interruptExpiredManualRuns(transaction, binId);
+        const row = await readRun(transaction, binId, runId);
+        return row === undefined
+          ? failure(404, "run_not_found", "没有找到这个运行。", ["runId"])
+          : { ok: true, value: await rowToRun(transaction, row) };
+      });
+    },
+
+    async cancelRun(binId, runId) {
+      return await database.begin(async (transaction) => {
+        await interruptExpiredManualRuns(transaction, binId);
+        const rows = await transaction.unsafe<
+          { readonly status: ManualRun["status"] }[]
+        >(
+          "SELECT status FROM " +
+            tableName +
+            " WHERE bin_id = $1 AND run_id = $2 FOR UPDATE",
+          [binId, runId],
+        );
+        const current = rows[0];
+        if (current === undefined)
+          return failure(404, "run_not_found", "没有找到这个运行。", ["runId"]);
+
+        if (current.status === "queued") {
+          await transaction.unsafe(
+            "UPDATE " +
+              tableName +
+              " SET status = 'cancelled', cancel_requested_at = clock_timestamp(), " +
+              "stop_confirmed_at = clock_timestamp(), finished_at = clock_timestamp() " +
+              "WHERE bin_id = $1 AND run_id = $2 AND status = 'queued'",
+            [binId, runId],
+          );
+        } else if (current.status === "executing") {
+          await transaction.unsafe(
+            "UPDATE " +
+              tableName +
+              " SET status = 'cancelling', cancel_requested_at = clock_timestamp() " +
+              "WHERE bin_id = $1 AND run_id = $2 AND status = 'executing'",
+            [binId, runId],
+          );
+        } else if (
+          current.status !== "cancelling" &&
+          current.status !== "cancelled"
+        ) {
+          return failure(
+            409,
+            "run_not_cancellable",
+            "这个运行已经终结，不能再请求取消。",
+            ["runId"],
+          );
+        }
+
+        const row = await readRun(transaction, binId, runId);
+        if (row === undefined) throw new Error("取消运行后记录意外消失。");
+        return { ok: true, value: await rowToRun(transaction, row) };
+      });
     },
 
     async claimRun(binId, input) {
@@ -352,10 +472,19 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
+        await interruptExpiredManualRuns(transaction, binId);
+        const owners = await transaction.unsafe<
+          { readonly owner_state: "confirmed" | "unconfirmed" }[]
+        >("SELECT owner_state FROM runtime_connections WHERE bin_id = $1", [
+          binId,
+        ]);
+        if (owners[0]?.owner_state !== "confirmed")
+          return { ok: true, value: null };
+
         const active = await transaction.unsafe<{ readonly run_id: string }[]>(
           "SELECT run_id FROM " +
             tableName +
-            " WHERE bin_id = $1 AND status = 'executing' LIMIT 1",
+            " WHERE bin_id = $1 AND status IN ('executing', 'cancelling') LIMIT 1",
           [binId],
         );
         if (active.length > 0) return { ok: true, value: null };
@@ -363,7 +492,9 @@ export function createManualRunStore(
         const pending = await transaction.unsafe<RunSnapshotRow[]>(
           "SELECT run_id, bin_id, identity_id, collector_snapshot, collector_id, " +
             "collector_version, action, params, config_snapshot, targets_snapshot, " +
-            "status, created_at, started_at, finished_at, completed_scopes, failure, " +
+            "status, created_at, started_at, finished_at, " +
+            "cancel_requested_at AS cancellation_requested_at, stop_confirmed_at, " +
+            "completed_scopes, failure, " +
             "NULL AS queue_reason FROM " +
             tableName +
             " WHERE bin_id = $1 AND status = 'queued' " +
@@ -434,7 +565,8 @@ export function createManualRunStore(
             " SET status = 'executing', runtime_id = $2, started_at = clock_timestamp() " +
             "WHERE run_id = $1 AND status = 'queued' RETURNING run_id, bin_id, " +
             "collector_id, collector_version, action, status, created_at, started_at, " +
-            "finished_at, completed_scopes, failure, NULL AS queue_reason",
+            "finished_at, NULL AS cancellation_requested_at, NULL AS stop_confirmed_at, " +
+            "completed_scopes, failure, NULL AS queue_reason",
           [run.run_id, checked.data.runtimeId],
         );
         if (updated[0] === undefined) return { ok: true, value: null };
@@ -468,6 +600,7 @@ export function createManualRunStore(
 
       const completionResult = await database.begin<ManualRunOperation<string>>(
         async (transaction) => {
+          await interruptExpiredManualRuns(transaction, binId);
           const rows = await transaction.unsafe<
             {
               readonly status: ManualRun["status"];
@@ -484,6 +617,13 @@ export function createManualRunStore(
             return failure(404, "run_not_found", "没有找到这个运行。", [
               "runId",
             ]);
+          if (current.status === "cancelling")
+            return failure(
+              409,
+              "run_cancellation_pending",
+              "取消请求已受理；确认执行进程停止前不能提交其他结果。",
+              ["runId"],
+            );
           if (current.status !== "executing")
             return failure(
               409,
@@ -498,6 +638,22 @@ export function createManualRunStore(
               "运行器不能提交其他运行器的结果。",
               ["runtimeId"],
             );
+          const owner = await transaction.unsafe<
+            { readonly writable: boolean }[]
+          >(
+            "SELECT (runtime_id = $2 AND owner_state = 'confirmed' " +
+              "AND disconnected = false " +
+              "AND last_heartbeat_at > clock_timestamp() - ($3 * interval '1 millisecond')) " +
+              "AS writable FROM runtime_connections WHERE bin_id = $1",
+            [binId, checked.data.runtimeId, runtimeHeartbeatTimeoutMs],
+          );
+          if (owner[0]?.writable !== true)
+            return failure(
+              409,
+              "runtime_owner_unconfirmed",
+              "运行器尚未确认它仍持有这个 bin 的执行权。",
+              ["runtimeId"],
+            );
 
           const completion: ManualRunCompletion = checked.data.completion;
           const runFailure =
@@ -508,7 +664,8 @@ export function createManualRunStore(
             "UPDATE " +
               tableName +
               " SET status = $3, completed_scopes = $4, failure = $5, " +
-              "finished_at = clock_timestamp() WHERE run_id = $1 AND bin_id = $2",
+              "finished_at = clock_timestamp(), stop_confirmed_at = clock_timestamp() " +
+              "WHERE run_id = $1 AND bin_id = $2",
             [
               runId,
               binId,

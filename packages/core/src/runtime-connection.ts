@@ -15,6 +15,11 @@ import {
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import {
+  confirmManualRunOwnerStopped,
+  interruptExpiredManualRuns,
+  interruptReplacedManualRuns,
+} from "./manual-run-fencing.ts";
 
 type RuntimeConnectionRow = {
   readonly bin_id: string;
@@ -25,6 +30,7 @@ type RuntimeConnectionRow = {
   readonly environment: RuntimeEnvironment | null;
   readonly last_heartbeat_at: Date | null;
   readonly disconnected: boolean | null;
+  readonly owner_state: "confirmed" | "unconfirmed" | null;
 };
 
 const tableName = "runtime_connections";
@@ -224,7 +230,7 @@ async function selectRuntimeConnection(
   const rows = await database.unsafe<RuntimeConnectionRow[]>(
     "SELECT b.id AS bin_id, b.collector AS configured_collector, b.config, " +
       "r.runtime_id, r.collector AS runtime_collector, r.environment, " +
-      "r.last_heartbeat_at, r.disconnected FROM bin_configurations b " +
+      "r.last_heartbeat_at, r.disconnected, r.owner_state FROM bin_configurations b " +
       "LEFT JOIN " +
       tableName +
       " r ON r.bin_id = b.id WHERE b.id = $1",
@@ -259,8 +265,25 @@ export async function initializeRuntimeConnectionSchema(
       "collector jsonb NOT NULL, " +
       "environment jsonb NOT NULL, " +
       "last_heartbeat_at timestamptz NOT NULL DEFAULT now(), " +
-      "disconnected boolean NOT NULL DEFAULT false" +
+      "disconnected boolean NOT NULL DEFAULT false, " +
+      "owner_state text NOT NULL DEFAULT 'confirmed' " +
+      "CHECK (owner_state IN ('confirmed', 'unconfirmed'))" +
       ")",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
+      " ADD COLUMN IF NOT EXISTS owner_state text NOT NULL DEFAULT 'confirmed'",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
+      " DROP CONSTRAINT IF EXISTS runtime_connections_owner_state_check",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
+      " ADD CONSTRAINT runtime_connections_owner_state_check CHECK (owner_state IN ('confirmed', 'unconfirmed'))",
   );
 }
 
@@ -282,39 +305,81 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      const current = await selectRuntimeConnection(database, binId);
-      if (current === undefined) {
-        return failure(404, {
-          code: "bin_not_found",
-          message: "没有找到这个 bin。",
-          path: ["binId"],
-        });
-      }
+      return await database.begin(async (transaction) => {
+        const bins = await transaction.unsafe<{ readonly id: string }[]>(
+          "SELECT id FROM bin_configurations WHERE id = $1 FOR UPDATE",
+          [binId],
+        );
+        if (bins[0] === undefined)
+          return failure(404, {
+            code: "bin_not_found",
+            message: "没有找到这个 bin。",
+            path: ["binId"],
+          });
 
-      await database.unsafe(
-        "INSERT INTO " +
-          tableName +
-          " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected) " +
-          "VALUES ($1, $2, $3, $4, now(), false) " +
-          "ON CONFLICT (bin_id) DO UPDATE SET runtime_id = EXCLUDED.runtime_id, " +
-          "collector = EXCLUDED.collector, environment = EXCLUDED.environment, " +
-          "last_heartbeat_at = now(), disconnected = false",
-        [
+        const current = await selectRuntimeConnection(transaction, binId);
+        const expiredRunIds = await interruptExpiredManualRuns(
+          transaction,
           binId,
-          checked.data.runtimeId,
-          jsonbParameter(database, checked.data.collector),
-          jsonbParameter(database, checked.data.environment),
-        ],
-      );
+        );
+        let ownerState: "confirmed" | "unconfirmed" =
+          current?.owner_state === "unconfirmed" || expiredRunIds.length > 0
+            ? "unconfirmed"
+            : "confirmed";
 
-      const row = await selectRuntimeConnection(database, binId);
-      if (row === undefined) {
-        throw new Error("心跳写入后 bin 配置意外消失。");
-      }
-      const execution = rowExecution(row);
-      return execution.status === "incompatible"
-        ? { ok: false, status: 409, error: execution.error }
-        : { ok: true, value: execution };
+        if (
+          current?.runtime_id != null &&
+          current.runtime_id !== checked.data.runtimeId
+        ) {
+          if (checked.data.activeRunId !== null || checked.data.claimInFlight) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "新运行器尚未确认旧执行进程已经退出。",
+              path: ["activeRunId"],
+            });
+          }
+          await interruptReplacedManualRuns(
+            transaction,
+            binId,
+            current.runtime_id,
+          );
+          ownerState = "confirmed";
+        } else if (
+          checked.data.activeRunId === null &&
+          !checked.data.claimInFlight
+        ) {
+          await confirmManualRunOwnerStopped(
+            transaction,
+            binId,
+            checked.data.runtimeId,
+          );
+          ownerState = "confirmed";
+        }
+
+        await transaction.unsafe(
+          "INSERT INTO " +
+            tableName +
+            " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected, owner_state) " +
+            "VALUES ($1, $2, $3, $4, now(), false, $5) " +
+            "ON CONFLICT (bin_id) DO UPDATE SET runtime_id = EXCLUDED.runtime_id, " +
+            "collector = EXCLUDED.collector, environment = EXCLUDED.environment, " +
+            "last_heartbeat_at = now(), disconnected = false, owner_state = EXCLUDED.owner_state",
+          [
+            binId,
+            checked.data.runtimeId,
+            jsonbParameter(database, checked.data.collector),
+            jsonbParameter(database, checked.data.environment),
+            ownerState,
+          ],
+        );
+
+        const row = await selectRuntimeConnection(transaction, binId);
+        if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
+        const execution = rowExecution(row);
+        return execution.status === "incompatible"
+          ? { ok: false, status: 409, error: execution.error }
+          : { ok: true, value: execution };
+      });
     },
 
     async disconnect(binId, input) {
@@ -327,22 +392,34 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      await database.unsafe(
-        "UPDATE " +
-          tableName +
-          " SET disconnected = true WHERE bin_id = $1 AND runtime_id = $2",
-        [binId, checked.data.runtimeId],
-      );
-      const current = await selectRuntimeConnection(database, binId);
-      if (current === undefined) {
-        return failure(404, {
-          code: "bin_not_found",
-          message: "没有找到这个 bin。",
-          path: ["binId"],
-        });
-      }
-      // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
-      return { ok: true, value: rowExecution(current) };
+      return await database.begin(async (transaction) => {
+        const bins = await transaction.unsafe<{ readonly id: string }[]>(
+          "SELECT id FROM bin_configurations WHERE id = $1 FOR UPDATE",
+          [binId],
+        );
+        if (bins[0] === undefined)
+          return failure(404, {
+            code: "bin_not_found",
+            message: "没有找到这个 bin。",
+            path: ["binId"],
+          });
+        await confirmManualRunOwnerStopped(
+          transaction,
+          binId,
+          checked.data.runtimeId,
+        );
+        await transaction.unsafe(
+          "UPDATE " +
+            tableName +
+            " SET disconnected = true WHERE bin_id = $1 AND runtime_id = $2",
+          [binId, checked.data.runtimeId],
+        );
+        const current = await selectRuntimeConnection(transaction, binId);
+        if (current === undefined)
+          throw new Error("运行器断开后 bin 配置意外消失。");
+        // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
+        return { ok: true, value: rowExecution(current) };
+      });
     },
   };
 }

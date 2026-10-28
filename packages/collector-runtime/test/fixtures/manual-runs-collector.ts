@@ -1,3 +1,5 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import {
   collectorActionError,
   defineCollector,
@@ -8,7 +10,7 @@ import { z } from "zod";
 
 const configurationSchema = z.object({ section: z.string() });
 const sourceResultSchema = z.object({
-  disposition: z.enum(["material", "manual", "empty", "partial"]),
+  disposition: z.enum(["material", "manual", "empty", "partial", "slow"]),
   sourceKey: z.string(),
   title: z.string(),
   text: z.string(),
@@ -28,8 +30,12 @@ export default defineCollector({
         sourceUrl: z.url(),
         gateKey: z.string().min(1),
         sourceKey: z.string().min(1),
+        waitBeforeSourceMs: z.number().int().min(0).max(60_000).optional(),
+        waitAfterCommitMs: z.number().int().min(0).max(60_000).optional(),
       }),
       async execute(context, params) {
+        if (params.waitBeforeSourceMs !== undefined)
+          await delay(params.waitBeforeSourceMs);
         const response = await fetch(
           new URL("/source/collect", params.sourceUrl),
           {
@@ -95,6 +101,39 @@ export default defineCollector({
           ],
         } satisfies CollectorArchiveSubmission;
         await context.archive.submit(submission);
+        if (source.disposition === "slow") {
+          const marker = await fetch(
+            new URL("/control/mark", params.sourceUrl),
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                runId: context.runId,
+                gateKey: params.gateKey,
+                marker: "committed",
+              }),
+            },
+          );
+          if (!marker.ok) throw new Error("受控信源没有记录提交标记。");
+          await delay(params.waitAfterCommitMs ?? 10_000);
+          const lateMarker = await fetch(
+            new URL("/control/mark", params.sourceUrl),
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                runId: context.runId,
+                gateKey: params.gateKey,
+                marker: "after-stop-delay",
+              }),
+            },
+          );
+          if (!lateMarker.ok) throw new Error("受控信源没有记录延迟标记。");
+          await context.archive.submit({
+            ...submission,
+            requestId: submission.requestId + ":late",
+          });
+        }
         if (source.disposition === "partial") {
           // 同请求重放证明SDK复用02的幂等提交，再以失败结束本次run。
           await context.archive.submit(submission);
