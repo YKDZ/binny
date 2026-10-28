@@ -43,6 +43,7 @@ const collectorValidatorCacheLimit = 32;
 
 type CompiledCollectorValidators = {
   readonly configuration: ValidateFunction;
+  readonly actions: Readonly<Record<string, ValidateFunction>>;
   // Ajv 持有 schema 对象强引用；淘汰条目时一并释放整个编译器。
   readonly compiler: Ajv2020;
 };
@@ -188,6 +189,7 @@ function compileCollectorValidators(collector: CollectorManifest): {
   if (config.error !== undefined)
     return { validators: undefined, error: config.error };
 
+  const actions: Record<string, ValidateFunction> = {};
   for (const [name, action] of Object.entries(collector.actions)) {
     const result = createDynamicSchema(
       action.params,
@@ -196,10 +198,12 @@ function compileCollectorValidators(collector: CollectorManifest): {
     );
     if (result.error !== undefined)
       return { validators: undefined, error: result.error };
+    actions[name] = result.validator!;
   }
 
   const validators = {
     configuration: config.validator!,
+    actions,
     compiler,
   };
   collectorValidatorCache.set(cacheKey, validators);
@@ -237,6 +241,67 @@ export function validateCollectorConfiguration(
     ...(issue === undefined
       ? {}
       : { path: ["config", ...dynamicSchemaPath(issue)] }),
+  };
+}
+
+export type CollectorActionValidation =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly code:
+        | "invalid_manifest"
+        | "action_not_found"
+        | "invalid_action_parameters";
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    };
+
+/** 在创建运行时按已登记清单校验动态动作及本次参数。 */
+export function validateCollectorActionParameters(
+  collector: CollectorManifest,
+  actionName: string,
+  params: JsonObject,
+): CollectorActionValidation {
+  const checked = collectorManifestSchema.safeParse(collector);
+  if (!checked.success) {
+    const issue = checked.error.issues[0];
+    return {
+      ok: false,
+      code: "invalid_manifest",
+      message: issue?.message ?? "采集器声明格式无效。",
+      ...(issue === undefined
+        ? {}
+        : { path: schemaIssuePath(["collector"], issue.path) }),
+    };
+  }
+
+  if (!Object.hasOwn(checked.data.actions, actionName)) {
+    return {
+      ok: false,
+      code: "action_not_found",
+      message: "采集器没有声明这个动作。",
+      path: ["action"],
+    };
+  }
+
+  const built = compileCollectorValidators(checked.data);
+  if (built.error !== undefined) {
+    return {
+      ok: false,
+      code: "invalid_manifest",
+      message: built.error.message,
+      ...(built.error.path === undefined ? {} : { path: built.error.path }),
+    };
+  }
+
+  const validator = built.validators!.actions[actionName];
+  if (validator === undefined || validator(params)) return { ok: true };
+  const issue = validator.errors?.[0];
+  return {
+    ok: false,
+    code: "invalid_action_parameters",
+    message: "本次动作参数不符合采集器声明。",
+    ...(issue === undefined ? {} : { path: ["params", ...dynamicSchemaPath(issue)] }),
   };
 }
 
@@ -380,26 +445,59 @@ export function createBinConfigurationStore(
     },
 
     async setBinStatus(id, status) {
-      const rows = await database.unsafe<BinRow[]>(
-        "UPDATE " +
-          tableName +
-          " SET status = $1, updated_at = now() WHERE id = $2 RETURNING " +
-          selectColumns,
-        [status, id],
-      );
-      return rows[0] === undefined
-        ? notFound(id)
-        : { ok: true, value: rowToConfiguration(rows[0]) };
+      return await database.begin(async (transaction) => {
+        const rows = await transaction.unsafe<BinRow[]>(
+          "UPDATE " +
+            tableName +
+            " SET status = $1, updated_at = now() WHERE id = $2 RETURNING " +
+            selectColumns,
+          [status, id],
+        );
+        const bin = rows[0];
+        if (bin === undefined) return notFound(id);
+        if (status === "disabled") {
+          // 已在执行的运行继续使用快照；排队运行在停用时明确失败。
+          await transaction.unsafe(
+            "UPDATE manual_runs SET status = 'failed', " +
+              "failure = $2, finished_at = clock_timestamp() " +
+              "WHERE bin_id = $1 AND status = 'queued'",
+            [
+              id,
+              transaction.json({
+                code: "bin_disabled",
+                message: "bin 已停用，排队中的运行没有执行。",
+                impact: "排队中的运行已结束。",
+                suggestion: "重新启用后可创建新的运行。",
+                requiresHuman: false,
+              }),
+            ],
+          );
+        }
+        return { ok: true, value: rowToConfiguration(bin) };
+      });
     },
 
     async removeBin(id) {
-      const rows = await database.unsafe<{ readonly id: string }[]>(
-        "DELETE FROM " + tableName + " WHERE id = $1 RETURNING id",
-        [id],
-      );
-      return rows[0] === undefined
-        ? notFound(id)
-        : { ok: true, value: { id: rows[0].id } };
+      return await database.begin(async (transaction) => {
+        const pendingFailure = transaction.json({
+          code: "bin_removed",
+          message: "bin 配置已移除，排队中的运行没有执行。",
+          impact: "排队中的运行已结束。",
+          requiresHuman: false,
+        });
+        await transaction.unsafe(
+          "UPDATE manual_runs SET status = 'failed', failure = $2, " +
+            "finished_at = clock_timestamp() WHERE bin_id = $1 AND status = 'queued'",
+          [id, pendingFailure],
+        );
+        const rows = await transaction.unsafe<{ readonly id: string }[]>(
+          "DELETE FROM " + tableName + " WHERE id = $1 RETURNING id",
+          [id],
+        );
+        return rows[0] === undefined
+          ? notFound(id)
+          : { ok: true as const, value: { id: rows[0].id } };
+      });
     },
   };
 }

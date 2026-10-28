@@ -3,12 +3,16 @@ import { pathToFileURL } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  CollectorActionError,
+  createCollectorContext,
   collectorManifest,
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
   runtimeHeartbeatIntervalMs,
   runtimeProtocolVersion,
+  type ManualRunCompletion,
+  type ManualRunExecution,
   type RuntimeEnvironment,
 } from "@binny/contracts";
 
@@ -63,7 +67,8 @@ if (collector === undefined) {
   );
 }
 
-const manifest = collectorManifest(collector);
+const activeCollector: CollectorDefinition = collector;
+const manifest = collectorManifest(activeCollector);
 const environment: RuntimeEnvironment = {
   kind: environmentKind,
   browser: {
@@ -74,7 +79,7 @@ const environment: RuntimeEnvironment = {
   },
 };
 const runtimeId = randomUUID();
-const server = createRuntimeServer({ collector });
+const server = createRuntimeServer({ collector: activeCollector });
 const client = createApiClient(apiUrl, {
   fetch: (input, init) =>
     fetch(input, {
@@ -84,6 +89,7 @@ const client = createApiClient(apiUrl, {
 });
 let heartbeatTimer: NodeJS.Timeout | undefined;
 let heartbeatInFlight: Promise<void> | undefined;
+let runInFlight: Promise<void> | undefined;
 let stopping: Promise<void> | undefined;
 let lastStatus: string | undefined;
 
@@ -111,6 +117,7 @@ async function heartbeat(): Promise<void> {
     if (response.status === 200) {
       const execution = await response.json();
       logStatus(execution.status);
+      if (execution.status === "online") void pollRun();
     } else {
       const result = await response.json();
       logStatus(result.error.code, result.error.message);
@@ -124,6 +131,151 @@ async function heartbeat(): Promise<void> {
     if (stopping === undefined) {
       heartbeatTimer = setTimeout(startHeartbeat, heartbeatInterval);
     }
+  }
+}
+
+function failureFrom(error: unknown) {
+  if (error instanceof CollectorActionError) return error.failure;
+  return {
+    code: "collector_execution_failed",
+    message: "采集器动作执行失败。",
+    impact: "本次运行未能完成。",
+    requiresHuman: false,
+  } as const;
+}
+
+async function finishRun(
+  run: ManualRunExecution,
+  completion: ManualRunCompletion,
+): Promise<void> {
+  const response = await client.bins[":binId"].runtime.runs[":runId"].complete.$post({
+    param: { binId: runtimeBinId, runId: run.runId },
+    json: { runtimeId, completion },
+  });
+  switch (response.status) {
+    case 200:
+      return;
+    case 400:
+    case 404:
+    case 409: {
+      const result = await response.json();
+      process.stderr.write(
+        `运行结果未能写入：run=${run.runId} code=${result.error.code} message=${result.error.message}\n`,
+      );
+      return;
+    }
+  }
+}
+
+async function executeRun(run: ManualRunExecution): Promise<void> {
+  let completion: ManualRunCompletion;
+  const action = activeCollector.actions[run.action];
+  if (
+    run.collectorId !== manifest.id ||
+    run.collectorVersion !== manifest.version ||
+    action === undefined
+  ) {
+    completion = {
+      status: "failed",
+      completedScopes: [],
+      error: {
+        code: "collector_version_unavailable",
+        message: "当前运行器没有本次运行要求的采集器版本或动作。",
+        impact: "本次运行未执行。",
+        suggestion: "部署对应采集器版本后重新触发。",
+        requiresHuman: false,
+      },
+    };
+  } else {
+    const parsed = action.params.safeParse(run.params);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      completion = {
+        status: "failed",
+        completedScopes: [],
+        error: {
+          code: "invalid_action_parameters",
+          message: "本次动作参数不符合当前运行器声明。",
+          impact: "本次运行未执行。",
+          ...(issue === undefined
+            ? {}
+            : {
+                path: issue.path.map((part) =>
+                  typeof part === "symbol" ? String(part) : part,
+                ),
+              }),
+          requiresHuman: false,
+        },
+      };
+    } else {
+      try {
+        const result = await action.execute(
+          createCollectorContext(client, {
+            binId: run.binId,
+            identityId: run.identityId,
+            runId: run.runId,
+            collectorVersion: run.collectorVersion,
+            config: run.config,
+            targets: run.targets,
+            signal: new AbortController().signal,
+          }),
+          parsed.data,
+        );
+        completion = {
+          status: "completed",
+          completedScopes: result === undefined ? [] : [...result.completedScopes],
+        };
+      } catch (error) {
+        completion = {
+          status: "failed",
+          completedScopes: [],
+          error: failureFrom(error),
+        };
+      }
+    }
+  }
+
+  try {
+    await finishRun(run, completion);
+  } catch (error) {
+    process.stderr.write(
+      `运行结果暂时无法连接核心：run=${run.runId} ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+async function pollRun(): Promise<void> {
+  if (runInFlight !== undefined || stopping !== undefined) return;
+  try {
+    const response = await client.bins[":binId"].runtime.runs.claim.$post({
+      param: { binId: runtimeBinId },
+      json: { runtimeId },
+    });
+    switch (response.status) {
+      case 200: {
+        const result = await response.json();
+        if (result.run === null) return;
+        const current = executeRun(result.run);
+        runInFlight = current;
+        void current.finally(() => {
+          if (runInFlight === current) runInFlight = undefined;
+        });
+        return;
+      }
+      case 400:
+      case 404:
+      case 409: {
+        const result = await response.json();
+        process.stderr.write(
+          `运行器领取失败：code=${result.error.code} message=${result.error.message}\n`,
+        );
+        return;
+      }
+    }
+  } catch (error) {
+    process.stderr.write(
+      `运行器暂时无法领取任务：${error instanceof Error ? error.message : String(error)}\n`,
+    );
   }
 }
 

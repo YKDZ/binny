@@ -18,9 +18,12 @@ import {
   binCreateInputSchema,
   binErrorSchema,
   binIdSchema,
+  collectorActionNameSchema,
   collectorManifestSchema,
   identityIdSchema,
   jsonObjectSchema,
+  manualRunErrorSchema,
+  manualRunSchema,
 } from "@binny/contracts";
 import {
   CliWriteError,
@@ -91,6 +94,7 @@ const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
 const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
   archiveErrorSchema.shape.error,
+  manualRunErrorSchema.shape.error,
 ]);
 
 function createCliContract(identity: CliCommandIdentity) {
@@ -146,6 +150,12 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "archive",
         description: "读取已归档资料和不可变内容版本。",
+      },
+      run: {
+        kind: "commandGroup",
+        parent: "cli",
+        name: "run",
+        description: "触发采集动作并查询运行结果。",
       },
       ...command("binList")({
         kind: "command",
@@ -467,6 +477,93 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的移除状态。");
+        },
+      }),
+      ...command("runTrigger")({
+        kind: "command",
+        parent: "run",
+        name: "trigger",
+        description: "触发一次独立采集运行。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          action: { kind: "positional", description: "已声明的动作名称" },
+          params: {
+            kind: "valueOption",
+            longOption: "--params",
+            description: "本次运行参数 JSON",
+          },
+        },
+        input: z.object({
+          binId: binIdSchema,
+          action: collectorActionNameSchema,
+          params: jsonObjectTextSchema.optional(),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            triggered: {
+              description: "已排队的运行",
+              exitCode: 0,
+              schema: manualRunSchema,
+              text: (run) => outputText("已触发运行", run),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].runs.$post({
+              param: { binId: input.binId },
+              json: { action: input.action, params: input.params ?? {} },
+            });
+          if (response.status === 202)
+            return outcome.data.triggered(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的运行触发状态。");
+        },
+      }),
+      ...command("runGet")({
+        kind: "command",
+        parent: "run",
+        name: "get",
+        description: "读取一次运行的状态和结果。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          runId: { kind: "positional", description: "运行标识" },
+        },
+        input: z.object({
+          binId: binIdSchema,
+          runId: z.string().uuid(),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "运行状态和结果",
+              exitCode: 0,
+              schema: manualRunSchema,
+              text: (run) => outputText("运行状态", run),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].runs[":runId"].$get({
+              param: { binId: input.binId, runId: input.runId },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的运行读取状态。");
         },
       }),
       ...command("archiveItem")({

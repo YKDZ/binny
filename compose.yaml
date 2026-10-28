@@ -78,6 +78,50 @@ services:
       - "${BINNY14_RUNTIME_TWO_PORT:-14142}:8080"
     restart: unless-stopped
 
+  runtime-fifteen-one:
+    image: ${BINNY15_RUNTIME_IMAGE:-binny15-lightweight:local}
+    profiles: [binny15]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny15-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-fifteen-two:
+    image: ${BINNY15_RUNTIME_IMAGE:-binny15-lightweight:local}
+    profiles: [binny15]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny15-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   bins:
