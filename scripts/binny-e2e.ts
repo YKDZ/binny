@@ -497,19 +497,26 @@ async function waitFor<T>(
   );
 }
 
-async function waitForBlockedQuery(queryFragment: string): Promise<void> {
+async function waitForBlockedTableWrite(
+  table: "archive_resource" | "archive_revision_resource",
+): Promise<void> {
+  // 按关系 OID 观察未授予写锁，避免依赖 Drizzle 生成的标识符文本。
+  const relationByTable = {
+    archive_resource: "public.archive_resource",
+    archive_revision_resource: "public.archive_revision_resource",
+  } as const;
   await waitFor(
     async () => {
       const result = await compose(
         postgresExecArgs([
           "-c",
-          `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%${queryFragment}%';`,
+          `SELECT count(*) FROM pg_locks AS blocked INNER JOIN pg_stat_activity AS activity ON activity.pid = blocked.pid WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND blocked.locktype = 'relation' AND blocked.relation = '${relationByTable[table]}'::regclass AND blocked.mode = 'RowExclusiveLock' AND NOT blocked.granted;`,
         ]).slice(composePrefix().length),
       );
       return Number(result.stdout.trim());
     },
     (count) => count > 0,
-    `PostgreSQL 等待 ${queryFragment} 锁`,
+    `PostgreSQL 等待 ${table} 写锁`,
   );
 }
 
@@ -599,7 +606,7 @@ async function verifyResourceStorageInterruptions(
     assert.equal(newPublishedFiles.length, 1);
     const publishedFile = newPublishedFiles[0];
     assert.ok(publishedFile);
-    await waitForBlockedQuery("INSERT INTO archive_resource");
+    await waitForBlockedTableWrite("archive_resource");
     assert.doesNotMatch(publishRequest.stdout(), /BINNY04_UPLOAD_RESPONSE/u);
 
     await compose(["kill", "-s", "SIGKILL", "server"]);
@@ -655,7 +662,7 @@ async function verifyResourceStorageInterruptions(
     referenceLock = await holdTableShareLock("archive_revision_resource");
     referenceRequest = archiveReferenceProcess(uploaded.resourceId);
     await referenceRequest.waitForMarker("BINNY04_REFERENCE_STARTED");
-    await waitForBlockedQuery("INSERT INTO archive_revision_resource");
+    await waitForBlockedTableWrite("archive_revision_resource");
     assert.doesNotMatch(
       referenceRequest.stdout(),
       /BINNY04_REFERENCE_RESPONSE/u,
