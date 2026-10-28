@@ -23,18 +23,116 @@ type ManagedProcess = {
   readonly waitForClose: () => Promise<ProcessResult>;
 };
 
+type HeartbeatDelayProxy = {
+  readonly arm: (stoppedRunId: string) => Promise<void>;
+  readonly waitUntilHeld: () => Promise<{
+    readonly heldAt: number;
+    readonly runtimeId: string;
+    readonly ownerGeneration?: string;
+    readonly stoppedRunId?: string;
+  }>;
+  readonly waitUntilTimedOut: () => Promise<number>;
+  readonly waitUntilForwarded: (
+    runtimeId: string,
+  ) => Promise<string | undefined>;
+  readonly release: () => Promise<void>;
+};
+
+type HeartbeatDelayProxyStatus = {
+  readonly held: boolean;
+  readonly heldAt?: number;
+  readonly clientClosedAt?: number;
+  readonly heldRuntimeId?: string;
+  readonly heldOwnerGeneration?: string;
+  readonly heldStoppedRunId?: string;
+  readonly forwardedRuntimeId?: string;
+  readonly forwardedOwnerGeneration?: string;
+};
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny10fix-e2e-" + process.pid.toString(10);
+const projectName = "binny18owner-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
 let composeOverrideFile = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
+
+function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
+  const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
+  const controlUrl = `http://${host}:${String(controlPort)}`;
+
+  async function readStatus(): Promise<HeartbeatDelayProxyStatus> {
+    const response = await fetch(controlUrl + "/control/status", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()) as HeartbeatDelayProxyStatus;
+  }
+
+  return {
+    async arm(stoppedRunId) {
+      const response = await fetch(controlUrl + "/control/arm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ stoppedRunId }),
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async waitUntilHeld() {
+      const status = await waitFor(
+        readStatus,
+        (current) =>
+          current.held &&
+          typeof current.heldAt === "number" &&
+          typeof current.heldRuntimeId === "string",
+        "代理暂存的原生 idle heartbeat",
+      );
+      assert.ok(status.heldAt !== undefined);
+      assert.ok(status.heldRuntimeId !== undefined);
+      return {
+        heldAt: status.heldAt,
+        runtimeId: status.heldRuntimeId,
+        ...(status.heldOwnerGeneration === undefined
+          ? {}
+          : { ownerGeneration: status.heldOwnerGeneration }),
+        ...(status.heldStoppedRunId === undefined
+          ? {}
+          : { stoppedRunId: status.heldStoppedRunId }),
+      };
+    },
+    async waitUntilTimedOut() {
+      const status = await waitFor(
+        readStatus,
+        (current) => typeof current.clientClosedAt === "number",
+        "运行器 heartbeat 客户端超时",
+      );
+      assert.ok(status.clientClosedAt !== undefined);
+      return status.clientClosedAt;
+    },
+    async waitUntilForwarded(runtimeId) {
+      const status = await waitFor(
+        readStatus,
+        (current) => current.forwardedRuntimeId === runtimeId,
+        `新运行器 ${runtimeId} 的真实心跳`,
+      );
+      return status.forwardedOwnerGeneration;
+    },
+    async release() {
+      if (!(await readStatus()).held) return;
+      const response = await fetch(controlUrl + "/control/release", {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+      });
+      assert.equal(response.status, 200);
+    },
+  };
+}
 
 function composePrefix(): readonly string[] {
   return [
@@ -52,6 +150,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: imageName,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
+    BINNY18_STOP_GRACE_MS: "1500",
     BINNY22_RUNTIME_IMAGE: rssRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
@@ -430,6 +529,11 @@ type HeldTableLock = {
   readonly release: () => Promise<void>;
 };
 
+type ManualRunLockWaiter = {
+  readonly pid: number;
+  readonly blockers: readonly number[];
+};
+
 function postgresExecArgs(args: readonly string[]): readonly string[] {
   return [
     ...composePrefix(),
@@ -466,6 +570,73 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
       assert.equal(result.code, 0, result.stderr);
     },
   };
+}
+
+async function holdManualRunRowLock(runId: string): Promise<{
+  readonly backendPid: number;
+  readonly release: () => Promise<void>;
+}> {
+  assert.match(runId, /^[0-9a-f-]{36}$/u);
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    `BEGIN;\nSELECT pg_backend_pid();\nSELECT run_id FROM manual_runs WHERE run_id = '${runId}'::uuid FOR UPDATE;\nSELECT 'BINNY18_MANUAL_RUN_ROW_LOCK_HELD';\n`,
+  );
+  await lock.waitForMarker("BINNY18_MANUAL_RUN_ROW_LOCK_HELD");
+  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
+  let released = false;
+  return {
+    backendPid,
+    async release() {
+      if (released) return;
+      released = true;
+      lock.write("COMMIT;\n\\q\n");
+      const result = await lock.waitForClose();
+      assert.equal(result.code, 0, result.stderr);
+    },
+  };
+}
+
+async function readManualRunLockWaiters(): Promise<
+  readonly ManualRunLockWaiter[]
+> {
+  const result = await compose(
+    postgresExecArgs([
+      "-c",
+      "SELECT json_build_object('pid', activity.pid, 'blockers', pg_blocking_pids(activity.pid)) FROM pg_stat_activity AS activity WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock';",
+    ]).slice(composePrefix().length),
+  );
+  const output = result.stdout.trim();
+  if (output.length === 0) return [];
+  return output.split("\n").map((line) => {
+    const value: unknown = JSON.parse(line);
+    assert.ok(typeof value === "object" && value !== null);
+    assert.ok("pid" in value && typeof value.pid === "number");
+    assert.ok("blockers" in value && Array.isArray(value.blockers));
+    assert.ok(value.blockers.every((pid: unknown) => typeof pid === "number"));
+    return {
+      pid: value.pid,
+      blockers: value.blockers,
+    };
+  });
+}
+
+async function waitForManualRunLockWaiterBlockedBy(
+  blockerPid: number,
+  excludingPids: readonly number[] = [],
+): Promise<number> {
+  const waiter = await waitFor(
+    async () =>
+      (await readManualRunLockWaiters()).find(
+        (candidate) =>
+          !excludingPids.includes(candidate.pid) &&
+          candidate.blockers.includes(blockerPid),
+      ),
+    (candidate) => candidate !== undefined,
+    `PostgreSQL 行锁等待方被进程 ${String(blockerPid)} 阻塞`,
+  );
+  assert.ok(waiter !== undefined);
+  return waiter.pid;
 }
 
 async function resourceFiles(): Promise<readonly string[]> {
@@ -1221,6 +1392,7 @@ async function releaseSource(
   gateKey: string,
   disposition:
     | "material"
+    | "slow"
     | "available"
     | "unavailable"
     | "unknown" = "material",
@@ -1260,10 +1432,85 @@ async function waitForManualRunSource(): Promise<void> {
   assert.fail("受控信源没有在 Compose 网络入口启动。");
 }
 
+async function waitForSourceMarker(
+  sourceUrl: string,
+  runId: string,
+  gateKey: string,
+  marker: string,
+): Promise<void> {
+  await waitFor(
+    async () => {
+      const response = await fetch(sourceUrl + "/control/arrivals", {
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()) as unknown;
+    },
+    (status) =>
+      typeof status === "object" &&
+      status !== null &&
+      "markers" in status &&
+      Array.isArray(status.markers) &&
+      status.markers.some(
+        (entry: unknown) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "runId" in entry &&
+          entry.runId === runId &&
+          "gateKey" in entry &&
+          entry.gateKey === gateKey &&
+          "marker" in entry &&
+          entry.marker === marker,
+      ),
+    `运行 ${runId} 写出信源标记 ${marker}`,
+  );
+}
+
+async function runtimeProcessSnapshot(service: string): Promise<
+  readonly {
+    readonly pid: number;
+    readonly pgid: number;
+    readonly command: string;
+  }[]
+> {
+  const containers = await compose(["ps", "-q", service]);
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId, `没有找到 Compose 服务 ${service} 的容器。`);
+  const processes = await run(
+    "docker",
+    ["top", containerId, "-eo", "pid,pgid,args"],
+    { env: composeEnvironment() },
+  );
+  assert.equal(processes.code, 0, processes.stderr);
+  return processes.stdout
+    .trim()
+    .split("\n")
+    .slice(1)
+    .flatMap((line) => {
+      const match = /^(\d+)\s+(\d+)\s+(.+)$/u.exec(line.trim());
+      return match === null
+        ? []
+        : [
+            {
+              pid: Number(match[1]),
+              pgid: Number(match[2]),
+              command: match[3]!,
+            },
+          ];
+    });
+}
+
 type ManualRunCliState = {
   readonly runId: string;
   readonly binId: string;
   readonly status: string;
+  readonly queueReason?:
+    | "runtime_offline"
+    | "earlier_run_active"
+    | "earlier_run_queued"
+    | "previous_execution_unconfirmed";
+  readonly cancellationRequestedAt?: string;
+  readonly stopConfirmedAt?: string;
   readonly result?: {
     readonly completedScopes: readonly string[];
     readonly commits: readonly {
@@ -1271,6 +1518,7 @@ type ManualRunCliState = {
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
+    readonly error?: { readonly code: string };
     readonly check?: {
       readonly availability: "available" | "unavailable" | "unknown";
       readonly checkedAt: string;
@@ -1284,9 +1532,359 @@ type ManualRunCliState = {
   };
 };
 
+async function waitForCliManualRunState(
+  baseUrl: string,
+  binId: string,
+  runId: string,
+  statuses: readonly string[],
+): Promise<ManualRunCliState> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const current = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, runId]),
+      "found",
+    );
+    if (statuses.includes(current.status)) return current;
+    await wait(50);
+  }
+  assert.fail(`运行没有进入预期状态：${statuses.join("/")}`);
+}
+
+type RuntimeExecutionState = {
+  readonly status: string;
+  readonly runtimeId?: string;
+  readonly reason?: string;
+};
+
+async function readRuntimeExecutionState(
+  baseUrl: string,
+  binId: string,
+): Promise<RuntimeExecutionState> {
+  const bin = cliData<{ readonly execution: RuntimeExecutionState }>(
+    await cli(baseUrl, ["bin", "get", binId]),
+    "found",
+  );
+  return bin.execution;
+}
+
+async function waitForReplacementRuntime(
+  baseUrl: string,
+  binId: string,
+  previousRuntimeId: string,
+): Promise<string> {
+  const replacement = await waitFor(
+    () => readRuntimeExecutionState(baseUrl, binId),
+    (current) =>
+      current.status === "online" &&
+      current.runtimeId !== undefined &&
+      current.runtimeId !== previousRuntimeId,
+    `bin ${binId} 的替换运行器上线`,
+  );
+  assert.ok(replacement.runtimeId !== undefined);
+  return replacement.runtimeId;
+}
+
+async function verifyDelayedOldOwnerCannotDisturbRun(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+  label: string,
+  currentRuntimeId: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const gateKey = `18-${label}-late-owner-${randomUUID()}`;
+  const run = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey,
+        sourceKey: gateKey,
+        waitAfterCommitMs: 60_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(sourceControlUrl, gateKey, run.runId, binId);
+  await releaseSource(sourceControlUrl, gateKey, "slow");
+  await waitForSourceMarker(sourceControlUrl, run.runId, gateKey, "committed");
+  const worker = (await runtimeProcessSnapshot(service)).find((process) =>
+    process.command.includes("worker.js"),
+  );
+  assert.ok(worker, `${label} 应有真实的新 owner worker 正在运行。`);
+
+  await heartbeatProxy.release();
+  await wait(150);
+  const afterLateHeartbeat = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", binId, run.runId]),
+    "found",
+  );
+  assert.equal(
+    afterLateHeartbeat.status,
+    "executing",
+    `${label} 的迟到旧 idle 不能终结新 owner 的运行。`,
+  );
+  assert.equal(afterLateHeartbeat.stopConfirmedAt, undefined);
+  const ownerAfterLateHeartbeat = await readRuntimeExecutionState(
+    baseUrl,
+    binId,
+  );
+  assert.equal(ownerAfterLateHeartbeat.status, "online");
+  assert.equal(ownerAfterLateHeartbeat.runtimeId, currentRuntimeId);
+  assert.ok(
+    (await runtimeProcessSnapshot(service)).some(
+      (process) => process.pgid === worker.pgid,
+    ),
+    `${label} 的迟到旧 idle 不能确认仍在运行的 worker 已停止。`,
+  );
+
+  const cancellation = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "cancel", binId, run.runId]),
+    "cancellation",
+  );
+  assert.equal(cancellation.status, "cancelling");
+  const cancelled = await waitForCliManualRunState(baseUrl, binId, run.runId, [
+    "cancelled",
+  ]);
+  assert.ok(cancelled.stopConfirmedAt);
+  await waitFor(
+    () => runtimeProcessSnapshot(service),
+    (processes) => !processes.some((process) => process.pgid === worker.pgid),
+    `${label} 的取消确认等待真实 worker 退出`,
+  );
+
+  const completedGate = `18-${label}-replacement-run-${randomUUID()}`;
+  const completedRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: completedGate,
+        sourceKey: completedGate,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    completedGate,
+    completedRun.runId,
+    binId,
+  );
+  await releaseSource(sourceControlUrl, completedGate);
+  const completed = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    completedRun.runId,
+    ["completed"],
+  );
+  assert.equal(completed.result?.stopReason.code, "completed");
+}
+
+async function ownerGenerationOverlapStep(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+  previousStoppedRunId: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(initialOwner.status, "online");
+  assert.ok(initialOwner.runtimeId !== undefined);
+
+  await heartbeatProxy.arm(previousStoppedRunId);
+  const registeredOldHeartbeat = await heartbeatProxy.waitUntilHeld();
+  assert.equal(registeredOldHeartbeat.runtimeId, initialOwner.runtimeId);
+  assert.ok(registeredOldHeartbeat.ownerGeneration !== undefined);
+  assert.equal(registeredOldHeartbeat.stoppedRunId, undefined);
+  const heldAt = registeredOldHeartbeat.heldAt;
+  const clientClosedAt = await heartbeatProxy.waitUntilTimedOut();
+  assert.ok(clientClosedAt - heldAt >= 2_500);
+  await compose(["kill", "--signal", "SIGKILL", service]);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const registeredReplacementId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    initialOwner.runtimeId,
+  );
+  const registeredReplacementGeneration =
+    await heartbeatProxy.waitUntilForwarded(registeredReplacementId);
+  assert.ok(registeredReplacementGeneration !== undefined);
+  assert.ok(
+    BigInt(registeredReplacementGeneration) >
+      BigInt(registeredOldHeartbeat.ownerGeneration),
+    "通过同卷 owner lock 的合法替换必须持久推进所有权代际。",
+  );
+  await verifyDelayedOldOwnerCannotDisturbRun(
+    baseUrl,
+    heartbeatProxy,
+    "registered-owner",
+    registeredReplacementId,
+  );
+
+  await compose(["stop", service]);
+  const stoppedOwner = await waitFor(
+    () => readRuntimeExecutionState(baseUrl, binId),
+    (current) =>
+      current.status === "offline" &&
+      current.runtimeId === registeredReplacementId,
+    "当前运行器正常断开",
+  );
+  assert.equal(stoppedOwner.reason, "runtime_not_connected");
+
+  await heartbeatProxy.arm(previousStoppedRunId);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const unseenOldHeartbeat = await heartbeatProxy.waitUntilHeld();
+  assert.notEqual(unseenOldHeartbeat.runtimeId, registeredReplacementId);
+  assert.ok(unseenOldHeartbeat.ownerGeneration !== undefined);
+  assert.equal(unseenOldHeartbeat.stoppedRunId, undefined);
+  assert.ok(
+    BigInt(unseenOldHeartbeat.ownerGeneration) >
+      BigInt(registeredReplacementGeneration),
+  );
+  const stillStopped = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(stillStopped.status, "offline");
+  assert.equal(
+    stillStopped.runtimeId,
+    registeredReplacementId,
+    "core 尚未见到新 controller 的首个 idle 心跳。",
+  );
+  const unseenClientClosedAt = await heartbeatProxy.waitUntilTimedOut();
+  assert.ok(unseenClientClosedAt - unseenOldHeartbeat.heldAt >= 2_500);
+  await compose(["kill", "--signal", "SIGKILL", service]);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const unseenReplacementId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    registeredReplacementId,
+  );
+  assert.notEqual(unseenReplacementId, unseenOldHeartbeat.runtimeId);
+  const unseenReplacementGeneration =
+    await heartbeatProxy.waitUntilForwarded(unseenReplacementId);
+  assert.ok(unseenReplacementGeneration !== undefined);
+  assert.ok(
+    BigInt(unseenReplacementGeneration) >
+      BigInt(unseenOldHeartbeat.ownerGeneration),
+    "核心未见旧首包时，新 controller 仍须携带更高的持久代际。",
+  );
+  await verifyDelayedOldOwnerCannotDisturbRun(
+    baseUrl,
+    heartbeatProxy,
+    "unseen-first-heartbeat",
+    unseenReplacementId,
+  );
+}
+
+async function replacementPreservesAcceptedCancellationStep(
+  baseUrl: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(initialOwner.status, "online");
+  assert.ok(initialOwner.runtimeId !== undefined);
+
+  const gateKey = `18-replacement-cancel-race-${randomUUID()}`;
+  const run = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey,
+        sourceKey: gateKey,
+        waitAfterCommitMs: 60_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(sourceControlUrl, gateKey, run.runId, binId);
+  await releaseSource(sourceControlUrl, gateKey, "slow");
+  await waitForSourceMarker(sourceControlUrl, run.runId, gateKey, "committed");
+
+  const rowLock = await holdManualRunRowLock(run.runId);
+  let cancellationRequest:
+    | Promise<
+        | { readonly status: number; readonly body: unknown }
+        | { readonly error: unknown }
+      >
+    | undefined;
+  try {
+    cancellationRequest = fetch(
+      `${baseUrl}/bins/${encodeURIComponent(binId)}/runs/${encodeURIComponent(run.runId)}/cancel`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(60_000),
+      },
+    )
+      .then(async (response) => ({
+        status: response.status,
+        body: (await response.json()) as unknown,
+      }))
+      .catch((error: unknown) => ({ error }));
+    const cancellationWaiterPid = await waitForManualRunLockWaiterBlockedBy(
+      rowLock.backendPid,
+      [rowLock.backendPid],
+    );
+
+    await compose(["kill", "--signal", "SIGKILL", service]);
+    await compose([
+      "up",
+      "--detach",
+      "--no-build",
+      "--force-recreate",
+      service,
+    ]);
+    await waitForManualRunLockWaiterBlockedBy(cancellationWaiterPid, [
+      rowLock.backendPid,
+      cancellationWaiterPid,
+    ]);
+  } finally {
+    await rowLock.release();
+  }
+
+  assert.ok(cancellationRequest !== undefined);
+  const acceptedResponse = await cancellationRequest;
+  if ("error" in acceptedResponse)
+    assert.fail(`取消请求失败：${String(acceptedResponse.error)}`);
+  assert.equal(acceptedResponse.status, 200);
+  const acceptedCancellation = acceptedResponse.body as ManualRunCliState;
+  assert.equal(acceptedCancellation.status, "cancelling");
+  assert.ok(acceptedCancellation.cancellationRequestedAt);
+
+  const replacementRuntimeId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    initialOwner.runtimeId,
+  );
+  const cancelled = await waitForCliManualRunState(baseUrl, binId, run.runId, [
+    "cancelled",
+  ]);
+  assert.ok(cancelled.stopConfirmedAt);
+  assert.equal(cancelled.result?.stopReason.code, "cancelled");
+  assert.equal(
+    (await readRuntimeExecutionState(baseUrl, binId)).runtimeId,
+    replacementRuntimeId,
+  );
+}
+
 async function manualRunsCliStep(
   baseUrl: string,
   manifest: unknown,
+  heartbeatProxy: HeartbeatDelayProxy,
 ): Promise<void> {
   const manifestJson = JSON.stringify(manifest);
   assert.ok(manifestJson !== undefined);
@@ -1494,6 +2092,237 @@ async function manualRunsCliStep(
   assert.deepEqual(collectedAfterCheck.result?.completedScopes, [
     "source/cli-after-check",
   ]);
+
+  await ownerGenerationOverlapStep(baseUrl, heartbeatProxy, followUp.runId);
+  await replacementPreservesAcceptedCancellationStep(baseUrl);
+
+  const slowGateKey = "18-cli-slow-stop";
+  const slowRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: slowGateKey,
+        sourceKey: "partial-before-cancel",
+        waitAfterCommitMs: 10_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    slowGateKey,
+    slowRun.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, slowGateKey, "slow");
+  await waitForSourceMarker(
+    sourceControlUrl,
+    slowRun.runId,
+    slowGateKey,
+    "committed",
+  );
+  const originalWorker = (
+    await runtimeProcessSnapshot("runtime-fifteen-one")
+  ).find((process) => process.command.includes("worker.js"));
+  assert.ok(originalWorker, "慢动作应由独立执行进程运行。");
+
+  const nextGateKey = "18-cli-next-after-stop";
+  const nextRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny15-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: nextGateKey,
+        sourceKey: "after-cancel",
+      }),
+    ]),
+    "triggered",
+  );
+  const queuedBehindSlowRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    "found",
+  );
+  assert.equal(queuedBehindSlowRun.status, "queued");
+  assert.equal(queuedBehindSlowRun.queueReason, "earlier_run_active");
+
+  const acceptedCancel = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "cancel", "binny15-one", slowRun.runId]),
+    "cancellation",
+  );
+  assert.equal(acceptedCancel.status, "cancelling");
+  assert.ok(acceptedCancel.cancellationRequestedAt);
+  assert.equal(acceptedCancel.stopConfirmedAt, undefined);
+  const stillQueued = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    "found",
+  );
+  assert.equal(stillQueued.status, "queued");
+  assert.equal(stillQueued.queueReason, "earlier_run_active");
+  const arrivalsDuringStop = await fetch(
+    sourceControlUrl + "/control/arrivals",
+  );
+  assert.equal(arrivalsDuringStop.status, 200);
+  assert.equal(
+    sourceArrived(await arrivalsDuringStop.json(), nextGateKey),
+    false,
+  );
+
+  const cancelled = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    slowRun.runId,
+    ["cancelled"],
+  );
+  assert.ok(cancelled.stopConfirmedAt);
+  assert.equal(cancelled.result?.stopReason.code, "cancelled");
+  assert.equal(cancelled.result?.commits.length, 1);
+  const savedPartial = cancelled.result?.commits[0];
+  assert.ok(savedPartial);
+  const retainedCommit = cliData<{ readonly runId?: string }>(
+    await cli(baseUrl, ["archive", "commit", savedPartial.commitId]),
+    "found",
+  );
+  assert.equal(retainedCommit.runId, slowRun.runId);
+  const stoppedProcesses = await runtimeProcessSnapshot("runtime-fifteen-one");
+  assert.equal(
+    stoppedProcesses.some((process) => process.pgid === originalWorker.pgid),
+    false,
+    "取消完成后旧 worker 进程组必须已经退出。",
+  );
+  const sourceAfterStopResponse = await fetch(
+    sourceControlUrl + "/control/arrivals",
+  );
+  assert.equal(sourceAfterStopResponse.status, 200);
+  const sourceAfterStop: unknown = await sourceAfterStopResponse.json();
+  if (
+    typeof sourceAfterStop === "object" &&
+    sourceAfterStop !== null &&
+    "markers" in sourceAfterStop &&
+    Array.isArray(sourceAfterStop.markers)
+  ) {
+    assert.equal(
+      sourceAfterStop.markers.some(
+        (entry: unknown) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "runId" in entry &&
+          entry.runId === slowRun.runId &&
+          "marker" in entry &&
+          entry.marker === "after-stop-delay",
+      ),
+      false,
+    );
+  }
+
+  await waitForSourceArrival(
+    sourceControlUrl,
+    nextGateKey,
+    nextRun.runId,
+    "binny15-one",
+  );
+  await releaseSource(sourceControlUrl, nextGateKey);
+  const nextCompleted = await waitForCliManualRunState(
+    baseUrl,
+    "binny15-one",
+    nextRun.runId,
+    ["completed"],
+  );
+  assert.equal(nextCompleted.result?.stopReason.code, "completed");
+
+  const ownerBeforeStorageFailure = await readRuntimeExecutionState(
+    baseUrl,
+    "binny15-one",
+  );
+  assert.equal(ownerBeforeStorageFailure.status, "online");
+  assert.ok(ownerBeforeStorageFailure.runtimeId !== undefined);
+  const runningContainer = await compose(["ps", "-q", "runtime-fifteen-one"]);
+  const runningContainerId = runningContainer.stdout.trim().split("\n")[0];
+  assert.ok(runningContainerId);
+  const makeOwnerVolumeReadOnly = await run("docker", [
+    "exec",
+    "--user",
+    "0",
+    runningContainerId,
+    "chmod",
+    "0555",
+    "/var/lib/binny/runtime",
+  ]);
+  assert.equal(makeOwnerVolumeReadOnly.code, 0, makeOwnerVolumeReadOnly.stderr);
+  await compose(["stop", "runtime-fifteen-one"]);
+  await waitFor(
+    () => readRuntimeExecutionState(baseUrl, "binny15-one"),
+    (current) =>
+      current.status === "offline" &&
+      current.runtimeId === ownerBeforeStorageFailure.runtimeId,
+    "存储故障前的运行器断开",
+  );
+  await compose([
+    "up",
+    "--detach",
+    "--no-build",
+    "--force-recreate",
+    "runtime-fifteen-one",
+  ]);
+  const failedContainer = await compose([
+    "ps",
+    "--all",
+    "-q",
+    "runtime-fifteen-one",
+  ]);
+  const failedContainerId = failedContainer.stdout.trim().split("\n")[0];
+  assert.ok(failedContainerId);
+  await waitFor(
+    async () =>
+      await run("docker", [
+        "inspect",
+        "--format",
+        "{{.State.Status}} {{.RestartCount}}",
+        failedContainerId,
+      ]),
+    (state) =>
+      state.code === 0 &&
+      /^(?:exited|restarting) [1-9][0-9]*$/u.test(state.stdout.trim()),
+    "代际不能持久发布时 controller 启动失败",
+  );
+  const failedContainerLogs = await run("docker", ["logs", failedContainerId]);
+  assert.match(
+    failedContainerLogs.stdout + failedContainerLogs.stderr,
+    /无法持久发布运行器所有权代际/u,
+  );
+  const ownerAfterStorageFailure = await readRuntimeExecutionState(
+    baseUrl,
+    "binny15-one",
+  );
+  assert.equal(ownerAfterStorageFailure.status, "offline");
+  assert.equal(
+    ownerAfterStorageFailure.runtimeId,
+    ownerBeforeStorageFailure.runtimeId,
+    "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
+  );
+  await compose([
+    "run",
+    "--rm",
+    "--no-deps",
+    "--user",
+    "0",
+    "--entrypoint",
+    "chmod",
+    "runtime-fifteen-one",
+    "0755",
+    "/var/lib/binny/runtime",
+  ]);
+  await compose(["restart", "runtime-fifteen-one"]);
+  await waitForRuntimeHealth("runtime-fifteen-one");
+  await waitForRuntime(baseUrl, "binny15-one");
 }
 
 async function manualRunsHttpStep(
@@ -1521,6 +2350,152 @@ async function manualRunsHttpStep(
   );
   assert.equal(result.code, 0, result.stderr);
   process.stdout.write(result.stdout);
+}
+
+async function manualRunControllerPartitionStep(): Promise<void> {
+  const baseUrl = apiBaseUrl();
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const binId = "binny15-two";
+  const interruptedGateKey = "18-controller-link-loss";
+  const interrupted = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: interruptedGateKey,
+        sourceKey: "interrupted-before-source",
+        waitBeforeSourceMs: 30_000,
+      }),
+    ]),
+    "triggered",
+  );
+  const active = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    interrupted.runId,
+    ["executing"],
+  );
+  assert.equal(active.status, "executing");
+  const oldWorker = (await runtimeProcessSnapshot("runtime-fifteen-two")).find(
+    (process) => process.command.includes("worker.js"),
+  );
+  assert.ok(oldWorker, "失联验收应观察到真实执行子进程。");
+  const bin = cliData<{
+    readonly execution: { readonly runtimeId?: string };
+  }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  assert.ok(bin.execution.runtimeId);
+
+  const containers = await compose(["ps", "-q", "runtime-fifteen-two"]);
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId);
+  const networkName = projectName + "_runtime";
+  const detached = await run(
+    "docker",
+    ["network", "disconnect", networkName, containerId],
+    { env: composeEnvironment() },
+  );
+  assert.equal(detached.code, 0, detached.stderr);
+  let reconnected = false;
+  try {
+    const nextGateKey = "18-after-controller-link-loss";
+    const next = cliData<ManualRunCliState>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        binId,
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl: manualRunSourceRuntimeUrl(),
+          gateKey: nextGateKey,
+          sourceKey: "after-interruption",
+        }),
+      ]),
+      "triggered",
+    );
+    const stale = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      interrupted.runId,
+      ["failed"],
+    );
+    assert.equal(stale.result?.error?.code, "runtime_interrupted");
+    assert.equal(stale.stopConfirmedAt, undefined);
+    const stillQueued = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, next.runId]),
+      "found",
+    );
+    assert.equal(stillQueued.status, "queued");
+    assert.equal(stillQueued.queueReason, "previous_execution_unconfirmed");
+
+    const claim = await fetch(
+      baseUrl + "/bins/" + binId + "/runtime/runs/claim",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runtimeId: bin.execution.runtimeId }),
+      },
+    );
+    assert.equal(claim.status, 200);
+    assert.deepEqual(await claim.json(), { run: null });
+    const liveProcesses = await runtimeProcessSnapshot("runtime-fifteen-two");
+    assert.ok(
+      liveProcesses.some((process) => process.pgid === oldWorker.pgid),
+      "失联超时不能伪称旧执行进程已经退出。",
+    );
+
+    const attached = await run(
+      "docker",
+      ["network", "connect", networkName, containerId],
+      { env: composeEnvironment() },
+    );
+    assert.equal(attached.code, 0, attached.stderr);
+    reconnected = true;
+
+    await waitForSourceArrival(
+      sourceControlUrl,
+      nextGateKey,
+      next.runId,
+      binId,
+    );
+    const stopped = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      interrupted.runId,
+      ["failed"],
+    );
+    assert.ok(stopped.stopConfirmedAt);
+    const processesAfterAck = await runtimeProcessSnapshot(
+      "runtime-fifteen-two",
+    );
+    assert.equal(
+      processesAfterAck.some((process) => process.pgid === oldWorker.pgid),
+      false,
+      "恢复控制连接并收到停止确认后旧 worker 进程组应消失。",
+    );
+    await releaseSource(sourceControlUrl, nextGateKey);
+    const completedNext = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      next.runId,
+      ["completed"],
+    );
+    assert.equal(completedNext.result?.stopReason.code, "completed");
+  } finally {
+    if (!reconnected) {
+      const attached = await run(
+        "docker",
+        ["network", "connect", networkName, containerId],
+        { env: composeEnvironment() },
+      );
+      if (attached.code !== 0 && !attached.stderr.includes("already exists"))
+        process.stderr.write(attached.stderr);
+    }
+  }
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
@@ -2837,10 +3812,12 @@ async function runRssAcceptance(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny10fix-e2e-compose-"),
+    path.join(tmpdir(), "binny18owner-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.48.0/24";
+  const runtimeSubnet =
+    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.150.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -2851,20 +3828,55 @@ async function main(): Promise<void> {
       "  manual-runs-source:",
       "    ports: !override",
       '      - "8081"',
+      "    networks:",
+      "      - default",
+      "      - runtime",
       "  rss-e2e-source:",
       "    ports: !override",
       '      - "8081"',
+      "    networks:",
+      "      - default",
+      "      - runtime",
+      "  runtime-fifteen-one:",
+      "    environment:",
+      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      "    networks: !override",
+      "      - runtime",
+      "  runtime-fifteen-two:",
+      "    environment:",
+      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      "    networks: !override",
+      "      - runtime",
+      "  heartbeat-proxy:",
+      `    image: ${imageName}`,
+      "    command:",
+      "      - node",
+      "      - scripts/binny-e2e-heartbeat-proxy.ts",
+      "    ports: !override",
+      '      - "8082"',
+      '      - "8083"',
+      "    depends_on:",
+      "      server:",
+      "        condition: service_started",
+      "    networks:",
+      "      - default",
+      "      - runtime",
       "networks:",
       "  default:",
       "    ipam:",
       "      config:",
       `        - subnet: ${e2eSubnet}`,
+      "  runtime:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${runtimeSubnet}`,
       "",
     ].join("\n"),
   );
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
+  let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
   try {
     await compose(["build", "server"]);
@@ -2884,9 +3896,14 @@ async function main(): Promise<void> {
       "runtime-fifteen-two",
       "runtime-rss",
       "runtime-rss-two",
+      "heartbeat-proxy",
     ]);
     composePort = await publishedPort("server", 3000);
     manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    const activeHeartbeatProxy = createHeartbeatDelayProxy(
+      await publishedPort("heartbeat-proxy", 8083),
+    );
+    heartbeatProxy = activeHeartbeatProxy;
     rssControlSource = await createRssControlSource(
       await publishedPort("rss-e2e-source", 8081),
     );
@@ -2902,7 +3919,8 @@ async function main(): Promise<void> {
     });
     await verifyConfigurationJourney(baseUrl);
     const manualRunManifest = await createRuntimeFixtureManifest();
-    await manualRunsCliStep(baseUrl, manualRunManifest);
+    await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
+    await manualRunControllerPartitionStep();
     await manualRunsHttpStep(baseUrl, manualRunManifest);
     await runRssAcceptance(baseUrl, rssControlSource);
     for (const binId of ["binny15-one", "binny15-two"]) {
@@ -2936,6 +3954,14 @@ async function main(): Promise<void> {
       "Compose 验收失败日志：\n" + logs.stdout + logs.stderr,
     );
   } finally {
+    if (heartbeatProxy !== undefined) {
+      try {
+        await heartbeatProxy.release();
+      } catch (error) {
+        cleanupError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
     const cleanup = await run(
       "docker",
       [

@@ -84,6 +84,8 @@ services:
       BINNY_BIN_ID: binny14-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    volumes:
+      - runtime-one-owner:/var/lib/binny/runtime
     ports:
       - "${BINNY14_RUNTIME_ONE_PORT:-14141}:8080"
     restart: unless-stopped
@@ -99,6 +101,8 @@ services:
       BINNY_BIN_ID: binny14-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    volumes:
+      - runtime-two-owner:/var/lib/binny/runtime
     ports:
       - "${BINNY14_RUNTIME_TWO_PORT:-14142}:8080"
     restart: unless-stopped
@@ -121,6 +125,9 @@ services:
       BINNY_BIN_ID: binny15-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY18_STOP_GRACE_MS:-2000}
+    volumes:
+      - runtime-fifteen-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -143,6 +150,9 @@ services:
       BINNY_BIN_ID: binny15-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY18_STOP_GRACE_MS:-2000}
+    volumes:
+      - runtime-fifteen-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -167,6 +177,7 @@ services:
       BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
     volumes:
       - rss-one-collector-state:/var/lib/binny/collector-state
+      - rss-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -191,6 +202,7 @@ services:
       BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
     volumes:
       - rss-two-collector-state:/var/lib/binny/collector-state
+      - rss-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -199,5 +211,11 @@ volumes:
   postgres-data:
   bins:
   resource-data:
+  runtime-one-owner:
+  runtime-two-owner:
+  runtime-fifteen-one-owner:
+  runtime-fifteen-two-owner:
+  rss-one-owner:
   rss-one-collector-state:
+  rss-two-owner:
   rss-two-collector-state:

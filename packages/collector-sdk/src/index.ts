@@ -222,16 +222,19 @@ export function createCollectorContext(
     ...context,
     archive: {
       async submit(input) {
-        const response = await client.archives.$post({
-          json: {
-            ...input,
-            relations: input.relations ?? [],
-            requestId: input.requestId ?? randomUUID(),
-            binId: context.binId,
-            runId: context.runId,
-            collectorVersion: context.collectorVersion,
+        const response = await client.archives.$post(
+          {
+            json: {
+              ...input,
+              relations: input.relations ?? [],
+              requestId: input.requestId ?? randomUUID(),
+              binId: context.binId,
+              runId: context.runId,
+              collectorVersion: context.collectorVersion,
+            },
           },
-        });
+          { init: { signal: context.signal } },
+        );
         switch (response.status) {
           case 201:
             return await response.json();

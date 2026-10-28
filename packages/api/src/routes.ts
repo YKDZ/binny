@@ -191,6 +191,24 @@ function makeApp(operations: ApiOperations) {
       },
     )
     .post(
+      "/bins/:binId/runs/:runId/cancel",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, runId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, runId } = c.req.valid("param");
+        const result = await operations.runs.cancelRun(binId, runId);
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
       "/bins/:binId/runtime/runs/claim",
       zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
         if (!result.success)

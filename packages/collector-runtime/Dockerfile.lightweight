@@ -38,10 +38,12 @@ FROM node:24.21.0-bookworm-slim AS lightweight
 ARG BINNY_COLLECTOR_ENTRY
 ENV NODE_ENV=production
 ENV BINNY_COLLECTOR_ENTRY="/app/${BINNY_COLLECTOR_ENTRY}"
+ENV BINNY_RUNTIME_OWNER_LOCK_PATH=/var/lib/binny/runtime/owner.lock
 WORKDIR /app
 COPY --from=build --chown=node:node /deploy /app
-RUN mkdir -p /var/lib/binny/collector-state \
-  && chown node:node /var/lib/binny/collector-state
+RUN command -v flock \
+  && mkdir -p /var/lib/binny/runtime /var/lib/binny/collector-state \
+  && chown -R node:node /var/lib/binny/runtime /var/lib/binny/collector-state
 USER node
 EXPOSE 8080
-ENTRYPOINT ["node", "/app/binny-runtime/dist/entry.js"]
+ENTRYPOINT ["flock", "--exclusive", "--nonblock", "--no-fork", "/var/lib/binny/runtime/owner.lock", "node", "/app/binny-runtime/dist/entry.js"]

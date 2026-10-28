@@ -18,6 +18,11 @@ import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import {
+  confirmManualRunOwnerStopped,
+  interruptExpiredManualRuns,
+  interruptReplacedManualRuns,
+} from "./manual-run-fencing.ts";
 import { binConfigurations, runtimeConnections } from "./schema.ts";
 
 const runtimeSelection = {
@@ -29,6 +34,8 @@ const runtimeSelection = {
   environment: runtimeConnections.environment,
   lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
   disconnected: runtimeConnections.disconnected,
+  ownerState: runtimeConnections.ownerState,
+  ownerGeneration: runtimeConnections.ownerGeneration,
 };
 
 type RuntimeCompatibilityError = {
@@ -266,44 +273,139 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      const current = await selectRuntimeConnection(database, binId);
-      if (current === undefined) {
-        return failure(404, {
-          code: "bin_not_found",
-          message: "没有找到这个 bin。",
-          path: ["binId"],
-        });
-      }
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined) {
+          return failure(404, {
+            code: "bin_not_found",
+            message: "没有找到这个 bin。",
+            path: ["binId"],
+          });
+        }
 
-      await database
-        .insert(runtimeConnections)
-        .values({
+        const [current] = await transaction
+          .select({
+            runtimeId: runtimeConnections.runtimeId,
+            ownerState: runtimeConnections.ownerState,
+            ownerGeneration: runtimeConnections.ownerGeneration,
+          })
+          .from(runtimeConnections)
+          .where(eq(runtimeConnections.binId, binId));
+        const incomingGeneration = BigInt(checked.data.ownerGeneration);
+        const currentGeneration = current?.ownerGeneration;
+        // 在 bin 行锁下比较已记录代际，使未登记的旧首包也会被新 owner 淘汰。
+        if (
+          current !== undefined &&
+          currentGeneration !== undefined &&
+          incomingGeneration < currentGeneration
+        ) {
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "运行器所有权代际已过期，不能覆盖当前所有者。",
+            path: ["ownerGeneration"],
+          });
+        }
+        if (
+          current !== undefined &&
+          currentGeneration !== undefined &&
+          incomingGeneration === currentGeneration &&
+          current.runtimeId !== checked.data.runtimeId
+        ) {
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "相同所有权代际只能由原运行器继续持有。",
+            path: ["ownerGeneration"],
+          });
+        }
+        if (
+          current !== undefined &&
+          currentGeneration !== undefined &&
+          incomingGeneration > currentGeneration &&
+          current.runtimeId === checked.data.runtimeId
+        ) {
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "运行器身份不能切换到新的所有权代际。",
+            path: ["ownerGeneration"],
+          });
+        }
+
+        const expiredRunIds = await interruptExpiredManualRuns(
+          transaction,
           binId,
-          runtimeId: checked.data.runtimeId,
-          collector: checked.data.collector,
-          environment: checked.data.environment,
-          disconnected: false,
-        })
-        .onConflictDoUpdate({
-          target: runtimeConnections.binId,
-          set: {
+        );
+        let ownerState: "confirmed" | "unconfirmed" =
+          current?.ownerState === "unconfirmed" || expiredRunIds.length > 0
+            ? "unconfirmed"
+            : "confirmed";
+
+        if (
+          current !== undefined &&
+          current.runtimeId !== checked.data.runtimeId
+        ) {
+          if (
+            checked.data.activeRunId !== null ||
+            checked.data.claimInFlight ||
+            checked.data.stoppedRunId !== undefined
+          ) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "新运行器尚未确认旧执行进程已经退出。",
+              path: ["activeRunId"],
+            });
+          }
+          await interruptReplacedManualRuns(
+            transaction,
+            binId,
+            current.runtimeId,
+          );
+          ownerState = "confirmed";
+        } else if (checked.data.stoppedRunId !== undefined) {
+          const stopped = await confirmManualRunOwnerStopped(
+            transaction,
+            binId,
+            checked.data.runtimeId,
+            checked.data.stoppedRunId,
+          );
+          if (stopped) ownerState = "confirmed";
+        }
+
+        await transaction
+          .insert(runtimeConnections)
+          .values({
+            binId,
             runtimeId: checked.data.runtimeId,
             collector: checked.data.collector,
             environment: checked.data.environment,
-            // 保持 PostgreSQL now() 的服务端时钟语义。
-            lastHeartbeatAt: sql`now()`,
             disconnected: false,
-          },
-        });
+            ownerState,
+            ownerGeneration: incomingGeneration,
+          })
+          .onConflictDoUpdate({
+            target: runtimeConnections.binId,
+            set: {
+              runtimeId: checked.data.runtimeId,
+              collector: checked.data.collector,
+              environment: checked.data.environment,
+              // 保持 PostgreSQL 服务端时钟语义。
+              lastHeartbeatAt: sql`clock_timestamp()`,
+              disconnected: false,
+              ownerState,
+              ownerGeneration: incomingGeneration,
+            },
+          });
 
-      const row = await selectRuntimeConnection(database, binId);
-      if (row === undefined) {
-        throw new Error("心跳写入后 bin 配置意外消失。");
-      }
-      const execution = rowExecution(row);
-      return execution.status === "incompatible"
-        ? { ok: false, status: 409, error: execution.error }
-        : { ok: true, value: execution };
+        const row = await selectRuntimeConnection(transaction, binId);
+        if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
+        const execution = rowExecution(row);
+        return execution.status === "incompatible"
+          ? { ok: false, status: 409, error: execution.error }
+          : { ok: true, value: execution };
+      });
     },
 
     async disconnect(binId, input) {
@@ -316,25 +418,34 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      await database
-        .update(runtimeConnections)
-        .set({ disconnected: true })
-        .where(
-          and(
-            eq(runtimeConnections.binId, binId),
-            eq(runtimeConnections.runtimeId, checked.data.runtimeId),
-          ),
-        );
-      const current = await selectRuntimeConnection(database, binId);
-      if (current === undefined) {
-        return failure(404, {
-          code: "bin_not_found",
-          message: "没有找到这个 bin。",
-          path: ["binId"],
-        });
-      }
-      // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
-      return { ok: true, value: rowExecution(current) };
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined) {
+          return failure(404, {
+            code: "bin_not_found",
+            message: "没有找到这个 bin。",
+            path: ["binId"],
+          });
+        }
+        await transaction
+          .update(runtimeConnections)
+          .set({ disconnected: true })
+          .where(
+            and(
+              eq(runtimeConnections.binId, binId),
+              eq(runtimeConnections.runtimeId, checked.data.runtimeId),
+            ),
+          );
+        const current = await selectRuntimeConnection(transaction, binId);
+        if (current === undefined)
+          throw new Error("运行器断开后 bin 配置意外消失。");
+        // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
+        return { ok: true, value: rowExecution(current) };
+      });
     },
   };
 }

@@ -657,6 +657,48 @@ function createCliContract(identity: CliCommandIdentity) {
           throw new Error("服务返回了未声明的运行读取状态。");
         },
       }),
+      ...command("runCancel")({
+        kind: "command",
+        parent: "run",
+        name: "cancel",
+        description: "请求取消运行并查看停止确认状态。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          runId: { kind: "positional", description: "运行标识" },
+        },
+        input: z.object({
+          binId: binIdSchema,
+          runId: z.string().uuid(),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            cancellation: {
+              description: "取消请求及停止状态",
+              exitCode: 0,
+              schema: manualRunSchema,
+              text: (run) => outputText("运行取消状态", run),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].runs[":runId"].cancel.$post({
+              param: { binId: input.binId, runId: input.runId },
+            });
+          if (response.status === 200)
+            return outcome.data.cancellation(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的运行取消状态。");
+        },
+      }),
       ...command("archiveItem")({
         kind: "command",
         parent: "archive",
