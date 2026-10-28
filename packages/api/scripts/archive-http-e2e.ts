@@ -49,6 +49,7 @@ type ArchiveJourney = {
   readonly relationItemId: string;
   readonly relationCommitId: string;
   readonly revisionId: string;
+  readonly comparedRevisionId: string;
   readonly commitId: string;
   readonly historicalAsOf: string;
   readonly relationAsOf: string;
@@ -57,6 +58,8 @@ type ArchiveJourney = {
   readonly expectedObservationCount: number;
   readonly resourceItemId: string;
   readonly resourceRevisionId: string;
+  readonly resourcePartialRevisionId: string;
+  readonly resourceRepairedRevisionId: string;
   readonly resourceId: string;
   readonly repairedResourceId: string;
   readonly orphanResourceId: string;
@@ -122,6 +125,7 @@ const archiveJourneySchema = z.object({
   relationItemId: archiveIdentifierSchema,
   relationCommitId: archiveIdentifierSchema,
   revisionId: archiveIdentifierSchema,
+  comparedRevisionId: archiveIdentifierSchema,
   commitId: archiveIdentifierSchema,
   historicalAsOf: archiveSnapshotSequenceSchema,
   relationAsOf: archiveSnapshotSequenceSchema,
@@ -130,6 +134,8 @@ const archiveJourneySchema = z.object({
   expectedObservationCount: z.number().int().nonnegative(),
   resourceItemId: archiveIdentifierSchema,
   resourceRevisionId: archiveIdentifierSchema,
+  resourcePartialRevisionId: archiveIdentifierSchema,
+  resourceRepairedRevisionId: archiveIdentifierSchema,
   resourceId: archiveIdentifierSchema,
   repairedResourceId: archiveIdentifierSchema,
   orphanResourceId: archiveIdentifierSchema,
@@ -166,9 +172,25 @@ async function readArchiveItem(client: ArchiveClient, itemId: string) {
   return await response.json();
 }
 
+async function readArchiveRevisionDiff(
+  client: ArchiveClient,
+  firstRevisionId: string,
+  secondRevisionId: string,
+) {
+  const response = await client.archives.revisions[":firstRevisionId"].diff[
+    ":secondRevisionId"
+  ].$get({ param: { firstRevisionId, secondRevisionId } });
+  if (response.status !== 200) {
+    throw new Error("比较归档版本失败：" + (await response.text()));
+  }
+  return await response.json();
+}
+
 async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   readonly resourceId: string;
   readonly repairedResourceId: string;
+  readonly partialRevisionId: string;
+  readonly repairedRevisionId: string;
   readonly orphanResourceId: string;
   readonly resourceMarkerItemId: string;
   readonly itemId: string;
@@ -189,24 +211,34 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   }
   const first = await firstResponse.json();
 
+  const originalState = {
+    sourceKey: { namespace: "e2e", key: "resource-history" },
+    sourceRef: "https://example.test/resource-history",
+    metadata: {
+      title: "原始完整版本",
+      nested: { nullable: null, removed: "旧值" },
+    },
+    properties: {
+      nested: { nullable: null, removed: "旧值" },
+      values: ["左", null, "右"],
+    },
+    body: {
+      html: `<p>原文媒体：binny://resource/${first.resourceId}</p>`,
+      markdown: `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
+      text: "原始纯文本正文",
+      searchText: "原始可检索文本",
+    },
+    resources: [{ resourceId: first.resourceId }],
+    capture: {
+      scope: { phase: "full" },
+      completeness: "complete" as const,
+      missing: [],
+    },
+  } satisfies ArchiveSubmission["items"][number];
   const firstCommitPromise = submitArchive(client, {
     requestId: "e2e:archive:resource-history:first",
     binId: "rss-main",
-    items: [
-      {
-        sourceKey: { namespace: "e2e", key: "resource-history" },
-        metadata: { title: "原始完整版本" },
-        body: {
-          markdown: `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
-        },
-        resources: [{ resourceId: first.resourceId }],
-        capture: {
-          scope: { phase: "full" },
-          completeness: "complete",
-          missing: [],
-        },
-      },
-    ],
+    items: [originalState],
   });
   const duplicateResponse = await duplicateResponsePromise;
   assert.equal(duplicateResponse.status, 201);
@@ -331,8 +363,19 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
-        metadata: { title: "本次只取得部分资料" },
-        body: { text: "本次取得的正文" },
+        metadata: {
+          title: "本次只取得部分资料",
+          nested: { added: "新值" },
+        },
+        properties: {
+          nested: { nullable: null, added: "新值" },
+          values: ["右", null, "左"],
+        },
+        body: {
+          html: "<p>本次部分正文</p>",
+          text: "本次取得的正文",
+          searchText: "本次可检索正文",
+        },
         capture: {
           scope: { phase: "partial" },
           completeness: "partial",
@@ -357,6 +400,60 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   ]);
   assert.equal(partialRead.views[0]?.state.resources, undefined);
 
+  const firstToPartialDiff = await readArchiveRevisionDiff(
+    client,
+    firstItem.revisionId,
+    partialItem.revisionId,
+  );
+  assert.equal(firstToPartialDiff.hasChanges, true);
+  assert.deepEqual(firstToPartialDiff.fields.sourceRef, {
+    status: "changed",
+    before: { present: true, value: originalState.sourceRef },
+    after: { present: false },
+  });
+  assert.deepEqual(firstToPartialDiff.fields.body, {
+    status: "changed",
+    before: { present: true, value: originalState.body },
+    after: {
+      present: true,
+      value: {
+        html: "<p>本次部分正文</p>",
+        text: "本次取得的正文",
+        searchText: "本次可检索正文",
+      },
+    },
+  });
+  assert.deepEqual(firstToPartialDiff.fields.metadata, {
+    status: "changed",
+    before: { present: true, value: originalState.metadata },
+    after: {
+      present: true,
+      value: {
+        title: "本次只取得部分资料",
+        nested: { added: "新值" },
+      },
+    },
+  });
+  assert.equal(firstToPartialDiff.fields.properties.status, "changed");
+  if (firstToPartialDiff.fields.properties.status === "changed") {
+    assert.deepEqual(firstToPartialDiff.fields.properties.before, {
+      present: true,
+      value: originalState.properties,
+    });
+    assert.deepEqual(firstToPartialDiff.fields.properties.after, {
+      present: true,
+      value: {
+        nested: { nullable: null, added: "新值" },
+        values: ["右", null, "左"],
+      },
+    });
+  }
+  assert.equal(firstToPartialDiff.fields.capture.status, "changed");
+  assert.deepEqual(firstToPartialDiff.resources, {
+    added: [],
+    removed: [first.resourceId],
+  });
+
   const replacementBytes = new TextEncoder().encode("binny media bytes v2");
   const replacementResponse = await upload(new Blob([replacementBytes]));
   if (replacementResponse.status !== 201) {
@@ -370,6 +467,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
         metadata: { title: "补齐后的资料" },
+        properties: { completion: { media: true } },
         body: { markdown: "补齐后的正文" },
         resources: [{ resourceId: replacement.resourceId }],
         capture: {
@@ -390,6 +488,90 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   ]);
   assert.equal(repairedRead.revisions.length, 3);
 
+  const firstToRepairedDiff = await readArchiveRevisionDiff(
+    client,
+    firstItem.revisionId,
+    repairedItem.revisionId,
+  );
+  assert.equal(firstToRepairedDiff.hasChanges, true);
+  assert.deepEqual(firstToRepairedDiff.resources, {
+    added: [replacement.resourceId],
+    removed: [first.resourceId],
+  });
+  assert.deepEqual(firstToRepairedDiff.fields.body, {
+    status: "changed",
+    before: { present: true, value: originalState.body },
+    after: { present: true, value: { markdown: "补齐后的正文" } },
+  });
+  assert.deepEqual(firstToRepairedDiff.fields.capture, { status: "changed" });
+  const partialToRepairedDiff = await readArchiveRevisionDiff(
+    client,
+    partialItem.revisionId,
+    repairedItem.revisionId,
+  );
+  assert.equal(partialToRepairedDiff.fields.capture.status, "changed");
+  assert.deepEqual(partialToRepairedDiff.fields.capture, {
+    status: "changed",
+    before: { present: true, value: partialRead.views[0]?.state.capture },
+    after: { present: true, value: repairedRead.views[0]?.state.capture },
+  });
+  const sameRevisionDiff = await readArchiveRevisionDiff(
+    client,
+    firstItem.revisionId,
+    firstItem.revisionId,
+  );
+  assert.equal(sameRevisionDiff.hasChanges, false);
+  assert.deepEqual(sameRevisionDiff.resources, { added: [], removed: [] });
+  assert.equal(sameRevisionDiff.fields.metadata.status, "unchanged");
+  assert.equal(sameRevisionDiff.fields.properties.status, "unchanged");
+
+  const invalidRevisionDiff = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: "not-a-revision-id",
+      secondRevisionId: firstItem.revisionId,
+    },
+  });
+  assert.equal(invalidRevisionDiff.status, 400);
+  if (invalidRevisionDiff.status === 400) {
+    assert.equal(
+      (await invalidRevisionDiff.json()).error.code,
+      "invalid_input",
+    );
+  }
+  const missingRevisionDiff = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: randomUUID(),
+      secondRevisionId: firstItem.revisionId,
+    },
+  });
+  assert.equal(missingRevisionDiff.status, 404);
+  if (missingRevisionDiff.status === 404) {
+    const error = await missingRevisionDiff.json();
+    assert.equal(error.error.code, "revision_not_found");
+    assert.deepEqual(error.error.path, ["firstRevisionId"]);
+  }
+  const attachmentRevision = attachmentOnly.items[0];
+  assert.ok(attachmentRevision);
+  const crossItemRevisionDiff = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: firstItem.revisionId,
+      secondRevisionId: attachmentRevision.revisionId,
+    },
+  });
+  assert.equal(crossItemRevisionDiff.status, 409);
+  if (crossItemRevisionDiff.status === 409) {
+    assert.equal(
+      (await crossItemRevisionDiff.json()).error.code,
+      "revision_item_mismatch",
+    );
+  }
+
   const historicRead = await client.archives.revisions[":revisionId"].$get({
     param: { revisionId: firstItem.revisionId },
   });
@@ -409,6 +591,8 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   return {
     resourceId: first.resourceId,
     repairedResourceId: replacement.resourceId,
+    partialRevisionId: partialItem.revisionId,
+    repairedRevisionId: repairedItem.revisionId,
     orphanResourceId: orphan.resourceId,
     resourceMarkerItemId,
     itemId: firstItem.itemId,
@@ -1711,6 +1895,7 @@ async function verifyArchiveABA(
     ArchiveJourney,
     | "itemId"
     | "revisionId"
+    | "comparedRevisionId"
     | "commitId"
     | "historicalAsOf"
     | "replayRequest"
@@ -1792,6 +1977,27 @@ async function verifyArchiveABA(
   assert.equal(abaFirstItem.itemId, abaThirdItem.itemId);
   assert.equal(abaFirstItem.revisionId, abaThirdItem.revisionId);
   assert.notEqual(abaFirstItem.revisionId, abaSecondItem.revisionId);
+
+  const firstToSecondDiff = await readArchiveRevisionDiff(
+    client,
+    abaFirstItem.revisionId,
+    abaSecondItem.revisionId,
+  );
+  assert.equal(firstToSecondDiff.hasChanges, true);
+  assert.equal(firstToSecondDiff.fields.body.status, "changed");
+  assert.equal(firstToSecondDiff.fields.metadata.status, "changed");
+  assert.equal(firstToSecondDiff.fields.properties.status, "changed");
+  assert.deepEqual(firstToSecondDiff.resources, { added: [], removed: [] });
+  const firstToReusedDiff = await readArchiveRevisionDiff(
+    client,
+    abaFirstItem.revisionId,
+    abaThirdItem.revisionId,
+  );
+  assert.equal(firstToReusedDiff.hasChanges, false);
+  assert.deepEqual(firstToReusedDiff.resources, { added: [], removed: [] });
+  for (const field of Object.values(firstToReusedDiff.fields)) {
+    assert.equal(field.status, "unchanged");
+  }
 
   const abaRead = await readArchiveItem(client, abaThirdItem.itemId);
   assert.equal(abaRead.revisions.length, 2);
@@ -2014,6 +2220,7 @@ async function verifyArchiveABA(
   return {
     itemId: abaThirdItem.itemId,
     revisionId: abaThirdItem.revisionId,
+    comparedRevisionId: abaSecondItem.revisionId,
     commitId: lateCommit.commitId,
     historicalAsOf: abaSecond.archiveSeq,
     replayRequest: abaFirstRequest,
@@ -6277,6 +6484,8 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
     ...relations,
     resourceItemId: resources.itemId,
     resourceRevisionId: resources.revisionId,
+    resourcePartialRevisionId: resources.partialRevisionId,
+    resourceRepairedRevisionId: resources.repairedRevisionId,
     resourceId: resources.resourceId,
     repairedResourceId: resources.repairedResourceId,
     orphanResourceId: resources.orphanResourceId,
@@ -6339,6 +6548,35 @@ async function verifyArchivePersistence(
   assert.deepEqual(historicalResource.state.resources, [
     { resourceId: archive.resourceId },
   ]);
+
+  const resourceDiffSnapshot = await readArchiveItem(
+    client,
+    archive.resourceItemId,
+  );
+  const revisionDiff = await readArchiveRevisionDiff(
+    client,
+    archive.revisionId,
+    archive.comparedRevisionId,
+  );
+  assert.equal(revisionDiff.hasChanges, true);
+  const resourcePartialDiff = await readArchiveRevisionDiff(
+    client,
+    archive.resourceRevisionId,
+    archive.resourcePartialRevisionId,
+  );
+  const resourceDiff = await readArchiveRevisionDiff(
+    client,
+    archive.resourceRevisionId,
+    archive.resourceRepairedRevisionId,
+  );
+  assert.deepEqual(resourceDiff.resources, {
+    added: [archive.repairedResourceId],
+    removed: [archive.resourceId],
+  });
+  assert.deepEqual(
+    await readArchiveItem(client, archive.resourceItemId),
+    resourceDiffSnapshot,
+  );
 
   const resourceMarkerItem = await readArchiveItem(
     client,
@@ -6488,6 +6726,9 @@ async function verifyArchivePersistence(
     item: persistedArchive,
     historicalItem,
     revision: persistedRevision,
+    revisionDiff,
+    resourcePartialDiff,
+    resourceDiff,
     resourceItem,
     resourceMarkerItem,
     resourceRevision: historicalResource,

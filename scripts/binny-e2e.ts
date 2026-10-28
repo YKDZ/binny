@@ -54,7 +54,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny23-rss-e2e-" + process.pid.toString(10);
+const projectName = "binny12-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
@@ -405,11 +405,14 @@ function archiveIds(state: string): {
   readonly relationItemId: string;
   readonly relationCommitId: string;
   readonly revisionId: string;
+  readonly comparedRevisionId: string;
   readonly commitId: string;
   readonly historicalAsOf: string;
   readonly relationAsOf: string;
   readonly resourceItemId: string;
   readonly resourceRevisionId: string;
+  readonly resourcePartialRevisionId: string;
+  readonly resourceRepairedRevisionId: string;
   readonly resourceId: string;
   readonly repairedResourceId: string;
   readonly orphanResourceId: string;
@@ -434,11 +437,14 @@ function archiveIds(state: string): {
     relationItemId: readText("relationItemId"),
     relationCommitId: readText("relationCommitId"),
     revisionId: readText("revisionId"),
+    comparedRevisionId: readText("comparedRevisionId"),
     commitId: readText("commitId"),
     historicalAsOf: readText("historicalAsOf"),
     relationAsOf: readText("relationAsOf"),
     resourceItemId: readText("resourceItemId"),
     resourceRevisionId: readText("resourceRevisionId"),
+    resourcePartialRevisionId: readText("resourcePartialRevisionId"),
+    resourceRepairedRevisionId: readText("resourceRepairedRevisionId"),
     resourceId: readText("resourceId"),
     repairedResourceId: readText("repairedResourceId"),
     orphanResourceId: readText("orphanResourceId"),
@@ -452,6 +458,9 @@ function archiveResponses(response: string): {
   readonly item: unknown;
   readonly historicalItem: unknown;
   readonly revision: unknown;
+  readonly revisionDiff: unknown;
+  readonly resourcePartialDiff: unknown;
+  readonly resourceDiff: unknown;
   readonly resourceItem: unknown;
   readonly resourceMarkerItem: unknown;
   readonly sdkItem: unknown;
@@ -473,6 +482,9 @@ function archiveResponses(response: string): {
   assert.ok(
     "item" in parsed &&
       "revision" in parsed &&
+      "revisionDiff" in parsed &&
+      "resourcePartialDiff" in parsed &&
+      "resourceDiff" in parsed &&
       "resourceItem" in parsed &&
       "resourceMarkerItem" in parsed &&
       "sdkItem" in parsed &&
@@ -495,6 +507,9 @@ function archiveResponses(response: string): {
     item: parsed.item,
     historicalItem: parsed.historicalItem,
     revision: parsed.revision,
+    revisionDiff: parsed.revisionDiff,
+    resourcePartialDiff: parsed.resourcePartialDiff,
+    resourceDiff: parsed.resourceDiff,
     resourceItem: parsed.resourceItem,
     resourceMarkerItem: parsed.resourceMarkerItem,
     sdkItem: parsed.sdkItem,
@@ -2851,11 +2866,14 @@ async function verifyRestartAndRemoval(
     relationItemId,
     relationCommitId,
     revisionId,
+    comparedRevisionId,
     commitId,
     historicalAsOf,
     relationAsOf,
     resourceItemId,
     resourceRevisionId,
+    resourcePartialRevisionId,
+    resourceRepairedRevisionId,
     resourceMarkerItemId,
     cliCascadeRootItemId,
     cliCascadeTargetItemId,
@@ -2884,6 +2902,31 @@ async function verifyRestartAndRemoval(
     "found",
   );
   assert.deepEqual(cliArchiveRevision, expectedArchive.revision);
+  const cliRevisionDiff = cliData<unknown>(
+    await cli(baseUrl, ["archive", "diff", revisionId, comparedRevisionId]),
+    "found",
+  );
+  assert.deepEqual(cliRevisionDiff, expectedArchive.revisionDiff);
+  const cliResourceDiff = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "diff",
+      resourceRevisionId,
+      resourceRepairedRevisionId,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliResourceDiff, expectedArchive.resourceDiff);
+  const cliResourcePartialDiff = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "diff",
+      resourceRevisionId,
+      resourcePartialRevisionId,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliResourcePartialDiff, expectedArchive.resourcePartialDiff);
 
   const cliResourceItem = cliData<unknown>(
     await cli(baseUrl, ["archive", "item", resourceItemId]),
@@ -4203,7 +4246,7 @@ async function runRssAcceptance(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny23-rss-e2e-compose-"),
+    path.join(tmpdir(), "binny12-revision-diff-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.23.0/24";
