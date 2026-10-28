@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,12 +17,21 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny01-" + process.pid.toString(10);
+const projectName = "binny02-" + process.pid.toString(10);
 const imageName = projectName + ":local";
+let composeOverrideFile = "";
 let composePort = 0;
 
 function composePrefix(): readonly string[] {
-  return ["compose", "--project-name", projectName, "--file", composeFile];
+  return [
+    "compose",
+    "--project-name",
+    projectName,
+    "--file",
+    composeFile,
+    "--file",
+    composeOverrideFile,
+  ];
 }
 
 function composeEnvironment(): Readonly<Record<string, string>> {
@@ -142,6 +153,53 @@ function cliFailure<T extends { readonly code: string }>(
   assert.equal(wire.variant, "apiError");
   assert.equal(wire.data.code, code);
   return wire.data;
+}
+
+async function archiveHttpStep(
+  stage: "submit" | "after-restart",
+  baseUrl: string,
+  state?: string,
+): Promise<string> {
+  const result = await run(
+    "pnpm",
+    [
+      "--silent",
+      "--filter",
+      "@binny/api",
+      "exec",
+      "node",
+      "--conditions=source",
+      "scripts/archive-http-e2e.ts",
+      stage,
+      baseUrl,
+    ],
+    {
+      env: state === undefined ? {} : { BINNY_E2E_ARCHIVE_STATE: state },
+    },
+  );
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  return result.stdout.trim();
+}
+
+function archiveIds(state: string): {
+  readonly itemId: string;
+  readonly revisionId: string;
+} {
+  const parsed: unknown = JSON.parse(state);
+  assert.ok(typeof parsed === "object" && parsed !== null);
+  assert.ok("itemId" in parsed && typeof parsed.itemId === "string");
+  assert.ok("revisionId" in parsed && typeof parsed.revisionId === "string");
+  return { itemId: parsed.itemId, revisionId: parsed.revisionId };
+}
+
+function archiveResponses(response: string): {
+  readonly item: unknown;
+  readonly revision: unknown;
+} {
+  const parsed: unknown = JSON.parse(response);
+  assert.ok(typeof parsed === "object" && parsed !== null);
+  assert.ok("item" in parsed && "revision" in parsed);
+  return { item: parsed.item, revision: parsed.revision };
 }
 
 async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
@@ -385,7 +443,13 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
 async function verifyRestartAndRemoval(
   baseUrl: string,
   port: number,
+  archive: string,
 ): Promise<void> {
+  const disabled = cliData<{ readonly status: string }>(
+    await cli(baseUrl, ["bin", "disable", "rss-main"]),
+    "disabled",
+  );
+  assert.equal(disabled.status, "disabled");
   await compose(["restart", "postgres"], port);
   await waitForApiAndDatabase(baseUrl);
   await compose(["restart", "server"], port);
@@ -421,13 +485,44 @@ async function verifyRestartAndRemoval(
     "listed",
   );
   assert.deepEqual(empty.bins, []);
+
+  const archiveState = await archiveHttpStep("after-restart", baseUrl, archive);
+  const { itemId, revisionId } = archiveIds(archive);
+  const expectedArchive = archiveResponses(archiveState);
+  const cliArchiveItem = cliData<unknown>(
+    await cli(baseUrl, ["archive", "item", itemId]),
+    "found",
+  );
+  assert.deepEqual(cliArchiveItem, expectedArchive.item);
+  const cliArchiveRevision = cliData<unknown>(
+    await cli(baseUrl, ["archive", "revision", revisionId]),
+    "found",
+  );
+  assert.deepEqual(cliArchiveRevision, expectedArchive.revision);
   await validateApiInput(baseUrl);
 }
 
 async function main(): Promise<void> {
   const port = await reservePort();
   composePort = port;
-  const baseUrl = "http://127.0.0.1:" + port;
+  const e2eHost = process.env.BINNY_E2E_HOST ?? "127.0.0.1";
+  const baseUrl = "http://" + e2eHost + ":" + port;
+  const overrideDirectory = await mkdtemp(
+    path.join(tmpdir(), "binny02-compose-"),
+  );
+  composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.2.0/24";
+  await writeFile(
+    composeOverrideFile,
+    [
+      "networks:",
+      "  default:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${e2eSubnet}`,
+      "",
+    ].join("\n"),
+  );
   let cleanupError: Error | undefined;
   try {
     await compose(
@@ -445,19 +540,21 @@ async function main(): Promise<void> {
     );
     await waitForApiAndDatabase(baseUrl);
     await verifyConfigurationJourney(baseUrl);
-    await verifyRestartAndRemoval(baseUrl, port);
+    const enabled = cliData<{ readonly status: string }>(
+      await cli(baseUrl, ["bin", "enable", "rss-main"]),
+      "enabled",
+    );
+    assert.equal(enabled.status, "active");
+    const archive = await archiveHttpStep("submit", baseUrl);
+    await verifyRestartAndRemoval(baseUrl, port, archive);
     process.stdout.write(
-      "Compose、PostgreSQL、HTTP API 与构建 CLI bin 配置旅程通过。\n",
+      "Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
     );
   } finally {
     const cleanup = await run(
       "docker",
       [
-        "compose",
-        "--project-name",
-        projectName,
-        "--file",
-        composeFile,
+        ...composePrefix(),
         "down",
         "--rmi",
         "all",
@@ -471,6 +568,7 @@ async function main(): Promise<void> {
         "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
       );
     }
+    await rm(overrideDirectory, { recursive: true, force: true });
   }
   if (cleanupError !== undefined) throw cleanupError;
 }

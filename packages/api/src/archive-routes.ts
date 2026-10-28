@@ -1,0 +1,143 @@
+import {
+  archiveCommitSchema,
+  archiveErrorSchema,
+  archiveIdentifierSchema,
+  archiveItemReadSchema,
+  archiveRevisionReadSchema,
+  archiveSubmissionInputSchema,
+  toInputJsonSchema,
+  type ArchiveOperations,
+} from "@binny/contracts";
+// 文本归档 HTTP 子路由；公开客户端类型直接由这些正式路由推导。
+import { zValidator } from "@hono/zod-validator";
+import { Hono } from "hono";
+import * as z from "zod";
+
+export type { ArchiveOperations } from "@binny/contracts";
+
+function validationFailure(issues: readonly z.core.$ZodIssue[]) {
+  const firstIssue = issues[0];
+  const path = firstIssue?.path.map((part) =>
+    typeof part === "symbol" ? String(part) : part,
+  );
+  const message =
+    firstIssue?.message.includes("。") === true
+      ? firstIssue.message
+      : firstIssue?.code === "unrecognized_keys"
+        ? "请求包含未支持的字段。"
+        : firstIssue?.code === "invalid_type"
+          ? "必填字段缺失或字段类型无效。"
+          : "字段值不符合要求。";
+  return {
+    error: {
+      code: "invalid_input" as const,
+      message,
+      ...(path === undefined || path.length === 0 ? {} : { path }),
+    },
+  };
+}
+
+function makeArchiveRoutes(operations: ArchiveOperations) {
+  return new Hono()
+    .post(
+      "/archives",
+      zValidator("json", archiveSubmissionInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.submitArchive(c.req.valid("json"));
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+          }
+        }
+        return c.json(result.value, 201);
+      },
+    )
+    .get(
+      "/archives/items/:itemId",
+      zValidator(
+        "param",
+        z.object({ itemId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.getArchiveItem(
+          c.req.valid("param").itemId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
+      "/archives/revisions/:revisionId",
+      zValidator(
+        "param",
+        z.object({ revisionId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.getArchiveRevision(
+          c.req.valid("param").revisionId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    );
+}
+
+export type ArchiveRoutes = ReturnType<typeof makeArchiveRoutes>;
+
+/** 公开归档输入输出的 JSON Schema 与正式运行时契约保持一致。 */
+export const archiveApiSchemas: {
+  readonly submitInput: Record<string, unknown>;
+  readonly commit: Record<string, unknown>;
+  readonly item: Record<string, unknown>;
+  readonly revision: Record<string, unknown>;
+  readonly error: Record<string, unknown>;
+} = {
+  submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
+  commit: z.toJSONSchema(archiveCommitSchema),
+  item: z.toJSONSchema(archiveItemReadSchema),
+  revision: z.toJSONSchema(archiveRevisionReadSchema),
+  error: z.toJSONSchema(archiveErrorSchema),
+};
+
+export function createArchiveRoutes(
+  operations: ArchiveOperations,
+): ArchiveRoutes {
+  return makeArchiveRoutes(operations);
+}
