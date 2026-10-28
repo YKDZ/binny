@@ -27,10 +27,11 @@ RUN test -n "$BINNY_COLLECTOR_PACKAGE" \
   && pnpm --filter "${BINNY_COLLECTOR_PACKAGE}..." build \
   && pnpm --filter @binny/collector-runtime build \
   && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then pnpm --filter @binny/collector-runtime build:fixture; fi \
+  && pnpm --filter @binny/collector-runtime --prod deploy --legacy /runtime-deploy \
   && pnpm --filter "$BINNY_COLLECTOR_PACKAGE" --prod deploy --legacy /deploy \
   && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then cp -r packages/collector-runtime/fixture-dist /deploy/fixture-dist; fi \
   && test -f "/deploy/${BINNY_COLLECTOR_ENTRY}" \
-  && cp -r packages/collector-runtime/dist /deploy/binny-runtime
+  && cp -r /runtime-deploy /deploy/binny-runtime
 
 FROM node:24.21.0-bookworm-slim AS lightweight
 
@@ -41,4 +42,4 @@ WORKDIR /app
 COPY --from=build --chown=node:node /deploy /app
 USER node
 EXPOSE 8080
-ENTRYPOINT ["node", "/app/binny-runtime/entry.js"]
+ENTRYPOINT ["node", "/app/binny-runtime/dist/entry.js"]
