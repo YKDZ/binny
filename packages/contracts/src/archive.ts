@@ -200,6 +200,13 @@ const timestampSchema = z.iso
   .datetime({ offset: true })
   .overwrite((value) => new Date(value).toISOString());
 
+export const archiveResourceReferenceSchema = z
+  .object({ resourceId: z.string().uuid() })
+  .strict();
+export type ArchiveResourceReference = z.infer<
+  typeof archiveResourceReferenceSchema
+>;
+
 const archiveItemFieldsSchema = z
   .object({
     sourceRef: nonEmptyText.optional(),
@@ -207,6 +214,22 @@ const archiveItemFieldsSchema = z
     metadata: jsonObjectSchema.optional(),
     properties: jsonObjectSchema.optional(),
     body: archiveBodySchema.optional(),
+    resources: z
+      .array(archiveResourceReferenceSchema)
+      .optional()
+      .superRefine((resources, context) => {
+        const resourceIds = new Set<string>();
+        for (const [index, resource] of (resources ?? []).entries()) {
+          if (resourceIds.has(resource.resourceId)) {
+            context.addIssue({
+              code: "custom",
+              path: [index, "resourceId"],
+              message: "同一内容版本不能重复登记相同资源。",
+            });
+          }
+          resourceIds.add(resource.resourceId);
+        }
+      }),
     capture: archiveCaptureSchema,
   })
   .strict();
@@ -215,13 +238,19 @@ function hasReceivedMaterial(item: {
   readonly metadata?: Record<string, unknown> | undefined;
   readonly properties?: Record<string, unknown> | undefined;
   readonly body?: object | undefined;
+  readonly resources?: readonly unknown[] | undefined;
 }): boolean {
   const hasMetadata =
     item.metadata !== undefined && Object.keys(item.metadata).length > 0;
   const hasProperties =
     item.properties !== undefined && Object.keys(item.properties).length > 0;
   // sourceRef 只定位出处，不能让未取得资料的失败形成空版本。
-  return hasMetadata || hasProperties || item.body !== undefined;
+  return (
+    hasMetadata ||
+    hasProperties ||
+    item.body !== undefined ||
+    (item.resources?.length ?? 0) > 0
+  );
 }
 
 /** 保存已整理的资料状态；采集上下文和诊断不会因此生成新版本。 */
@@ -287,6 +316,26 @@ export type ArchiveSubmissionInput = z.infer<
 
 export const archiveIdentifierSchema = z.string().uuid();
 const archiveIdSchema = archiveIdentifierSchema;
+const archiveSha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+export const archiveResourceMediaTypeSchema = z
+  .string()
+  .regex(
+    /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/u,
+    "媒体类型格式无效。",
+  );
+
+export const archiveResourceMetadataSchema = z
+  .object({
+    resourceId: archiveIdSchema,
+    sha256: archiveSha256Schema,
+    mediaType: archiveResourceMediaTypeSchema,
+    size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+export type ArchiveResourceMetadata = z.infer<
+  typeof archiveResourceMetadataSchema
+>;
+
 // PostgreSQL BIGINT 序号以十进制文本传输，避免超出安全整数范围时舍入。
 export const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
 export const archiveSnapshotSequenceSchema = z
@@ -396,6 +445,8 @@ export const archiveErrorSchema = z
           "archive_request_conflict",
           "item_not_found",
           "revision_not_found",
+          "resource_not_found",
+          "resource_storage_unavailable",
           "commit_not_found",
         ]),
         message: z.string(),
@@ -417,13 +468,23 @@ export type ArchiveOperation<T> =
   | { readonly ok: true; readonly value: T }
   | {
       readonly ok: false;
-      readonly status: 400 | 404 | 409;
+      readonly status: 400 | 404 | 409 | 503;
       readonly error: ArchiveError;
     };
 export type ArchiveOperations = {
   submitArchive(
     input: ArchiveSubmissionInput,
   ): Promise<ArchiveOperation<ArchiveCommit>>;
+  uploadArchiveResource(
+    body: ReadableStream<Uint8Array>,
+    mediaType: string,
+  ): Promise<ArchiveOperation<ArchiveResourceMetadata>>;
+  getArchiveResource(resourceId: string): Promise<
+    ArchiveOperation<{
+      readonly metadata: ArchiveResourceMetadata;
+      readonly body: ReadableStream<Uint8Array>;
+    }>
+  >;
   getArchiveItem(
     itemId: string,
     options?: ArchiveReadOptions,
