@@ -9,6 +9,10 @@ async function checkPublicBinContract(): Promise<void> {
       version: "1.0.0",
       configSchema: { type: "object", properties: {} },
       actions: {
+        check: {
+          description: "检查订阅源当前是否可用",
+          params: { type: "object", properties: {} },
+        },
         collect: {
           description: "轮询订阅源",
           params: { type: "object", properties: {} },
@@ -28,6 +32,16 @@ async function checkPublicBinContract(): Promise<void> {
   const created = await client.bins.$post({
     json: createInput,
   });
+
+  const manifestWithoutCheck = {
+    ...createInput,
+    collector: {
+      ...createInput.collector,
+      actions: { collect: createInput.collector.actions.collect },
+    },
+  };
+  // @ts-expect-error 采集器清单必须声明独立的 check 动作。
+  void client.bins.$post({ json: manifestWithoutCheck });
 
   if (created.status === 201) {
     const bin = await created.json();
@@ -87,6 +101,13 @@ async function checkPublicManualRunContract(): Promise<void> {
     const status: "queued" | "executing" | "completed" | "failed" = run.status;
     void returnedRunId;
     void status;
+    if (run.result?.check !== undefined) {
+      const availability: "available" | "unavailable" | "unknown" =
+        run.result.check.availability;
+      void availability;
+      // @ts-expect-error 诊断结果只能使用公开的三类可用性。
+      void (run.result.check.availability satisfies "ready");
+    }
     // @ts-expect-error 触发成功响应不包含错误封装。
     void run.error;
   } else if (

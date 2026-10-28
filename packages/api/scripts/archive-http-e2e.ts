@@ -1510,6 +1510,10 @@ async function verifyPersistableTextBoundary(
     version: "1.0.0",
     configSchema: { type: "object" },
     actions: {
+      check: {
+        description: "检查输入是否处于可用状态",
+        params: { type: "object" },
+      },
       collect: {
         description: "采集验证资料",
         params: { type: "object" },

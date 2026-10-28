@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
+  manualRunCheckResultSchema,
   manualRunErrorSchema,
   manualRunFailureSchema,
   manualRunSchema,
@@ -11,6 +12,7 @@ import {
   type JsonObject,
   type ManualRun,
   type ManualRunCompletion,
+  type ManualRunCheckInput,
   type ManualRunApiError,
   type ManualRunExecution,
   type ManualRunFailure,
@@ -35,6 +37,7 @@ type RunRow = {
   readonly finished_at: Date | null;
   readonly completed_scopes: readonly string[];
   readonly failure: ManualRunFailure | null;
+  readonly check_result: ManualRunCheckInput | null;
   readonly queue_reason: ManualRun["queueReason"] | null;
 };
 
@@ -127,7 +130,7 @@ async function readRun(
 ): Promise<RunRow | undefined> {
   const rows = await database.unsafe<RunRow[]>(
     "SELECT run_id, bin_id, collector_id, collector_version, action, status, " +
-      "created_at, started_at, finished_at, completed_scopes, failure, " +
+      "created_at, started_at, finished_at, completed_scopes, failure, check_result, " +
       "CASE WHEN status <> 'queued' THEN NULL " +
       "WHEN NOT EXISTS (SELECT 1 FROM runtime_connections r " +
       "WHERE r.bin_id = manual_runs.bin_id AND r.disconnected = false " +
@@ -154,6 +157,23 @@ async function rowToRun(
 ): Promise<ManualRun> {
   const commits = await readCommitLocators(database, row.run_id, row.bin_id);
   const hasResult = row.status === "completed" || row.status === "failed";
+  if (
+    row.action === "check" &&
+    row.status === "completed" &&
+    row.check_result === null
+  ) {
+    throw new Error("已完成的 check 运行缺少诊断结果。");
+  }
+  if (row.check_result !== null && row.finished_at === null) {
+    throw new Error("check 诊断结果缺少检查完成时间。");
+  }
+  const checkResult =
+    row.check_result === null || row.finished_at === null
+      ? undefined
+      : manualRunCheckResultSchema.parse({
+          ...row.check_result,
+          checkedAt: row.finished_at.toISOString(),
+        });
   return manualRunSchema.parse({
     runId: row.run_id,
     binId: row.bin_id,
@@ -175,6 +195,7 @@ async function rowToRun(
           result: {
             completedScopes: row.completed_scopes,
             commits,
+            ...(checkResult === undefined ? {} : { check: checkResult }),
             stopReason: statusReason(row.failure),
             ...(row.failure === null ? {} : { error: row.failure }),
           },
@@ -208,6 +229,11 @@ export async function initializeManualRunSchema(
         "started_at timestamptz, " +
         "finished_at timestamptz" +
         ")",
+    );
+    await transaction.unsafe(
+      "ALTER TABLE " +
+        tableName +
+        " ADD COLUMN IF NOT EXISTS check_result jsonb",
     );
     await transaction.unsafe(
       "CREATE INDEX IF NOT EXISTS manual_runs_bin_queue_idx " +
@@ -292,7 +318,8 @@ export function createManualRunStore(
             "collector_version, action, params, config_snapshot, targets_snapshot, status) " +
             "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued') " +
             "RETURNING run_id, bin_id, collector_id, collector_version, action, status, " +
-            "created_at, started_at, finished_at, completed_scopes, failure, NULL AS queue_reason",
+            "created_at, started_at, finished_at, completed_scopes, failure, " +
+            "NULL AS check_result, NULL AS queue_reason",
           [
             runId,
             binId,
@@ -364,6 +391,7 @@ export function createManualRunStore(
           "SELECT run_id, bin_id, identity_id, collector_snapshot, collector_id, " +
             "collector_version, action, params, config_snapshot, targets_snapshot, " +
             "status, created_at, started_at, finished_at, completed_scopes, failure, " +
+            "check_result, " +
             "NULL AS queue_reason FROM " +
             tableName +
             " WHERE bin_id = $1 AND status = 'queued' " +
@@ -434,7 +462,7 @@ export function createManualRunStore(
             " SET status = 'executing', runtime_id = $2, started_at = clock_timestamp() " +
             "WHERE run_id = $1 AND status = 'queued' RETURNING run_id, bin_id, " +
             "collector_id, collector_version, action, status, created_at, started_at, " +
-            "finished_at, completed_scopes, failure, NULL AS queue_reason",
+            "finished_at, completed_scopes, failure, check_result, NULL AS queue_reason",
           [run.run_id, checked.data.runtimeId],
         );
         if (updated[0] === undefined) return { ok: true, value: null };
@@ -471,10 +499,11 @@ export function createManualRunStore(
           const rows = await transaction.unsafe<
             {
               readonly status: ManualRun["status"];
+              readonly action: string;
               readonly runtime_id: string | null;
             }[]
           >(
-            "SELECT status, runtime_id FROM " +
+            "SELECT status, action, runtime_id FROM " +
               tableName +
               " WHERE bin_id = $1 AND run_id = $2 FOR UPDATE",
             [binId, runId],
@@ -500,6 +529,30 @@ export function createManualRunStore(
             );
 
           const completion: ManualRunCompletion = checked.data.completion;
+          if (
+            current.action === "check" &&
+            completion.status === "completed" &&
+            completion.check === undefined
+          ) {
+            return failure(
+              400,
+              "invalid_input",
+              "check 必须提交结构化诊断结果。",
+              ["completion", "check"],
+            );
+          }
+          if (
+            current.action !== "check" &&
+            completion.status === "completed" &&
+            completion.check !== undefined
+          ) {
+            return failure(
+              400,
+              "invalid_input",
+              "只有 check 动作可以提交可用性诊断结果。",
+              ["completion", "check"],
+            );
+          }
           const runFailure =
             completion.status === "failed"
               ? serializeFailure(completion.error)
@@ -508,13 +561,18 @@ export function createManualRunStore(
             "UPDATE " +
               tableName +
               " SET status = $3, completed_scopes = $4, failure = $5, " +
-              "finished_at = clock_timestamp() WHERE run_id = $1 AND bin_id = $2",
+              "check_result = $6, finished_at = clock_timestamp() " +
+              "WHERE run_id = $1 AND bin_id = $2",
             [
               runId,
               binId,
               completion.status,
               jsonbParameter(database, completion.completedScopes),
               runFailure === null ? null : jsonbParameter(database, runFailure),
+              completion.status === "completed" &&
+              completion.check !== undefined
+                ? jsonbParameter(database, completion.check)
+                : null,
             ],
           );
           return { ok: true as const, value: runId };
