@@ -1,26 +1,47 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveSearchFilterSchema,
+  archiveSearchInputSchema,
+  archiveSearchPageSchema,
+  archiveErrorSchema,
   archiveIdentifierSchema,
   archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
+import type { AnySchema } from "ajv/dist/2020.js";
 import * as z from "zod";
+
+import { archiveApiSchemas, binApiSchemas } from "../src/routes.ts";
+
+const require = createRequire(import.meta.url);
+const Ajv2020 =
+  require("ajv/dist/2020.js") as typeof import("ajv/dist/2020.js").default;
+const addFormats =
+  require("ajv-formats") as typeof import("ajv-formats").default;
 
 type ArchiveClient = ReturnType<typeof createApiClient>;
 type ArchiveTimelineQuery = Parameters<
   ArchiveClient["archives"]["items"][":itemId"]["timeline"]["$get"]
 >[0]["query"];
+type ArchiveRelationQuery = Parameters<
+  ArchiveClient["archives"]["items"][":itemId"]["relations"]["$get"]
+>[0]["query"];
 type ArchiveSubmission = Parameters<
   ArchiveClient["archives"]["$post"]
 >[0]["json"];
+type BinCreateRequest = Parameters<ArchiveClient["bins"]["$post"]>[0]["json"];
 type ArchiveJourney = {
   readonly itemId: string;
+  readonly relationItemId: string;
+  readonly relationCommitId: string;
   readonly revisionId: string;
   readonly commitId: string;
   readonly historicalAsOf: string;
+  readonly relationAsOf: string;
   readonly replayRequest: ArchiveSubmission;
   readonly replayCommitId: string;
   readonly expectedObservationCount: number;
@@ -38,11 +59,59 @@ type SdkResourceJourney = {
   readonly resourceId: string;
 };
 
+function compileJsonSchema(document: unknown) {
+  const ajv = new Ajv2020({ strict: false });
+  addFormats(ajv);
+  return ajv.compile(document as AnySchema);
+}
+
+function compilePublishedSearchSchemas() {
+  for (const document of [
+    ...Object.values(binApiSchemas),
+    ...Object.values(archiveApiSchemas),
+  ]) {
+    compileJsonSchema(document);
+  }
+
+  const standardRoots = [
+    archiveSearchInputSchema["~standard"].jsonSchema.input({
+      target: "draft-2020-12",
+    }),
+    archiveSearchInputSchema["~standard"].jsonSchema.output({
+      target: "draft-2020-12",
+    }),
+    archiveSearchFilterSchema["~standard"].jsonSchema.input({
+      target: "draft-2020-12",
+    }),
+    archiveSearchFilterSchema["~standard"].jsonSchema.output({
+      target: "draft-2020-12",
+    }),
+    archiveSearchPageSchema["~standard"].jsonSchema.input({
+      target: "draft-2020-12",
+    }),
+    archiveSearchPageSchema["~standard"].jsonSchema.output({
+      target: "draft-2020-12",
+    }),
+  ];
+  for (const document of standardRoots) compileJsonSchema(document);
+
+  return {
+    apiInput: compileJsonSchema(archiveApiSchemas.searchInput),
+    apiOutput: compileJsonSchema(archiveApiSchemas.searchPage),
+    standardInput: compileJsonSchema(standardRoots[0]),
+    standardFilter: compileJsonSchema(standardRoots[2]),
+    standardOutput: compileJsonSchema(standardRoots[5]),
+  };
+}
+
 const archiveJourneySchema = z.object({
   itemId: archiveIdentifierSchema,
+  relationItemId: archiveIdentifierSchema,
+  relationCommitId: archiveIdentifierSchema,
   revisionId: archiveIdentifierSchema,
   commitId: archiveIdentifierSchema,
   historicalAsOf: archiveSnapshotSequenceSchema,
+  relationAsOf: archiveSnapshotSequenceSchema,
   replayRequest: archiveSubmissionInputSchema,
   replayCommitId: archiveIdentifierSchema,
   expectedObservationCount: z.number().int().nonnegative(),
@@ -347,6 +416,21 @@ async function readArchiveTimeline(
   return await response.json();
 }
 
+async function readArchiveRelations(
+  client: ArchiveClient,
+  itemId: string,
+  query: ArchiveRelationQuery,
+) {
+  const response = await client.archives.items[":itemId"].relations.$get({
+    param: { itemId },
+    query,
+  });
+  if (response.status !== 200) {
+    throw new Error("读取对象关系失败：" + (await response.text()));
+  }
+  return await response.json();
+}
+
 async function readArchiveCommit(client: ArchiveClient, commitId: string) {
   const response = await client.archives.commits[":commitId"].$get({
     param: { commitId },
@@ -539,6 +623,644 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   );
 }
 
+async function verifyArchiveRelations(client: ArchiveClient): Promise<{
+  readonly relationItemId: string;
+  readonly relationCommitId: string;
+  readonly relationAsOf: string;
+}> {
+  const from = { namespace: "e2e-relations", key: "same-batch-from" };
+  const to = { namespace: "e2e-relations", key: "same-batch-to" };
+  const foreignTarget = {
+    namespace: "e2e-relations",
+    key: "other-bin-target",
+  };
+  const foreignTargetCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:foreign-target",
+    binId: "rss-secondary",
+    items: [
+      {
+        sourceKey: foreignTarget,
+        body: { text: "只在另一个 bin 取得的目标" },
+        capture: {
+          scope: { case: "relation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const foreignTargetItem = foreignTargetCommit.items[0];
+  assert.ok(foreignTargetItem);
+
+  const firstState = {
+    from,
+    to: { sourceKey: to },
+    name: "reply",
+    properties: Object.fromEntries([
+      ["__proto__", { label: "关系中文 emoji 🧭" }],
+      ["position", 1],
+    ] as const),
+    cascade: true,
+  };
+  const secondState = {
+    from,
+    to: { sourceKey: to },
+    name: "reply",
+    properties: Object.fromEntries([
+      ["__proto__", { label: "更新关系中文 emoji 🌿" }],
+      ["position", 2],
+    ] as const),
+    cascade: false,
+  };
+  const firstCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:same-batch",
+    binId: "rss-main",
+    observedAt: "2026-10-28T04:20:00.000Z",
+    items: [
+      {
+        sourceKey: from,
+        body: { text: "关系来源资料" },
+        capture: {
+          scope: { case: "relation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: to,
+        body: { text: "同批关系目标" },
+        capture: {
+          scope: { case: "relation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [
+      { relationId: "e2e:relation:01-forward", value: firstState },
+      {
+        relationId: "e2e:relation:02-external",
+        value: {
+          from,
+          to: { sourceRef: "https://example.test/external-target" },
+          name: "cites",
+          properties: {
+            label: "external",
+            sourceRef: "https://example.test/external-target",
+          },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation:03-unknown-target",
+        value: {
+          from,
+          to: { sourceKey: foreignTarget },
+          name: "mentions",
+          properties: { label: "cross-bin" },
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:relation:04-loop-reverse",
+        value: {
+          from: to,
+          to: { sourceKey: from },
+          name: "loop",
+          properties: {},
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const fromItem = firstCommit.items[0];
+  const toItem = firstCommit.items[1];
+  assert.ok(fromItem);
+  assert.ok(toItem);
+  assert.equal(firstCommit.relations.length, 4);
+  assert.deepEqual(
+    firstCommit.relations.map(({ ordinal }) => ordinal),
+    [2, 3, 4, 5],
+  );
+  const firstCommittedRelation = firstCommit.relations[0];
+  assert.equal(firstCommittedRelation?.status, "observed");
+  if (firstCommittedRelation?.status === "observed") {
+    assert.deepEqual(
+      firstCommittedRelation.state.properties,
+      firstState.properties,
+    );
+  }
+
+  const firstOutgoingPage = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    { direction: "outgoing", binId: "rss-main", limit: "2" },
+  );
+  assert.deepEqual(firstOutgoingPage.snapshot, {
+    asOf: firstCommit.archiveSeq,
+    mode: "current",
+  });
+  assert.deepEqual(
+    firstOutgoingPage.relations.map(({ relationId }) => relationId),
+    ["e2e:relation:01-forward", "e2e:relation:02-external"],
+  );
+  assert.ok(firstOutgoingPage.nextCursor);
+  const firstForward = firstOutgoingPage.relations[0];
+  assert.equal(firstForward?.status, "observed");
+  if (firstForward?.status === "observed" && firstForward.to.kind === "item") {
+    assert.equal(firstForward.to.itemId, toItem.itemId);
+    assert.equal(firstForward.to.status, "observed");
+    assert.deepEqual(firstForward.state.properties, firstState.properties);
+  }
+  const externalTarget = firstOutgoingPage.relations[1]?.to;
+  assert.equal(externalTarget?.kind, "sourceRef");
+  if (externalTarget?.kind === "sourceRef") {
+    assert.equal(
+      externalTarget.sourceRef,
+      "https://example.test/external-target",
+    );
+  }
+  const externalRelation = firstOutgoingPage.relations[1];
+  assert.equal(externalRelation?.status, "observed");
+  if (externalRelation?.status === "observed") {
+    assert.equal(
+      externalRelation.state.properties?.sourceRef,
+      "https://example.test/external-target",
+    );
+  }
+
+  const lateRelationCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:late-page-edge",
+    binId: "rss-main",
+    observedAt: "2026-10-28T03:59:00.000Z",
+    items: [],
+    relations: [
+      {
+        relationId: "e2e:relation:05-late",
+        value: {
+          from,
+          to: { sourceKey: foreignTarget },
+          name: "related",
+          properties: { arrived: "after-first-page" },
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const secondOutgoingPage = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      cursor: firstOutgoingPage.nextCursor,
+      limit: "2",
+    },
+  );
+  assert.deepEqual(secondOutgoingPage.snapshot, {
+    asOf: firstCommit.archiveSeq,
+    mode: "asOf",
+  });
+  assert.deepEqual(
+    secondOutgoingPage.relations.map(({ relationId }) => relationId),
+    ["e2e:relation:03-unknown-target"],
+  );
+  assert.equal(secondOutgoingPage.nextCursor, undefined);
+  const unknownTarget = secondOutgoingPage.relations[0];
+  assert.equal(unknownTarget?.status, "observed");
+  if (
+    unknownTarget?.status === "observed" &&
+    unknownTarget.to.kind === "item"
+  ) {
+    assert.equal(unknownTarget.to.itemId, foreignTargetItem.itemId);
+    assert.equal(unknownTarget.to.status, "unknown");
+  }
+  const currentOutgoingPage = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    { direction: "outgoing", binId: "rss-main", limit: "10" },
+  );
+  assert.ok(
+    currentOutgoingPage.relations.some(
+      ({ relationId }) => relationId === "e2e:relation:05-late",
+    ),
+  );
+  assert.equal(
+    BigInt(lateRelationCommit.archiveSeq),
+    BigInt(firstCommit.archiveSeq) + 1n,
+  );
+  assert.equal(lateRelationCommit.observedAt, "2026-10-28T03:59:00.000Z");
+  const lateRelation = currentOutgoingPage.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:05-late",
+  );
+  assert.equal(lateRelation?.status, "observed");
+  if (lateRelation?.status === "observed") {
+    assert.equal(
+      lateRelation.observation.archiveSeq,
+      lateRelationCommit.archiveSeq,
+    );
+    assert.equal(
+      lateRelation.observation.observedAt,
+      lateRelationCommit.observedAt,
+    );
+    assert.equal(
+      lateRelation.observation.recordedAt,
+      lateRelationCommit.recordedAt,
+    );
+  }
+
+  const incomingLoop = await readArchiveRelations(client, fromItem.itemId, {
+    direction: "incoming",
+    binId: "rss-main",
+    asOf: firstCommit.archiveSeq,
+    limit: "10",
+  });
+  assert.deepEqual(
+    incomingLoop.relations.map(({ relationId }) => relationId),
+    ["e2e:relation:04-loop-reverse"],
+  );
+  assert.equal(incomingLoop.relations[0]?.from.itemId, toItem.itemId);
+
+  const relationOnlyCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:only-update",
+    binId: "rss-main",
+    observedAt: "2026-10-28T04:20:00.000Z",
+    items: [],
+    relations: [{ relationId: "e2e:relation:01-forward", value: secondState }],
+  });
+  assert.equal(relationOnlyCommit.items.length, 0);
+  assert.equal(relationOnlyCommit.relations[0]?.status, "observed");
+  assert.ok(relationOnlyCommit.relations[0]?.ordinal === 0);
+  const afterRelationOnly = await readArchiveItem(client, fromItem.itemId);
+  assert.equal(afterRelationOnly.views[0]?.revisionId, fromItem.revisionId);
+  assert.equal(afterRelationOnly.revisions.length, 1);
+  assert.equal(afterRelationOnly.observations.length, 1);
+
+  const noRelationChangeCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:omission-does-not-withdraw",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: from,
+        body: { text: "关系来源资料" },
+        capture: {
+          scope: { case: "relation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  assert.equal(noRelationChangeCommit.relations.length, 0);
+  const relationAfterOmission = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    { direction: "outgoing", binId: "rss-main", limit: "10" },
+  );
+  const stillActive = relationAfterOmission.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:01-forward",
+  );
+  assert.equal(stillActive?.status, "observed");
+  if (stillActive?.status === "observed") {
+    assert.equal(stillActive.state.properties?.position, 2);
+    assert.equal(stillActive.state.cascade, false);
+    assert.deepEqual(stillActive.state.properties, secondState.properties);
+  }
+  assert.equal(
+    noRelationChangeCommit.items[0]?.revisionId,
+    fromItem.revisionId,
+  );
+
+  const historicalRelations = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      asOf: firstCommit.archiveSeq,
+      limit: "10",
+    },
+  );
+  const historicalForward = historicalRelations.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:01-forward",
+  );
+  assert.equal(historicalForward?.status, "observed");
+  if (historicalForward?.status === "observed") {
+    assert.equal(historicalForward.state.properties?.position, 1);
+    assert.equal(historicalForward.state.cascade, true);
+    assert.deepEqual(historicalForward.state.properties, firstState.properties);
+  }
+
+  const secondaryObservation = await submitArchive(client, {
+    requestId: "e2e:archive:relation:secondary-observation",
+    binId: "rss-secondary",
+    items: [],
+    relations: [{ relationId: "e2e:relation:01-forward", value: secondState }],
+  });
+  assert.equal(secondaryObservation.items.length, 0);
+  const secondaryRelations = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+  );
+  const secondaryForward = secondaryRelations.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:01-forward",
+  );
+  assert.equal(secondaryForward?.status, "observed");
+  if (secondaryForward?.status === "observed") {
+    assert.equal(secondaryForward.from.status, "unknown");
+    assert.equal(secondaryForward.to.kind, "item");
+    if (secondaryForward.to.kind === "item") {
+      assert.equal(secondaryForward.to.status, "unknown");
+    }
+  }
+  const unknownRelationInSecondary = secondaryRelations.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:03-unknown-target",
+  );
+  assert.equal(unknownRelationInSecondary?.status, "unknown");
+  if (unknownRelationInSecondary?.status === "unknown") {
+    assert.equal(unknownRelationInSecondary.to.kind, "item");
+    if (unknownRelationInSecondary.to.kind === "item") {
+      assert.equal(unknownRelationInSecondary.to.status, "observed");
+    }
+  }
+
+  const [concurrentMain, concurrentSecondary] = await Promise.all([
+    submitArchive(client, {
+      requestId: "e2e:archive:relation:concurrent-main",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "e2e:relation:06-concurrent",
+          value: {
+            from,
+            to: { sourceKey: to },
+            name: "concurrent",
+            properties: { bin: "main" },
+            cascade: false,
+          },
+        },
+      ],
+    }),
+    submitArchive(client, {
+      requestId: "e2e:archive:relation:concurrent-secondary",
+      binId: "rss-secondary",
+      items: [],
+      relations: [
+        {
+          relationId: "e2e:relation:06-concurrent",
+          value: {
+            from,
+            to: { sourceKey: to },
+            name: "concurrent",
+            properties: { bin: "secondary" },
+            cascade: false,
+          },
+        },
+      ],
+    }),
+  ]);
+  assert.equal(concurrentMain.items.length, 0);
+  assert.equal(concurrentSecondary.items.length, 0);
+  const concurrentSequences = [
+    BigInt(concurrentMain.archiveSeq),
+    BigInt(concurrentSecondary.archiveSeq),
+  ].toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  assert.equal(concurrentSequences[1]! - concurrentSequences[0]!, 1n);
+  const [mainRelationsAfterConcurrent, secondaryRelationsAfterConcurrent] =
+    await Promise.all([
+      readArchiveRelations(client, fromItem.itemId, {
+        direction: "outgoing",
+        binId: "rss-main",
+        limit: "100",
+      }),
+      readArchiveRelations(client, fromItem.itemId, {
+        direction: "outgoing",
+        binId: "rss-secondary",
+        limit: "100",
+      }),
+    ]);
+  const mainConcurrentRelation = mainRelationsAfterConcurrent.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:06-concurrent",
+  );
+  const secondaryConcurrentRelation =
+    secondaryRelationsAfterConcurrent.relations.find(
+      ({ relationId }) => relationId === "e2e:relation:06-concurrent",
+    );
+  assert.equal(mainConcurrentRelation?.status, "observed");
+  assert.equal(secondaryConcurrentRelation?.status, "observed");
+  if (
+    mainConcurrentRelation?.status === "observed" &&
+    secondaryConcurrentRelation?.status === "observed"
+  ) {
+    assert.equal(mainConcurrentRelation.state.properties?.bin, "main");
+    assert.equal(
+      secondaryConcurrentRelation.state.properties?.bin,
+      "secondary",
+    );
+  }
+
+  const withdrawalCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation:withdraw-main",
+    binId: "rss-main",
+    items: [],
+    relations: [{ relationId: "e2e:relation:01-forward", value: null }],
+  });
+  assert.equal(withdrawalCommit.relations[0]?.status, "withdrawn");
+  assert.equal(withdrawalCommit.items.length, 0);
+  const afterWithdrawal = await readArchiveRelations(client, fromItem.itemId, {
+    direction: "outgoing",
+    binId: "rss-main",
+    limit: "10",
+  });
+  assert.equal(
+    afterWithdrawal.relations.find(
+      ({ relationId }) => relationId === "e2e:relation:01-forward",
+    )?.status,
+    "withdrawn",
+  );
+  const afterOtherBinWithdrawal = await readArchiveRelations(
+    client,
+    fromItem.itemId,
+    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+  );
+  assert.equal(
+    afterOtherBinWithdrawal.relations.find(
+      ({ relationId }) => relationId === "e2e:relation:01-forward",
+    )?.status,
+    "observed",
+  );
+
+  const changedEndpoint = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:relation:changed-endpoint",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "e2e:relation:01-forward",
+          value: {
+            from,
+            to: { sourceKey: foreignTarget },
+            name: "reply",
+            cascade: false,
+          },
+        },
+      ],
+    },
+  });
+  assert.equal(changedEndpoint.status, 409);
+  if (changedEndpoint.status === 409) {
+    assert.equal(
+      (await changedEndpoint.json()).error.code,
+      "relation_endpoint_conflict",
+    );
+  }
+
+  const beforeInvalidBatch = await readArchiveItem(client, fromItem.itemId);
+  const invalidRelationBatch = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:relation:atomic-invalid",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
+          body: { text: "拒绝整批时不能留下" },
+          capture: {
+            scope: { case: "relation-atomic" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+      relations: [
+        {
+          relationId: "e2e:relation:atomic-invalid",
+          value: {
+            from: { namespace: "e2e-relations", key: "atomic-from" },
+            to: {
+              sourceKey: {
+                namespace: "e2e-relations",
+                key: "not-archived",
+              },
+            },
+            name: "invalid",
+            cascade: false,
+          },
+        },
+      ],
+    },
+  });
+  assert.equal(invalidRelationBatch.status, 400);
+  if (invalidRelationBatch.status === 400) {
+    const error = await invalidRelationBatch.json();
+    assert.equal(error.error.code, "invalid_input");
+    assert.deepEqual(error.error.path, [
+      "relations",
+      0,
+      "value",
+      "to",
+      "sourceKey",
+    ]);
+  }
+  const validRetryAfterRejection = await submitArchive(client, {
+    requestId: "e2e:archive:relation:atomic-invalid",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
+        body: { text: "拒绝整批时不能留下" },
+        capture: {
+          scope: { case: "relation-atomic" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  assert.equal(
+    BigInt(validRetryAfterRejection.archiveSeq),
+    BigInt(beforeInvalidBatch.snapshot.asOf) + 1n,
+  );
+  const rejectedRelationRead = await readArchiveRelations(
+    client,
+    validRetryAfterRejection.items[0]!.itemId,
+    { direction: "outgoing", binId: "rss-main", limit: "10" },
+  );
+  assert.deepEqual(rejectedRelationRead.relations, []);
+
+  const timeline = await readArchiveTimeline(client, fromItem.itemId, {
+    binId: "rss-main",
+    limit: "100",
+  });
+  const initialEvents = timeline.events.filter(
+    (event) => event.archiveSeq === firstCommit.archiveSeq,
+  );
+  assert.deepEqual(
+    initialEvents.map((event) => event.kind),
+    ["item", "relation", "relation", "relation", "relation"],
+  );
+  assert.deepEqual(
+    initialEvents.map((event) => event.ordinal),
+    [0, 2, 3, 4, 5],
+  );
+  const forwardHistory = timeline.events.filter(
+    (event) =>
+      event.kind === "relation" &&
+      event.relationId === "e2e:relation:01-forward",
+  );
+  assert.equal(forwardHistory[0]?.kind, "relation");
+  assert.equal(forwardHistory[1]?.kind, "relation");
+  if (
+    forwardHistory[0]?.kind === "relation" &&
+    forwardHistory[1]?.kind === "relation"
+  ) {
+    assert.equal(forwardHistory[0].observedAt, "2026-10-28T04:20:00.000Z");
+    assert.equal(forwardHistory[1].observedAt, "2026-10-28T04:20:00.000Z");
+    assert.ok(
+      BigInt(forwardHistory[0].archiveSeq) <
+        BigInt(forwardHistory[1].archiveSeq),
+    );
+    assert.equal(forwardHistory[1].archiveSeq, relationOnlyCommit.archiveSeq);
+  }
+  assert.deepEqual(
+    timeline.events.map(
+      ({ archiveSeq, ordinal }) => [archiveSeq, ordinal] as const,
+    ),
+    timeline.events
+      .map(({ archiveSeq, ordinal }) => [archiveSeq, ordinal] as const)
+      .toSorted((left, right) =>
+        BigInt(left[0]!) === BigInt(right[0]!)
+          ? left[1]! - right[1]!
+          : BigInt(left[0]!) < BigInt(right[0]!)
+            ? -1
+            : 1,
+      ),
+  );
+  const commitRead = await readArchiveCommit(
+    client,
+    relationOnlyCommit.commitId,
+  );
+  assert.equal(commitRead.items.length, 0);
+  assert.equal(commitRead.relations[0]?.status, "observed");
+  assert.equal(commitRead.relations[0]?.ordinal, 0);
+  const committedRelationRead = commitRead.relations[0];
+  assert.equal(committedRelationRead?.status, "observed");
+  if (committedRelationRead?.status === "observed") {
+    assert.deepEqual(
+      committedRelationRead.state.properties,
+      secondState.properties,
+    );
+  }
+
+  return {
+    relationItemId: fromItem.itemId,
+    relationCommitId: relationOnlyCommit.commitId,
+    relationAsOf: relationOnlyCommit.archiveSeq,
+  };
+}
+
 async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   const retryItem = {
     sourceKey: { namespace: "e2e", key: "idempotent-retry" },
@@ -559,6 +1281,14 @@ async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   const replayedCommit = await submitArchive(client, retryRequest);
   assert.equal(replayedCommit.commitId, firstRetryCommit.commitId);
   assert.equal(replayedCommit.archiveSeq, firstRetryCommit.archiveSeq);
+  const replayedWithExplicitEmptyRelations = await submitArchive(client, {
+    ...retryRequest,
+    relations: [],
+  });
+  assert.equal(
+    replayedWithExplicitEmptyRelations.commitId,
+    firstRetryCommit.commitId,
+  );
 
   const conflictingRetry = {
     ...retryRequest,
@@ -598,6 +1328,358 @@ async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   assert.equal(retryRead.revisions.length, 1);
 }
 
+async function verifyArchivePrototypeKeys(
+  client: ArchiveClient,
+): Promise<void> {
+  const metadata = Object.fromEntries([
+    ["__proto__", { title: "自有元信息键" }],
+  ] as const);
+  const properties = Object.fromEntries([
+    ["__proto__", { title: "自有属性键" }],
+    [
+      "nested",
+      Object.fromEntries([["__proto__", { title: "嵌套自有键" }]] as const),
+    ],
+  ] as const);
+  const scope = Object.fromEntries([
+    ["__proto__", { title: "自有范围键" }],
+  ] as const);
+  const details = Object.fromEntries([
+    ["__proto__", { title: "自有诊断键" }],
+  ] as const);
+  const state = {
+    sourceKey: { namespace: "e2e", key: "prototype-json" },
+    metadata,
+    properties,
+    body: { text: "保留自有 JSON 键" },
+    capture: {
+      scope,
+      completeness: "complete" as const,
+      missing: [],
+    },
+    diagnostics: [
+      { code: "prototype_json", message: "保留诊断 JSON 键", details },
+    ],
+  };
+  const firstRequest = {
+    requestId: "e2e:archive:prototype-json:first",
+    binId: "rss-main",
+    items: [state],
+  };
+  const first = await submitArchive(client, firstRequest);
+  const itemId = first.items[0]?.itemId;
+  const revisionId = first.items[0]?.revisionId;
+  assert.ok(itemId);
+  assert.ok(revisionId);
+
+  const persisted = await readArchiveItem(client, itemId);
+  assert.deepEqual(persisted.views[0]?.state.metadata, metadata);
+  assert.deepEqual(persisted.views[0]?.state.properties, properties);
+  assert.deepEqual(persisted.views[0]?.state.capture.scope, scope);
+  assert.deepEqual(persisted.views[0]?.diagnostics?.[0]?.details, details);
+
+  const freshSameState = await submitArchive(client, {
+    ...firstRequest,
+    requestId: "e2e:archive:prototype-json:same-state",
+  });
+  assert.equal(freshSameState.items[0]?.revisionId, revisionId);
+  const observedAgain = await readArchiveItem(client, itemId);
+  assert.equal(observedAgain.observations.length, 2);
+  assert.equal(observedAgain.revisions.length, 1);
+
+  const firstConflictRequest = {
+    requestId: "e2e:archive:prototype-json:conflict",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "prototype-json-conflict" },
+        properties: Object.fromEntries([["__proto__", { value: 1 }]] as const),
+        body: { text: "幂等键冲突负例" },
+        capture: {
+          scope: { case: "prototype-conflict" },
+          completeness: "complete" as const,
+          missing: [],
+        },
+      },
+    ],
+  };
+  await submitArchive(client, firstConflictRequest);
+  const firstConflictItem = firstConflictRequest.items[0];
+  assert.ok(firstConflictItem);
+  const changedOwnKey = Object.fromEntries([
+    ["__proto__", { value: 2 }],
+  ] as const);
+  const conflictingResponse = await client.archives.$post({
+    json: {
+      ...firstConflictRequest,
+      items: [{ ...firstConflictItem, properties: changedOwnKey }],
+    },
+  });
+  if (conflictingResponse.status !== 409) {
+    throw new Error(
+      "自有 __proto__ 属性变化必须触发幂等冲突：" +
+        (await conflictingResponse.text()),
+    );
+  }
+  assert.equal(
+    (await conflictingResponse.json()).error.code,
+    "archive_request_conflict",
+  );
+}
+
+async function expectUnsupportedPostgresText(
+  response: Response,
+  path: readonly (string | number)[],
+  label: string,
+): Promise<void> {
+  if (response.status !== 400) {
+    throw new Error(label + " 应返回结构化 400：" + (await response.text()));
+  }
+  const body = archiveErrorSchema.parse(await response.json());
+  assert.equal(body.error.code, "invalid_input");
+  assert.equal(
+    body.error.message,
+    "文本不能包含空字符或未配对的 Unicode 代理项。",
+  );
+  assert.deepEqual(body.error.path, path);
+}
+
+async function verifyPersistableTextBoundary(
+  client: ArchiveClient,
+): Promise<void> {
+  const invalidArchiveBody = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:postgres-text-nul",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "postgres-text-nul" },
+          body: { text: "a\u0000b" },
+          capture: {
+            scope: {},
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidArchiveBody,
+    ["items", 0, "body", "text"],
+    "含空字符的归档正文",
+  );
+
+  const invalidArchiveKey = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:postgres-text-key-nul",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "postgres-text-key-nul" },
+          properties: { ["bad\u0000key"]: "value" },
+          body: { text: "正常中文正文🌿" },
+          capture: {
+            scope: {},
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidArchiveKey,
+    ["items", 0, "properties", "bad\u0000key"],
+    "键中含空字符的归档属性",
+  );
+
+  const collector = {
+    id: "text-boundary",
+    version: "1.0.0",
+    configSchema: { type: "object" },
+    actions: {
+      collect: {
+        description: "采集验证资料",
+        params: { type: "object" },
+      },
+    },
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+  };
+  const binInput = {
+    id: "e2e-text-boundary-invalid",
+    collector,
+    identityId: "text-boundary",
+    config: { value: "正常中文🌿" },
+    targets: [{ value: "正常中文🌿" }],
+  };
+  const invalidBins: {
+    readonly label: string;
+    readonly input: BinCreateRequest;
+    readonly path: readonly (string | number)[];
+  }[] = [
+    {
+      label: "身份标识中的空字符",
+      input: { ...binInput, identityId: "a\u0000b" },
+      path: ["identityId"],
+    },
+    {
+      label: "身份标识中的未配对代理项",
+      input: { ...binInput, identityId: "a\ud800b" },
+      path: ["identityId"],
+    },
+    {
+      label: "配置字符串中的空字符",
+      input: { ...binInput, config: { value: "a\u0000b" } },
+      path: ["config", "value"],
+    },
+    {
+      label: "配置字符串中的未配对代理项",
+      input: { ...binInput, config: { value: "a\ud800b" } },
+      path: ["config", "value"],
+    },
+    {
+      label: "配置键中的空字符",
+      input: {
+        ...binInput,
+        config: { ["bad\u0000key"]: "value" },
+      },
+      path: ["config", "bad\u0000key"],
+    },
+    {
+      label: "目标中的空字符",
+      input: { ...binInput, targets: [{ value: "a\u0000b" }] },
+      path: ["targets", 0, "value"],
+    },
+    {
+      label: "采集器版本中的空字符",
+      input: {
+        ...binInput,
+        collector: { ...collector, version: "a\u0000b" },
+      },
+      path: ["collector", "version"],
+    },
+    {
+      label: "采集器 JSON Schema 中的空字符",
+      input: {
+        ...binInput,
+        collector: {
+          ...collector,
+          configSchema: { type: "object", description: "a\u0000b" },
+        },
+      },
+      path: ["collector", "configSchema", "description"],
+    },
+  ];
+
+  for (const testCase of invalidBins) {
+    const response = await client.bins.$post({ json: testCase.input });
+    await expectUnsupportedPostgresText(
+      response,
+      testCase.path,
+      testCase.label,
+    );
+  }
+
+  const validBinInput = {
+    ...binInput,
+    id: "e2e-text-boundary-" + process.pid.toString(10),
+    collector: { ...collector, version: "版本 1.0 🌿" },
+    identityId: "身份🌿",
+    config: { value: "配置🌿" },
+    targets: [{ value: "目标🌿" }],
+  };
+  const validBinResponse = await client.bins.$post({ json: validBinInput });
+  if (validBinResponse.status !== 201) {
+    throw new Error(
+      "合法中文和 emoji 应能持久化：" + (await validBinResponse.text()),
+    );
+  }
+  const validBin = await validBinResponse.json();
+  assert.equal(validBin.identityId, validBinInput.identityId);
+  assert.equal(validBin.collector.version, validBinInput.collector.version);
+  assert.deepEqual(validBin.config, validBinInput.config);
+  assert.deepEqual(validBin.targets, validBinInput.targets);
+  const removed = await client.bins[":binId"].$delete({
+    param: { binId: validBinInput.id },
+  });
+  assert.equal(removed.status, 200);
+
+  const validArchive = await submitArchive(client, {
+    requestId: "e2e:archive:postgres-text-valid",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "postgres-text-valid" },
+        body: { text: "合法中文和 emoji 🌿" },
+        capture: {
+          scope: { language: "中文🌿" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const validArchiveItemId = validArchive.items[0]?.itemId;
+  assert.ok(validArchiveItemId);
+  const validArchiveItem = await readArchiveItem(client, validArchiveItemId);
+  assert.equal(
+    validArchiveItem.views[0]?.state.body?.text,
+    "合法中文和 emoji 🌿",
+  );
+  assert.deepEqual(validArchiveItem.views[0]?.state.capture.scope, {
+    language: "中文🌿",
+  });
+
+  const validRelationSource = {
+    namespace: "e2e",
+    key: "postgres-text-valid",
+  };
+  const relationValue = {
+    from: validRelationSource,
+    to: { sourceKey: validRelationSource },
+    name: "related",
+    cascade: false,
+  };
+  const invalidRelationId = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:relation-postgres-text-nul-id",
+      binId: "rss-main",
+      items: [],
+      relations: [{ relationId: "relation\u0000id", value: relationValue }],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidRelationId,
+    ["relations", 0, "relationId"],
+    "关系标识中的空字符",
+  );
+
+  const invalidRelationProperties = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:relation-postgres-text-surrogate-key",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "e2e:relation:postgres-text-surrogate-key",
+          value: {
+            ...relationValue,
+            properties: { ["bad\ud800key"]: "value" },
+          },
+        },
+      ],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidRelationProperties,
+    ["relations", 0, "value", "properties", "bad\ud800key"],
+    "关系属性键中的未配对代理项",
+  );
+}
+
 async function verifyArchiveABA(
   client: ArchiveClient,
 ): Promise<
@@ -618,7 +1700,7 @@ async function verifyArchiveABA(
     sourceModifiedAt: "2026-10-28T12:00:00+08:00",
     metadata: { title: "状态 A", authors: ["writer"] },
     properties: { counts: { replies: 2, stars: 4 }, tags: ["a", "b"] },
-    body: { markdown: "正文 A", searchText: "正文 A" },
+    body: { markdown: "正文 A🌿", searchText: "正文 A🌿" },
     capture: {
       scope: { source: "e2e", topic: "42" },
       completeness: "complete" as const,
@@ -702,7 +1784,7 @@ async function verifyArchiveABA(
       abaThirdItem.revisionId,
     ],
   );
-  assert.equal(abaRead.views[0]?.state.body?.markdown, "正文 A");
+  assert.equal(abaRead.views[0]?.state.body?.markdown, "正文 A🌿");
   assert.equal(abaRead.views[0]?.diagnostics?.[0]?.message, "诊断已变化");
   assert.equal(abaRead.views[0]?.observedAt, "2026-10-28T04:03:00.000Z");
 
@@ -743,26 +1825,41 @@ async function verifyArchiveABA(
     mode: "asOf",
   });
   assert.deepEqual(
-    historicalTimeline.observations.map(({ revisionId }) => revisionId),
+    historicalTimeline.events
+      .filter((event) => event.kind === "item")
+      .map(({ revisionId }) => revisionId),
     [abaFirstItem.revisionId, abaSecondItem.revisionId],
   );
-  assert.equal(historicalTimeline.observations[0]?.commitId, abaFirst.commitId);
-  assert.equal(historicalTimeline.observations[0]?.binId, "rss-main");
-  assert.equal(historicalTimeline.observations[0]?.runId, "run-a1");
+  const firstHistoricalItemEvent = historicalTimeline.events.find(
+    (event) => event.kind === "item",
+  );
+  assert.ok(firstHistoricalItemEvent);
+  if (firstHistoricalItemEvent?.kind === "item") {
+    assert.equal(firstHistoricalItemEvent.commitId, abaFirst.commitId);
+    assert.equal(firstHistoricalItemEvent.binId, "rss-main");
+    assert.equal(firstHistoricalItemEvent.runId, "run-a1");
+  }
   assert.equal(
-    historicalTimeline.observations[0]?.collectorVersion,
+    firstHistoricalItemEvent?.kind === "item"
+      ? firstHistoricalItemEvent.collectorVersion
+      : undefined,
     "rss@1.0.0",
   );
   assert.equal(
-    historicalTimeline.observations[0]?.sourceModifiedAt,
+    firstHistoricalItemEvent?.kind === "item"
+      ? firstHistoricalItemEvent.sourceModifiedAt
+      : undefined,
     "2026-10-28T04:00:00.000Z",
   );
   assert.equal(
-    historicalTimeline.observations[0]?.observedAt,
+    firstHistoricalItemEvent?.kind === "item"
+      ? firstHistoricalItemEvent.observedAt
+      : undefined,
     "2026-10-28T04:01:00.000Z",
   );
   assert.equal(
-    historicalTimeline.observations[1]?.observedAt,
+    historicalTimeline.events.filter((event) => event.kind === "item")[1]
+      ?.observedAt,
     "2026-10-28T04:01:00.000Z",
   );
 
@@ -774,7 +1871,9 @@ async function verifyArchiveABA(
   assert.equal(firstTimelinePage.snapshot.mode, "current");
   assert.equal(firstTimelinePage.snapshot.asOf, abaThird.archiveSeq);
   assert.equal(
-    firstTimelinePage.observations[0]?.revisionId,
+    firstTimelinePage.events[0]?.kind === "item"
+      ? firstTimelinePage.events[0].revisionId
+      : undefined,
     abaFirstItem.revisionId,
   );
   assert.ok(firstTimelinePage.nextCursor);
@@ -797,7 +1896,9 @@ async function verifyArchiveABA(
     mode: "asOf",
   });
   assert.equal(
-    secondTimelinePage.observations[0]?.revisionId,
+    secondTimelinePage.events[0]?.kind === "item"
+      ? secondTimelinePage.events[0].revisionId
+      : undefined,
     abaSecondItem.revisionId,
   );
   assert.ok(secondTimelinePage.nextCursor);
@@ -809,7 +1910,9 @@ async function verifyArchiveABA(
   );
   assert.deepEqual(thirdTimelinePage.snapshot, secondTimelinePage.snapshot);
   assert.equal(
-    thirdTimelinePage.observations[0]?.revisionId,
+    thirdTimelinePage.events[0]?.kind === "item"
+      ? thirdTimelinePage.events[0].revisionId
+      : undefined,
     abaThirdItem.revisionId,
   );
   assert.equal(thirdTimelinePage.nextCursor, undefined);
@@ -820,7 +1923,9 @@ async function verifyArchiveABA(
     { binId: "rss-main", limit: "10" },
   );
   assert.deepEqual(
-    currentTimeline.observations.map(({ archiveSeq }) => archiveSeq),
+    currentTimeline.events
+      .filter((event) => event.kind === "item")
+      .map(({ archiveSeq }) => archiveSeq),
     [
       abaFirst.archiveSeq,
       abaSecond.archiveSeq,
@@ -829,11 +1934,13 @@ async function verifyArchiveABA(
     ],
   );
   assert.equal(
-    currentTimeline.observations[3]?.sourceModifiedAt,
+    currentTimeline.events.filter((event) => event.kind === "item")[3]
+      ?.sourceModifiedAt,
     "2026-10-28T04:00:00.000Z",
   );
   assert.equal(
-    currentTimeline.observations[3]?.observedAt,
+    currentTimeline.events.filter((event) => event.kind === "item")[3]
+      ?.observedAt,
     "2026-10-28T03:59:00.000Z",
   );
   assert.equal(lateCommit.items[0]?.revisionId, abaFirstItem.revisionId);
@@ -842,7 +1949,9 @@ async function verifyArchiveABA(
   assert.equal(firstCommitRead.collectorVersion, "rss@1.0.0");
   assert.equal(firstCommitRead.items[0]?.itemId, abaFirstItem.itemId);
   assert.equal(
-    historicalTimeline.observations[0]?.recordedAt,
+    firstHistoricalItemEvent?.kind === "item"
+      ? firstHistoricalItemEvent.recordedAt
+      : undefined,
     firstCommitRead.recordedAt,
   );
   const lateCommitRead = await readArchiveCommit(client, lateCommit.commitId);
@@ -876,7 +1985,7 @@ async function verifyArchiveABA(
   const abaRevision = await abaRevisionResponse.json();
   assert.equal(abaRevision.state.sourceModifiedAt, "2026-10-28T04:00:00.000Z");
   assert.equal(abaRevision.state.metadata?.title, "状态 A");
-  assert.equal(abaRevision.state.body?.markdown, "正文 A");
+  assert.equal(abaRevision.state.body?.markdown, "正文 A🌿");
 
   return {
     itemId: abaThirdItem.itemId,
@@ -1072,6 +2181,7 @@ async function verifySearchRoute(
   historicalAsOf: string,
 ): Promise<void> {
   const client = createApiClient(baseUrl);
+  const searchSchemas = compilePublishedSearchSchemas();
   const unicodeCommit = await submitArchive(client, {
     requestId: "e2e:archive:search-unicode",
     binId: "rss-main",
@@ -1094,17 +2204,20 @@ async function verifySearchRoute(
   });
   const unicodeItem = unicodeCommit.items[0];
   assert.ok(unicodeItem);
-  const response = await client.archives.search.$post({
-    json: {
-      scope: { kind: "current", binId: "rss-main" },
-      text: { kind: "literal", value: "正文 A" },
-      limit: 10,
-    },
-  });
+  const query = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    text: { kind: "literal" as const, value: "正文 A" },
+    limit: 10,
+  };
+  assert.equal(searchSchemas.apiInput(query), true);
+  assert.equal(searchSchemas.standardInput(query), true);
+  const response = await client.archives.search.$post({ json: query });
   if (response.status !== 200) {
     throw new Error("公开正文搜索失败：" + (await response.text()));
   }
   const page = await response.json();
+  assert.equal(searchSchemas.apiOutput(page), true);
+  assert.equal(searchSchemas.standardOutput(page), true);
   assert.equal(page.unit, "item");
   assert.equal(page.snapshot.mode, "current");
   assert.equal(page.results.length, 1);
@@ -1113,15 +2226,17 @@ async function verifySearchRoute(
   assert.equal(result.itemId, itemId);
   assert.equal(result.matches[0]?.revisionId, revisionId);
   assert.equal(result.matches[0]?.binId, "rss-main");
-  assert.deepEqual(result.matches[0]?.hit.position, {
+  assert.equal(result.matches[0]?.sourceRef, "https://example.test/aba-item");
+  assert.equal(result.matches[0]?.completeness, "complete");
+  assert.deepEqual(result.matches[0]?.hit?.position, {
     encoding: "unicode-code-point",
     start: 0,
     end: 4,
   });
-  assert.deepEqual(result.matches[0]?.hit.context, {
+  assert.deepEqual(result.matches[0]?.hit?.context, {
     start: 0,
-    end: 4,
-    text: "正文 A",
+    end: 5,
+    text: "正文 A🌿",
   });
 
   const regexResponse = await client.archives.search.$post({
@@ -1137,7 +2252,7 @@ async function verifySearchRoute(
   const regexPage = await regexResponse.json();
   assert.equal(regexPage.results.length, 1);
   assert.equal(regexPage.results[0]?.itemId, itemId);
-  assert.deepEqual(regexPage.results[0]?.matches[0]?.hit.position, {
+  assert.deepEqual(regexPage.results[0]?.matches[0]?.hit?.position, {
     encoding: "unicode-code-point",
     start: 3,
     end: 4,
@@ -1156,12 +2271,12 @@ async function verifySearchRoute(
   const unicodePage = await unicodeSearch.json();
   assert.equal(unicodePage.results.length, 1);
   assert.equal(unicodePage.results[0]?.itemId, unicodeItem.itemId);
-  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit.position, {
+  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit?.position, {
     encoding: "unicode-code-point",
     start: 4,
     end: 6,
   });
-  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit.context, {
+  assert.deepEqual(unicodePage.results[0]?.matches[0]?.hit?.context, {
     start: 0,
     end: 7,
     text: "前🙂中文短串后",
@@ -1221,6 +2336,15 @@ async function verifySearchRoute(
   if (composedFilter.status !== 200) {
     throw new Error("组合字段过滤失败：" + (await composedFilter.text()));
   }
+  assert.equal(
+    searchSchemas.standardFilter({
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "search-unicode",
+    }),
+    true,
+  );
   const composedPage = (await composedFilter.json()) as typeof unicodePage;
   assert.equal(composedPage.results.length, 1);
   assert.equal(composedPage.results[0]?.itemId, unicodeItem.itemId);
@@ -1264,6 +2388,57 @@ async function verifySearchRoute(
   assert.notEqual(
     historicalPage.results[0]?.matches[0]?.revisionId,
     revisionId,
+  );
+
+  const revisionHistory = await client.archives.search.$post({
+    json: {
+      scope: {
+        kind: "revisions",
+        binId: "rss-main",
+        asOf: historicalAsOf,
+      },
+      text: { kind: "literal", value: "正文 B" },
+      limit: 10,
+    },
+  });
+  if (revisionHistory.status !== 200) {
+    throw new Error("历史版本正文搜索失败：" + (await revisionHistory.text()));
+  }
+  const revisionHistoryPage = await revisionHistory.json();
+  assert.equal(revisionHistoryPage.unit, "revision");
+  assert.equal(
+    revisionHistoryPage.results.find(
+      ({ itemId: matchedId }) => matchedId === itemId,
+    )?.revisionId,
+    historicalPage.results[0]?.matches[0]?.revisionId,
+  );
+
+  const observationHistory = await client.archives.search.$post({
+    json: {
+      scope: {
+        kind: "observations",
+        binId: "rss-main",
+        asOf: historicalAsOf,
+      },
+      text: { kind: "literal", value: "正文 B" },
+      limit: 10,
+    },
+  });
+  if (observationHistory.status !== 200) {
+    throw new Error(
+      "观察历史正文搜索失败：" + (await observationHistory.text()),
+    );
+  }
+  const observationHistoryPage = await observationHistory.json();
+  assert.equal(observationHistoryPage.unit, "observation");
+  const historicalObservation = observationHistoryPage.results.find(
+    ({ itemId: matchedId }) => matchedId === itemId,
+  );
+  assert.ok(historicalObservation?.commitId);
+  assert.equal(historicalObservation?.ordinal, 0);
+  assert.equal(
+    historicalObservation?.matches[0]?.revisionId,
+    historicalPage.results[0]?.matches[0]?.revisionId,
   );
 
   const invalidRegex = await client.archives.search.$post({
@@ -1357,6 +2532,118 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     ["rss-main"],
   );
 
+  const asOfAcrossBins = await client.archives.search.$post({
+    json: {
+      scope: { kind: "asOf", asOf: secondary.archiveSeq },
+      text: { kind: "literal", value: "分视图文字" },
+      limit: 10,
+    },
+  });
+  if (asOfAcrossBins.status !== 200) {
+    throw new Error("未选来源的历史搜索失败：" + (await asOfAcrossBins.text()));
+  }
+  const asOfAcrossBinsPage = await asOfAcrossBins.json();
+  assert.equal(asOfAcrossBinsPage.unit, "item");
+  assert.equal(asOfAcrossBinsPage.snapshot.asOf, secondary.archiveSeq);
+  assert.equal(asOfAcrossBinsPage.results.length, 1);
+  assert.equal(asOfAcrossBinsPage.results[0]?.itemId, primary.items[0]?.itemId);
+  assert.deepEqual(
+    asOfAcrossBinsPage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-main"],
+  );
+
+  const fieldOnlySearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: "search-cross-view",
+      },
+      limit: 10,
+    },
+  });
+  if (fieldOnlySearch.status !== 200) {
+    throw new Error("纯字段搜索失败：" + (await fieldOnlySearch.text()));
+  }
+  const fieldOnlyPage = await fieldOnlySearch.json();
+  assert.equal(fieldOnlyPage.results.length, 1);
+  assert.equal(fieldOnlyPage.results[0]?.itemId, primary.items[0]?.itemId);
+  assert.equal(fieldOnlyPage.results[0]?.matches[0]?.hit, undefined);
+
+  const nestedOrSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      where: {
+        type: "or",
+        conditions: [
+          {
+            type: "field",
+            field: "runId",
+            operator: "eq",
+            value: "search-view-right",
+          },
+          {
+            type: "text",
+            text: { kind: "literal", value: "分视图文字" },
+          },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  if (nestedOrSearch.status !== 200) {
+    throw new Error("嵌套 OR 正文搜索失败：" + (await nestedOrSearch.text()));
+  }
+  const nestedOrPage = await nestedOrSearch.json();
+  const nestedOrResult = nestedOrPage.results.find(
+    ({ itemId }) => itemId === primary.items[0]?.itemId,
+  );
+  assert.ok(nestedOrResult);
+  assert.deepEqual(
+    nestedOrResult.matches.map(({ binId }) => binId),
+    ["rss-main", "rss-secondary"],
+  );
+  assert.ok(nestedOrResult.matches[0]?.hit);
+  assert.equal(nestedOrResult.matches[1]?.hit, undefined);
+
+  const nestedNotSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "eq",
+            value: "search-cross-view",
+          },
+          {
+            type: "not",
+            condition: {
+              type: "text",
+              text: { kind: "literal", value: "分视图文字" },
+            },
+          },
+        ],
+      },
+      limit: 10,
+    },
+  });
+  if (nestedNotSearch.status !== 200) {
+    throw new Error("嵌套 NOT 正文搜索失败：" + (await nestedNotSearch.text()));
+  }
+  const nestedNotPage = await nestedNotSearch.json();
+  assert.equal(nestedNotPage.results.length, 1);
+  assert.equal(nestedNotPage.results[0]?.itemId, primary.items[0]?.itemId);
+  assert.deepEqual(
+    nestedNotPage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-secondary"],
+  );
+  assert.equal(nestedNotPage.results[0]?.matches[0]?.hit, undefined);
+
   const sharedKey = { namespace: "e2e", key: "search-shared-revision" };
   const sharedState = {
     sourceKey: sharedKey,
@@ -1400,6 +2687,162 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     sharedPage.results[0]?.matches.map(({ binId }) => binId),
     ["rss-main", "rss-secondary"],
   );
+
+  const sharedRevisionHistory = await client.archives.search.$post({
+    json: {
+      scope: { kind: "revisions" },
+      text: { kind: "literal", value: "相同正文跨两个来源" },
+      limit: 10,
+    },
+  });
+  if (sharedRevisionHistory.status !== 200) {
+    throw new Error(
+      "共享版本历史搜索失败：" + (await sharedRevisionHistory.text()),
+    );
+  }
+  const sharedRevisionPage = await sharedRevisionHistory.json();
+  assert.equal(sharedRevisionPage.unit, "revision");
+  assert.equal(sharedRevisionPage.results.length, 1);
+  assert.equal(
+    sharedRevisionPage.results[0]?.revisionId,
+    sharedMain.items[0]?.revisionId,
+  );
+  assert.deepEqual(
+    sharedRevisionPage.results[0]?.matches.map(({ binId }) => binId),
+    ["rss-main", "rss-secondary"],
+  );
+
+  const sharedObservationHistory = await client.archives.search.$post({
+    json: {
+      scope: { kind: "observations" },
+      text: { kind: "literal", value: "相同正文跨两个来源" },
+      limit: 1,
+    },
+  });
+  if (sharedObservationHistory.status !== 200) {
+    throw new Error(
+      "共享来源观察搜索失败：" + (await sharedObservationHistory.text()),
+    );
+  }
+  const sharedObservationPage = await sharedObservationHistory.json();
+  assert.equal(sharedObservationPage.unit, "observation");
+  assert.equal(sharedObservationPage.results.length, 1);
+  assert.ok(sharedObservationPage.nextCursor);
+  const sharedObservationSecondPageResponse =
+    await client.archives.search.$post({
+      json: {
+        scope: { kind: "observations" },
+        text: { kind: "literal", value: "相同正文跨两个来源" },
+        limit: 1,
+        cursor: sharedObservationPage.nextCursor,
+      },
+    });
+  if (sharedObservationSecondPageResponse.status !== 200) {
+    throw new Error(
+      "观察搜索游标续页失败：" +
+        (await sharedObservationSecondPageResponse.text()),
+    );
+  }
+  const sharedObservationSecondPage =
+    await sharedObservationSecondPageResponse.json();
+  assert.equal(sharedObservationSecondPage.results.length, 1);
+  assert.equal(sharedObservationSecondPage.nextCursor, undefined);
+  assert.equal(
+    sharedObservationSecondPage.snapshot.asOf,
+    sharedObservationPage.snapshot.asOf,
+  );
+  assert.deepEqual(
+    [...sharedObservationPage.results, ...sharedObservationSecondPage.results]
+      .map(({ matches }) => matches[0]?.binId)
+      .toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
+    ["rss-main", "rss-secondary"],
+  );
+
+  const complete = await submitArchive(client, {
+    requestId: "e2e:archive:search-latest-partial:complete",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-latest-partial" },
+        body: { searchText: "旧完整版本onlyneedle" },
+        capture: {
+          scope: { case: "search-partial" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const partial = await submitArchive(client, {
+    requestId: "e2e:archive:search-latest-partial:partial",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-latest-partial" },
+        body: { searchText: "最新部分版本onlyneedle" },
+        capture: {
+          scope: { case: "search-partial" },
+          completeness: "partial",
+          missing: [{ path: "attachments", reason: "本次未能下载附件。" }],
+        },
+      },
+    ],
+  });
+  const stalePartialSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "旧完整版本onlyneedle" },
+      limit: 10,
+    },
+  });
+  assert.equal(stalePartialSearch.status, 200);
+  if (stalePartialSearch.status !== 200) return;
+  assert.deepEqual((await stalePartialSearch.json()).results, []);
+  const currentPartialSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      text: { kind: "literal", value: "最新部分版本onlyneedle" },
+      limit: 10,
+    },
+  });
+  if (currentPartialSearch.status !== 200) {
+    throw new Error(
+      "最新部分版本搜索失败：" + (await currentPartialSearch.text()),
+    );
+  }
+  const currentPartialPage = await currentPartialSearch.json();
+  assert.equal(currentPartialPage.results.length, 1);
+  assert.equal(
+    currentPartialPage.results[0]?.itemId,
+    complete.items[0]?.itemId,
+  );
+  assert.equal(
+    currentPartialPage.results[0]?.matches[0]?.revisionId,
+    partial.items[0]?.revisionId,
+  );
+  const oldPartialSnapshotSearch = await client.archives.search.$post({
+    json: {
+      scope: {
+        kind: "asOf",
+        binId: "rss-main",
+        asOf: complete.archiveSeq,
+      },
+      text: { kind: "literal", value: "旧完整版本onlyneedle" },
+      limit: 10,
+    },
+  });
+  if (oldPartialSnapshotSearch.status !== 200) {
+    throw new Error(
+      "部分版本前的显式截点搜索失败：" +
+        (await oldPartialSnapshotSearch.text()),
+    );
+  }
+  const oldPartialSnapshotPage = await oldPartialSnapshotSearch.json();
+  assert.equal(oldPartialSnapshotPage.results.length, 1);
+  assert.equal(
+    oldPartialSnapshotPage.results[0]?.matches[0]?.revisionId,
+    complete.items[0]?.revisionId,
+  );
 }
 
 async function verifySearchPagination(baseUrl: string): Promise<void> {
@@ -1411,6 +2854,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-a" },
+        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -1427,6 +2871,22 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-b" },
+        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
+        body: { searchText: "稳定分页唯一needle" },
+        capture: {
+          scope: { case: "search-page" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const pageNullTime = await submitArchive(client, {
+    requestId: "e2e:archive:search-page-null-time",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-page-null-time" },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -1441,7 +2901,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     text: { kind: "literal" as const, value: "稳定分页唯一needle" },
     select: ["runId" as const],
     orderBy: [
-      { field: "sourceKey.namespace" as const, direction: "asc" as const },
+      { field: "sourceModifiedAt" as const, direction: "asc" as const },
       { field: "sourceKey.key" as const, direction: "asc" as const },
     ],
     limit: 1,
@@ -1457,7 +2917,9 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   assert.equal(firstPage.results[0]?.itemId, pageA.items[0]?.itemId);
   assert.equal(firstPage.results[0]?.sourceKey, undefined);
   assert.equal(firstPage.results[0]?.matches[0]?.runId, "search-page-run");
-  assert.equal(firstPage.results[0]?.matches[0]?.hit.context, undefined);
+  assert.equal(firstPage.results[0]?.matches[0]?.sourceRef, undefined);
+  assert.equal(firstPage.results[0]?.matches[0]?.completeness, undefined);
+  assert.equal(firstPage.results[0]?.matches[0]?.hit?.context, undefined);
   assert.ok(firstPage.nextCursor);
 
   await submitArchive(client, {
@@ -1466,6 +2928,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-c" },
+        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -1484,8 +2947,20 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   const secondPage = await secondResponse.json();
   assert.equal(secondPage.results.length, 1);
   assert.equal(secondPage.results[0]?.itemId, pageB.items[0]?.itemId);
-  assert.equal(secondPage.nextCursor, undefined);
+  assert.ok(secondPage.nextCursor);
   assert.equal(secondPage.snapshot.asOf, firstPage.snapshot.asOf);
+
+  const thirdResponse = await client.archives.search.$post({
+    json: { ...baseQuery, cursor: secondPage.nextCursor },
+  });
+  if (thirdResponse.status !== 200) {
+    throw new Error("搜索 null 排序页失败：" + (await thirdResponse.text()));
+  }
+  const thirdPage = await thirdResponse.json();
+  assert.equal(thirdPage.results.length, 1);
+  assert.equal(thirdPage.results[0]?.itemId, pageNullTime.items[0]?.itemId);
+  assert.equal(thirdPage.nextCursor, undefined);
+  assert.equal(thirdPage.snapshot.asOf, firstPage.snapshot.asOf);
 
   const mismatchedCursor = await client.archives.search.$post({
     json: {
@@ -1495,13 +2970,43 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     },
   });
   assert.equal(mismatchedCursor.status, 400);
+
+  await submitArchive(client, {
+    requestId: "e2e:archive:search-wide-regex-budget",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "search-wide-regex-budget" },
+        body: { searchText: "a".repeat(250_000) },
+        capture: {
+          scope: { case: "search-budget" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const overBudget = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current" },
+      text: { kind: "regex", pattern: ".*" },
+      budgetMs: 1,
+      limit: 10,
+    },
+  });
+  assert.equal(overBudget.status, 422);
+  if (overBudget.status !== 422) return;
+  assert.equal((await overBudget.json()).error.code, "query_budget_exceeded");
 }
 
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   const client = createApiClient(baseUrl);
   await verifyArchiveAtomicity(client);
+  const relations = await verifyArchiveRelations(client);
   const resources = await verifyArchiveResourceHttp(client);
   await verifyArchiveIdempotency(client);
+  await verifyArchivePrototypeKeys(client);
+  await verifyPersistableTextBoundary(client);
   const aba = await verifyArchiveABA(client);
   await verifySearchRoute(
     baseUrl,
@@ -1515,6 +3020,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifyArchiveReadErrors(client, aba.itemId);
   return {
     ...aba,
+    ...relations,
     resourceItemId: resources.itemId,
     resourceRevisionId: resources.revisionId,
     resourceId: resources.resourceId,
@@ -1541,7 +3047,7 @@ async function verifyArchivePersistence(
     persistedArchive.views.map(({ binId }) => binId),
     ["rss-main"],
   );
-  assert.equal(persistedArchive.views[0]?.state.body?.markdown, "正文 A");
+  assert.equal(persistedArchive.views[0]?.state.body?.markdown, "正文 A🌿");
 
   const revisionResponse = await client.archives.revisions[":revisionId"].$get({
     param: { revisionId: archive.revisionId },
@@ -1552,7 +3058,7 @@ async function verifyArchivePersistence(
     );
   }
   const persistedRevision = await revisionResponse.json();
-  assert.equal(persistedRevision.state.body?.markdown, "正文 A");
+  assert.equal(persistedRevision.state.body?.markdown, "正文 A🌿");
 
   const resourceItem = await readArchiveItem(client, archive.resourceItemId);
   assert.equal(resourceItem.views[0]?.state.capture.completeness, "complete");
@@ -1666,6 +3172,62 @@ async function verifyArchivePersistence(
     limit: "1",
   });
   const commit = await readArchiveCommit(client, archive.commitId);
+  const relationCommit = await readArchiveCommit(
+    client,
+    archive.relationCommitId,
+  );
+  const relationPage = await readArchiveRelations(
+    client,
+    archive.relationItemId,
+    {
+      direction: "outgoing",
+      binId: "rss-main",
+      asOf: archive.relationAsOf,
+      limit: "10",
+    },
+  );
+  const relationTimelinePage = await readArchiveTimeline(
+    client,
+    archive.relationItemId,
+    {
+      binId: "rss-main",
+      asOf: archive.relationAsOf,
+      limit: "100",
+    },
+  );
+  const restoredRelation = relationPage.relations.find(
+    ({ relationId }) => relationId === "e2e:relation:01-forward",
+  );
+  assert.equal(restoredRelation?.status, "observed");
+  if (restoredRelation?.status === "observed") {
+    assert.deepEqual(
+      restoredRelation.state.properties,
+      Object.fromEntries([
+        ["__proto__", { label: "更新关系中文 emoji 🌿" }],
+        ["position", 2],
+      ] as const),
+    );
+  }
+  const restoredRelationEvent = relationTimelinePage.events
+    .filter(
+      (event) =>
+        event.kind === "relation" &&
+        event.relationId === "e2e:relation:01-forward",
+    )
+    .at(-1);
+  assert.equal(restoredRelationEvent?.kind, "relation");
+  if (restoredRelationEvent?.kind === "relation") {
+    assert.equal(restoredRelationEvent.status, "observed");
+    if (restoredRelationEvent.status === "observed") {
+      assert.deepEqual(
+        restoredRelationEvent.state.properties,
+        Object.fromEntries([
+          ["__proto__", { label: "更新关系中文 emoji 🌿" }],
+          ["position", 2],
+        ] as const),
+      );
+    }
+  }
   return {
     item: persistedArchive,
     historicalItem,
@@ -1678,6 +3240,9 @@ async function verifyArchivePersistence(
     firstTimelinePage,
     secondTimelinePage,
     commit,
+    relationCommit,
+    relationPage,
+    relationTimelinePage,
   };
 }
 

@@ -1,8 +1,15 @@
 // 共享资料、查询、运行与采集器契约，不依赖 HTTP 或业务实现。
 import * as z from "zod";
 
-export const binIdSchema = z
-  .string()
+import {
+  postgresTextSchema,
+  registerPostgresJsonSchemaProjection,
+  toPostgresJsonSchema,
+  validatePostgresJsonText,
+  withPostgresJsonSchemaProjection,
+} from "./postgres-text.ts";
+
+export const binIdSchema = postgresTextSchema
   .min(1, "bin 标识不能为空。")
   .max(128, "bin 标识不能超过 128 个字符。")
   .regex(
@@ -10,65 +17,107 @@ export const binIdSchema = z
     "bin 标识只能包含字母、数字、点、下划线和连字符。",
   );
 
-export const collectorIdSchema = z
-  .string()
+export const collectorIdSchema = postgresTextSchema
   .min(1, "采集器标识不能为空。")
   .max(128, "采集器标识不能超过 128 个字符。");
 
-export const identityIdSchema = z
-  .string()
+export const identityIdSchema = postgresTextSchema
   .min(1, "访问身份标识不能为空。")
   .max(256, "访问身份标识不能超过 256 个字符。");
 
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
+  isPlainJsonObject,
+  { message: "字段必须是 JSON 对象。" },
+);
+
 /** 线上 JSON 对象；配置本身由对应采集器声明的动态 JSON Schema 校验。 */
-export const jsonObjectSchema = z.record(z.string(), z.unknown());
+export const jsonObjectSchema = withPostgresJsonSchemaProjection(
+  jsonObjectBaseSchema.superRefine((object, context) => {
+    validatePostgresJsonText(object, context);
+  }),
+);
+
+registerPostgresJsonSchemaProjection(
+  jsonObjectBaseSchema,
+  jsonObjectSchema,
+  z.record(postgresTextSchema, z.unknown()),
+);
 
 /** 采集器以 JSON Schema 声明运行时才知道的配置、目标和动作参数。 */
-export const jsonSchemaDocumentSchema = z.record(z.string(), z.unknown());
+export const jsonSchemaDocumentSchema = jsonObjectSchema;
 
-export const collectorActionNameSchema = z
-  .string()
-  .regex(/^[a-z][a-z0-9-]*$/u, "动作名称必须使用小写字母、数字和连字符。");
-
-export const collectorActionSchema = z.object({
-  description: z.string().min(1, "动作说明不能为空。"),
-  params: jsonSchemaDocumentSchema,
+const targetsBaseSchema = z.custom<unknown[]>(Array.isArray, {
+  message: "目标必须是 JSON 数组。",
 });
+const targetsSchema = targetsBaseSchema.superRefine((targets, context) => {
+  validatePostgresJsonText(targets, context);
+});
+registerPostgresJsonSchemaProjection(
+  targetsBaseSchema,
+  targetsSchema,
+  z.array(z.unknown()),
+);
 
-export const collectorManifestSchema = z.object({
-  id: collectorIdSchema,
-  version: z.string().min(1, "采集器版本不能为空。"),
-  description: z.string().optional(),
-  configSchema: jsonSchemaDocumentSchema,
-  actions: z.record(collectorActionNameSchema, collectorActionSchema),
-  environment: z.object({
-    browser: z.object({
-      required: z.boolean(),
-      profileReuseAfterRestart: z.boolean(),
-      profileReuseUnavailableReason: z.string().optional(),
+export const collectorActionNameSchema = postgresTextSchema.regex(
+  /^[a-z][a-z0-9-]*$/u,
+  "动作名称必须使用小写字母、数字和连字符。",
+);
+
+export const collectorActionSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    description: postgresTextSchema.min(1, "动作说明不能为空。"),
+    params: jsonSchemaDocumentSchema,
+  }),
+);
+
+export const collectorManifestSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: collectorIdSchema,
+    version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+    description: postgresTextSchema.optional(),
+    configSchema: jsonSchemaDocumentSchema,
+    actions: z.record(collectorActionNameSchema, collectorActionSchema),
+    environment: z.object({
+      browser: z.object({
+        required: z.boolean(),
+        profileReuseAfterRestart: z.boolean(),
+        profileReuseUnavailableReason: postgresTextSchema.optional(),
+      }),
     }),
   }),
-});
+);
 
-export const binCreateInputSchema = z.object({
-  id: binIdSchema,
-  collector: collectorManifestSchema,
-  identityId: identityIdSchema,
-  config: jsonObjectSchema,
-  targets: z.array(z.unknown()),
-});
+export const binCreateInputSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: binIdSchema,
+    collector: collectorManifestSchema,
+    identityId: identityIdSchema,
+    config: jsonObjectSchema,
+    targets: targetsSchema,
+  }),
+);
 
-export const binUpdateInputSchema = z
-  .object({
-    collector: collectorManifestSchema.optional(),
-    identityId: identityIdSchema.optional(),
-    config: jsonObjectSchema.optional(),
-    targets: z.array(z.unknown()).optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "至少提供一个需要修改的字段。",
-  });
+export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      collector: collectorManifestSchema.optional(),
+      identityId: identityIdSchema.optional(),
+      config: jsonObjectSchema.optional(),
+      targets: targetsSchema.optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "至少提供一个需要修改的字段。",
+    }),
+);
 
 export const binStatusSchema = z.enum(["active", "disabled"]);
 
@@ -88,33 +137,35 @@ export const runtimeEnvironmentSchema = z.object({
   }),
 });
 
-export const runtimeHeartbeatInputSchema = z.object({
-  protocolVersion: z.literal(runtimeProtocolVersion),
-  runtimeId: z.string().min(1),
-  collector: collectorManifestSchema,
-  environment: runtimeEnvironmentSchema,
-});
+export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    protocolVersion: z.literal(runtimeProtocolVersion),
+    runtimeId: postgresTextSchema.min(1),
+    collector: collectorManifestSchema,
+    environment: runtimeEnvironmentSchema,
+  }),
+);
 
 export const runtimeDisconnectInputSchema = z.object({
-  runtimeId: z.string().min(1),
+  runtimeId: postgresTextSchema.min(1),
 });
 
 export const runtimeExecutionSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("online"),
-    runtimeId: z.string(),
+    runtimeId: postgresTextSchema,
     environment: runtimeEnvironmentSchema,
     lastHeartbeatAt: z.iso.datetime(),
   }),
   z.object({
     status: z.literal("offline"),
     reason: z.enum(["runtime_not_connected", "heartbeat_expired"]),
-    runtimeId: z.string().optional(),
+    runtimeId: postgresTextSchema.optional(),
     lastHeartbeatAt: z.iso.datetime().optional(),
   }),
   z.object({
     status: z.literal("incompatible"),
-    runtimeId: z.string(),
+    runtimeId: postgresTextSchema,
     lastHeartbeatAt: z.iso.datetime(),
     error: z.object({
       code: z.enum([
@@ -122,23 +173,25 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
         "runtime_configuration_incompatible",
         "runtime_environment_incompatible",
       ]),
-      message: z.string(),
+      message: postgresTextSchema,
       path: z.array(z.union([z.string(), z.number()])),
     }),
   }),
 ]);
 
-export const binConfigurationSchema = z.object({
-  id: binIdSchema,
-  collector: collectorManifestSchema,
-  identityId: identityIdSchema,
-  config: jsonObjectSchema,
-  targets: z.array(z.unknown()),
-  status: binStatusSchema,
-  execution: runtimeExecutionSchema,
-  createdAt: z.iso.datetime(),
-  updatedAt: z.iso.datetime(),
-});
+export const binConfigurationSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: binIdSchema,
+    collector: collectorManifestSchema,
+    identityId: identityIdSchema,
+    config: jsonObjectSchema,
+    targets: targetsSchema,
+    status: binStatusSchema,
+    execution: runtimeExecutionSchema,
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+  }),
+);
 
 export const binErrorSchema = z.object({
   error: z.object({
@@ -152,7 +205,7 @@ export const binErrorSchema = z.object({
       "runtime_configuration_incompatible",
       "runtime_environment_incompatible",
     ]),
-    message: z.string(),
+    message: postgresTextSchema,
     path: z.array(z.union([z.string(), z.number()])).optional(),
   }),
 });
@@ -206,5 +259,5 @@ export type RuntimeConnectionOperations = {
 
 /** 使用与运行时校验相同的 Zod 4 原生接口生成输入 JSON Schema。 */
 export function toInputJsonSchema(schema: z.ZodType): Record<string, unknown> {
-  return z.toJSONSchema(schema, { io: "input" });
+  return toPostgresJsonSchema(schema, "input");
 }
