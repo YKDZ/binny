@@ -196,8 +196,8 @@ function searchJsonPathExpression(
 }
 
 function searchJsonValue(value: unknown): SQL {
-  // JSON 值显式编码后再转为 jsonb，保留对象中的 own __proto__ 键并避免驱动猜测参数类型。
-  return sql`${JSON.stringify(value)}::jsonb`;
+  // RC 不编码 jsonb 标量；包入对象后绑定原生 Jsonb Param，再解包保留 null、布尔和数组。
+  return sql`(${sql.param({ value }, archiveRevisions.stateData)}::jsonb -> 'value')`;
 }
 
 function decodeCaptureCompleteness(value: unknown): "complete" | "partial" {
@@ -1220,7 +1220,7 @@ async function readCurrentSearchPage(
               selector.path,
             );
             const field = sql`${selector.field}::text`;
-            const path = sql`${JSON.stringify(selector.path)}::jsonb`;
+            const path = searchJsonValue(selector.path);
             return sql`CASE WHEN ${isNull(expression)} THEN jsonb_build_object('field', ${field}, 'path', ${path}, 'exists', false) ELSE jsonb_build_object('field', ${field}, 'path', ${path}, 'exists', true, 'value', ${expression}) END`;
           }),
           sql`, `,
@@ -1413,7 +1413,7 @@ async function readCurrentSearchPage(
       };
       for (const selector of expansions) {
         // RC 没有 JSON 记录集的表值函数类型；此处仅声明页内有界输入列，再立即生成类型化 CTE。
-        const requestRows = sql`jsonb_to_recordset(${JSON.stringify(views)}::jsonb) AS request(result_id text, item_id uuid, bin_id text)`;
+        const requestRows = sql`jsonb_to_recordset(${searchJsonValue(views)}) AS request(result_id text, item_id uuid, bin_id text)`;
         const viewsCte = transaction.$with("views").as(
           transaction
             .selectDistinct({
