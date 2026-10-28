@@ -2,7 +2,9 @@
   "extends": "@binny/tooling-config/node.json",
   "compilerOptions": {
     "types": ["node"],
-    "declarationMap": false
+    "declarationMap": false,
+    // RC 的可选驱动声明缺少同级 peer 且与 strict optional 有冲突，保留本包源码检查。
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "*.config.ts", "template/**/*.ts"]
 }

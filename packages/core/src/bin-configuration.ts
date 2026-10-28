@@ -76,23 +76,6 @@ function jsonbParameter(database: CoreDatabase, value: unknown) {
   return database.typed(value, jsonbType);
 }
 
-export async function initializeBinConfigurationSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.unsafe(
-    "CREATE TABLE IF NOT EXISTS bin_configurations (" +
-      "id text PRIMARY KEY, " +
-      "collector jsonb NOT NULL, " +
-      "identity_id text NOT NULL, " +
-      "config jsonb NOT NULL, " +
-      "targets jsonb NOT NULL, " +
-      "status text NOT NULL CHECK (status IN ('active', 'disabled')), " +
-      "created_at timestamptz NOT NULL DEFAULT now(), " +
-      "updated_at timestamptz NOT NULL DEFAULT now()" +
-      ")",
-  );
-}
-
 function failure<T>(
   status: 400 | 404 | 409,
   code: BinError["code"],
