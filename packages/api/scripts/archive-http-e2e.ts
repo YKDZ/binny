@@ -61,6 +61,8 @@ type ArchiveJourney = {
   readonly repairedResourceId: string;
   readonly orphanResourceId: string;
   readonly resourceMarkerItemId: string;
+  readonly cliCascadeRootItemId: string;
+  readonly cliCascadeTargetItemId: string;
 };
 
 type SdkResourceJourney = {
@@ -132,6 +134,8 @@ const archiveJourneySchema = z.object({
   repairedResourceId: archiveIdentifierSchema,
   orphanResourceId: archiveIdentifierSchema,
   resourceMarkerItemId: archiveIdentifierSchema,
+  cliCascadeRootItemId: archiveIdentifierSchema,
+  cliCascadeTargetItemId: archiveIdentifierSchema,
 });
 
 const sdkResourceJourneySchema = z.object({
@@ -5387,6 +5391,7 @@ async function verifyHardDeleteEntryPoint(
   }
   const deletion = archiveItemDeletionResultSchema.parse(await response.json());
   assert.equal(deletion.itemId, target.itemId);
+  assert.deepEqual(deletion.deletedItemIds, [target.itemId]);
   assert.equal(deletion.deleted, true);
   assert.ok(BigInt(deletion.deletionSeq) > BigInt(secondCommit.archiveSeq));
 
@@ -5729,6 +5734,479 @@ async function verifyHardDeleteEntryPoint(
   );
 }
 
+async function verifyDeclaredCascadeDeleteEntryPoint(
+  client: ArchiveClient,
+): Promise<void> {
+  const runId = randomUUID();
+  const rootKey = { namespace: "e2e", key: "cascade-root:" + runId };
+  const targetKey = { namespace: "e2e", key: "cascade-target:" + runId };
+  const cycleKey = { namespace: "e2e", key: "cascade-cycle:" + runId };
+  const sharedKey = { namespace: "e2e", key: "cascade-shared:" + runId };
+  const incomingKey = { namespace: "e2e", key: "cascade-incoming:" + runId };
+  const ordinaryKey = { namespace: "e2e", key: "cascade-ordinary:" + runId };
+  const changedKey = { namespace: "e2e", key: "cascade-changed:" + runId };
+  const withdrawnKey = { namespace: "e2e", key: "cascade-withdrawn:" + runId };
+  const unrelatedKey = { namespace: "e2e", key: "cascade-unrelated:" + runId };
+  const sharedBytes = new TextEncoder().encode("binny07 shared cascade media");
+  const exclusiveBytes = new TextEncoder().encode(
+    "binny07 exclusive cascade media",
+  );
+  const upload = async (bytes: Uint8Array) => {
+    const body = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(body).set(bytes);
+    const response = await client.resources.$post(
+      { header: { "content-type": "image/png" } },
+      { init: { body: new Blob([body]) } },
+    );
+    assert.equal(response.status, 201);
+    if (response.status !== 201) {
+      throw new Error("级联删除资源上传失败。");
+    }
+    return await response.json();
+  };
+  const sharedResource = await upload(sharedBytes);
+  const exclusiveResource = await upload(exclusiveBytes);
+  const relationIds = {
+    forward: "e2e:cascade:" + runId + ":forward",
+    toCycle: "e2e:cascade:" + runId + ":to-cycle",
+    cycleBack: "e2e:cascade:" + runId + ":cycle-back",
+    sharedFromTarget: "e2e:cascade:" + runId + ":shared-from-target",
+    sharedFromCycle: "e2e:cascade:" + runId + ":shared-from-cycle",
+    incoming: "e2e:cascade:" + runId + ":incoming",
+    ordinary: "e2e:cascade:" + runId + ":ordinary",
+    changed: "e2e:cascade:" + runId + ":changed",
+    withdrawn: "e2e:cascade:" + runId + ":withdrawn",
+  };
+  const keys = [
+    rootKey,
+    targetKey,
+    cycleKey,
+    sharedKey,
+    incomingKey,
+    ordinaryKey,
+    changedKey,
+    withdrawnKey,
+    unrelatedKey,
+  ];
+  const commit = await submitArchive(client, {
+    requestId: "e2e:archive:cascade:" + runId,
+    binId: "rss-main",
+    items: keys.map((sourceKey) => {
+      const resources =
+        sourceKey.key === rootKey.key || sourceKey.key === unrelatedKey.key
+          ? [{ resourceId: sharedResource.resourceId }]
+          : sourceKey.key === targetKey.key
+            ? [{ resourceId: exclusiveResource.resourceId }]
+            : [];
+      return {
+        sourceKey,
+        body: { text: sourceKey.key },
+        resources,
+        capture: {
+          scope: { case: "declared-cascade" },
+          completeness: "complete" as const,
+          missing: [],
+        },
+      };
+    }),
+    relations: [
+      {
+        relationId: relationIds.forward,
+        value: {
+          from: rootKey,
+          to: { sourceKey: targetKey },
+          name: "declared-child",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.toCycle,
+        value: {
+          from: targetKey,
+          to: { sourceKey: cycleKey },
+          name: "declared-child",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.cycleBack,
+        value: {
+          from: cycleKey,
+          to: { sourceKey: rootKey },
+          name: "declared-cycle",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.sharedFromTarget,
+        value: {
+          from: targetKey,
+          to: { sourceKey: sharedKey },
+          name: "declared-child",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.sharedFromCycle,
+        value: {
+          from: cycleKey,
+          to: { sourceKey: sharedKey },
+          name: "declared-child",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.incoming,
+        value: {
+          from: incomingKey,
+          to: { sourceKey: rootKey },
+          name: "declared-parent",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.ordinary,
+        value: {
+          from: rootKey,
+          to: { sourceKey: ordinaryKey },
+          name: "ordinary-link",
+          cascade: false,
+        },
+      },
+      {
+        relationId: relationIds.changed,
+        value: {
+          from: rootKey,
+          to: { sourceKey: changedKey },
+          name: "changed-declaration",
+          cascade: true,
+        },
+      },
+      {
+        relationId: relationIds.withdrawn,
+        value: {
+          from: rootKey,
+          to: { sourceKey: withdrawnKey },
+          name: "withdrawn-declaration",
+          cascade: true,
+        },
+      },
+    ],
+  });
+  const itemsByKey = new Map(
+    commit.items.map(({ sourceKey, itemId }) => [sourceKey.key, itemId]),
+  );
+  const rootItemId = itemsByKey.get(rootKey.key);
+  const targetItemId = itemsByKey.get(targetKey.key);
+  const cycleItemId = itemsByKey.get(cycleKey.key);
+  const sharedItemId = itemsByKey.get(sharedKey.key);
+  const incomingItemId = itemsByKey.get(incomingKey.key);
+  const ordinaryItemId = itemsByKey.get(ordinaryKey.key);
+  const changedItemId = itemsByKey.get(changedKey.key);
+  const withdrawnItemId = itemsByKey.get(withdrawnKey.key);
+  const unrelatedItemId = itemsByKey.get(unrelatedKey.key);
+  assert.ok(rootItemId);
+  assert.ok(targetItemId);
+  assert.ok(cycleItemId);
+  assert.ok(sharedItemId);
+  assert.ok(incomingItemId);
+  assert.ok(ordinaryItemId);
+  assert.ok(changedItemId);
+  assert.ok(withdrawnItemId);
+  assert.ok(unrelatedItemId);
+
+  const forwardState = (cascade: boolean) => ({
+    from: rootKey,
+    to: { sourceKey: targetKey },
+    name: "declared-child",
+    cascade,
+  });
+  await submitArchive(client, {
+    requestId: "e2e:archive:cascade:secondary:" + runId,
+    binId: "rss-secondary",
+    items: [],
+    relations: [{ relationId: relationIds.forward, value: forwardState(true) }],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:archive:cascade:main-update:" + runId,
+    binId: "rss-main",
+    items: [],
+    relations: [
+      { relationId: relationIds.forward, value: forwardState(false) },
+      {
+        relationId: relationIds.changed,
+        value: {
+          from: rootKey,
+          to: { sourceKey: changedKey },
+          name: "changed-declaration",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:archive:cascade:main-withdrawal:" + runId,
+    binId: "rss-main",
+    items: [],
+    relations: [
+      { relationId: relationIds.forward, value: null },
+      { relationId: relationIds.withdrawn, value: null },
+    ],
+  });
+  const mainCurrentRelations = await readArchiveRelations(client, rootItemId, {
+    direction: "outgoing",
+    binId: "rss-main",
+    limit: "100",
+  });
+  assert.equal(
+    mainCurrentRelations.relations.find(
+      ({ relationId }) => relationId === relationIds.forward,
+    )?.status,
+    "withdrawn",
+  );
+  const changedDeclaration = mainCurrentRelations.relations.find(
+    ({ relationId }) => relationId === relationIds.changed,
+  );
+  assert.equal(changedDeclaration?.status, "observed");
+  if (changedDeclaration?.status === "observed") {
+    assert.equal(changedDeclaration.state.cascade, false);
+  }
+  assert.equal(
+    mainCurrentRelations.relations.find(
+      ({ relationId }) => relationId === relationIds.withdrawn,
+    )?.status,
+    "withdrawn",
+  );
+  const secondaryCurrentRelations = await readArchiveRelations(
+    client,
+    rootItemId,
+    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+  );
+  const oldBinDeclaration = secondaryCurrentRelations.relations.find(
+    ({ relationId }) => relationId === relationIds.forward,
+  );
+  assert.equal(oldBinDeclaration?.status, "observed");
+  if (oldBinDeclaration?.status === "observed") {
+    assert.equal(oldBinDeclaration.state.cascade, true);
+  }
+
+  const deletion = await client.archives.items[":itemId"].$delete({
+    param: { itemId: rootItemId },
+  });
+  assert.equal(deletion.status, 200);
+  if (deletion.status !== 200) {
+    throw new Error("声明级联删除请求失败。");
+  }
+  const deletionResult = await deletion.json();
+  assert.equal(deletionResult.itemId, rootItemId);
+  const deletedItemIds = [rootItemId, targetItemId, cycleItemId, sharedItemId];
+  assert.deepEqual(
+    deletionResult.deletedItemIds.toSorted(),
+    deletedItemIds.toSorted(),
+  );
+  assert.equal(
+    new Set(deletionResult.deletedItemIds).size,
+    deletionResult.deletedItemIds.length,
+  );
+
+  for (const itemId of deletedItemIds) {
+    const response = await client.archives.items[":itemId"].$get({
+      param: { itemId },
+      query: {},
+    });
+    assert.equal(response.status, 404);
+    if (response.status === 404) {
+      assert.equal((await response.json()).error.code, "item_deleted");
+    }
+  }
+  for (const itemId of [
+    incomingItemId,
+    ordinaryItemId,
+    changedItemId,
+    withdrawnItemId,
+    unrelatedItemId,
+  ]) {
+    const response = await client.archives.items[":itemId"].$get({
+      param: { itemId },
+      query: {},
+    });
+    assert.equal(response.status, 200);
+    if (response.status === 200 && itemId === unrelatedItemId) {
+      const retainedOwner = await response.json();
+      assert.deepEqual(retainedOwner.views[0]?.state.resources, [
+        { resourceId: sharedResource.resourceId },
+      ]);
+    }
+  }
+
+  const sharedResourceRead = await client.resources[":resourceId"].$get({
+    param: { resourceId: sharedResource.resourceId },
+  });
+  assert.equal(sharedResourceRead.status, 200);
+  if (sharedResourceRead.status === 200) {
+    assert.deepEqual(
+      new Uint8Array(await sharedResourceRead.arrayBuffer()),
+      sharedBytes,
+    );
+  }
+  const exclusiveResourceRead = await client.resources[":resourceId"].$get({
+    param: { resourceId: exclusiveResource.resourceId },
+  });
+  assert.equal(exclusiveResourceRead.status, 404);
+  if (exclusiveResourceRead.status === 404) {
+    assert.equal(
+      (await exclusiveResourceRead.json()).error.code,
+      "resource_not_found",
+    );
+  }
+
+  const deletedCommit = await readArchiveCommit(client, commit.commitId);
+  assert.deepEqual(
+    deletedCommit.gaps?.items.map(({ itemId }) => itemId).toSorted(),
+    deletedItemIds.toSorted(),
+  );
+  assert.deepEqual(
+    deletedCommit.gaps?.relations
+      .map(({ relationId }) => relationId)
+      .toSorted(),
+    Object.values(relationIds).toSorted(),
+  );
+  const historicalTimeline = await readArchiveTimeline(client, targetItemId, {
+    asOf: commit.archiveSeq,
+    limit: "100",
+  });
+  assert.ok(
+    historicalTimeline.events.some(
+      (event) =>
+        event.kind === "gap" &&
+        event.subject.kind === "item" &&
+        event.subject.itemId === targetItemId,
+    ),
+  );
+}
+
+async function verifyConcurrentCascadeWrites(
+  client: ArchiveClient,
+): Promise<void> {
+  for (const mutation of ["submission", "withdrawal"] as const) {
+    const runId = randomUUID();
+    const rootKey = { namespace: "e2e", key: "cascade-race-root:" + runId };
+    const targetKey = {
+      namespace: "e2e",
+      key: "cascade-race-target:" + runId,
+    };
+    const relationId = "e2e:cascade-race:" + runId + ":original";
+    const firstCommit = await submitArchive(client, {
+      requestId: "e2e:archive:cascade-race:first:" + runId,
+      binId: "rss-main",
+      items: [rootKey, targetKey].map((sourceKey) => ({
+        sourceKey,
+        body: { text: sourceKey.key },
+        capture: {
+          scope: { case: "declared-cascade-race" },
+          completeness: "complete" as const,
+          missing: [],
+        },
+      })),
+      relations: [
+        {
+          relationId,
+          value: {
+            from: rootKey,
+            to: { sourceKey: targetKey },
+            name: "declared-child",
+            cascade: mutation === "withdrawal",
+          },
+        },
+      ],
+    });
+    const rootItem = firstCommit.items.find(
+      ({ sourceKey }) => sourceKey.key === rootKey.key,
+    );
+    const targetItem = firstCommit.items.find(
+      ({ sourceKey }) => sourceKey.key === targetKey.key,
+    );
+    assert.ok(rootItem);
+    assert.ok(targetItem);
+
+    const mutationSubmission: ArchiveSubmission =
+      mutation === "submission"
+        ? {
+            requestId: "e2e:archive:cascade-race:new-edge:" + runId,
+            binId: "rss-main",
+            items: [],
+            relations: [
+              {
+                relationId: "e2e:cascade-race:" + runId + ":new",
+                value: {
+                  from: rootKey,
+                  to: { sourceKey: targetKey },
+                  name: "concurrent-child",
+                  cascade: true,
+                },
+              },
+            ],
+          }
+        : {
+            requestId: "e2e:archive:cascade-race:withdraw:" + runId,
+            binId: "rss-main",
+            items: [],
+            relations: [{ relationId, value: null }],
+          };
+    const [deletionResponse, mutationResponse] = await Promise.all([
+      client.archives.items[":itemId"].$delete({
+        param: { itemId: rootItem.itemId },
+      }),
+      client.archives.$post({ json: mutationSubmission }),
+    ]);
+    assert.equal(deletionResponse.status, 200);
+    if (deletionResponse.status !== 200) {
+      throw new Error("并发级联删除失败。");
+    }
+    const deletionResult = await deletionResponse.json();
+    const targetWasDeleted = deletionResult.deletedItemIds.includes(
+      targetItem.itemId,
+    );
+
+    if (mutation === "submission") {
+      if (mutationResponse.status === 201) {
+        assert.equal(targetWasDeleted, true);
+      } else if (mutationResponse.status === 400) {
+        assert.equal(
+          (await mutationResponse.json()).error.code,
+          "invalid_input",
+        );
+        assert.equal(targetWasDeleted, false);
+      } else {
+        assert.fail("并发关系提交返回了未预期的状态。");
+      }
+    } else if (mutationResponse.status === 201) {
+      assert.equal(
+        (await mutationResponse.json()).relations[0]?.status,
+        "withdrawn",
+      );
+      assert.equal(targetWasDeleted, false);
+    } else if (mutationResponse.status === 404) {
+      assert.equal(
+        (await mutationResponse.json()).error.code,
+        "relation_not_found",
+      );
+      assert.equal(targetWasDeleted, true);
+    } else {
+      assert.fail("并发关系撤回返回了未预期的状态。");
+    }
+
+    const targetRead = await client.archives.items[":itemId"].$get({
+      param: { itemId: targetItem.itemId },
+      query: {},
+    });
+    assert.equal(targetRead.status, targetWasDeleted ? 404 : 200);
+    if (targetRead.status === 404) {
+      assert.equal((await targetRead.json()).error.code, "item_deleted");
+    }
+  }
+}
+
 async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   const client = createApiClient(baseUrl);
   await verifyArchiveAtomicity(client);
@@ -5751,6 +6229,49 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);
   await verifyHardDeleteEntryPoint(client, baseUrl);
+  await verifyDeclaredCascadeDeleteEntryPoint(client);
+  await verifyConcurrentCascadeWrites(client);
+  const cliCascadeRunId = randomUUID();
+  const cliCascadeRootKey = {
+    namespace: "e2e",
+    key: "cli-cascade-root:" + cliCascadeRunId,
+  };
+  const cliCascadeTargetKey = {
+    namespace: "e2e",
+    key: "cli-cascade-target:" + cliCascadeRunId,
+  };
+  const cliCascadeCommit = await submitArchive(client, {
+    requestId: "e2e:archive:cli-cascade:" + cliCascadeRunId,
+    binId: "rss-main",
+    items: [cliCascadeRootKey, cliCascadeTargetKey].map((sourceKey) => ({
+      sourceKey,
+      body: { text: sourceKey.key },
+      capture: {
+        scope: { case: "declared-cascade-cli" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    relations: [
+      {
+        relationId: "e2e:cli-cascade:" + cliCascadeRunId,
+        value: {
+          from: cliCascadeRootKey,
+          to: { sourceKey: cliCascadeTargetKey },
+          name: "declared-child",
+          cascade: true,
+        },
+      },
+    ],
+  });
+  const cliCascadeRoot = cliCascadeCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cliCascadeRootKey.key,
+  );
+  const cliCascadeTarget = cliCascadeCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cliCascadeTargetKey.key,
+  );
+  assert.ok(cliCascadeRoot);
+  assert.ok(cliCascadeTarget);
   return {
     ...aba,
     ...relations,
@@ -5760,6 +6281,8 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
     repairedResourceId: resources.repairedResourceId,
     orphanResourceId: resources.orphanResourceId,
     resourceMarkerItemId: resources.resourceMarkerItemId,
+    cliCascadeRootItemId: cliCascadeRoot.itemId,
+    cliCascadeTargetItemId: cliCascadeTarget.itemId,
   };
 }
 

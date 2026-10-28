@@ -10,7 +10,17 @@ import {
   type ArchiveRelationState,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
-import { and, eq, inArray, notExists, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  notExists,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import { canonicalJson, failure, validationFailure } from "./archive-common.ts";
 import {
@@ -20,7 +30,7 @@ import {
 import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
-import type { CoreDatabase } from "./database.ts";
+import type { CoreDatabase, CoreTransaction } from "./database.ts";
 import {
   archiveCommits,
   archiveItemDeletions,
@@ -82,6 +92,299 @@ function sourceKeyIdentity(sourceKey: {
   readonly key: string;
 }): string {
   return JSON.stringify([sourceKey.namespace, sourceKey.key]);
+}
+
+async function findCascadeItemIds(
+  transaction: CoreTransaction,
+  rootItemId: string,
+): Promise<string[]> {
+  const visited = new Set([rootItemId]);
+  let frontier = [rootItemId];
+
+  while (frontier.length > 0) {
+    const targetsByRelation = new Map<string, string>();
+    for (let offset = 0; offset < frontier.length; offset += inArrayChunkSize) {
+      const frontierBatch = frontier.slice(offset, offset + inArrayChunkSize);
+      const outgoingRelations = await transaction
+        .select({
+          relationId: archiveRelations.relationId,
+          targetItemId: archiveRelations.targetItemId,
+        })
+        .from(archiveRelations)
+        .where(
+          and(
+            inArray(archiveRelations.fromItemId, frontierBatch),
+            isNotNull(archiveRelations.targetItemId),
+          ),
+        )
+        .orderBy(asc(archiveRelations.relationId));
+      for (const relation of outgoingRelations) {
+        if (relation.targetItemId !== null) {
+          targetsByRelation.set(relation.relationId, relation.targetItemId);
+        }
+      }
+    }
+
+    const relationIds = [...targetsByRelation.keys()];
+    const nextFrontier = new Set<string>();
+    for (
+      let offset = 0;
+      offset < relationIds.length;
+      offset += inArrayChunkSize
+    ) {
+      const relationIdBatch = relationIds.slice(
+        offset,
+        offset + inArrayChunkSize,
+      );
+      const latestObservations = transaction
+        .$with("latest_relation_observations")
+        .as(
+          transaction
+            .selectDistinctOn(
+              [
+                archiveRelationObservations.relationId,
+                archiveRelationObservations.binId,
+              ],
+              {
+                relationId: archiveRelationObservations.relationId,
+                relationRevisionId:
+                  archiveRelationObservations.relationRevisionId,
+              },
+            )
+            .from(archiveRelationObservations)
+            .where(
+              inArray(archiveRelationObservations.relationId, relationIdBatch),
+            )
+            .orderBy(
+              asc(archiveRelationObservations.relationId),
+              asc(archiveRelationObservations.binId),
+              desc(archiveRelationObservations.archiveSequence),
+              desc(archiveRelationObservations.ordinal),
+              desc(archiveRelationObservations.commitId),
+            ),
+        );
+      const currentStates = await transaction
+        .with(latestObservations)
+        .select({
+          relationId: latestObservations.relationId,
+          stateData: archiveRelationRevisions.stateData,
+        })
+        .from(latestObservations)
+        .leftJoin(
+          archiveRelationRevisions,
+          and(
+            eq(
+              archiveRelationRevisions.relationId,
+              latestObservations.relationId,
+            ),
+            eq(
+              archiveRelationRevisions.relationRevisionId,
+              latestObservations.relationRevisionId,
+            ),
+          ),
+        );
+
+      for (const currentState of currentStates) {
+        if (currentState.stateData === null) continue;
+        if (!archiveRelationStateSchema.parse(currentState.stateData).cascade) {
+          continue;
+        }
+        const targetItemId = targetsByRelation.get(currentState.relationId);
+        if (targetItemId !== undefined && !visited.has(targetItemId)) {
+          visited.add(targetItemId);
+          nextFrontier.add(targetItemId);
+        }
+      }
+    }
+    frontier = [...nextFrontier];
+  }
+
+  return [...visited].toSorted();
+}
+
+async function deleteArchiveItems(
+  transaction: CoreTransaction,
+  currentSequence: bigint,
+  itemIds: readonly string[],
+): Promise<{ readonly deletionSeq: string; readonly resourceIds: string[] }> {
+  const items: {
+    readonly itemId: string;
+    readonly namespace: string;
+    readonly sourceKey: string;
+  }[] = [];
+  for (let offset = 0; offset < itemIds.length; offset += inArrayChunkSize) {
+    const itemIdBatch = itemIds.slice(offset, offset + inArrayChunkSize);
+    items.push(
+      ...(await transaction
+        .select({
+          itemId: archiveItems.itemId,
+          namespace: archiveItems.namespace,
+          sourceKey: archiveItems.sourceKey,
+        })
+        .from(archiveItems)
+        .where(inArray(archiveItems.itemId, itemIdBatch))
+        .for("update")),
+    );
+  }
+
+  const relationIds = new Set<string>();
+  for (let offset = 0; offset < itemIds.length; offset += inArrayChunkSize) {
+    const itemIdBatch = itemIds.slice(offset, offset + inArrayChunkSize);
+    const relations = await transaction
+      .select({ relationId: archiveRelations.relationId })
+      .from(archiveRelations)
+      .where(
+        or(
+          inArray(archiveRelations.fromItemId, itemIdBatch),
+          inArray(archiveRelations.targetItemId, itemIdBatch),
+        ),
+      )
+      .for("update");
+    for (const relation of relations) relationIds.add(relation.relationId);
+  }
+  const relationIdList = [...relationIds].toSorted();
+
+  const resourceIds = new Set<string>();
+  for (let offset = 0; offset < itemIds.length; offset += inArrayChunkSize) {
+    const itemIdBatch = itemIds.slice(offset, offset + inArrayChunkSize);
+    const resourceRows = await transaction
+      .selectDistinct({
+        resourceId: archiveRevisionResources.resourceId,
+      })
+      .from(archiveRevisions)
+      .innerJoin(
+        archiveRevisionResources,
+        eq(archiveRevisionResources.revisionId, archiveRevisions.revisionId),
+      )
+      .where(inArray(archiveRevisions.itemId, itemIdBatch));
+    for (const resource of resourceRows) resourceIds.add(resource.resourceId);
+  }
+  const resourceIdList = [...resourceIds].toSorted();
+  const deletionSeq = await advanceArchiveSequence(
+    transaction,
+    currentSequence,
+  );
+
+  for (let offset = 0; offset < items.length; offset += inArrayChunkSize) {
+    const itemBatch = items.slice(offset, offset + inArrayChunkSize);
+    await transaction.insert(archiveItemDeletions).values(
+      itemBatch.map((item) => ({
+        itemId: item.itemId,
+        namespace: item.namespace,
+        sourceKey: item.sourceKey,
+        deletionSequence: BigInt(deletionSeq),
+      })),
+    );
+  }
+  for (let offset = 0; offset < itemIds.length; offset += inArrayChunkSize) {
+    const itemIdBatch = itemIds.slice(offset, offset + inArrayChunkSize);
+    await transaction.insert(archiveItemObservationGaps).select((query) =>
+      query
+        .select({
+          commitId: archiveObservations.commitId,
+          ordinal: archiveObservations.ordinal,
+          itemId: archiveObservations.itemId,
+        })
+        .from(archiveObservations)
+        .where(inArray(archiveObservations.itemId, itemIdBatch)),
+    );
+  }
+
+  for (
+    let offset = 0;
+    offset < relationIdList.length;
+    offset += inArrayChunkSize
+  ) {
+    const relationIdBatch = relationIdList.slice(
+      offset,
+      offset + inArrayChunkSize,
+    );
+    await transaction.insert(archiveRelationObservationGaps).select((query) =>
+      query
+        .select({
+          commitId: archiveRelationObservations.commitId,
+          ordinal: archiveRelationObservations.ordinal,
+          relationId: archiveRelations.relationId,
+          fromItemId: archiveRelations.fromItemId,
+          targetItemId: archiveRelations.targetItemId,
+        })
+        .from(archiveRelationObservations)
+        .innerJoin(
+          archiveRelations,
+          eq(
+            archiveRelations.relationId,
+            archiveRelationObservations.relationId,
+          ),
+        )
+        .where(inArray(archiveRelations.relationId, relationIdBatch)),
+    );
+    await transaction
+      .delete(archiveRelationObservations)
+      .where(inArray(archiveRelationObservations.relationId, relationIdBatch));
+    await transaction
+      .delete(archiveRelationRevisions)
+      .where(inArray(archiveRelationRevisions.relationId, relationIdBatch));
+    await transaction
+      .delete(archiveRelations)
+      .where(inArray(archiveRelations.relationId, relationIdBatch));
+  }
+
+  for (let offset = 0; offset < itemIds.length; offset += inArrayChunkSize) {
+    const itemIdBatch = itemIds.slice(offset, offset + inArrayChunkSize);
+    await transaction
+      .delete(archiveObservations)
+      .where(inArray(archiveObservations.itemId, itemIdBatch));
+    await transaction
+      .delete(archiveRevisionResources)
+      .where(
+        inArray(
+          archiveRevisionResources.revisionId,
+          transaction
+            .select({ revisionId: archiveRevisions.revisionId })
+            .from(archiveRevisions)
+            .where(inArray(archiveRevisions.itemId, itemIdBatch)),
+        ),
+      );
+    await transaction
+      .delete(archiveRevisions)
+      .where(inArray(archiveRevisions.itemId, itemIdBatch));
+    await transaction
+      .delete(archiveItems)
+      .where(inArray(archiveItems.itemId, itemIdBatch));
+  }
+
+  for (
+    let offset = 0;
+    offset < resourceIdList.length;
+    offset += inArrayChunkSize
+  ) {
+    const resourceIdBatch = resourceIdList.slice(
+      offset,
+      offset + inArrayChunkSize,
+    );
+    await transaction
+      .update(archiveResources)
+      .set({ status: "deleting" })
+      .where(
+        and(
+          inArray(archiveResources.resourceId, resourceIdBatch),
+          eq(archiveResources.status, "ready"),
+          notExists(
+            transaction
+              .select({ resourceId: archiveRevisionResources.resourceId })
+              .from(archiveRevisionResources)
+              .where(
+                eq(
+                  archiveRevisionResources.resourceId,
+                  archiveResources.resourceId,
+                ),
+              ),
+          ),
+        ),
+      );
+  }
+
+  return { deletionSeq, resourceIds: resourceIdList };
 }
 
 export type ArchiveStoreOptions = {
@@ -564,196 +867,25 @@ export function createArchiveStore(
             };
           }
 
-          const relations = await transaction
-            .select({ relationId: archiveRelations.relationId })
-            .from(archiveRelations)
-            .where(
-              or(
-                eq(archiveRelations.fromItemId, item.itemId),
-                eq(archiveRelations.targetItemId, item.itemId),
-              ),
-            )
-            .for("update");
-          const relationIds = relations.map(({ relationId }) => relationId);
-          const resourceRows = await transaction
-            .selectDistinct({
-              resourceId: archiveRevisionResources.resourceId,
-            })
-            .from(archiveRevisions)
-            .innerJoin(
-              archiveRevisionResources,
-              eq(
-                archiveRevisionResources.revisionId,
-                archiveRevisions.revisionId,
-              ),
-            )
-            .where(eq(archiveRevisions.itemId, item.itemId));
-          const resourceIds = resourceRows.map(({ resourceId }) => resourceId);
-          const deletionSeq = await advanceArchiveSequence(
+          const deletedItemIds = await findCascadeItemIds(
+            transaction,
+            item.itemId,
+          );
+          const deletion = await deleteArchiveItems(
             transaction,
             currentSequence,
+            deletedItemIds,
           );
-
-          await transaction.insert(archiveItemDeletions).values({
-            itemId: item.itemId,
-            namespace: item.namespace,
-            sourceKey: item.sourceKey,
-            deletionSequence: BigInt(deletionSeq),
-          });
-          await transaction.insert(archiveItemObservationGaps).select((query) =>
-            query
-              .select({
-                commitId: archiveObservations.commitId,
-                ordinal: archiveObservations.ordinal,
-                itemId: archiveObservations.itemId,
-              })
-              .from(archiveObservations)
-              .where(eq(archiveObservations.itemId, item.itemId)),
-          );
-          if (relationIds.length > 0) {
-            for (
-              let offset = 0;
-              offset < relationIds.length;
-              offset += inArrayChunkSize
-            ) {
-              const relationIdBatch = relationIds.slice(
-                offset,
-                offset + inArrayChunkSize,
-              );
-              await transaction
-                .insert(archiveRelationObservationGaps)
-                .select((query) =>
-                  query
-                    .select({
-                      commitId: archiveRelationObservations.commitId,
-                      ordinal: archiveRelationObservations.ordinal,
-                      relationId: archiveRelations.relationId,
-                      fromItemId: archiveRelations.fromItemId,
-                      targetItemId: archiveRelations.targetItemId,
-                    })
-                    .from(archiveRelationObservations)
-                    .innerJoin(
-                      archiveRelations,
-                      eq(
-                        archiveRelations.relationId,
-                        archiveRelationObservations.relationId,
-                      ),
-                    )
-                    .where(
-                      inArray(archiveRelations.relationId, relationIdBatch),
-                    ),
-                );
-            }
-            for (
-              let offset = 0;
-              offset < relationIds.length;
-              offset += inArrayChunkSize
-            ) {
-              const relationIdBatch = relationIds.slice(
-                offset,
-                offset + inArrayChunkSize,
-              );
-              await transaction
-                .delete(archiveRelationObservations)
-                .where(
-                  inArray(
-                    archiveRelationObservations.relationId,
-                    relationIdBatch,
-                  ),
-                );
-            }
-            for (
-              let offset = 0;
-              offset < relationIds.length;
-              offset += inArrayChunkSize
-            ) {
-              const relationIdBatch = relationIds.slice(
-                offset,
-                offset + inArrayChunkSize,
-              );
-              await transaction
-                .delete(archiveRelationRevisions)
-                .where(
-                  inArray(archiveRelationRevisions.relationId, relationIdBatch),
-                );
-            }
-            for (
-              let offset = 0;
-              offset < relationIds.length;
-              offset += inArrayChunkSize
-            ) {
-              const relationIdBatch = relationIds.slice(
-                offset,
-                offset + inArrayChunkSize,
-              );
-              await transaction
-                .delete(archiveRelations)
-                .where(inArray(archiveRelations.relationId, relationIdBatch));
-            }
-          }
-          await transaction
-            .delete(archiveObservations)
-            .where(eq(archiveObservations.itemId, item.itemId));
-          await transaction
-            .delete(archiveRevisionResources)
-            .where(
-              inArray(
-                archiveRevisionResources.revisionId,
-                transaction
-                  .select({ revisionId: archiveRevisions.revisionId })
-                  .from(archiveRevisions)
-                  .where(eq(archiveRevisions.itemId, item.itemId)),
-              ),
-            );
-          await transaction
-            .delete(archiveRevisions)
-            .where(eq(archiveRevisions.itemId, item.itemId));
-          await transaction
-            .delete(archiveItems)
-            .where(eq(archiveItems.itemId, item.itemId));
-          if (resourceIds.length > 0) {
-            for (
-              let offset = 0;
-              offset < resourceIds.length;
-              offset += inArrayChunkSize
-            ) {
-              const resourceIdBatch = resourceIds.slice(
-                offset,
-                offset + inArrayChunkSize,
-              );
-              await transaction
-                .update(archiveResources)
-                .set({ status: "deleting" })
-                .where(
-                  and(
-                    inArray(archiveResources.resourceId, resourceIdBatch),
-                    eq(archiveResources.status, "ready"),
-                    notExists(
-                      transaction
-                        .select({
-                          resourceId: archiveRevisionResources.resourceId,
-                        })
-                        .from(archiveRevisionResources)
-                        .where(
-                          eq(
-                            archiveRevisionResources.resourceId,
-                            archiveResources.resourceId,
-                          ),
-                        ),
-                    ),
-                  ),
-                );
-            }
-          }
 
           return {
             ok: true as const,
             value: archiveItemDeletionResultSchema.parse({
               itemId: item.itemId,
-              deletionSeq,
+              deletedItemIds,
+              deletionSeq: deletion.deletionSeq,
               deleted: true,
             }),
-            resourceIds,
+            resourceIds: deletion.resourceIds,
           };
         },
       );
