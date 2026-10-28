@@ -17,6 +17,7 @@ import {
 import { z } from "zod";
 
 export type { CollectorManifest, JsonSchema } from "@binny/contracts";
+export type { ArchiveCommit, ArchiveResourceMetadata } from "@binny/contracts";
 
 type CollectorApiClient = ReturnType<typeof createApiClient>;
 
@@ -111,9 +112,15 @@ export interface CollectorContext {
   readonly archive: {
     submit(input: CollectorArchiveSubmission): Promise<ArchiveCommit>;
   };
+  readonly resources: {
+    upload(body: BodyInit, mediaType: string): Promise<ArchiveResourceUpload>;
+  };
 }
 
-export type CollectorCheckContext = Omit<CollectorContext, "archive">;
+export type CollectorCheckContext = Omit<
+  CollectorContext,
+  "archive" | "resources"
+>;
 
 export type CollectorEnvironment = CollectorManifest["environment"];
 
@@ -159,7 +166,12 @@ export function defineCollectorCheckAction<TParams extends z.ZodType>(
 
 export type CollectorRunContext = Omit<
   CollectorContext,
-  "archive" | "binId" | "identityId" | "runId" | "collectorVersion"
+  | "archive"
+  | "resources"
+  | "binId"
+  | "identityId"
+  | "runId"
+  | "collectorVersion"
 > & {
   readonly binId: string;
   readonly identityId: string;
@@ -243,6 +255,11 @@ export function createCollectorContext(
           }
         }
         throw new Error("归档服务返回了未声明的提交状态。");
+      },
+    },
+    resources: {
+      upload(body, mediaType) {
+        return uploadArchiveResource(client, body, mediaType);
       },
     },
   };

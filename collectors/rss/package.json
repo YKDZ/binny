@@ -2,7 +2,7 @@
   "name": "@binny/collector-rss",
   "version": "0.0.0",
   "private": true,
-  "description": "RSS/Atom 采集及公开静态网页正文与媒体补采。",
+  "description": "RSS/Atom 正文与媒体归档。",
   "files": [
     "dist"
   ],
@@ -27,10 +27,14 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "test": "node --conditions=source --test 'test/**/*.test.ts'",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
   },
   "dependencies": {
-    "@binny/collector-sdk": "workspace:*"
+    "@binny/collector-sdk": "workspace:*",
+    "@rowanmanning/feed-parser": "2.1.5",
+    "parse5": "7.3.0",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
