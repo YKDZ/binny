@@ -118,7 +118,8 @@ type TimelineRow = CommitRow & {
   readonly gap_source_key: string | null;
 };
 
-type SearchRow = {
+type SearchResultRow = {
+  readonly cursor_missing: false;
   readonly result_id: string;
   readonly result_unit: "item" | "revision" | "observation";
   readonly item_id: string;
@@ -144,6 +145,8 @@ type SearchRow = {
   readonly context_text: string | null;
   readonly json_projections: unknown;
 };
+
+type SearchRow = SearchResultRow | { readonly cursor_missing: true };
 
 type RelationIdentityRow = {
   readonly relation_id: string;
@@ -1675,7 +1678,9 @@ async function readCurrentSearchPage(
   input: ReturnType<typeof archiveSearchInputSchema.parse>,
   cursor: SearchCursor | undefined,
   queryHash: string,
-): Promise<ReturnType<typeof archiveSearchPageSchema.parse>> {
+): Promise<
+  ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
+> {
   const parameters: (postgres.JSONValue | postgres.Parameter)[] = [];
   const bind = (value: postgres.JSONValue | postgres.Parameter): string => {
     parameters.push(value);
@@ -1998,9 +2003,27 @@ async function readCurrentSearchPage(
     .join(", ");
   let cursorPredicate = "TRUE";
   let cursorRootCte = "";
+  let cursorMissingPageRow = "";
   if (cursor !== undefined) {
     const cursorResultId = bind(cursor.resultId);
     cursorRootCte = `cursor_root AS (SELECT * FROM roots WHERE result_id = ${cursorResultId}::text),`;
+    const nullSortValues = sortExpressions
+      .map(({ kind }) => (kind === "jsonb" ? "NULL::jsonb" : "NULL::text"))
+      .join(", ");
+    cursorMissingPageRow = `UNION ALL
+      SELECT
+        true AS cursor_missing,
+        NULL::text AS result_id,
+        '${resultUnit}'::text AS result_unit,
+        NULL AS item_id,
+        NULL::text AS root_revision_id,
+        NULL::text AS root_commit_id,
+        NULL::integer AS root_ordinal,
+        NULL AS namespace,
+        NULL AS source_key,
+        ${nullSortValues},
+        NULL::bigint AS result_rank
+      WHERE NOT EXISTS (SELECT 1 FROM cursor_root)`;
     const afterBranches: string[] = [];
     const equalPrefix: string[] = [];
     for (const [index, sort] of input.orderBy.entries()) {
@@ -2129,7 +2152,7 @@ async function readCurrentSearchPage(
       GROUP BY result_id, item_id, namespace, source_key
     ),
     ${cursorRootCte}
-    page AS (
+    limited_page AS (
       SELECT
         roots.*,
         row_number() OVER (ORDER BY ${pageOrdering}) AS result_rank
@@ -2137,8 +2160,14 @@ async function readCurrentSearchPage(
       WHERE ${cursorPredicate}
       ORDER BY ${pageOrdering}
       LIMIT ${limit}::integer
+    ),
+    page AS (
+      SELECT false AS cursor_missing, limited_page.*
+      FROM limited_page
+      ${cursorMissingPageRow}
     )
     SELECT
+      page.cursor_missing,
       page.result_id,
       page.result_unit,
       page.root_revision_id,
@@ -2166,14 +2195,25 @@ async function readCurrentSearchPage(
       ) AS context_text,
       ${jsonProjectionExpression} AS json_projections
     FROM page
-    JOIN contextual ON contextual.result_id = page.result_id
-    ORDER BY page.result_rank, contextual.bin_id COLLATE "C", contextual.archive_seq::bigint
+    LEFT JOIN contextual ON contextual.result_id = page.result_id
+    ORDER BY page.cursor_missing, page.result_rank, contextual.bin_id COLLATE "C", contextual.archive_seq::bigint
   `;
   const rows = await transaction.unsafe<SearchRow[]>(query, parameters);
 
   const selected = new Set(input.select);
   const results = new Map<string, SearchResult>();
   for (const row of rows) {
+    if (row.cursor_missing) {
+      return {
+        ok: false,
+        status: 400,
+        error: {
+          code: "invalid_input",
+          message: "搜索游标已失效，请重新查询。",
+          path: ["cursor"],
+        },
+      };
+    }
     const match: SearchMatch = {
       binId: row.bin_id,
       revisionId: row.revision_id,
@@ -2269,12 +2309,15 @@ async function readCurrentSearchPage(
         })
       : undefined;
 
-  return archiveSearchPageSchema.parse({
-    unit: resultUnit,
-    snapshot,
-    results: pageResults,
-    ...(nextCursor === undefined ? {} : { nextCursor }),
-  });
+  return {
+    ok: true,
+    value: archiveSearchPageSchema.parse({
+      unit: resultUnit,
+      snapshot,
+      results: pageResults,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
+    }),
+  };
 }
 
 export type ArchiveStore = ArchiveOperations & {
@@ -3012,16 +3055,13 @@ export function createArchiveStore(
               },
             };
           }
-          return {
-            ok: true,
-            value: await readCurrentSearchPage(
-              transaction,
-              fixedSnapshot,
-              checked.data,
-              decodedCursor,
-              queryHash,
-            ),
-          };
+          return await readCurrentSearchPage(
+            transaction,
+            fixedSnapshot,
+            checked.data,
+            decodedCursor,
+            queryHash,
+          );
         });
       } catch (error) {
         if (postgresErrorCode(error) === "57014") {

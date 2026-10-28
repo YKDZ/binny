@@ -3738,6 +3738,161 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     [numberHigh, missingValue, numberLow, stringValue],
   );
 
+  const cursorRunId = randomUUID();
+  const cursorKeys = [
+    "json-cursor-a:" + cursorRunId,
+    "json-cursor-b:" + cursorRunId,
+    "json-cursor-c:" + cursorRunId,
+    "json-cursor-d:" + cursorRunId,
+  ];
+  const cursorCommit = await submitArchive(client, {
+    requestId: "e2e:archive:search-json-cursor-delete:" + cursorRunId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[0]! },
+        properties: { rank: 2 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[1]! },
+        properties: { rank: 10 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[2]! },
+        properties: { rank: 9 },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: cursorKeys[3]! },
+        properties: { rank: "not a number" },
+        capture: {
+          scope: { case: "json-cursor-delete" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const cursorAnchor = cursorCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cursorKeys[1],
+  );
+  assert.ok(cursorAnchor);
+  const cursorQuery = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    where: {
+      type: "field" as const,
+      field: "sourceKey.key" as const,
+      operator: "in" as const,
+      values: cursorKeys,
+    },
+    select: ["sourceKey" as const],
+    orderBy: [
+      {
+        field: "properties" as const,
+        path: ["rank"],
+        valueType: "number" as const,
+        direction: "desc" as const,
+      },
+      { field: "sourceKey.key" as const, direction: "asc" as const },
+    ],
+    limit: 1,
+  };
+  const cursorFirstPage = await searchJsonPage(cursorQuery);
+  assert.deepEqual(
+    cursorFirstPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[1]],
+  );
+  assert.ok(cursorFirstPage.nextCursor);
+
+  const cursorAnchorDeletion = await fetch(
+    baseUrl + "/archives/items/" + cursorAnchor.itemId,
+    { method: "DELETE" },
+  );
+  assert.equal(cursorAnchorDeletion.status, 200);
+  if (cursorAnchorDeletion.status !== 200) {
+    throw new Error("JSON 排序游标锚点硬删除失败。");
+  }
+
+  const retainedAtCursorSnapshot = await searchJsonPage({
+    ...cursorQuery,
+    scope: {
+      kind: "asOf",
+      binId: "rss-main",
+      asOf: cursorFirstPage.snapshot.asOf,
+    },
+    limit: 10,
+  });
+  assert.deepEqual(
+    retainedAtCursorSnapshot.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[2], cursorKeys[0], cursorKeys[3]],
+  );
+  assert.equal(retainedAtCursorSnapshot.nextCursor, undefined);
+
+  const deletedCursorResponse = await client.archives.search.$post({
+    json: { ...cursorQuery, cursor: cursorFirstPage.nextCursor },
+  });
+  assert.equal(deletedCursorResponse.status, 400);
+  if (deletedCursorResponse.status === 400) {
+    const deletedCursorError = await deletedCursorResponse.json();
+    assert.equal(deletedCursorError.error.code, "invalid_input");
+    assert.deepEqual(deletedCursorError.error.path, ["cursor"]);
+    assert.equal(
+      deletedCursorError.error.message,
+      "搜索游标已失效，请重新查询。",
+    );
+  }
+
+  const retainedAnchorQuery = {
+    ...cursorQuery,
+    where: {
+      type: "field" as const,
+      field: "sourceKey.key" as const,
+      operator: "in" as const,
+      values: [cursorKeys[2]!, cursorKeys[3]!],
+    },
+  };
+  const retainedAnchorPage = await searchJsonPage(retainedAnchorQuery);
+  assert.deepEqual(
+    retainedAnchorPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [cursorKeys[2]],
+  );
+  assert.ok(retainedAnchorPage.nextCursor);
+  const tailAnchor = cursorCommit.items.find(
+    ({ sourceKey }) => sourceKey.key === cursorKeys[3],
+  );
+  assert.ok(tailAnchor);
+  const tailAnchorDeletion = await fetch(
+    baseUrl + "/archives/items/" + tailAnchor.itemId,
+    { method: "DELETE" },
+  );
+  assert.equal(tailAnchorDeletion.status, 200);
+  if (tailAnchorDeletion.status !== 200) {
+    throw new Error("JSON 排序游标尾项硬删除失败。");
+  }
+  const exhaustedCursorResponse = await client.archives.search.$post({
+    json: { ...retainedAnchorQuery, cursor: retainedAnchorPage.nextCursor },
+  });
+  assert.equal(exhaustedCursorResponse.status, 200);
+  if (exhaustedCursorResponse.status === 200) {
+    const exhaustedCursorPage = await exhaustedCursorResponse.json();
+    assert.deepEqual(exhaustedCursorPage.results, []);
+    assert.equal(exhaustedCursorPage.nextCursor, undefined);
+  }
+
   const budgetPage = await client.archives.search.$post({
     json: {
       scope: { kind: "current", binId: "rss-main" },
