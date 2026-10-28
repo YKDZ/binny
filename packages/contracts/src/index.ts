@@ -1,2 +1,2 @@
 // 共享资料、查询、运行与采集器契约，不依赖 HTTP 或业务实现。
-export {};
+export * from "./bin-configuration.ts";

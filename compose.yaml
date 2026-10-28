@@ -1,0 +1,42 @@
+x-binny-image: &binny-image
+  image: ${BINNY_IMAGE:-binny01-server:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: binny
+      POSTGRES_USER: binny
+      POSTGRES_PASSWORD: ${BINNY_POSTGRES_PASSWORD:-binny}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U binny -d binny
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  server:
+    <<: *binny-image
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://binny:${BINNY_POSTGRES_PASSWORD:-binny}@postgres:5432/binny
+      BINNY_API_URL: http://127.0.0.1:3000
+      PORT: 3000
+    ports:
+      - "${BINNY_PORT:-3000}:3000"
+    volumes:
+      - bins:/var/lib/binny/bins
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  bins:

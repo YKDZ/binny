@@ -36,6 +36,22 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
+    "//#test:binny:e2e": {
+      "dependsOn": ["@binny/binny#build"],
+      "inputs": [
+        "compose.yaml",
+        "Dockerfile",
+        "scripts/binny-e2e.ts",
+        "packages/api/src/**",
+        "packages/binny/src/**",
+        "packages/contracts/src/**",
+        "packages/core/src/**",
+        "packages/server/src/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
     "//#publication:pack": {
       "tags": ["work:release"],
       "cache": false

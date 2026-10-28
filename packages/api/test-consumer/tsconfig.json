@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.node.json",
+  "compilerOptions": {
+    "customConditions": [],
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["client-types.ts"]
+}

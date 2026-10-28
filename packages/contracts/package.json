@@ -29,6 +29,9 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
   },
+  "dependencies": {
+    "zod": "catalog:"
+  },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",

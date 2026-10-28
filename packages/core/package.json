@@ -30,7 +30,9 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
   },
   "dependencies": {
-    "@binny/contracts": "workspace:*"
+    "@binny/contracts": "workspace:*",
+    "postgres": "^3.4.9",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",

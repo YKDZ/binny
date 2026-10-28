@@ -31,7 +31,8 @@
   },
   "dependencies": {
     "@binny/api": "workspace:*",
-    "@binny/core": "workspace:*"
+    "@binny/core": "workspace:*",
+    "@hono/node-server": "^2.1.5"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
