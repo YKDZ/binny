@@ -203,53 +203,6 @@ async function rowToRun(
   });
 }
 
-export async function initializeManualRunSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.begin(async (transaction) => {
-    await transaction.unsafe(
-      "CREATE TABLE IF NOT EXISTS " +
-        tableName +
-        " (" +
-        "run_id uuid PRIMARY KEY, " +
-        "bin_id text NOT NULL, " +
-        "identity_id text NOT NULL, " +
-        "collector_snapshot jsonb NOT NULL, " +
-        "collector_id text NOT NULL, " +
-        "collector_version text NOT NULL, " +
-        "action text NOT NULL, " +
-        "params jsonb NOT NULL, " +
-        "config_snapshot jsonb NOT NULL, " +
-        "targets_snapshot jsonb NOT NULL, " +
-        "status text NOT NULL CHECK (status IN ('queued', 'executing', 'completed', 'failed')), " +
-        "runtime_id text, " +
-        "completed_scopes jsonb NOT NULL DEFAULT '[]'::jsonb, " +
-        "failure jsonb, " +
-        "created_at timestamptz NOT NULL DEFAULT clock_timestamp(), " +
-        "started_at timestamptz, " +
-        "finished_at timestamptz" +
-        ")",
-    );
-    await transaction.unsafe(
-      "ALTER TABLE " +
-        tableName +
-        " ADD COLUMN IF NOT EXISTS check_result jsonb",
-    );
-    await transaction.unsafe(
-      "CREATE INDEX IF NOT EXISTS manual_runs_bin_queue_idx " +
-        "ON " +
-        tableName +
-        " (bin_id, created_at, run_id) WHERE status = 'queued'",
-    );
-    await transaction.unsafe(
-      "CREATE UNIQUE INDEX IF NOT EXISTS manual_runs_one_executing_bin_idx " +
-        "ON " +
-        tableName +
-        " (bin_id) WHERE status = 'executing'",
-    );
-  });
-}
-
 export function createManualRunStore(
   database: CoreDatabase,
 ): ManualRunOperations {

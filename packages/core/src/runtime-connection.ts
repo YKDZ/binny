@@ -247,23 +247,6 @@ export async function readRuntimeExecution(
     : { ok: true, value: rowExecution(row) };
 }
 
-export async function initializeRuntimeConnectionSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.unsafe(
-    "CREATE TABLE IF NOT EXISTS " +
-      tableName +
-      " (" +
-      "bin_id text PRIMARY KEY REFERENCES bin_configurations(id) ON DELETE CASCADE, " +
-      "runtime_id text NOT NULL, " +
-      "collector jsonb NOT NULL, " +
-      "environment jsonb NOT NULL, " +
-      "last_heartbeat_at timestamptz NOT NULL DEFAULT now(), " +
-      "disconnected boolean NOT NULL DEFAULT false" +
-      ")",
-  );
-}
-
 export function createRuntimeConnectionStore(
   database: CoreDatabase,
 ): RuntimeConnectionOperations {
