@@ -11,12 +11,15 @@ import {
   type ArchiveOperation,
   type ArchiveResourceMetadata,
 } from "@binny/contracts";
+import {
+  archiveResources,
+  archiveRevisionResources,
+  type Database,
+} from "@binny/db";
 import { and, asc, eq, inArray, lte, notExists, sql } from "drizzle-orm";
 
 import { withArchiveWriteLock } from "./archive-lock.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
-import type { CoreDatabase } from "./database.ts";
-import { archiveResources, archiveRevisionResources } from "./schema.ts";
 
 type ResourceRow = typeof archiveResources.$inferSelect;
 
@@ -244,7 +247,7 @@ async function writeStreamToFile(
 }
 
 export function createArchiveResourceStorage(
-  database: CoreDatabase,
+  database: Database,
   options: StorageOptions,
 ): ArchiveResourceStorage {
   const directory = resolve(options.directory);

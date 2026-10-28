@@ -458,12 +458,40 @@ importers:
       '@binny/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@binny/db':
+        specifier: workspace:*
+        version: link:../db
       ajv:
         specifier: ^8.17.1
         version: 8.17.1
       ajv-formats:
         specifier: ^3.0.1
         version: 3.0.1(ajv@8.17.1)
+      drizzle-orm:
+        specifier: 1.0.0-rc.5
+        version: 1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  packages/db:
+    dependencies:
       drizzle-orm:
         specifier: 1.0.0-rc.5
         version: 1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)
@@ -501,6 +529,9 @@ importers:
       '@binny/core':
         specifier: workspace:*
         version: link:../core
+      '@binny/db':
+        specifier: workspace:*
+        version: link:../db
       '@hono/node-server':
         specifier: ^2.1.5
         version: 2.1.5(hono@4.13.14)

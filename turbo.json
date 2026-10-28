@@ -45,6 +45,8 @@
       ],
       "passThroughEnv": [
         "BINNY_E2E_HOST",
+        "BINNY_E2E_BASELINE_IMAGE",
+        "BINNY_E2E_BASELINE_IMAGE_ID",
         "BINNY_E2E_SUBNET",
         "BINNY_E2E_RUNTIME_SUBNET"
       ],
@@ -69,7 +71,10 @@
         "collectors/rss/package.json",
         "collectors/rss/src/**",
         "packages/contracts/src/**",
+        "packages/core/package.json",
         "packages/core/src/**",
+        "packages/db/**",
+        "packages/server/package.json",
         "packages/server/src/**"
       ],
       "outputs": [],
@@ -93,6 +98,9 @@
         "packages/collector-sdk/**",
         "packages/api/**",
         "packages/contracts/**",
+        "packages/core/package.json",
+        "packages/db/**",
+        "packages/server/package.json",
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml"
@@ -115,6 +123,9 @@
         "packages/collector-runtime/test/fixtures/**",
         "packages/contracts/src/**",
         "packages/core/src/**",
+        "packages/core/package.json",
+        "packages/db/**",
+        "packages/server/package.json",
         "packages/server/src/**"
       ],
       "outputs": [],
@@ -146,7 +157,12 @@
       },
       "binny:core": {
         "dependencies": {
-          "allow": ["binny:contracts", "binny:tooling"]
+          "allow": ["binny:contracts", "binny:db", "binny:tooling"]
+        }
+      },
+      "binny:db": {
+        "dependencies": {
+          "allow": ["binny:tooling"]
         }
       },
       "binny:api": {
@@ -160,6 +176,7 @@
             "binny:core",
             "binny:api",
             "binny:contracts",
+            "binny:db",
             "binny:tooling"
           ]
         }
