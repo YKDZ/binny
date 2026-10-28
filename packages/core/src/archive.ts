@@ -6,7 +6,11 @@ import {
   archiveItemReadSchema,
   archiveItemStateSchema,
   archiveRevisionReadSchema,
+  archiveSnapshotSequenceSchema,
+  archiveTimelineCursorSchema,
+  archiveTimelinePageSchema,
   archiveSubmissionInputSchema,
+  binIdSchema,
   type ArchiveCommit,
   type ArchiveError,
   type ArchiveItemRead,
@@ -62,6 +66,19 @@ type ViewRow = CommitRow & {
 type ObservationRow = CommitRow & {
   readonly revision_id: string;
   readonly diagnostics: unknown;
+  readonly ordinal: number;
+  readonly source_modified_at: string | null;
+};
+
+type TimelineRow = CommitRow & {
+  readonly revision_id: string;
+  readonly ordinal: number;
+  readonly source_modified_at: string | null;
+};
+
+type ResolvedSnapshot = {
+  readonly asOf: string;
+  readonly mode: "current" | "asOf";
 };
 
 type RevisionReadRow = RevisionRow & ItemRow;
@@ -104,6 +121,68 @@ function validationFailure<T>(
     issue?.message ?? "归档请求格式无效。",
     issue?.path.map((part) => (typeof part === "symbol" ? String(part) : part)),
   );
+}
+
+async function resolveSnapshot(
+  transaction: ArchiveTransaction,
+  requestedAsOf?: string,
+): Promise<ArchiveOperation<ResolvedSnapshot>> {
+  // 先读共享写时钟以固定可重复读快照；以后提交的观察序号一定大于此截点。
+  await transaction.unsafe(
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+  );
+  const clocks = await transaction<ClockRow[]>`
+    SELECT last_seq::text AS last_seq
+    FROM archive_write_clock
+    WHERE clock_id = 1
+  `;
+  const currentSequence = clocks[0]?.last_seq;
+  if (currentSequence === undefined) {
+    throw new Error("归档写入时钟尚未初始化。");
+  }
+  const checkedAsOf =
+    requestedAsOf === undefined
+      ? undefined
+      : archiveSnapshotSequenceSchema.safeParse(requestedAsOf);
+  if (checkedAsOf !== undefined && !checkedAsOf.success) {
+    return validationFailure(
+      checkedAsOf.error.issues.map((issue) => ({
+        message: issue.message,
+        path: ["asOf", ...issue.path],
+      })),
+    );
+  }
+  const asOf = checkedAsOf?.data ?? currentSequence;
+  if (BigInt(asOf) > BigInt(currentSequence)) {
+    return failure(400, "invalid_input", "归档截点不能晚于当前已记录的资料。", [
+      "asOf",
+    ]);
+  }
+  return {
+    ok: true,
+    value: {
+      asOf,
+      mode: requestedAsOf === undefined ? "current" : "asOf",
+    },
+  };
+}
+
+function encodeTimelineCursor(
+  cursor: ReturnType<typeof archiveTimelineCursorSchema.parse>,
+): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeTimelineCursor(
+  cursor: string,
+): ReturnType<typeof archiveTimelineCursorSchema.parse> | undefined {
+  try {
+    const json = Buffer.from(cursor, "base64url").toString("utf8");
+    if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
+    return archiveTimelineCursorSchema.parse(JSON.parse(json) as unknown);
+  } catch {
+    return undefined;
+  }
 }
 
 function canonicalJson(value: unknown): string {
@@ -359,6 +438,8 @@ async function readCommit(
 async function readItem(
   transaction: ArchiveTransaction,
   itemId: string,
+  snapshot: ResolvedSnapshot,
+  binId?: string,
 ): Promise<ArchiveOperation<ArchiveItemRead>> {
   const items = await transaction<ItemRow[]>`
     SELECT item_id, namespace, source_key
@@ -370,11 +451,37 @@ async function readItem(
     return failure(404, "item_not_found", "没有找到这个归档条目。", ["itemId"]);
   }
 
-  const revisionRows = await transaction<RevisionRow[]>`
-    SELECT revision_id, state_hash, state_data
-    FROM archive_revision
-    WHERE item_id = ${itemId}
-    ORDER BY created_at, revision_id
+  const visibleRows = await transaction<{ readonly item_id: string }[]>`
+    SELECT observation.item_id
+    FROM archive_observation AS observation
+    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+    WHERE observation.item_id = ${itemId}
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+    LIMIT 1
+  `;
+  if (visibleRows[0] === undefined) {
+    return failure(404, "item_not_found", "这个条目在所选归档截点尚未记录。", [
+      "itemId",
+    ]);
+  }
+
+  const revisionRows = await transaction<
+    { readonly revision_id: string; readonly state_hash: string }[]
+  >`
+    SELECT
+      revision.revision_id,
+      revision.state_hash,
+      MIN(commit.archive_seq) AS first_archive_seq
+    FROM archive_revision AS revision
+    JOIN archive_observation AS observation
+      ON observation.item_id = revision.item_id
+      AND observation.revision_id = revision.revision_id
+    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+    WHERE observation.item_id = ${itemId}
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
+    GROUP BY revision.revision_id, revision.state_hash
+    ORDER BY first_archive_seq, revision.revision_id
   `;
   const observationRows = await transaction<ObservationRow[]>`
     SELECT
@@ -386,11 +493,18 @@ async function readItem(
       commit.observed_at,
       commit.recorded_at,
       observation.revision_id,
-      observation.diagnostics
+      observation.diagnostics,
+      observation.ordinal,
+      revision.state_data->>'sourceModifiedAt' AS source_modified_at
     FROM archive_observation AS observation
     JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+    JOIN archive_revision AS revision
+      ON revision.item_id = observation.item_id
+      AND revision.revision_id = observation.revision_id
     WHERE observation.item_id = ${itemId}
-    ORDER BY commit.archive_seq, observation.ordinal
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
+    ORDER BY commit.archive_seq, observation.ordinal, commit.commit_id
   `;
   const viewRows = await transaction<ViewRow[]>`
     SELECT DISTINCT ON (commit.bin_id)
@@ -410,7 +524,13 @@ async function readItem(
       ON revision.item_id = observation.item_id
       AND revision.revision_id = observation.revision_id
     WHERE observation.item_id = ${itemId}
-    ORDER BY commit.bin_id, commit.archive_seq DESC, observation.ordinal DESC
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
+    ORDER BY
+      commit.bin_id,
+      commit.archive_seq DESC,
+      observation.ordinal DESC,
+      commit.commit_id DESC
   `;
 
   return {
@@ -418,6 +538,7 @@ async function readItem(
     value: archiveItemReadSchema.parse({
       itemId: item.item_id,
       sourceKey: { namespace: item.namespace, key: item.source_key },
+      snapshot,
       views: viewRows.map((row) => ({
         binId: row.bin_id,
         archiveSeq: row.archive_seq,
@@ -436,14 +557,117 @@ async function readItem(
       observations: observationRows.map((row) => ({
         commitId: row.commit_id,
         archiveSeq: row.archive_seq,
+        ordinal: row.ordinal,
         binId: row.bin_id,
         revisionId: row.revision_id,
+        ...(row.source_modified_at === null
+          ? {}
+          : { sourceModifiedAt: row.source_modified_at }),
         observedAt: isoTimestamp(row.observed_at),
         recordedAt: isoTimestamp(row.recorded_at),
         ...optionalText("runId", row.run_id),
         ...optionalText("collectorVersion", row.collector_version),
         ...optionalDiagnostics(row.diagnostics),
       })),
+    }),
+  };
+}
+
+async function readTimelinePage(
+  transaction: ArchiveTransaction,
+  itemId: string,
+  snapshot: ResolvedSnapshot,
+  binId: string | undefined,
+  after:
+    | ReturnType<typeof archiveTimelineCursorSchema.parse>["after"]
+    | undefined,
+  limit: number,
+): Promise<
+  ArchiveOperation<ReturnType<typeof archiveTimelinePageSchema.parse>>
+> {
+  const visibleRows = await transaction<{ readonly item_id: string }[]>`
+    SELECT observation.item_id
+    FROM archive_observation AS observation
+    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+    WHERE observation.item_id = ${itemId}
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+    LIMIT 1
+  `;
+  if (visibleRows[0] === undefined) {
+    return failure(404, "item_not_found", "这个条目在所选归档截点尚未记录。", [
+      "itemId",
+    ]);
+  }
+
+  const rows = await transaction<TimelineRow[]>`
+    SELECT
+      commit.commit_id,
+      commit.archive_seq::text AS archive_seq,
+      commit.bin_id,
+      commit.run_id,
+      commit.collector_version,
+      commit.observed_at,
+      commit.recorded_at,
+      observation.revision_id,
+      observation.ordinal,
+      revision.state_data->>'sourceModifiedAt' AS source_modified_at
+    FROM archive_observation AS observation
+    JOIN archive_commit AS commit ON commit.commit_id = observation.commit_id
+    JOIN archive_revision AS revision
+      ON revision.item_id = observation.item_id
+      AND revision.revision_id = observation.revision_id
+    WHERE observation.item_id = ${itemId}
+      AND commit.archive_seq <= ${snapshot.asOf}::bigint
+      AND (${binId ?? null}::text IS NULL OR commit.bin_id = ${binId ?? null})
+      AND (
+        ${after?.archiveSeq ?? null}::bigint IS NULL
+        OR (commit.archive_seq, observation.ordinal, commit.commit_id) > (
+          ${after?.archiveSeq ?? null}::bigint,
+          ${after?.ordinal ?? null}::integer,
+          ${after?.commitId ?? null}::uuid
+        )
+      )
+    ORDER BY commit.archive_seq, observation.ordinal, commit.commit_id
+    LIMIT ${limit + 1}
+  `;
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const last = pageRows.at(-1);
+  const nextCursor =
+    hasMore && last !== undefined
+      ? encodeTimelineCursor({
+          version: 1,
+          itemId,
+          binId: binId ?? null,
+          snapshot: { asOf: snapshot.asOf, mode: "asOf" },
+          after: {
+            archiveSeq: last.archive_seq,
+            ordinal: last.ordinal,
+            commitId: last.commit_id,
+          },
+        })
+      : undefined;
+
+  return {
+    ok: true,
+    value: archiveTimelinePageSchema.parse({
+      itemId,
+      snapshot,
+      observations: pageRows.map((row) => ({
+        commitId: row.commit_id,
+        archiveSeq: row.archive_seq,
+        ordinal: row.ordinal,
+        binId: row.bin_id,
+        ...optionalText("runId", row.run_id),
+        ...optionalText("collectorVersion", row.collector_version),
+        revisionId: row.revision_id,
+        ...(row.source_modified_at === null
+          ? {}
+          : { sourceModifiedAt: row.source_modified_at }),
+        observedAt: isoTimestamp(row.observed_at),
+        recordedAt: isoTimestamp(row.recorded_at),
+      })),
+      ...(nextCursor === undefined ? {} : { nextCursor }),
     }),
   };
 }
@@ -658,7 +882,7 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
       );
     },
 
-    async getArchiveItem(itemId) {
+    async getArchiveItem(itemId, options) {
       const checkedId = archiveIdentifierSchema.safeParse(itemId);
       if (!checkedId.success) {
         return validationFailure(
@@ -668,11 +892,27 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
           })),
         );
       }
-      return await database.begin(async (transaction) => {
-        await transaction.unsafe(
-          "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+      const checkedBinId =
+        options?.binId === undefined
+          ? undefined
+          : binIdSchema.safeParse(options.binId);
+      if (checkedBinId !== undefined && !checkedBinId.success) {
+        return validationFailure(
+          checkedBinId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["binId", ...issue.path],
+          })),
         );
-        return await readItem(transaction, checkedId.data);
+      }
+      return await database.begin(async (transaction) => {
+        const snapshot = await resolveSnapshot(transaction, options?.asOf);
+        if (!snapshot.ok) return snapshot;
+        return await readItem(
+          transaction,
+          checkedId.data,
+          snapshot.value,
+          checkedBinId?.data,
+        );
       });
     },
 
@@ -717,6 +957,126 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
             stateHash: row.state_hash,
             state: row.state_data,
           }),
+        };
+      });
+    },
+
+    async getArchiveTimeline(itemId, options) {
+      const checkedId = archiveIdentifierSchema.safeParse(itemId);
+      if (!checkedId.success) {
+        return validationFailure(
+          checkedId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["itemId", ...issue.path],
+          })),
+        );
+      }
+      const checkedBinId =
+        options?.binId === undefined
+          ? undefined
+          : binIdSchema.safeParse(options.binId);
+      if (checkedBinId !== undefined && !checkedBinId.success) {
+        return validationFailure(
+          checkedBinId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["binId", ...issue.path],
+          })),
+        );
+      }
+      const limit = options?.limit ?? 50;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+        return failure(
+          400,
+          "invalid_input",
+          "时间线每页必须读取 1 到 100 条观察。",
+          ["limit"],
+        );
+      }
+
+      const cursor =
+        options?.cursor === undefined
+          ? undefined
+          : decodeTimelineCursor(options.cursor);
+      if (options?.cursor !== undefined && cursor === undefined) {
+        return failure(400, "invalid_input", "时间线游标格式无效。", [
+          "cursor",
+        ]);
+      }
+      if (cursor !== undefined && cursor.itemId !== checkedId.data) {
+        return failure(400, "invalid_input", "时间线游标不属于这个条目。", [
+          "cursor",
+        ]);
+      }
+      if (
+        cursor !== undefined &&
+        checkedBinId?.data !== undefined &&
+        checkedBinId.data !== (cursor.binId ?? undefined)
+      ) {
+        return failure(400, "invalid_input", "时间线游标的来源范围不匹配。", [
+          "binId",
+        ]);
+      }
+      if (
+        cursor !== undefined &&
+        options?.asOf !== undefined &&
+        options.asOf !== cursor.snapshot.asOf
+      ) {
+        return failure(400, "invalid_input", "时间线游标的归档截点不匹配。", [
+          "asOf",
+        ]);
+      }
+
+      const binId = cursor?.binId ?? checkedBinId?.data;
+      const requestedAsOf = cursor?.snapshot.asOf ?? options?.asOf;
+      return await database.begin(async (transaction) => {
+        const snapshot = await resolveSnapshot(transaction, requestedAsOf);
+        if (!snapshot.ok) return snapshot;
+        if (
+          cursor !== undefined &&
+          BigInt(cursor.after.archiveSeq) > BigInt(snapshot.value.asOf)
+        ) {
+          return failure(400, "invalid_input", "时间线游标超出归档截点。", [
+            "cursor",
+          ]);
+        }
+        return await readTimelinePage(
+          transaction,
+          checkedId.data,
+          snapshot.value,
+          binId,
+          cursor?.after,
+          limit,
+        );
+      });
+    },
+
+    async getArchiveCommit(commitId) {
+      const checkedId = archiveIdentifierSchema.safeParse(commitId);
+      if (!checkedId.success) {
+        return validationFailure(
+          checkedId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["commitId", ...issue.path],
+          })),
+        );
+      }
+      return await database.begin(async (transaction) => {
+        await transaction.unsafe(
+          "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        );
+        const rows = await transaction<{ readonly commit_id: string }[]>`
+          SELECT commit_id
+          FROM archive_commit
+          WHERE commit_id = ${checkedId.data}
+        `;
+        if (rows[0] === undefined) {
+          return failure(404, "commit_not_found", "没有找到这个归档提交。", [
+            "commitId",
+          ]);
+        }
+        return {
+          ok: true,
+          value: await readCommit(transaction, checkedId.data),
         };
       });
     },

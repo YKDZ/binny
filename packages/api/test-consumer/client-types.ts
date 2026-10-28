@@ -2,30 +2,31 @@ import { createApiClient } from "@binny/api/client";
 
 async function checkPublicBinContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
-  const created = await client.bins.$post({
-    json: {
-      id: "rss-main",
-      collector: {
-        id: "rss",
-        version: "1.0.0",
-        configSchema: { type: "object", properties: {} },
-        actions: {
-          collect: {
-            description: "轮询订阅源",
-            params: { type: "object", properties: {} },
-          },
-        },
-        environment: {
-          browser: {
-            required: false,
-            profileReuseAfterRestart: false,
-          },
+  const createInput = {
+    id: "rss-main",
+    collector: {
+      id: "rss",
+      version: "1.0.0",
+      configSchema: { type: "object", properties: {} },
+      actions: {
+        collect: {
+          description: "轮询订阅源",
+          params: { type: "object", properties: {} },
         },
       },
-      identityId: "personal-account",
-      config: {},
-      targets: [{ url: "https://example.test/feed.xml" }],
+      environment: {
+        browser: {
+          required: false,
+          profileReuseAfterRestart: false,
+        },
+      },
     },
+    identityId: "personal-account",
+    config: {},
+    targets: [{ url: "https://example.test/feed.xml" }],
+  };
+  const created = await client.bins.$post({
+    json: createInput,
   });
 
   if (created.status === 201) {
@@ -34,10 +35,18 @@ async function checkPublicBinContract(): Promise<void> {
     void bin.execution.status;
     // @ts-expect-error 执行器尚未连接，响应不会伪称在线。
     void bin.execution.isOnline;
+    // @ts-expect-error 标识响应字段的类型是字符串。
+    const invalidBinId: number = bin.id;
+    void invalidBinId;
   } else if (created.status === 400 || created.status === 409) {
     const failure = await created.json();
     void failure.error.code;
     void failure.error.message;
+    // @ts-expect-error 错误响应不包含未声明字段。
+    void failure.error.detail;
+    // @ts-expect-error 错误代码使用字符串字面量，不是数字。
+    const invalidErrorCode: number = failure.error.code;
+    void invalidErrorCode;
   }
 
   const lookup = await client.bins[":binId"].$get({
@@ -57,6 +66,8 @@ async function checkPublicBinContract(): Promise<void> {
   void client.bins[":binId"].$get({ param: {} });
   // @ts-expect-error 请求字段必须符合公开创建契约。
   void client.bins.$post({ json: { id: 42 } });
+  // @ts-expect-error 已声明字段类型错误，即使其他字段都合法也不能通过。
+  void client.bins.$post({ json: { ...createInput, id: 42 } });
 }
 
 void checkPublicBinContract;
@@ -97,6 +108,7 @@ async function checkPublicArchiveContract(): Promise<void> {
 
   const item = await client.archives.items[":itemId"].$get({
     param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: {},
   });
   if (item.status === 200) {
     void (await item.json()).views[0]?.state.body?.text;
@@ -106,6 +118,49 @@ async function checkPublicArchiveContract(): Promise<void> {
     item.status === 409
   ) {
     void (await item.json()).error.code;
+  }
+
+  const historicalItem = await client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", asOf: "12" },
+  });
+  if (historicalItem.status === 200) {
+    const snapshotSequence: string = (await historicalItem.json()).snapshot
+      .asOf;
+    void snapshotSequence;
+  }
+
+  const timeline = await client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", limit: "20" },
+  });
+  if (timeline.status === 200) {
+    const page = await timeline.json();
+    void page.nextCursor;
+    void page.observations[0]?.sourceModifiedAt;
+    // @ts-expect-error Timeline observations do not invent revision fields.
+    void page.observations[0]?.stateHash;
+  } else if (
+    timeline.status === 400 ||
+    timeline.status === 404 ||
+    timeline.status === 409
+  ) {
+    void (await timeline.json()).error.path;
+  }
+
+  const commitRead = await client.archives.commits[":commitId"].$get({
+    param: { commitId: "750e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (commitRead.status === 200) {
+    const commit = await commitRead.json();
+    void commit.recordedAt;
+    void commit.items[0]?.revisionId;
+  } else if (
+    commitRead.status === 400 ||
+    commitRead.status === 404 ||
+    commitRead.status === 409
+  ) {
+    void (await commitRead.json()).error.code;
   }
 
   const revision = await client.archives.revisions[":revisionId"].$get({
@@ -129,6 +184,18 @@ async function checkPublicArchiveContract(): Promise<void> {
   void client.archives.items[":itemId"].$get({ param: {} });
   // @ts-expect-error revision 路由没有 POST 方法。
   void client.archives.revisions[":revisionId"].$post();
+  void client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error asOf 使用十进制文本，不能由 JavaScript number 传输。
+    query: { asOf: 12 },
+  });
+  void client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error 页大小也是传输查询字符串。
+    query: { limit: 20 },
+  });
+  // @ts-expect-error commit 路由没有 POST 方法。
+  void client.archives.commits[":commitId"].$post();
 }
 
 void checkPublicArchiveContract;

@@ -400,12 +400,39 @@ try {
     "runtime_environment_incompatible",
   );
 
+  const allOfCollector = {
+    ...collector,
+    configSchema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        section: {
+          type: "string",
+          allOf: [{ pattern: "^a" }, { pattern: "z$" }],
+        },
+      },
+      required: ["section"],
+      additionalProperties: false,
+    },
+  };
+  await createBin("binny14-config-allof-valid", allOfCollector, "az");
+  const compatibleConfig = await postHeartbeat("binny14-config-allof-valid", {
+    runtimeId: "binny14-config-allof-valid-probe",
+    collector: allOfCollector,
+    environment: {
+      kind: "lightweight",
+      browser: { available: false, profileReuseAfterRestart: false },
+    },
+  });
+  assert.equal(compatibleConfig.status, 200);
+  assert.equal((compatibleConfig.body as RuntimeStatus).status, "online");
+
   const configMismatchCollector = {
     ...collector,
     configSchema: {
       type: "object",
-      properties: { other: { type: "string" } },
-      required: ["other"],
+      properties: { section: { type: "string" } },
+      required: ["section"],
       additionalProperties: false,
     },
   };
@@ -421,7 +448,7 @@ try {
       "--identity",
       "identity-binny14-config-mismatch",
       "--config",
-      JSON.stringify({ other: "kept" }),
+      JSON.stringify({ section: "ab" }),
       "--targets",
       "[]",
     ]),
@@ -430,7 +457,7 @@ try {
   assert.equal(incompatibleConfigCreated.id, "binny14-config-mismatch");
   const incompatibleConfig = await postHeartbeat("binny14-config-mismatch", {
     runtimeId: "binny14-config-probe",
-    collector,
+    collector: allOfCollector,
     environment: {
       kind: "lightweight",
       browser: { available: false, profileReuseAfterRestart: false },
