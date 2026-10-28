@@ -40,7 +40,8 @@
       "dependsOn": [
         "@binny/api#build",
         "@binny/binny#build",
-        "@binny/collector-sdk#build"
+        "@binny/collector-sdk#build",
+        "@binny/collector-rss#build"
       ],
       "passThroughEnv": ["BINNY_E2E_HOST", "BINNY_E2E_SUBNET"],
       "inputs": [
@@ -48,6 +49,7 @@
         "Dockerfile",
         "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
+        "scripts/binny-e2e-rss-source.ts",
         "packages/api/package.json",
         "packages/api/src/**",
         "packages/api/scripts/**",
@@ -58,6 +60,8 @@
         "packages/collector-runtime/Dockerfile.lightweight",
         "packages/collector-runtime/src/**",
         "packages/collector-runtime/test/fixtures/**",
+        "collectors/rss/package.json",
+        "collectors/rss/src/**",
         "packages/contracts/src/**",
         "packages/core/src/**",
         "packages/server/src/**"
