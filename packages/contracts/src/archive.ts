@@ -1,5 +1,6 @@
 import * as z from "zod";
 
+import type { ArchiveHistoryOperations } from "./archive-history.ts";
 import { binIdSchema } from "./bin-configuration.ts";
 
 const nonEmptyText = z
@@ -242,7 +243,17 @@ export type ArchiveSubmissionInput = z.infer<
 export const archiveIdentifierSchema = z.string().uuid();
 const archiveIdSchema = archiveIdentifierSchema;
 // PostgreSQL BIGINT 序号以十进制文本传输，避免超出安全整数范围时舍入。
-const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
+export const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
+export const archiveSnapshotSequenceSchema = z
+  .string()
+  .regex(/^(?:0|[1-9][0-9]{0,18})$/u);
+/** 读取在此已提交序号内所知的 current 视图或历史视图。 */
+export const archiveSnapshotSchema = z
+  .object({
+    asOf: archiveSnapshotSequenceSchema,
+    mode: z.enum(["current", "asOf"]),
+  })
+  .strict();
 const archiveStateHashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 
 const archiveCommitItemSchema = z
@@ -253,14 +264,16 @@ const archiveCommitItemSchema = z
   })
   .strict();
 
-const archiveObservationSchema = z
+export const archiveObservationSchema = z
   .object({
     commitId: archiveIdSchema,
     archiveSeq: archiveSequenceSchema,
+    ordinal: z.number().int().nonnegative(),
     binId: binIdSchema,
     runId: nonEmptyText.max(128).optional(),
     collectorVersion: nonEmptyText.max(256).optional(),
     revisionId: archiveIdSchema,
+    sourceModifiedAt: timestampSchema.optional(),
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     diagnostics: z.array(archiveDiagnosticSchema).optional(),
@@ -302,11 +315,12 @@ export const archiveCommitSchema = z
   })
   .strict();
 
-/** 条目读取同时返回各 bin 当前视图和用于还原观察顺序的轻量记录。 */
+/** 条目读取固定归档截点，并返回该点各 bin 的 current、版本与观察。 */
 export const archiveItemReadSchema = z
   .object({
     itemId: archiveIdSchema,
     sourceKey: sourceKeySchema,
+    snapshot: archiveSnapshotSchema,
     views: z.array(archiveViewSchema),
     revisions: z.array(archiveRevisionSummarySchema),
     observations: z.array(archiveObservationSchema),
@@ -333,6 +347,7 @@ export const archiveErrorSchema = z
           "archive_request_conflict",
           "item_not_found",
           "revision_not_found",
+          "commit_not_found",
         ]),
         message: z.string(),
         path: z.array(z.union([z.string(), z.number()])).optional(),
@@ -345,6 +360,10 @@ export type ArchiveCommit = z.infer<typeof archiveCommitSchema>;
 export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
 export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
+export type ArchiveReadOptions = {
+  readonly binId?: z.infer<typeof binIdSchema>;
+  readonly asOf?: z.infer<typeof archiveSnapshotSequenceSchema>;
+};
 export type ArchiveOperation<T> =
   | { readonly ok: true; readonly value: T }
   | {
@@ -356,8 +375,11 @@ export type ArchiveOperations = {
   submitArchive(
     input: ArchiveSubmissionInput,
   ): Promise<ArchiveOperation<ArchiveCommit>>;
-  getArchiveItem(itemId: string): Promise<ArchiveOperation<ArchiveItemRead>>;
+  getArchiveItem(
+    itemId: string,
+    options?: ArchiveReadOptions,
+  ): Promise<ArchiveOperation<ArchiveItemRead>>;
   getArchiveRevision(
     revisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionRead>>;
-};
+} & ArchiveHistoryOperations;

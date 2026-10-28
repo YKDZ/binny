@@ -108,6 +108,7 @@ async function checkPublicArchiveContract(): Promise<void> {
 
   const item = await client.archives.items[":itemId"].$get({
     param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: {},
   });
   if (item.status === 200) {
     void (await item.json()).views[0]?.state.body?.text;
@@ -117,6 +118,49 @@ async function checkPublicArchiveContract(): Promise<void> {
     item.status === 409
   ) {
     void (await item.json()).error.code;
+  }
+
+  const historicalItem = await client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", asOf: "12" },
+  });
+  if (historicalItem.status === 200) {
+    const snapshotSequence: string = (await historicalItem.json()).snapshot
+      .asOf;
+    void snapshotSequence;
+  }
+
+  const timeline = await client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", limit: "20" },
+  });
+  if (timeline.status === 200) {
+    const page = await timeline.json();
+    void page.nextCursor;
+    void page.observations[0]?.sourceModifiedAt;
+    // @ts-expect-error Timeline observations do not invent revision fields.
+    void page.observations[0]?.stateHash;
+  } else if (
+    timeline.status === 400 ||
+    timeline.status === 404 ||
+    timeline.status === 409
+  ) {
+    void (await timeline.json()).error.path;
+  }
+
+  const commitRead = await client.archives.commits[":commitId"].$get({
+    param: { commitId: "750e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (commitRead.status === 200) {
+    const commit = await commitRead.json();
+    void commit.recordedAt;
+    void commit.items[0]?.revisionId;
+  } else if (
+    commitRead.status === 400 ||
+    commitRead.status === 404 ||
+    commitRead.status === 409
+  ) {
+    void (await commitRead.json()).error.code;
   }
 
   const revision = await client.archives.revisions[":revisionId"].$get({
@@ -140,6 +184,18 @@ async function checkPublicArchiveContract(): Promise<void> {
   void client.archives.items[":itemId"].$get({ param: {} });
   // @ts-expect-error revision 路由没有 POST 方法。
   void client.archives.revisions[":revisionId"].$post();
+  void client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error asOf 使用十进制文本，不能由 JavaScript number 传输。
+    query: { asOf: 12 },
+  });
+  void client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error 页大小也是传输查询字符串。
+    query: { limit: 20 },
+  });
+  // @ts-expect-error commit 路由没有 POST 方法。
+  void client.archives.commits[":commitId"].$post();
 }
 
 void checkPublicArchiveContract;
