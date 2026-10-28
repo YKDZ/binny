@@ -50,8 +50,8 @@ type CommitLocatorRow = {
   readonly commit_id: string;
   readonly archive_seq: string;
   readonly items: readonly {
-    readonly item_id: string;
-    readonly revision_id: string;
+    readonly item_id: string | null;
+    readonly revision_id: string | null;
   }[];
 };
 
@@ -71,7 +71,11 @@ function failure<T>(
   return {
     ok: false,
     status,
-    error: { code, message, ...(path === undefined ? {} : { path: [...path] }) },
+    error: {
+      code,
+      message,
+      ...(path === undefined ? {} : { path: [...path] }),
+    },
   };
 }
 
@@ -96,9 +100,11 @@ async function readCommitLocators(
 ): Promise<ManualRunResult["commits"]> {
   const rows = await database.unsafe<CommitLocatorRow[]>(
     "SELECT c.commit_id, c.archive_seq::text AS archive_seq, " +
-      "jsonb_agg(jsonb_build_object('itemId', o.item_id, 'revisionId', o.revision_id) " +
-      "ORDER BY o.ordinal) AS items FROM archive_commit c " +
-      "JOIN archive_observation o ON o.commit_id = c.commit_id " +
+      "COALESCE(jsonb_agg(jsonb_build_object('item_id', o.item_id, " +
+      "'revision_id', o.revision_id) ORDER BY o.ordinal) " +
+      "FILTER (WHERE o.item_id IS NOT NULL), '[]'::jsonb) AS items " +
+      "FROM archive_commit c " +
+      "LEFT JOIN archive_observation o ON o.commit_id = c.commit_id " +
       "WHERE c.run_id = $1 AND c.bin_id = $2 " +
       "GROUP BY c.commit_id, c.archive_seq ORDER BY c.archive_seq",
     [runId, binId],
@@ -106,10 +112,11 @@ async function readCommitLocators(
   return rows.map((row) => ({
     commitId: row.commit_id,
     archiveSeq: row.archive_seq,
-    items: row.items.map((item) => ({
-      itemId: item.item_id,
-      revisionId: item.revision_id,
-    })),
+    items: row.items.flatMap((item) =>
+      item.item_id === null || item.revision_id === null
+        ? []
+        : [{ itemId: item.item_id, revisionId: item.revision_id }],
+    ),
   }));
 }
 
@@ -133,7 +140,9 @@ async function readRun(
       "WHERE earlier.bin_id = manual_runs.bin_id AND earlier.status = 'queued' " +
       "AND (earlier.created_at, earlier.run_id) < (manual_runs.created_at, manual_runs.run_id)) " +
       "THEN 'earlier_run_queued' ELSE NULL END AS queue_reason " +
-      "FROM " + tableName + " WHERE bin_id = $1 AND run_id = $2",
+      "FROM " +
+      tableName +
+      " WHERE bin_id = $1 AND run_id = $2",
     [binId, runId],
   );
   return rows[0];
@@ -154,7 +163,9 @@ async function rowToRun(
     status: row.status,
     ...(row.queue_reason === null ? {} : { queueReason: row.queue_reason }),
     createdAt: row.created_at.toISOString(),
-    ...(row.started_at === null ? {} : { startedAt: row.started_at.toISOString() }),
+    ...(row.started_at === null
+      ? {}
+      : { startedAt: row.started_at.toISOString() }),
     ...(row.finished_at === null
       ? {}
       : { finishedAt: row.finished_at.toISOString() }),
@@ -411,14 +422,12 @@ export function createManualRunStore(
 
         const runtimeMatches = await transaction.unsafe<
           { readonly matches: boolean }[]
-        >(
-          "SELECT $1::jsonb = $2::jsonb AS matches",
-          [
-            jsonbParameter(database, runtimeConnection.runtime_collector),
-            jsonbParameter(database, run.collector_snapshot),
-          ],
-        );
-        if (runtimeMatches[0]?.matches !== true) return { ok: true, value: null };
+        >("SELECT $1::jsonb = $2::jsonb AS matches", [
+          jsonbParameter(database, runtimeConnection.runtime_collector),
+          jsonbParameter(database, run.collector_snapshot),
+        ]);
+        if (runtimeMatches[0]?.matches !== true)
+          return { ok: true, value: null };
 
         const updated = await transaction.unsafe<RunRow[]>(
           "UPDATE " +
@@ -460,44 +469,56 @@ export function createManualRunStore(
 
       const completionResult = await database.begin<ManualRunOperation<string>>(
         async (transaction) => {
-        const rows = await transaction.unsafe<
-          {
-            readonly status: ManualRun["status"];
-            readonly runtime_id: string | null;
-          }[]
-        >(
-          "SELECT status, runtime_id FROM " +
-            tableName +
-            " WHERE bin_id = $1 AND run_id = $2 FOR UPDATE",
-          [binId, runId],
-        );
-        const current = rows[0];
-        if (current === undefined)
-          return failure(404, "run_not_found", "没有找到这个运行。", ["runId"]);
-        if (current.status !== "executing")
-          return failure(409, "run_not_executing", "这个运行当前不能提交结果。", ["runId"]);
-        if (current.runtime_id !== checked.data.runtimeId)
-          return failure(409, "runtime_mismatch", "运行器不能提交其他运行器的结果。", ["runtimeId"]);
+          const rows = await transaction.unsafe<
+            {
+              readonly status: ManualRun["status"];
+              readonly runtime_id: string | null;
+            }[]
+          >(
+            "SELECT status, runtime_id FROM " +
+              tableName +
+              " WHERE bin_id = $1 AND run_id = $2 FOR UPDATE",
+            [binId, runId],
+          );
+          const current = rows[0];
+          if (current === undefined)
+            return failure(404, "run_not_found", "没有找到这个运行。", [
+              "runId",
+            ]);
+          if (current.status !== "executing")
+            return failure(
+              409,
+              "run_not_executing",
+              "这个运行当前不能提交结果。",
+              ["runId"],
+            );
+          if (current.runtime_id !== checked.data.runtimeId)
+            return failure(
+              409,
+              "runtime_mismatch",
+              "运行器不能提交其他运行器的结果。",
+              ["runtimeId"],
+            );
 
-        const completion: ManualRunCompletion = checked.data.completion;
-        const runFailure =
-          completion.status === "failed"
-            ? serializeFailure(completion.error)
-            : null;
-        await transaction.unsafe(
-          "UPDATE " +
-            tableName +
-            " SET status = $3, completed_scopes = $4, failure = $5, " +
-            "finished_at = clock_timestamp() WHERE run_id = $1 AND bin_id = $2",
-          [
-            runId,
-            binId,
-            completion.status,
-            jsonbParameter(database, completion.completedScopes),
-            runFailure === null ? null : jsonbParameter(database, runFailure),
-          ],
-        );
-        return { ok: true as const, value: runId };
+          const completion: ManualRunCompletion = checked.data.completion;
+          const runFailure =
+            completion.status === "failed"
+              ? serializeFailure(completion.error)
+              : null;
+          await transaction.unsafe(
+            "UPDATE " +
+              tableName +
+              " SET status = $3, completed_scopes = $4, failure = $5, " +
+              "finished_at = clock_timestamp() WHERE run_id = $1 AND bin_id = $2",
+            [
+              runId,
+              binId,
+              completion.status,
+              jsonbParameter(database, completion.completedScopes),
+              runFailure === null ? null : jsonbParameter(database, runFailure),
+            ],
+          );
+          return { ok: true as const, value: runId };
         },
       );
       if (!completionResult.ok) return completionResult;

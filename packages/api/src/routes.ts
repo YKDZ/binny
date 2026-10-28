@@ -6,8 +6,7 @@ import {
   binUpdateInputSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
-  manualRunErrorSchema,
-  manualRunSchema,
+  manualRunApiSchemas as contractManualRunApiSchemas,
   manualRunTriggerInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
@@ -17,6 +16,7 @@ import {
   type ManualRunOperations,
   type RuntimeConnectionOperations,
   toInputJsonSchema,
+  toPostgresJsonSchema,
 } from "@binny/contracts";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -369,17 +369,11 @@ export const binApiSchemas = {
   update: toInputJsonSchema(binUpdateInputSchema),
   runtimeHeartbeat: toInputJsonSchema(runtimeHeartbeatInputSchema),
   runtimeDisconnect: toInputJsonSchema(runtimeDisconnectInputSchema),
-  output: z.toJSONSchema(binConfigurationSchema),
-  error: z.toJSONSchema(binErrorSchema),
+  output: toPostgresJsonSchema(binConfigurationSchema, "output"),
+  error: toPostgresJsonSchema(binErrorSchema, "output"),
 };
 
-export const manualRunApiSchemas = {
-  trigger: toInputJsonSchema(manualRunTriggerInputSchema),
-  claim: toInputJsonSchema(manualRunClaimInputSchema),
-  complete: toInputJsonSchema(manualRunCompleteInputSchema),
-  run: z.toJSONSchema(manualRunSchema),
-  error: z.toJSONSchema(manualRunErrorSchema),
-};
+export const manualRunApiSchemas = contractManualRunApiSchemas;
 
 export { archiveApiSchemas };
 

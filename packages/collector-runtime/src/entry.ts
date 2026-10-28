@@ -3,9 +3,10 @@ import { pathToFileURL } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  CollectorActionError,
+  collectorActionResultSchema,
   createCollectorContext,
   collectorManifest,
+  isCollectorActionError,
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
@@ -135,7 +136,7 @@ async function heartbeat(): Promise<void> {
 }
 
 function failureFrom(error: unknown) {
-  if (error instanceof CollectorActionError) return error.failure;
+  if (isCollectorActionError(error)) return error.failure;
   return {
     code: "collector_execution_failed",
     message: "采集器动作执行失败。",
@@ -148,7 +149,9 @@ async function finishRun(
   run: ManualRunExecution,
   completion: ManualRunCompletion,
 ): Promise<void> {
-  const response = await client.bins[":binId"].runtime.runs[":runId"].complete.$post({
+  const response = await client.bins[":binId"].runtime.runs[
+    ":runId"
+  ].complete.$post({
     param: { binId: runtimeBinId, runId: run.runId },
     json: { runtimeId, completion },
   });
@@ -221,9 +224,12 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
           }),
           parsed.data,
         );
+        const actionResult = collectorActionResultSchema.safeParse(result);
         completion = {
           status: "completed",
-          completedScopes: result === undefined ? [] : [...result.completedScopes],
+          completedScopes: actionResult.success
+            ? actionResult.data.completedScopes
+            : [],
         };
       } catch (error) {
         completion = {

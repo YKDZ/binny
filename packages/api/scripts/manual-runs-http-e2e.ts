@@ -2,25 +2,26 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
-import {
-  collectorManifestSchema,
-  type ManualRun,
-} from "@binny/contracts";
+import { collectorManifestSchema, type ManualRun } from "@binny/contracts";
 
-import {
-  sourceControlStatusSchema,
-  startControlledSource,
-} from "./manual-runs-source.ts";
+import { sourceControlStatusSchema } from "./manual-runs-source.ts";
 
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
-const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
+const sourceRuntimeUrl = "http://manual-runs-source:8081";
+const sourceControlUrl = (() => {
+  const url = process.env.BINNY15_SOURCE_CONTROL_URL;
+  if (url === undefined) throw new Error("缺少 BINNY15_SOURCE_CONTROL_URL。");
+  return url;
+})();
 const manifestJson = process.env.BINNY15_COLLECTOR_MANIFEST;
 
 if (baseUrl === undefined) throw new Error("缺少 BINNY_E2E_BASE_URL。");
 if (manifestJson === undefined)
   throw new Error("缺少由 SDK 构造的 BINNY15_COLLECTOR_MANIFEST。");
 
-const manifest = collectorManifestSchema.parse(JSON.parse(manifestJson) as unknown);
+const manifest = collectorManifestSchema.parse(
+  JSON.parse(manifestJson) as unknown,
+);
 const client = createApiClient(baseUrl);
 
 async function triggerRun(
@@ -38,9 +39,7 @@ async function triggerRun(
   });
   if (response.status === 202) return await response.json();
   const result = await response.json();
-  assert.fail(
-    `运行触发失败：${result.error.code} ${result.error.message}`,
-  );
+  assert.fail(`运行触发失败：${result.error.code} ${result.error.message}`);
 }
 
 async function readRun(binId: string, runId: string): Promise<ManualRun> {
@@ -53,7 +52,9 @@ async function readRun(binId: string, runId: string): Promise<ManualRun> {
 }
 
 async function sourceStatus(sourceUrl: string) {
-  const response = await fetch(sourceUrl + "/control/arrivals");
+  const response = await fetch(sourceUrl + "/control/arrivals", {
+    signal: AbortSignal.timeout(3_000),
+  });
   assert.equal(response.status, 200);
   return sourceControlStatusSchema.parse(await response.json());
 }
@@ -67,11 +68,15 @@ async function releaseSource(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ gateKey, disposition }),
+    signal: AbortSignal.timeout(3_000),
   });
   assert.equal(response.status, 200);
 }
 
-async function waitForArrival(sourceUrl: string, gateKey: string): Promise<void> {
+async function waitForArrival(
+  sourceUrl: string,
+  gateKey: string,
+): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const status = await sourceStatus(sourceUrl);
@@ -133,9 +138,7 @@ async function verifyArchivedSection(
   assert.equal(item.views[0]?.state.metadata?.section, expectedSection);
 }
 
-async function verifyDynamicValidation(
-  sourceUrl: string,
-): Promise<void> {
+async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   const invalidParams = await client.bins[":binId"].runs.$post({
     param: { binId: "binny15-one" },
     json: {
@@ -169,22 +172,23 @@ async function verifyDynamicValidation(
 }
 
 async function verifySerialParallelAndSnapshot(
-  sourceUrl: string,
+  runtimeSourceUrl: string,
+  controlSourceUrl: string,
 ): Promise<string> {
   const firstKey = "15-http-first";
   const secondKey = "15-http-queued";
   const parallelKey = "15-http-parallel";
   const first = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     firstKey,
     "serial-first",
   );
-  await waitForArrival(sourceUrl, firstKey);
+  await waitForArrival(controlSourceUrl, firstKey);
 
   const second = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     secondKey,
     "serial-queued",
   );
@@ -204,20 +208,20 @@ async function verifySerialParallelAndSnapshot(
 
   const parallel = await triggerRun(
     "binny15-two",
-    sourceUrl,
+    runtimeSourceUrl,
     parallelKey,
     "parallel-other-bin",
   );
-  await waitForArrival(sourceUrl, parallelKey);
+  await waitForArrival(controlSourceUrl, parallelKey);
   assert.equal(
-    (await sourceStatus(sourceUrl)).arrivals.some(
+    (await sourceStatus(controlSourceUrl)).arrivals.some(
       (arrival) => arrival.gateKey === secondKey,
     ),
     false,
   );
 
-  await releaseSource(sourceUrl, firstKey);
-  await releaseSource(sourceUrl, parallelKey);
+  await releaseSource(controlSourceUrl, firstKey);
+  await releaseSource(controlSourceUrl, parallelKey);
   const [completedFirst, completedParallel] = await Promise.all([
     waitForRun("binny15-one", first.runId, "completed"),
     waitForRun("binny15-two", parallel.runId, "completed"),
@@ -226,8 +230,8 @@ async function verifySerialParallelAndSnapshot(
   await verifyRunCommit(completedParallel);
   await verifyArchivedSection(firstArchive.itemId, "initial");
 
-  await waitForArrival(sourceUrl, secondKey);
-  await releaseSource(sourceUrl, secondKey);
+  await waitForArrival(controlSourceUrl, secondKey);
+  await releaseSource(controlSourceUrl, secondKey);
   const completedSecond = await waitForRun(
     "binny15-one",
     second.runId,
@@ -239,27 +243,26 @@ async function verifySerialParallelAndSnapshot(
 }
 
 async function verifyActionFailures(
-  sourceUrl: string,
+  runtimeSourceUrl: string,
+  controlSourceUrl: string,
   existingItemId: string,
 ): Promise<void> {
   const manualKey = "15-http-manual";
   const manual = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     manualKey,
     "manual-existing-item",
   );
-  await waitForArrival(sourceUrl, manualKey);
-  await releaseSource(sourceUrl, manualKey, "manual");
-  const failedManual = await waitForRun(
-    "binny15-one",
-    manual.runId,
-    "failed",
-  );
+  await waitForArrival(controlSourceUrl, manualKey);
+  await releaseSource(controlSourceUrl, manualKey, "manual");
+  const failedManual = await waitForRun("binny15-one", manual.runId, "failed");
   assert.equal(failedManual.result?.error?.code, "source_requires_human");
   assert.equal(failedManual.result?.error?.requiresHuman, true);
   assert.deepEqual(failedManual.result?.error?.path, ["source", "title"]);
-  assert.ok(failedManual.result?.error?.impact.includes("manual-existing-item"));
+  assert.ok(
+    failedManual.result?.error?.impact.includes("manual-existing-item"),
+  );
   assert.ok(failedManual.result?.error?.suggestion);
 
   const before = await client.archives.items[":itemId"].$get({
@@ -273,17 +276,14 @@ async function verifyActionFailures(
   const emptyKey = "15-http-empty";
   const empty = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     emptyKey,
     "serial-first",
   );
-  await waitForArrival(sourceUrl, emptyKey);
-  await releaseSource(sourceUrl, emptyKey, "empty");
+  await waitForArrival(controlSourceUrl, emptyKey);
+  await releaseSource(controlSourceUrl, emptyKey, "empty");
   const failedEmpty = await waitForRun("binny15-one", empty.runId, "failed");
-  assert.equal(
-    failedEmpty.result?.error?.code,
-    "source_returned_no_material",
-  );
+  assert.equal(failedEmpty.result?.error?.code, "source_returned_no_material");
   assert.equal(failedEmpty.result?.commits.length, 0);
 
   const after = await client.archives.items[":itemId"].$get({
@@ -293,24 +293,30 @@ async function verifyActionFailures(
   assert.equal(after.status, 200);
   if (after.status === 200) {
     const unchanged = await after.json();
-    assert.equal(unchanged.views[0]?.state.body?.text, original.views[0]?.state.body?.text);
+    assert.equal(
+      unchanged.views[0]?.state.body?.text,
+      original.views[0]?.state.body?.text,
+    );
     assert.equal(unchanged.views[0]?.revisionId, original.views[0]?.revisionId);
   }
 }
 
-async function verifyDisabledQueueBoundary(sourceUrl: string): Promise<void> {
+async function verifyDisabledQueueBoundary(
+  runtimeSourceUrl: string,
+  controlSourceUrl: string,
+): Promise<void> {
   const activeKey = "15-http-active-on-disable";
   const queuedKey = "15-http-queued-on-disable";
   const active = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     activeKey,
     "active-on-disable",
   );
-  await waitForArrival(sourceUrl, activeKey);
+  await waitForArrival(controlSourceUrl, activeKey);
   const queued = await triggerRun(
     "binny15-one",
-    sourceUrl,
+    runtimeSourceUrl,
     queuedKey,
     "queued-on-disable",
   );
@@ -323,7 +329,7 @@ async function verifyDisabledQueueBoundary(sourceUrl: string): Promise<void> {
   assert.equal(disabledRun.status, "failed");
   assert.equal(disabledRun.result?.error?.code, "bin_disabled");
   assert.equal(
-    (await sourceStatus(sourceUrl)).arrivals.some(
+    (await sourceStatus(controlSourceUrl)).arrivals.some(
       (arrival) => arrival.gateKey === queuedKey,
     ),
     false,
@@ -337,7 +343,7 @@ async function verifyDisabledQueueBoundary(sourceUrl: string): Promise<void> {
   if (blocked.status === 409)
     assert.equal((await blocked.json()).error.code, "bin_disabled");
 
-  await releaseSource(sourceUrl, activeKey);
+  await releaseSource(controlSourceUrl, activeKey);
   const completedActive = await waitForRun(
     "binny15-one",
     active.runId,
@@ -351,19 +357,20 @@ async function verifyDisabledQueueBoundary(sourceUrl: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const source = await startControlledSource();
-  const sourceUrl = "http://" + e2eHost + ":" + String(source.port);
-  try {
-    await verifyDynamicValidation(sourceUrl);
-    const existingItemId = await verifySerialParallelAndSnapshot(sourceUrl);
-    await verifyActionFailures(sourceUrl, existingItemId);
-    await verifyDisabledQueueBoundary(sourceUrl);
-    process.stdout.write(
-      "手动运行 HTTP 领取、串行与并行、快照、归档提交和错误结果旅程通过。\n",
-    );
-  } finally {
-    await source.close();
-  }
+  await verifyDynamicValidation(sourceRuntimeUrl);
+  const existingItemId = await verifySerialParallelAndSnapshot(
+    sourceRuntimeUrl,
+    sourceControlUrl,
+  );
+  await verifyActionFailures(
+    sourceRuntimeUrl,
+    sourceControlUrl,
+    existingItemId,
+  );
+  await verifyDisabledQueueBoundary(sourceRuntimeUrl, sourceControlUrl);
+  process.stdout.write(
+    "手动运行 HTTP 领取、串行与并行、快照、归档提交和错误结果旅程通过。\n",
+  );
 }
 
 await main();

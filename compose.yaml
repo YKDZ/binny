@@ -41,6 +41,20 @@ services:
       - resource-data:/var/lib/binny/resources
     restart: unless-stopped
 
+  manual-runs-source:
+    <<: *binny-image
+    profiles: [binny15]
+    command:
+      - node
+      - --conditions=source
+      - packages/api/scripts/manual-runs-source.ts
+      - --serve
+    environment:
+      BINNY15_SOURCE_PORT: 8081
+    ports:
+      - "${BINNY15_SOURCE_HOST_PORT:-18815}:8081"
+    restart: unless-stopped
+
   runtime-one:
     image: ${BINNY14_RUNTIME_IMAGE:-binny14-lightweight:local}
     profiles: [binny14]
@@ -86,7 +100,7 @@ services:
       dockerfile: packages/collector-runtime/Dockerfile.lightweight
       args:
         BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
         BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
@@ -108,7 +122,7 @@ services:
       dockerfile: packages/collector-runtime/Dockerfile.lightweight
       args:
         BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
         BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:

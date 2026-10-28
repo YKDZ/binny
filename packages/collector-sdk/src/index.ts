@@ -4,12 +4,14 @@ import { randomUUID } from "node:crypto";
 import { createApiClient } from "@binny/api/client";
 import type { CollectorManifest } from "@binny/contracts";
 import {
+  manualRunFailureSchema,
   type ArchiveCommit,
   type ArchiveError,
   type ArchiveResourceMetadata,
   type ArchiveResourceReference,
   type ArchiveSubmissionInput,
   type ManualRunFailure,
+  postgresTextSchema,
 } from "@binny/contracts";
 import { z } from "zod";
 
@@ -20,6 +22,14 @@ type CollectorApiClient = ReturnType<typeof createApiClient>;
 export type ArchiveResourceUpload =
   | { readonly ok: true; readonly resource: ArchiveResourceMetadata }
   | { readonly ok: false; readonly error: ArchiveError };
+
+export type CollectorArchiveSubmission = Omit<
+  ArchiveSubmissionInput,
+  "requestId" | "binId" | "runId" | "collectorVersion" | "relations"
+> & {
+  readonly requestId?: string;
+  readonly relations?: ArchiveSubmissionInput["relations"];
+};
 
 /** 将真实媒体字节上传到核心，成功后返回可提交的归档资源元信息。 */
 export async function uploadArchiveResource(
@@ -98,12 +108,7 @@ export interface CollectorContext {
   readonly targets: readonly unknown[];
   readonly signal: AbortSignal;
   readonly archive: {
-    submit(
-      input: Omit<
-        ArchiveSubmissionInput,
-        "requestId" | "binId" | "runId" | "collectorVersion"
-      > & { readonly requestId?: string },
-    ): Promise<ArchiveCommit>;
+    submit(input: CollectorArchiveSubmission): Promise<ArchiveCommit>;
   };
 }
 
@@ -115,12 +120,18 @@ export interface CollectorAction<TParams extends z.ZodType = z.ZodType> {
   execute(
     context: CollectorContext,
     params: z.output<TParams>,
-  ): Promise<void | CollectorActionResult>;
+  ): Promise<unknown>;
 }
 
 export type CollectorActionResult = {
   readonly completedScopes: readonly string[];
 };
+
+const collectorActionErrorType = "binny.collector-action-error";
+
+export const collectorActionResultSchema = z
+  .object({ completedScopes: z.array(postgresTextSchema) })
+  .strict();
 
 /** 将单个动作与其 Zod 参数输出类型关联，供清单声明保持编译期类型。 */
 export function defineCollectorAction<TParams extends z.ZodType>(
@@ -141,6 +152,7 @@ export type CollectorRunContext = Omit<
 
 /** 提交失败或需要人工处理时保留稳定代码、影响范围和可执行建议。 */
 export class CollectorActionError extends Error {
+  readonly type = collectorActionErrorType;
   readonly failure: ManualRunFailure;
 
   constructor(failure: ManualRunFailure) {
@@ -148,6 +160,22 @@ export class CollectorActionError extends Error {
     this.name = "CollectorActionError";
     this.failure = failure;
   }
+}
+
+/** 识别独立部署依赖树抛出的同一 SDK 错误，并校验其公开失败契约。 */
+export function isCollectorActionError(
+  error: unknown,
+): error is CollectorActionError {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("type" in error) ||
+    error.type !== collectorActionErrorType ||
+    !("failure" in error)
+  ) {
+    return false;
+  }
+  return manualRunFailureSchema.safeParse(error.failure).success;
 }
 
 export function collectorActionError(
@@ -168,6 +196,7 @@ export function createCollectorContext(
         const response = await client.archives.$post({
           json: {
             ...input,
+            relations: input.relations ?? [],
             requestId: input.requestId ?? randomUUID(),
             binId: context.binId,
             runId: context.runId,
@@ -224,9 +253,7 @@ type CollectorActionShape = {
 type TypedCollectorActions<
   TActions extends Readonly<Record<string, CollectorActionShape>>,
 > = {
-  readonly [Name in keyof TActions]: CollectorAction<
-    TActions[Name]["params"]
-  >;
+  readonly [Name in keyof TActions]: CollectorAction<TActions[Name]["params"]>;
 };
 
 export function defineCollector<

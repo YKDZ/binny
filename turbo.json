@@ -55,6 +55,9 @@
         "packages/binny/src/**",
         "packages/collector-sdk/scripts/**",
         "packages/collector-sdk/src/**",
+        "packages/collector-runtime/Dockerfile.lightweight",
+        "packages/collector-runtime/src/**",
+        "packages/collector-runtime/test/fixtures/**",
         "packages/contracts/src/**",
         "packages/core/src/**",
         "packages/server/src/**"

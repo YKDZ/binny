@@ -6,9 +6,15 @@ import {
   identityIdSchema,
   jsonObjectSchema,
 } from "./bin-configuration.ts";
+import {
+  postgresTextSchema,
+  toPostgresJsonSchema,
+  withPostgresJsonSchemaProjection,
+} from "./postgres-text.ts";
 
 const runIdSchema = z.string().uuid();
-const errorPathSchema = z.array(z.union([z.string(), z.number()]));
+const failurePathSchema = z.array(z.union([postgresTextSchema, z.number()]));
+const apiErrorPathSchema = z.array(z.union([z.string(), z.number()]));
 
 export const manualRunStatusSchema = z.enum([
   "queued",
@@ -23,134 +29,149 @@ export const manualRunQueueReasonSchema = z.enum([
   "earlier_run_queued",
 ]);
 
-export const manualRunTriggerInputSchema = z
-  .object({
-    action: collectorActionNameSchema,
-    params: jsonObjectSchema,
-  })
-  .strict();
+export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      action: collectorActionNameSchema,
+      params: jsonObjectSchema,
+    })
+    .strict(),
+);
 
 export const manualRunFailureSchema = z
   .object({
-    code: z.string().min(1).max(128),
-    message: z.string().min(1),
-    impact: z.string().min(1),
-    path: errorPathSchema.optional(),
-    suggestion: z.string().min(1).optional(),
+    code: postgresTextSchema.min(1).max(128),
+    message: postgresTextSchema.min(1),
+    impact: postgresTextSchema.min(1),
+    path: failurePathSchema.optional(),
+    suggestion: postgresTextSchema.min(1).optional(),
     requiresHuman: z.boolean(),
   })
   .strict();
 
 export const manualRunCompletionSchema = z.discriminatedUnion("status", [
-  z
-    .object({
-      status: z.literal("completed"),
-      completedScopes: z.array(z.string()),
-    })
-    .strict(),
-  z
-    .object({
-      status: z.literal("failed"),
-      completedScopes: z.array(z.string()),
-      error: manualRunFailureSchema,
-    })
-    .strict(),
+  withPostgresJsonSchemaProjection(
+    z
+      .object({
+        status: z.literal("completed"),
+        completedScopes: z.array(postgresTextSchema),
+      })
+      .strict(),
+  ),
+  withPostgresJsonSchemaProjection(
+    z
+      .object({
+        status: z.literal("failed"),
+        completedScopes: z.array(postgresTextSchema),
+        error: manualRunFailureSchema,
+      })
+      .strict(),
+  ),
 ]);
 
-export const manualRunCompleteInputSchema = z
-  .object({
-    runtimeId: z.string().min(1),
-    completion: manualRunCompletionSchema,
-  })
-  .strict();
+export const manualRunCompleteInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      runtimeId: postgresTextSchema.min(1),
+      completion: manualRunCompletionSchema,
+    })
+    .strict(),
+);
 
-export const manualRunClaimInputSchema = z
-  .object({ runtimeId: z.string().min(1) })
-  .strict();
+export const manualRunClaimInputSchema = withPostgresJsonSchemaProjection(
+  z.object({ runtimeId: postgresTextSchema.min(1) }).strict(),
+);
 
 export const manualRunCommitLocatorSchema = z
   .object({
     commitId: z.string().uuid(),
     archiveSeq: z.string().regex(/^[1-9][0-9]*$/u),
-    items: z
-      .array(
-        z
-          .object({
-            itemId: z.string().uuid(),
-            revisionId: z.string().uuid(),
-          })
-          .strict(),
-      )
-      .min(1),
+    items: z.array(
+      z
+        .object({
+          itemId: z.string().uuid(),
+          revisionId: z.string().uuid(),
+        })
+        .strict(),
+    ),
   })
   .strict();
 
 export const manualRunResultSchema = z
   .object({
-    completedScopes: z.array(z.string()),
+    completedScopes: z.array(postgresTextSchema),
     commits: z.array(manualRunCommitLocatorSchema),
     stopReason: z
-      .object({ code: z.string().min(1), message: z.string().min(1) })
+      .object({
+        code: postgresTextSchema.min(1),
+        message: postgresTextSchema.min(1),
+      })
       .strict(),
     error: manualRunFailureSchema.optional(),
   })
   .strict();
 
-export const manualRunSchema = z
-  .object({
-    runId: runIdSchema,
-    binId: binIdSchema,
-    action: collectorActionNameSchema,
-    collectorId: z.string().min(1),
-    collectorVersion: z.string().min(1),
-    status: manualRunStatusSchema,
-    queueReason: manualRunQueueReasonSchema.optional(),
-    createdAt: z.iso.datetime(),
-    startedAt: z.iso.datetime().optional(),
-    finishedAt: z.iso.datetime().optional(),
-    result: manualRunResultSchema.optional(),
-  })
-  .strict();
+export const manualRunSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      runId: runIdSchema,
+      binId: binIdSchema,
+      action: collectorActionNameSchema,
+      collectorId: postgresTextSchema.min(1),
+      collectorVersion: postgresTextSchema.min(1),
+      status: manualRunStatusSchema,
+      queueReason: manualRunQueueReasonSchema.optional(),
+      createdAt: z.iso.datetime(),
+      startedAt: z.iso.datetime().optional(),
+      finishedAt: z.iso.datetime().optional(),
+      result: manualRunResultSchema.optional(),
+    })
+    .strict(),
+);
 
-export const manualRunExecutionSchema = z
-  .object({
-    runId: runIdSchema,
-    binId: binIdSchema,
-    identityId: identityIdSchema,
-    collectorId: z.string().min(1),
-    collectorVersion: z.string().min(1),
-    action: collectorActionNameSchema,
-    params: jsonObjectSchema,
-    config: jsonObjectSchema,
-    targets: z.array(z.unknown()),
-  })
-  .strict();
+export const manualRunExecutionSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      runId: runIdSchema,
+      binId: binIdSchema,
+      identityId: identityIdSchema,
+      collectorId: postgresTextSchema.min(1),
+      collectorVersion: postgresTextSchema.min(1),
+      action: collectorActionNameSchema,
+      params: jsonObjectSchema,
+      config: jsonObjectSchema,
+      targets: z.array(z.unknown()),
+    })
+    .strict(),
+);
 
-export const manualRunClaimSchema = z
-  .object({ run: manualRunExecutionSchema.nullable() })
-  .strict();
+export const manualRunClaimSchema = withPostgresJsonSchemaProjection(
+  z.object({ run: manualRunExecutionSchema.nullable() }).strict(),
+);
 
-export const manualRunErrorSchema = z
-  .object({
-    error: z
-      .object({
-        code: z.enum([
-          "invalid_input",
-          "bin_not_found",
-          "bin_disabled",
-          "action_not_found",
-          "invalid_action_parameters",
-          "run_not_found",
-          "runtime_not_connected",
-          "runtime_mismatch",
-          "run_not_executing",
-        ]),
-        message: z.string(),
-        path: errorPathSchema.optional(),
-      })
-      .strict(),
-  })
-  .strict();
+export const manualRunErrorSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      error: z
+        .object({
+          code: z.enum([
+            "invalid_input",
+            "bin_not_found",
+            "bin_disabled",
+            "action_not_found",
+            "invalid_action_parameters",
+            "run_not_found",
+            "runtime_not_connected",
+            "runtime_mismatch",
+            "run_not_executing",
+          ]),
+          message: postgresTextSchema,
+          path: apiErrorPathSchema.optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+);
 
 export type ManualRunTriggerInput = z.infer<typeof manualRunTriggerInputSchema>;
 export type ManualRunFailure = z.infer<typeof manualRunFailureSchema>;
@@ -186,4 +207,13 @@ export type ManualRunOperations = {
     runId: string,
     input: z.infer<typeof manualRunCompleteInputSchema>,
   ): Promise<ManualRunOperation<ManualRun>>;
+};
+
+export const manualRunApiSchemas = {
+  trigger: toPostgresJsonSchema(manualRunTriggerInputSchema, "input"),
+  claim: toPostgresJsonSchema(manualRunClaimInputSchema, "input"),
+  complete: toPostgresJsonSchema(manualRunCompleteInputSchema, "input"),
+  claimOutput: toPostgresJsonSchema(manualRunClaimSchema, "output"),
+  run: toPostgresJsonSchema(manualRunSchema, "output"),
+  error: toPostgresJsonSchema(manualRunErrorSchema, "output"),
 };

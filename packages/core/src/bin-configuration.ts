@@ -301,7 +301,9 @@ export function validateCollectorActionParameters(
     ok: false,
     code: "invalid_action_parameters",
     message: "本次动作参数不符合采集器声明。",
-    ...(issue === undefined ? {} : { path: ["params", ...dynamicSchemaPath(issue)] }),
+    ...(issue === undefined
+      ? {}
+      : { path: ["params", ...dynamicSchemaPath(issue)] }),
   };
 }
 

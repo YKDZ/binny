@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -40,7 +44,9 @@ function sendJson(
   status: number,
   body: unknown,
 ): void {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+  });
   response.end(JSON.stringify(body));
 }
 
@@ -56,10 +62,12 @@ function sourceMaterial(
   };
 }
 
-export async function startControlledSource(options: {
-  readonly host?: string;
-  readonly port?: number;
-} = {}): Promise<{
+export async function startControlledSource(
+  options: {
+    readonly host?: string;
+    readonly port?: number;
+  } = {},
+): Promise<{
   readonly port: number;
   readonly arrivals: () => readonly SourceArrival[];
   readonly close: () => Promise<void>;
