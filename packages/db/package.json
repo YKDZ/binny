@@ -1,0 +1,50 @@
+{
+  "name": "@binny/db",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PostgreSQL schema、迁移和连接管理。",
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "db:generate": "drizzle-kit generate --output json --config drizzle.config.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
+  },
+  "dependencies": {
+    "drizzle-orm": "1.0.0-rc.5",
+    "postgres": "^3.4.9"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "workspace:*",
+    "@types/node": "catalog:",
+    "drizzle-kit": "1.0.0-rc.5",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}

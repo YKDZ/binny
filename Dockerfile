@@ -8,6 +8,7 @@ COPY packages/api/package.json packages/api/turbo.json packages/api/
 COPY packages/binny/package.json packages/binny/turbo.json packages/binny/
 COPY packages/contracts/package.json packages/contracts/turbo.json packages/contracts/
 COPY packages/core/package.json packages/core/turbo.json packages/core/
+COPY packages/db/package.json packages/db/turbo.json packages/db/
 COPY packages/server/package.json packages/server/turbo.json packages/server/
 COPY packages/tooling-config/package.json packages/tooling-config/
 

@@ -11,6 +11,7 @@ COPY packages/collector-runtime/package.json packages/collector-runtime/
 COPY packages/collector-sdk/package.json packages/collector-sdk/
 COPY packages/contracts/package.json packages/contracts/
 COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
 COPY packages/server/package.json packages/server/
 COPY packages/tooling-config/package.json packages/tooling-config/
 COPY collectors/linuxdo/package.json collectors/linuxdo/

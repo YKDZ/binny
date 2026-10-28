@@ -2,11 +2,9 @@ import {
   runtimeHeartbeatTimeoutMs,
   manualRunFailureSchema,
 } from "@binny/contracts";
+import { manualRuns, runtimeConnections, type Transaction } from "@binny/db";
 import { and, eq, exists, gt, inArray, isNull, not, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-
-import type { CoreTransaction } from "./database.ts";
-import { manualRuns, runtimeConnections } from "./schema.ts";
 
 const activeStatuses = ["executing", "cancelling"] as const;
 
@@ -24,7 +22,7 @@ const activeRunOwner = alias(runtimeConnections, "active_run_owner");
  * 心跳超时只终结运行，不代表远端进程已退出；owner_state 会继续阻止领取。
  */
 export async function interruptExpiredManualRuns(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   binId?: string,
 ): Promise<readonly string[]> {
   const conditions = [
@@ -72,7 +70,7 @@ export async function interruptExpiredManualRuns(
 
 /** 新 controller 已取得同一 OS 锁，旧 worker 已关闭继承的锁 fd。 */
 export async function interruptReplacedManualRuns(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   binId: string,
   previousRuntimeId: string,
 ): Promise<void> {
@@ -143,7 +141,7 @@ export async function interruptReplacedManualRuns(
 
 /** 当前运行器拥有有效心跳，且未被旧执行者停止确认状态阻塞。 */
 export async function isRuntimeOwnerWritable(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   binId: string,
   runtimeId: string,
 ): Promise<boolean> {
@@ -169,7 +167,7 @@ export async function isRuntimeOwnerWritable(
  * 取消接受与新归档写共用运行行锁；receipt 命中后的只读重放不调用此函数。
  */
 export async function lockManualRunForArchiveWrite(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   runId: string,
 ): Promise<boolean> {
   const [run] = await transaction
@@ -206,7 +204,7 @@ export async function lockManualRunForArchiveWrite(
 
 /** 只在 controller 等待指定 worker 真实退出后，由其心跳确认停止。 */
 export async function confirmManualRunOwnerStopped(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   binId: string,
   runtimeId: string,
   runId: string,
