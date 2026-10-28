@@ -76,6 +76,8 @@ try {
     "--env",
     "BINNY_BIN_ID=binny14-fixture",
     "--env",
+    "BINNY_API_URL=http://127.0.0.1:1",
+    "--env",
     `BINNY_RUNTIME_PORT=${runtimePort}`,
     image,
   ]);

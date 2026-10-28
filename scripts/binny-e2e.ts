@@ -250,7 +250,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   assert.equal(created.id, "rss-main");
   assert.equal(created.identityId, "account-one");
   assert.equal(created.status, "active");
-  assert.equal(created.execution.status, "unavailable");
+  assert.equal(created.execution.status, "offline");
 
   const discovered = cliData<{
     readonly actions: Readonly<Record<string, unknown>>;
@@ -259,7 +259,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   }>(await cli(baseUrl, ["bin", "actions", "rss-main"]), "discovered");
   assert.deepEqual(Object.keys(discovered.actions), ["collect"]);
   assert.equal(discovered.environment.browser.required, false);
-  assert.equal(discovered.execution.status, "unavailable");
+  assert.equal(discovered.execution.status, "offline");
 
   cliFailure(
     await cli(baseUrl, [
