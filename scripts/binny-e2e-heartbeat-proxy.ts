@@ -13,6 +13,11 @@ let heldAt: number | undefined;
 let clientClosedAt: number | undefined;
 let heldForward: (() => Promise<void>) | undefined;
 let armedForStoppedRunId: string | undefined;
+let heldRuntimeId: string | undefined;
+let heldOwnerGeneration: string | undefined;
+let heldStoppedRunId: string | undefined;
+let forwardedRuntimeId: string | undefined;
+let forwardedOwnerGeneration: string | undefined;
 
 function readPort(name: string, fallback: number): number {
   const port = Number(process.env[name] ?? String(fallback));
@@ -125,11 +130,53 @@ async function handleRuntimeRequest(
     armed = false;
     heldAt = Date.now();
     clientClosedAt = undefined;
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "runtimeId" in decoded &&
+      typeof decoded.runtimeId === "string"
+    ) {
+      heldRuntimeId = decoded.runtimeId;
+    }
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "stoppedRunId" in decoded &&
+      typeof decoded.stoppedRunId === "string"
+    ) {
+      heldStoppedRunId = decoded.stoppedRunId;
+    }
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "ownerGeneration" in decoded &&
+      typeof decoded.ownerGeneration === "string"
+    ) {
+      heldOwnerGeneration = decoded.ownerGeneration;
+    }
     response.once("close", () => {
       if (!response.writableEnded) clientClosedAt = Date.now();
     });
     heldForward = async () => await forward(request, response, body);
     return;
+  }
+  if (
+    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
+    typeof decoded === "object" &&
+    decoded !== null &&
+    "runtimeId" in decoded &&
+    typeof decoded.runtimeId === "string"
+  ) {
+    forwardedRuntimeId = decoded.runtimeId;
+  }
+  if (
+    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
+    typeof decoded === "object" &&
+    decoded !== null &&
+    "ownerGeneration" in decoded &&
+    typeof decoded.ownerGeneration === "string"
+  ) {
+    forwardedOwnerGeneration = decoded.ownerGeneration;
   }
   await forward(request, response, body);
 }
@@ -149,6 +196,13 @@ const control = createServer((request, response) => {
         held: heldForward !== undefined,
         ...(heldAt === undefined ? {} : { heldAt }),
         ...(clientClosedAt === undefined ? {} : { clientClosedAt }),
+        ...(heldRuntimeId === undefined ? {} : { heldRuntimeId }),
+        ...(heldOwnerGeneration === undefined ? {} : { heldOwnerGeneration }),
+        ...(heldStoppedRunId === undefined ? {} : { heldStoppedRunId }),
+        ...(forwardedRuntimeId === undefined ? {} : { forwardedRuntimeId }),
+        ...(forwardedOwnerGeneration === undefined
+          ? {}
+          : { forwardedOwnerGeneration }),
       });
       return;
     }
@@ -177,6 +231,9 @@ const control = createServer((request, response) => {
       armedForStoppedRunId = value.stoppedRunId;
       heldAt = undefined;
       clientClosedAt = undefined;
+      heldRuntimeId = undefined;
+      heldOwnerGeneration = undefined;
+      heldStoppedRunId = undefined;
       sendJson(response, 200, { armed });
       return;
     }

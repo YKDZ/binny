@@ -293,8 +293,9 @@ async function postHeartbeat(
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({
-        protocolVersion: 2,
+        protocolVersion: 3,
         ownerLockAcquired: true,
+        ownerGeneration: "1",
         activeRunId: null,
         claimInFlight: false,
         ...input,
@@ -355,7 +356,7 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 2);
+  assert.equal(runtimeOneManifest.protocolVersion, 3);
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 

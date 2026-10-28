@@ -108,8 +108,9 @@ async function heartbeat(
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
-      protocolVersion: 2,
+      protocolVersion: 3,
       runtimeId,
+      ownerGeneration: "1",
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,

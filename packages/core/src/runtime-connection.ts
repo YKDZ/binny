@@ -31,6 +31,7 @@ type RuntimeConnectionRow = {
   readonly last_heartbeat_at: Date | null;
   readonly disconnected: boolean | null;
   readonly owner_state: "confirmed" | "unconfirmed" | null;
+  readonly owner_generation: string | null;
 };
 
 const tableName = "runtime_connections";
@@ -230,7 +231,8 @@ async function selectRuntimeConnection(
   const rows = await database.unsafe<RuntimeConnectionRow[]>(
     "SELECT b.id AS bin_id, b.collector AS configured_collector, b.config, " +
       "r.runtime_id, r.collector AS runtime_collector, r.environment, " +
-      "r.last_heartbeat_at, r.disconnected, r.owner_state FROM bin_configurations b " +
+      "r.last_heartbeat_at, r.disconnected, r.owner_state, " +
+      "r.owner_generation::text AS owner_generation FROM bin_configurations b " +
       "LEFT JOIN " +
       tableName +
       " r ON r.bin_id = b.id WHERE b.id = $1",
@@ -266,6 +268,7 @@ export async function initializeRuntimeConnectionSchema(
       "environment jsonb NOT NULL, " +
       "last_heartbeat_at timestamptz NOT NULL DEFAULT now(), " +
       "disconnected boolean NOT NULL DEFAULT false, " +
+      "owner_generation bigint NOT NULL DEFAULT 0, " +
       "owner_state text NOT NULL DEFAULT 'confirmed' " +
       "CHECK (owner_state IN ('confirmed', 'unconfirmed'))" +
       ")",
@@ -278,12 +281,27 @@ export async function initializeRuntimeConnectionSchema(
   await database.unsafe(
     "ALTER TABLE " +
       tableName +
+      " ADD COLUMN IF NOT EXISTS owner_generation bigint NOT NULL DEFAULT 0",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
       " DROP CONSTRAINT IF EXISTS runtime_connections_owner_state_check",
   );
   await database.unsafe(
     "ALTER TABLE " +
       tableName +
       " ADD CONSTRAINT runtime_connections_owner_state_check CHECK (owner_state IN ('confirmed', 'unconfirmed'))",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
+      " DROP CONSTRAINT IF EXISTS runtime_connections_owner_generation_check",
+  );
+  await database.unsafe(
+    "ALTER TABLE " +
+      tableName +
+      " ADD CONSTRAINT runtime_connections_owner_generation_check CHECK (owner_generation >= 0)",
   );
 }
 
@@ -318,6 +336,42 @@ export function createRuntimeConnectionStore(
           });
 
         const current = await selectRuntimeConnection(transaction, binId);
+        const incomingGeneration = BigInt(checked.data.ownerGeneration);
+        const currentGeneration =
+          current?.owner_generation === null ||
+          current?.owner_generation === undefined
+            ? undefined
+            : BigInt(current.owner_generation);
+        if (
+          currentGeneration !== undefined &&
+          incomingGeneration < currentGeneration
+        )
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "运行器所有权代际已过期，不能覆盖当前所有者。",
+            path: ["ownerGeneration"],
+          });
+        if (
+          currentGeneration !== undefined &&
+          incomingGeneration === currentGeneration &&
+          current?.runtime_id !== checked.data.runtimeId
+        )
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "相同所有权代际只能由原运行器继续持有。",
+            path: ["ownerGeneration"],
+          });
+        if (
+          currentGeneration !== undefined &&
+          incomingGeneration > currentGeneration &&
+          current?.runtime_id === checked.data.runtimeId
+        )
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "运行器身份不能切换到新的所有权代际。",
+            path: ["ownerGeneration"],
+          });
+
         const expiredRunIds = await interruptExpiredManualRuns(
           transaction,
           binId,
@@ -361,17 +415,19 @@ export function createRuntimeConnectionStore(
         await transaction.unsafe(
           "INSERT INTO " +
             tableName +
-            " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected, owner_state) " +
-            "VALUES ($1, $2, $3, $4, now(), false, $5) " +
+            " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected, owner_state, owner_generation) " +
+            "VALUES ($1, $2, $3, $4, now(), false, $5, $6) " +
             "ON CONFLICT (bin_id) DO UPDATE SET runtime_id = EXCLUDED.runtime_id, " +
             "collector = EXCLUDED.collector, environment = EXCLUDED.environment, " +
-            "last_heartbeat_at = now(), disconnected = false, owner_state = EXCLUDED.owner_state",
+            "last_heartbeat_at = now(), disconnected = false, owner_state = EXCLUDED.owner_state, " +
+            "owner_generation = EXCLUDED.owner_generation",
           [
             binId,
             checked.data.runtimeId,
             jsonbParameter(database, checked.data.collector),
             jsonbParameter(database, checked.data.environment),
             ownerState,
+            checked.data.ownerGeneration,
           ],
         );
 

@@ -25,8 +25,16 @@ type ManagedProcess = {
 
 type HeartbeatDelayProxy = {
   readonly arm: (stoppedRunId: string) => Promise<void>;
-  readonly waitUntilHeld: () => Promise<number>;
+  readonly waitUntilHeld: () => Promise<{
+    readonly heldAt: number;
+    readonly runtimeId: string;
+    readonly ownerGeneration?: string;
+    readonly stoppedRunId?: string;
+  }>;
   readonly waitUntilTimedOut: () => Promise<number>;
+  readonly waitUntilForwarded: (
+    runtimeId: string,
+  ) => Promise<string | undefined>;
   readonly release: () => Promise<void>;
 };
 
@@ -34,6 +42,11 @@ type HeartbeatDelayProxyStatus = {
   readonly held: boolean;
   readonly heldAt?: number;
   readonly clientClosedAt?: number;
+  readonly heldRuntimeId?: string;
+  readonly heldOwnerGeneration?: string;
+  readonly heldStoppedRunId?: string;
+  readonly forwardedRuntimeId?: string;
+  readonly forwardedOwnerGeneration?: string;
 };
 
 const repositoryRoot = path.resolve(
@@ -41,7 +54,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny18fix-" + process.pid.toString(10);
+const projectName = "binny18owner-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 let composeOverrideFile = "";
@@ -73,11 +86,24 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
     async waitUntilHeld() {
       const status = await waitFor(
         readStatus,
-        (current) => current.held && typeof current.heldAt === "number",
+        (current) =>
+          current.held &&
+          typeof current.heldAt === "number" &&
+          typeof current.heldRuntimeId === "string",
         "代理暂存的原生 idle heartbeat",
       );
       assert.ok(status.heldAt !== undefined);
-      return status.heldAt;
+      assert.ok(status.heldRuntimeId !== undefined);
+      return {
+        heldAt: status.heldAt,
+        runtimeId: status.heldRuntimeId,
+        ...(status.heldOwnerGeneration === undefined
+          ? {}
+          : { ownerGeneration: status.heldOwnerGeneration }),
+        ...(status.heldStoppedRunId === undefined
+          ? {}
+          : { stoppedRunId: status.heldStoppedRunId }),
+      };
     },
     async waitUntilTimedOut() {
       const status = await waitFor(
@@ -87,6 +113,14 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
       );
       assert.ok(status.clientClosedAt !== undefined);
       return status.clientClosedAt;
+    },
+    async waitUntilForwarded(runtimeId) {
+      const status = await waitFor(
+        readStatus,
+        (current) => current.forwardedRuntimeId === runtimeId,
+        `新运行器 ${runtimeId} 的真实心跳`,
+      );
+      return status.forwardedOwnerGeneration;
     },
     async release() {
       if (!(await readStatus()).held) return;
@@ -1098,6 +1132,240 @@ async function waitForCliManualRunState(
   assert.fail(`运行没有进入预期状态：${statuses.join("/")}`);
 }
 
+type RuntimeExecutionState = {
+  readonly status: string;
+  readonly runtimeId?: string;
+  readonly reason?: string;
+};
+
+async function readRuntimeExecutionState(
+  baseUrl: string,
+  binId: string,
+): Promise<RuntimeExecutionState> {
+  const bin = cliData<{ readonly execution: RuntimeExecutionState }>(
+    await cli(baseUrl, ["bin", "get", binId]),
+    "found",
+  );
+  return bin.execution;
+}
+
+async function waitForReplacementRuntime(
+  baseUrl: string,
+  binId: string,
+  previousRuntimeId: string,
+): Promise<string> {
+  const replacement = await waitFor(
+    () => readRuntimeExecutionState(baseUrl, binId),
+    (current) =>
+      current.status === "online" &&
+      current.runtimeId !== undefined &&
+      current.runtimeId !== previousRuntimeId,
+    `bin ${binId} 的替换运行器上线`,
+  );
+  assert.ok(replacement.runtimeId !== undefined);
+  return replacement.runtimeId;
+}
+
+async function verifyDelayedOldOwnerCannotDisturbRun(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+  label: string,
+  currentRuntimeId: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const gateKey = `18-${label}-late-owner-${randomUUID()}`;
+  const run = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey,
+        sourceKey: gateKey,
+        waitAfterCommitMs: 60_000,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(sourceControlUrl, gateKey, run.runId, binId);
+  await releaseSource(sourceControlUrl, gateKey, "slow");
+  await waitForSourceMarker(sourceControlUrl, run.runId, gateKey, "committed");
+  const worker = (await runtimeProcessSnapshot(service)).find((process) =>
+    process.command.includes("worker.js"),
+  );
+  assert.ok(worker, `${label} 应有真实的新 owner worker 正在运行。`);
+
+  await heartbeatProxy.release();
+  await wait(150);
+  const afterLateHeartbeat = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", binId, run.runId]),
+    "found",
+  );
+  assert.equal(
+    afterLateHeartbeat.status,
+    "executing",
+    `${label} 的迟到旧 idle 不能终结新 owner 的运行。`,
+  );
+  assert.equal(afterLateHeartbeat.stopConfirmedAt, undefined);
+  const ownerAfterLateHeartbeat = await readRuntimeExecutionState(
+    baseUrl,
+    binId,
+  );
+  assert.equal(ownerAfterLateHeartbeat.status, "online");
+  assert.equal(ownerAfterLateHeartbeat.runtimeId, currentRuntimeId);
+  assert.ok(
+    (await runtimeProcessSnapshot(service)).some(
+      (process) => process.pgid === worker.pgid,
+    ),
+    `${label} 的迟到旧 idle 不能确认仍在运行的 worker 已停止。`,
+  );
+
+  const cancellation = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "cancel", binId, run.runId]),
+    "cancellation",
+  );
+  assert.equal(cancellation.status, "cancelling");
+  const cancelled = await waitForCliManualRunState(baseUrl, binId, run.runId, [
+    "cancelled",
+  ]);
+  assert.ok(cancelled.stopConfirmedAt);
+  await waitFor(
+    () => runtimeProcessSnapshot(service),
+    (processes) => !processes.some((process) => process.pgid === worker.pgid),
+    `${label} 的取消确认等待真实 worker 退出`,
+  );
+
+  const completedGate = `18-${label}-replacement-run-${randomUUID()}`;
+  const completedRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: completedGate,
+        sourceKey: completedGate,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    completedGate,
+    completedRun.runId,
+    binId,
+  );
+  await releaseSource(sourceControlUrl, completedGate);
+  const completed = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    completedRun.runId,
+    ["completed"],
+  );
+  assert.equal(completed.result?.stopReason.code, "completed");
+}
+
+async function ownerGenerationOverlapStep(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+  previousStoppedRunId: string,
+): Promise<void> {
+  const binId = "binny15-one";
+  const service = "runtime-fifteen-one";
+  const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(initialOwner.status, "online");
+  assert.ok(initialOwner.runtimeId !== undefined);
+
+  await heartbeatProxy.arm(previousStoppedRunId);
+  const registeredOldHeartbeat = await heartbeatProxy.waitUntilHeld();
+  assert.equal(registeredOldHeartbeat.runtimeId, initialOwner.runtimeId);
+  assert.ok(registeredOldHeartbeat.ownerGeneration !== undefined);
+  assert.equal(registeredOldHeartbeat.stoppedRunId, undefined);
+  const heldAt = registeredOldHeartbeat.heldAt;
+  const clientClosedAt = await heartbeatProxy.waitUntilTimedOut();
+  assert.ok(clientClosedAt - heldAt >= 2_500);
+  await compose(["kill", "--signal", "SIGKILL", service]);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const registeredReplacementId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    initialOwner.runtimeId,
+  );
+  const registeredReplacementGeneration =
+    await heartbeatProxy.waitUntilForwarded(registeredReplacementId);
+  assert.ok(registeredReplacementGeneration !== undefined);
+  assert.ok(
+    BigInt(registeredReplacementGeneration) >
+      BigInt(registeredOldHeartbeat.ownerGeneration),
+    "通过同卷 owner lock 的合法替换必须持久推进所有权代际。",
+  );
+  await verifyDelayedOldOwnerCannotDisturbRun(
+    baseUrl,
+    heartbeatProxy,
+    "registered-owner",
+    registeredReplacementId,
+  );
+
+  await compose(["stop", service]);
+  const stoppedOwner = await waitFor(
+    () => readRuntimeExecutionState(baseUrl, binId),
+    (current) =>
+      current.status === "offline" &&
+      current.runtimeId === registeredReplacementId,
+    "当前运行器正常断开",
+  );
+  assert.equal(stoppedOwner.reason, "runtime_not_connected");
+
+  await heartbeatProxy.arm(previousStoppedRunId);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const unseenOldHeartbeat = await heartbeatProxy.waitUntilHeld();
+  assert.notEqual(unseenOldHeartbeat.runtimeId, registeredReplacementId);
+  assert.ok(unseenOldHeartbeat.ownerGeneration !== undefined);
+  assert.equal(unseenOldHeartbeat.stoppedRunId, undefined);
+  assert.ok(
+    BigInt(unseenOldHeartbeat.ownerGeneration) >
+      BigInt(registeredReplacementGeneration),
+  );
+  const stillStopped = await readRuntimeExecutionState(baseUrl, binId);
+  assert.equal(stillStopped.status, "offline");
+  assert.equal(
+    stillStopped.runtimeId,
+    registeredReplacementId,
+    "core 尚未见到新 controller 的首个 idle 心跳。",
+  );
+  const unseenClientClosedAt = await heartbeatProxy.waitUntilTimedOut();
+  assert.ok(unseenClientClosedAt - unseenOldHeartbeat.heldAt >= 2_500);
+  await compose(["kill", "--signal", "SIGKILL", service]);
+  await compose(["up", "--detach", "--no-build", "--force-recreate", service]);
+  const unseenReplacementId = await waitForReplacementRuntime(
+    baseUrl,
+    binId,
+    registeredReplacementId,
+  );
+  assert.notEqual(unseenReplacementId, unseenOldHeartbeat.runtimeId);
+  const unseenReplacementGeneration =
+    await heartbeatProxy.waitUntilForwarded(unseenReplacementId);
+  assert.ok(unseenReplacementGeneration !== undefined);
+  assert.ok(
+    BigInt(unseenReplacementGeneration) >
+      BigInt(unseenOldHeartbeat.ownerGeneration),
+    "核心未见旧首包时，新 controller 仍须携带更高的持久代际。",
+  );
+  await verifyDelayedOldOwnerCannotDisturbRun(
+    baseUrl,
+    heartbeatProxy,
+    "unseen-first-heartbeat",
+    unseenReplacementId,
+  );
+}
+
 async function manualRunsCliStep(
   baseUrl: string,
   manifest: unknown,
@@ -1358,7 +1626,9 @@ async function manualRunsCliStep(
     heartbeatWarmRun.runId,
     ["completed"],
   );
-  const delayedHeartbeatAt = await heartbeatProxy.waitUntilHeld();
+  const delayedHeartbeat = await heartbeatProxy.waitUntilHeld();
+  assert.ok(delayedHeartbeat.ownerGeneration !== undefined);
+  const delayedHeartbeatAt = delayedHeartbeat.heldAt;
   const heartbeatClientClosedAt = await heartbeatProxy.waitUntilTimedOut();
   assert.ok(
     heartbeatClientClosedAt - delayedHeartbeatAt >= 2_500,
@@ -1417,6 +1687,12 @@ async function manualRunsCliStep(
     ),
     false,
     "迟到的旧 idle heartbeat 不能确认新 run，停止确认必须晚于 worker 退出。",
+  );
+
+  await ownerGenerationOverlapStep(
+    baseUrl,
+    heartbeatProxy,
+    heartbeatNextRun.runId,
   );
 
   const slowGateKey = "18-cli-slow-stop";
@@ -1560,6 +1836,77 @@ async function manualRunsCliStep(
     ["completed"],
   );
   assert.equal(nextCompleted.result?.stopReason.code, "completed");
+
+  const ownerBeforeStorageFailure = await readRuntimeExecutionState(
+    baseUrl,
+    "binny15-one",
+  );
+  assert.equal(ownerBeforeStorageFailure.status, "online");
+  assert.ok(ownerBeforeStorageFailure.runtimeId !== undefined);
+  const runningContainer = await compose(["ps", "-q", "runtime-fifteen-one"]);
+  const runningContainerId = runningContainer.stdout.trim().split("\n")[0];
+  assert.ok(runningContainerId);
+  const makeOwnerVolumeReadOnly = await run("docker", [
+    "exec",
+    "--user",
+    "0",
+    runningContainerId,
+    "chmod",
+    "0555",
+    "/var/lib/binny/runtime",
+  ]);
+  assert.equal(makeOwnerVolumeReadOnly.code, 0, makeOwnerVolumeReadOnly.stderr);
+  await compose(["stop", "runtime-fifteen-one"]);
+  await waitFor(
+    () => readRuntimeExecutionState(baseUrl, "binny15-one"),
+    (current) =>
+      current.status === "offline" &&
+      current.runtimeId === ownerBeforeStorageFailure.runtimeId,
+    "存储故障前的运行器断开",
+  );
+  await compose([
+    "up",
+    "--detach",
+    "--no-build",
+    "--force-recreate",
+    "runtime-fifteen-one",
+  ]);
+  const failedContainer = await compose([
+    "ps",
+    "--all",
+    "-q",
+    "runtime-fifteen-one",
+  ]);
+  const failedContainerId = failedContainer.stdout.trim().split("\n")[0];
+  assert.ok(failedContainerId);
+  await waitFor(
+    async () =>
+      await run("docker", [
+        "inspect",
+        "--format",
+        "{{.State.Status}} {{.RestartCount}}",
+        failedContainerId,
+      ]),
+    (state) =>
+      state.code === 0 &&
+      /^(?:exited|restarting) [1-9][0-9]*$/u.test(state.stdout.trim()),
+    "代际不能持久发布时 controller 启动失败",
+  );
+  const failedContainerLogs = await run("docker", ["logs", failedContainerId]);
+  assert.match(
+    failedContainerLogs.stdout + failedContainerLogs.stderr,
+    /无法持久发布运行器所有权代际/u,
+  );
+  const ownerAfterStorageFailure = await readRuntimeExecutionState(
+    baseUrl,
+    "binny15-one",
+  );
+  assert.equal(ownerAfterStorageFailure.status, "offline");
+  assert.equal(
+    ownerAfterStorageFailure.runtimeId,
+    ownerBeforeStorageFailure.runtimeId,
+    "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
+  );
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -2347,7 +2694,7 @@ async function verifyRestartAndRemoval(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny18fix-compose-"),
+    path.join(tmpdir(), "binny18owner-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";

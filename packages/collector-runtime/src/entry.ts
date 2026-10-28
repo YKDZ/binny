@@ -1,6 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readdir, realpath } from "node:fs/promises";
+import {
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  unlink,
+  type FileHandle,
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -85,7 +94,10 @@ if (!Number.isInteger(heartbeatInterval) || heartbeatInterval < 250) {
   throw new Error("BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS 必须大于等于 250。");
 }
 
-async function findOwnerLockDescriptor(): Promise<number> {
+async function findOwnerLockDescriptor(): Promise<{
+  readonly descriptor: number;
+  readonly path: string;
+}> {
   let expectedPath: string;
   try {
     expectedPath = await realpath(ownerLockPath);
@@ -99,7 +111,7 @@ async function findOwnerLockDescriptor(): Promise<number> {
     if (!Number.isInteger(descriptor)) continue;
     try {
       if ((await realpath(`/proc/self/fd/${entry}`)) === expectedPath)
-        return descriptor;
+        return { descriptor, path: expectedPath };
     } catch {
       // fd 列表可能在遍历时关闭临时描述符。
     }
@@ -109,7 +121,65 @@ async function findOwnerLockDescriptor(): Promise<number> {
   );
 }
 
-const ownerLockDescriptor = await findOwnerLockDescriptor();
+function hasErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function advanceOwnerGeneration(
+  ownerLockRealPath: string,
+): Promise<string> {
+  const directoryPath = dirname(ownerLockRealPath);
+  const generationPath = join(directoryPath, "owner.generation");
+  let current = 0n;
+  try {
+    const saved = await readFile(generationPath, "utf8");
+    const match = /^(0|[1-9][0-9]*)\n$/u.exec(saved);
+    if (match === null)
+      throw new Error("运行器所有权代际文件格式无效，拒绝重新编号。");
+    current = BigInt(match[1]!);
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT"))
+      throw new Error("无法读取运行器所有权代际，不能启动控制器。", {
+        cause: error,
+      });
+  }
+
+  const next = current + 1n;
+  if (next > 9_223_372_036_854_775_807n)
+    throw new Error("运行器所有权代际已用尽，不能启动控制器。");
+
+  const temporaryPath = join(
+    directoryPath,
+    `.owner-generation-${process.pid}-${randomUUID()}.tmp`,
+  );
+  let temporaryFile: FileHandle | undefined;
+  try {
+    temporaryFile = await open(temporaryPath, "wx", 0o600);
+    await temporaryFile.writeFile(`${next.toString()}\n`, "utf8");
+    await temporaryFile.sync();
+    await temporaryFile.close();
+    temporaryFile = undefined;
+    await rename(temporaryPath, generationPath);
+    const directory = await open(directoryPath, "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+    return next.toString();
+  } catch (error) {
+    if (temporaryFile !== undefined)
+      await temporaryFile.close().catch(() => {});
+    await unlink(temporaryPath).catch(() => {});
+    throw new Error("无法持久发布运行器所有权代际，不能发送首个心跳。", {
+      cause: error,
+    });
+  }
+}
+
+const ownerLock = await findOwnerLockDescriptor();
+const ownerLockDescriptor = ownerLock.descriptor;
+const ownerGeneration = await advanceOwnerGeneration(ownerLock.path);
 const importedCollector = (await import(pathToFileURL(collectorPath).href)) as {
   readonly default?: CollectorDefinition;
   readonly collector?: CollectorDefinition;
@@ -542,6 +612,7 @@ async function heartbeat(allowStopping = false): Promise<void> {
       json: {
         protocolVersion: runtimeProtocolVersion,
         runtimeId,
+        ownerGeneration,
         ownerLockAcquired: true,
         activeRunId,
         claimInFlight,
