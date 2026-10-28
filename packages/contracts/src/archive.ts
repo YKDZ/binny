@@ -588,6 +588,8 @@ export const archiveCommitSchema = withArchiveJsonSchemaProjection(
 export const archiveItemDeletionResultSchema = z
   .object({
     itemId: archiveIdSchema,
+    /** 包含输入条目的完整删除集合，按条目 ID 排序。 */
+    deletedItemIds: z.array(archiveIdSchema).min(1),
     deletionSeq: archiveSnapshotSequenceSchema,
     deleted: z.literal(true),
   })
@@ -1703,6 +1705,7 @@ export type ArchiveOperations = {
   submitArchive(
     input: ArchiveSubmissionInput,
   ): Promise<ArchiveOperation<ArchiveCommit>>;
+  /** 删除输入条目及沿各 bin 当前未撤回级联声明并集可达的对象；结果按 ID 排序并包含输入条目。 */
   deleteArchiveItem(
     itemId: string,
   ): Promise<ArchiveOperation<ArchiveItemDeletionResult>>;

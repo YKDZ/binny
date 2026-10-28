@@ -414,6 +414,8 @@ function archiveIds(state: string): {
   readonly repairedResourceId: string;
   readonly orphanResourceId: string;
   readonly resourceMarkerItemId: string;
+  readonly cliCascadeRootItemId: string;
+  readonly cliCascadeTargetItemId: string;
 } {
   const parsed: unknown = JSON.parse(state);
   if (typeof parsed !== "object" || parsed === null) {
@@ -441,6 +443,8 @@ function archiveIds(state: string): {
     repairedResourceId: readText("repairedResourceId"),
     orphanResourceId: readText("orphanResourceId"),
     resourceMarkerItemId: readText("resourceMarkerItemId"),
+    cliCascadeRootItemId: readText("cliCascadeRootItemId"),
+    cliCascadeTargetItemId: readText("cliCascadeTargetItemId"),
   };
 }
 
@@ -2822,6 +2826,8 @@ async function verifyRestartAndRemoval(
     resourceItemId,
     resourceRevisionId,
     resourceMarkerItemId,
+    cliCascadeRootItemId,
+    cliCascadeTargetItemId,
   } = archiveIds(archive);
   const expectedArchive = archiveResponses(archiveState);
   const cliArchiveItem = cliData<unknown>(
@@ -3166,6 +3172,26 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(cliArchiveCommit, expectedArchive.commit);
   await validateApiInput();
+
+  const cliCascadeDeletion = cliData<{
+    readonly itemId: string;
+    readonly deletedItemIds: readonly string[];
+    readonly deletionSeq: string;
+    readonly deleted: true;
+  }>(
+    await cli(baseUrl, ["archive", "delete", cliCascadeRootItemId]),
+    "deleted",
+  );
+  assert.equal(cliCascadeDeletion.itemId, cliCascadeRootItemId);
+  assert.deepEqual(
+    cliCascadeDeletion.deletedItemIds.toSorted(),
+    [cliCascadeRootItemId, cliCascadeTargetItemId].toSorted(),
+  );
+  assert.equal(cliCascadeDeletion.deleted, true);
+  cliFailure(
+    await cli(baseUrl, ["archive", "item", cliCascadeTargetItemId]),
+    "item_deleted",
+  );
   return baseUrl;
 }
 

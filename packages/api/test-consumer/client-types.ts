@@ -260,6 +260,16 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await item.json()).error.code;
   }
 
+  const deletion = await client.archives.items[":itemId"].$delete({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (deletion.status === 200) {
+    const deletionResult = await deletion.json();
+    void (deletionResult.deletedItemIds satisfies readonly string[]);
+    // @ts-expect-error 删除结果中的条目标识为字符串。
+    void (deletionResult.deletedItemIds satisfies readonly number[]);
+  }
+
   const historicalItem = await client.archives.items[":itemId"].$get({
     param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
     query: { binId: "rss-main", asOf: "12" },
