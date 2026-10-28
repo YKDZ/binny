@@ -28,7 +28,7 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny22fix-rss-e2e-" + process.pid.toString(10);
+const projectName = "binny23-rss-e2e-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
@@ -846,6 +846,9 @@ type RssControlSource = {
   readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
   readonly setPhotoAvailable: (available: boolean) => Promise<void>;
+  readonly setStaticArticleVersion: (version: number) => Promise<void>;
+  readonly setStaticPhotoAvailable: (available: boolean) => Promise<void>;
+  readonly setRecoveryPageAvailable: (available: boolean) => Promise<void>;
 };
 
 async function createRssControlSource(port: number): Promise<RssControlSource> {
@@ -920,6 +923,15 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     },
     async setPhotoAvailable(available) {
       await updateState({ photoAvailable: available });
+    },
+    async setStaticArticleVersion(version) {
+      await updateState({ staticArticleVersion: version });
+    },
+    async setStaticPhotoAvailable(available) {
+      await updateState({ staticPhotoAvailable: available });
+    },
+    async setRecoveryPageAvailable(available) {
+      await updateState({ recoveryPageAvailable: available });
     },
   };
 }
@@ -1076,11 +1088,22 @@ type RssArchiveRead = {
         readonly searchText?: string;
       };
       readonly metadata?: Record<string, unknown> & {
-        readonly item?: { readonly bodyType?: string } | null;
+        readonly item?: {
+          readonly bodyType?: string;
+          readonly bodySource?: string;
+          readonly bodyUrl?: string;
+          readonly bodyFinalUrl?: string;
+          readonly bodyTitle?: string | null;
+        } | null;
       };
       readonly resources?: readonly { readonly resourceId: string }[];
       readonly capture: {
         readonly completeness: "complete" | "partial";
+        readonly scope: {
+          readonly bodySource?: string;
+          readonly bodyUrl?: string;
+          readonly bodyFinalUrl?: string;
+        };
         readonly missing: readonly {
           readonly path: string;
           readonly reason: string;
@@ -2138,6 +2161,7 @@ async function runRssAcceptance(
         id: "real-feed-parser",
         url: "https://github.com/rowanmanning/feed-parser/releases.atom",
       },
+      { id: "static-main", url: source.baseUrl + "/static-rss" },
     ],
   };
   await Promise.all([
@@ -2152,7 +2176,7 @@ async function runRssAcceptance(
   ]);
 
   const initialRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
-    feedIds: ["rss-main", "atom-main", "temporary"],
+    feedIds: ["rss-main", "atom-main", "temporary", "static-main"],
   });
   const initialRequests = await source.requests();
   const initialAtomRequest = initialRequests.find(
@@ -2205,6 +2229,266 @@ async function runRssAcceptance(
     summaryState.capture.missing.some(({ reason }) =>
       reason.includes("不能声称已取得全文"),
     ),
+  );
+
+  const staticArticleV1 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "公开静态正文版本 1",
+  );
+  assert.equal(staticArticleV1.sourceKey.namespace, "rss:static-main");
+  assert.equal(staticArticleV1.sourceKey.key, "id:urn:binny:23:static-article");
+  const staticArticleStateV1 = rssArchiveView(staticArticleV1, "binny22-one");
+  assert.equal(staticArticleStateV1.capture.completeness, "complete");
+  assert.equal(staticArticleStateV1.capture.scope.bodySource, "static-html");
+  assert.equal(
+    staticArticleStateV1.capture.scope.bodyUrl,
+    source.baseUrl + "/story/static",
+  );
+  assert.equal(
+    staticArticleStateV1.capture.scope.bodyFinalUrl,
+    source.baseUrl + "/pages/2026/article.html",
+  );
+  assert.equal(staticArticleStateV1.metadata?.item?.bodySource, "static-html");
+  assert.equal(
+    staticArticleStateV1.metadata?.item?.bodyFinalUrl,
+    source.baseUrl + "/pages/2026/article.html",
+  );
+  assert.match(staticArticleStateV1.body?.html ?? "", /公开静态正文版本 1/u);
+  assert.doesNotMatch(staticArticleStateV1.body?.html ?? "", /导航文字/u);
+  assert.doesNotMatch(staticArticleStateV1.body?.html ?? "", /侧栏广告/u);
+  assert.match(staticArticleStateV1.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.match(
+    staticArticleStateV1.body?.markdown ?? "",
+    /binny:\/\/resource\//u,
+  );
+  assert.equal(staticArticleStateV1.resources?.length, 1);
+  assert.deepEqual(
+    await readRssResource(
+      baseUrl,
+      staticArticleStateV1.resources?.[0]?.resourceId ?? "",
+    ),
+    sourceMediaBytes.photoBytes,
+  );
+
+  const staticSecondBinRun = await triggerRssAction(
+    baseUrl,
+    "binny22-two",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(staticSecondBinRun.status, "failed");
+  const staticArticleSecondBin = await readRssArchive(
+    baseUrl,
+    "binny22-two",
+    "公开静态正文版本 1",
+  );
+  assert.equal(staticArticleSecondBin.itemId, staticArticleV1.itemId);
+  assert.deepEqual(staticArticleSecondBin.sourceKey, staticArticleV1.sourceKey);
+
+  const staticArchiveBeforeCheck = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "公开静态正文版本 1",
+  );
+  const staticPageRequestsBeforeCheck = (await source.requests()).filter(
+    ({ path }) => path.startsWith("/story/") || path.startsWith("/pages/"),
+  ).length;
+  const staticMediaRequestsBeforeCheck = (await source.requests()).filter(
+    ({ path }) => path.startsWith("/media/"),
+  ).length;
+  const staticCheck = await triggerRssAction(baseUrl, "binny22-one", "check", {
+    feedIds: ["static-main"],
+  });
+  assert.equal(staticCheck.status, "completed");
+  assert.equal(staticCheck.result?.check?.availability, "unavailable");
+  assert.deepEqual(staticCheck.result?.check?.scope, ["static-main"]);
+  assert.ok(
+    staticCheck.result?.check?.problems.some(
+      ({ code }) => code === "rss_static_article_unavailable",
+    ),
+  );
+  const staticPageRequestsAfterCheck = (await source.requests()).filter(
+    ({ path }) => path.startsWith("/story/") || path.startsWith("/pages/"),
+  ).length;
+  const staticMediaRequestsAfterCheck = (await source.requests()).filter(
+    ({ path }) => path.startsWith("/media/"),
+  ).length;
+  assert.equal(staticPageRequestsAfterCheck, staticPageRequestsBeforeCheck + 5);
+  assert.equal(staticMediaRequestsAfterCheck, staticMediaRequestsBeforeCheck);
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "公开静态正文版本 1"),
+    staticArchiveBeforeCheck,
+  );
+
+  const staticRequests = await source.requests();
+  const staticArticleRequest = [...staticRequests]
+    .reverse()
+    .find(({ path }) => path === "/pages/2026/article.html");
+  assert.ok(staticArticleRequest !== undefined);
+  assert.equal(staticArticleRequest.ifNoneMatch, undefined);
+  assert.equal(staticArticleRequest.ifModifiedSince, undefined);
+
+  const javascriptSummary = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "JavaScript 页面摘要",
+  );
+  const javascriptState = rssArchiveView(javascriptSummary, "binny22-one");
+  assert.equal(javascriptState.capture.completeness, "partial");
+  assert.ok(
+    javascriptState.capture.missing.some(
+      ({ path, reason }) =>
+        path === "body.fullText" && reason.includes("登录、脚本或特殊交互"),
+    ),
+  );
+
+  const loginSummary = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "登录页面摘要",
+  );
+  const loginState = rssArchiveView(loginSummary, "binny22-one");
+  assert.equal(loginState.capture.completeness, "partial");
+  assert.ok(
+    loginState.capture.missing.some(({ path }) => path === "body.fullText"),
+  );
+
+  const recoverySummary = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "恢复页面摘要",
+  );
+  const recoveryState = rssArchiveView(recoverySummary, "binny22-one");
+  assert.equal(recoveryState.capture.completeness, "partial");
+  assert.ok(
+    recoveryState.capture.missing.some(({ path }) => path === "body.fullText"),
+  );
+
+  const recoveryRequestsBeforeRetry = (await source.requests()).filter(
+    ({ path }) => path === "/story/recovery",
+  ).length;
+  await source.setRecoveryPageAvailable(true);
+  const recoveredPageRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(recoveredPageRun.status, "failed");
+  assert.equal(
+    (await source.requests()).filter(({ path }) => path === "/story/recovery")
+      .length,
+    recoveryRequestsBeforeRetry + 1,
+  );
+  const recoveredArticle = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "恢复后静态正文",
+  );
+  assert.equal(recoveredArticle.itemId, recoverySummary.itemId);
+  assert.equal(recoveredArticle.revisions.length, 2);
+  assert.equal(
+    rssArchiveView(recoveredArticle, "binny22-one").capture.completeness,
+    "complete",
+  );
+  assert.equal(
+    rssArchiveView(recoveredArticle, "binny22-one").metadata?.item?.bodySource,
+    "static-html",
+  );
+
+  const staticArticleV2ExpectedRequests = (await source.requests()).filter(
+    ({ path }) => path === "/pages/2026/article.html",
+  ).length;
+  await source.setStaticArticleVersion(2);
+  const staticArticleV2Run = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(staticArticleV2Run.status, "failed");
+  const staticArticleV2Requests = (await source.requests()).filter(
+    ({ path }) => path === "/pages/2026/article.html",
+  );
+  assert.equal(
+    staticArticleV2Requests.length,
+    staticArticleV2ExpectedRequests + 1,
+  );
+  assert.equal(staticArticleV2Requests.at(-1)?.ifNoneMatch, undefined);
+  const staticArticleV2 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "公开静态正文版本 2",
+  );
+  assert.equal(staticArticleV2.itemId, staticArticleV1.itemId);
+  assert.equal(staticArticleV2.revisions.length, 2);
+  const stableStaticArticleV2 = staticArticleV2;
+  const repeatedStaticRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(repeatedStaticRun.status, "failed");
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "公开静态正文版本 2"),
+    stableStaticArticleV2,
+  );
+
+  await source.setStaticPhotoAvailable(false);
+  await source.setStaticArticleVersion(3);
+  const partialStaticMediaRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(partialStaticMediaRun.status, "failed");
+  const staticArticleV3Partial = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "公开静态正文版本 3",
+  );
+  assert.equal(staticArticleV3Partial.itemId, staticArticleV1.itemId);
+  const staticArticleV3PartialState = rssArchiveView(
+    staticArticleV3Partial,
+    "binny22-one",
+  );
+  assert.equal(staticArticleV3PartialState.capture.completeness, "partial");
+  assert.equal(staticArticleV3PartialState.resources?.length ?? 0, 0);
+  assert.doesNotMatch(
+    staticArticleV3PartialState.body?.html ?? "",
+    /binny:\/\/resource\//u,
+  );
+  assert.ok(
+    staticArticleV3PartialState.capture.missing.some(({ path }) =>
+      path.startsWith("media."),
+    ),
+  );
+
+  await source.setStaticPhotoAvailable(true);
+  const recoveredStaticMediaRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["static-main"] },
+  );
+  assert.equal(recoveredStaticMediaRun.status, "failed");
+  const staticArticleV3 = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "公开静态正文版本 3",
+  );
+  assert.equal(staticArticleV3.itemId, staticArticleV1.itemId);
+  assert.equal(staticArticleV3.revisions.length, 4);
+  assert.equal(
+    rssArchiveView(staticArticleV3, "binny22-one").capture.completeness,
+    "complete",
+  );
+  assert.equal(
+    rssArchiveView(staticArticleV3, "binny22-one").resources?.length,
+    1,
   );
 
   const atomItemV1 = await readRssArchive(
@@ -2739,10 +3023,10 @@ async function runRssAcceptance(
 
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny22fix-rss-e2e-compose-"),
+    path.join(tmpdir(), "binny23-rss-e2e-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.23.0/24";
   await writeFile(
     composeOverrideFile,
     [

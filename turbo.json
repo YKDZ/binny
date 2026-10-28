@@ -50,6 +50,7 @@
         "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
         "scripts/binny-e2e-rss-source.ts",
+        "pnpm-lock.yaml",
         "packages/api/package.json",
         "packages/api/src/**",
         "packages/api/scripts/**",

@@ -16,6 +16,7 @@ import * as z from "zod";
 
 import {
   FeedRequestError,
+  fetchStaticArticle,
   fetchMedia,
   normalizeMediaUrl,
   prepareBody,
@@ -25,6 +26,7 @@ import {
   type FeedRequestResult,
   type MediaCandidate,
   type ParsedFeedItem,
+  type StaticArticleResult,
 } from "./feed.ts";
 import {
   hasPendingMedia,
@@ -182,12 +184,72 @@ function sourceRef(feed: FeedDefinition, item: ParsedFeedItem): string {
   return feed.url;
 }
 
+function staticArticleUrl(
+  item: ParsedFeedItem,
+  feed: FeedDefinition,
+): string | undefined {
+  return item.url === null ? undefined : normalizeMediaUrl(item.url, feed.url);
+}
+
+function shouldFetchStaticArticle(
+  item: ParsedFeedItem,
+  feed: FeedDefinition,
+): boolean {
+  return (
+    (item.content?.trim().length ?? 0) === 0 &&
+    staticArticleUrl(item, feed) !== undefined
+  );
+}
+
+async function prepareEntryBody(
+  item: ParsedFeedItem,
+  feed: FeedDefinition,
+  signal: AbortSignal,
+): Promise<{
+  readonly item: ParsedFeedItem;
+  readonly body: ReturnType<typeof prepareBody>;
+  readonly page: StaticArticleResult | undefined;
+}> {
+  if (!shouldFetchStaticArticle(item, feed)) {
+    return {
+      item,
+      body: prepareBody(item, sourceRef(feed, item)),
+      page: undefined,
+    };
+  }
+
+  const pageUrl = staticArticleUrl(item, feed);
+  if (pageUrl === undefined) {
+    return {
+      item,
+      body: prepareBody(item, sourceRef(feed, item)),
+      page: undefined,
+    };
+  }
+  const page = await fetchStaticArticle(pageUrl, signal);
+  if (page.status === "unavailable") {
+    return {
+      item,
+      body: prepareBody(item, sourceRef(feed, item)),
+      page,
+    };
+  }
+
+  const hydratedItem = { ...item, content: page.html, contentType: "html" };
+  return {
+    item: hydratedItem,
+    body: prepareBody(hydratedItem, page.finalUrl, "static-html"),
+    page,
+  };
+}
+
 function contentFingerprint(
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
   body: ReturnType<typeof prepareBody>,
   key: string,
+  page: StaticArticleResult | undefined,
 ): string {
   const snapshot = JSON.stringify({
     key,
@@ -213,7 +275,28 @@ function contentFingerprint(
     body:
       body === undefined
         ? null
-        : { source: body.source, type: body.type, html: body.html },
+        : {
+            source: body.source,
+            type: body.type,
+            html: body.html,
+            media: body.media,
+            invalidMedia: body.invalidMedia,
+          },
+    page:
+      page === undefined
+        ? null
+        : page.status === "extracted"
+          ? {
+              status: page.status,
+              requestedUrl: page.requestedUrl,
+              finalUrl: page.finalUrl,
+              title: page.title,
+            }
+          : {
+              status: page.status,
+              requestedUrl: page.requestedUrl,
+              reason: page.reason,
+            },
   });
   return createHash("sha256").update(snapshot).digest("hex");
 }
@@ -224,6 +307,7 @@ function entryMetadata(
   item: ParsedFeedItem,
   body: ReturnType<typeof prepareBody>,
   media: readonly MediaCandidate[],
+  page: StaticArticleResult | undefined,
 ): Record<string, unknown> {
   return {
     feed: {
@@ -243,6 +327,11 @@ function entryMetadata(
       published: item.published,
       updated: item.updated,
       bodyType: body.type,
+      bodySource: body.source,
+      ...(page === undefined ? {} : { bodyUrl: page.requestedUrl }),
+      ...(page?.status === "extracted"
+        ? { bodyFinalUrl: page.finalUrl, bodyTitle: page.title }
+        : {}),
       authors: item.authors,
       categories: item.categories,
       image: item.image,
@@ -316,11 +405,12 @@ async function submitEntry(
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
   key: string,
+  body: ReturnType<typeof prepareBody>,
+  page: StaticArticleResult | undefined,
 ): Promise<{
   readonly pendingMedia: boolean;
   readonly problems: readonly string[];
 }> {
-  const body = prepareBody(item, sourceRef(feed, item));
   const media = new Map<string, MediaCandidate>();
   for (const candidate of body?.media ?? [])
     media.set(candidate.url, candidate);
@@ -329,7 +419,9 @@ async function submitEntry(
   const missing: { path: string; reason: string }[] = [];
   const failures: string[] = [];
 
-  if (
+  if (page?.status === "unavailable") {
+    missing.push({ path: "body.fullText", reason: page.reason });
+  } else if (
     body === undefined ||
     body.html.trim().length === 0 ||
     body.source === "summary"
@@ -394,7 +486,14 @@ async function submitEntry(
     sourceKey: { namespace: `rss:${feed.id}`, key },
     sourceRef: sourceRef(feed, item),
     ...(sourceModifiedAt === undefined ? {} : { sourceModifiedAt }),
-    metadata: entryMetadata(feed, parsedFeed, item, body, [...media.values()]),
+    metadata: entryMetadata(
+      feed,
+      parsedFeed,
+      item,
+      body,
+      [...media.values()],
+      page,
+    ),
     ...(body === undefined && bodyWithResources.content.length === 0
       ? {}
       : {
@@ -418,6 +517,10 @@ async function submitEntry(
         feedUrl: feed.url,
         entryIdentity: key,
         bodySource: body?.source ?? "none",
+        ...(page === undefined ? {} : { bodyUrl: page.requestedUrl }),
+        ...(page?.status === "extracted"
+          ? { bodyFinalUrl: page.finalUrl }
+          : {}),
         archivedMediaCount: uploaded.size,
       },
       completeness:
@@ -576,18 +679,39 @@ async function checkFeeds(
           ),
         );
       }
-      const summaryOnly = response.feed.items.filter(
-        (item) =>
-          (item.content?.trim().length ?? 0) === 0 &&
-          (item.description?.trim().length ?? 0) !== 0,
-      ).length;
-      if (summaryOnly > 0) {
+      let summaryWithoutPage = 0;
+      for (const entry of entries.entries) {
+        if (entry.duplicate || (entry.item.content?.trim().length ?? 0) > 0) {
+          continue;
+        }
+        if (!shouldFetchStaticArticle(entry.item, feed)) {
+          if ((entry.item.description?.trim().length ?? 0) > 0) {
+            summaryWithoutPage += 1;
+          }
+          continue;
+        }
+        const pageUrl = staticArticleUrl(entry.item, feed);
+        if (pageUrl === undefined) continue;
+        const page = await fetchStaticArticle(pageUrl, context.signal);
+        if (page.status === "unavailable") {
+          unavailable = true;
+          problems.push(
+            feedProblem(
+              feed.id,
+              "rss_static_article_unavailable",
+              `条目「${entry.key ?? entry.item.title ?? "未命名"}」${page.reason}`,
+              page.suggestion,
+            ),
+          );
+        }
+      }
+      if (summaryWithoutPage > 0) {
         problems.push(
           feedProblem(
             feed.id,
             "rss_feed_summary_only",
-            `${summaryOnly} 个条目只提供摘要；采集结果会将其标记为 partial。`,
-            "确认 feed 是否能直接提供完整正文；静态页面补采由后续采集能力处理。",
+            `${summaryWithoutPage} 个条目只提供摘要且没有可补采的公开文章链接。`,
+            "确认 feed 是否能直接提供完整正文，或为条目提供公开文章链接。",
           ),
         );
       }
@@ -615,7 +739,7 @@ async function checkFeeds(
         : ("available" as const),
     scope: selected.feeds.map(({ id }) => id),
     basis:
-      "读取并解析所选 RSS/Atom feed，检查条目身份与正文范围；本次检查不执行采集、资源上传、归档或增量状态写入。",
+      "读取并解析所选 RSS/Atom feed，检查条目身份与正文范围；对仅提供摘要且带公开 HTTP/HTTPS 链接的条目请求页面并尝试静态正文提取。本次检查不下载媒体、不上传资源、不归档或写入增量状态。",
     problems,
   };
 }
@@ -625,6 +749,7 @@ function failureFromProblems(
     readonly feedId: string;
     readonly message: string;
     readonly path?: readonly (string | number)[];
+    readonly suggestion?: string;
   }[],
   completedScopes: readonly string[],
 ) {
@@ -646,6 +771,7 @@ function failureFromProblems(
     impact: `${completed}已成功提交的资料不会回滚；受影响 feed 的增量状态不会前移。`,
     ...(first?.path === undefined ? {} : { path: [...first.path] }),
     suggestion:
+      first?.suggestion ??
       "检查问题 feed 与媒体来源后重新触发 collect；已归档的相同条目会按稳定信源键处理。",
     requiresHuman: false,
   });
@@ -661,6 +787,7 @@ async function collectFeeds(
     feedId: string;
     message: string;
     path?: readonly (string | number)[];
+    suggestion?: string;
   }[] = selected.missing.map((feedId) => ({
     feedId,
     message: `本次参数选择了未配置的 feed「${feedId}」。`,
@@ -685,7 +812,7 @@ async function collectFeeds(
 
     const sameFeedUrl = state.feedUrl === feed.url;
     const validators =
-      sameFeedUrl && !hasPendingMedia(state)
+      sameFeedUrl && !hasPendingMedia(state) && !state.refreshStaticPages
         ? { etag: state.etag, lastModified: state.lastModified }
         : {};
     let response: FeedRequestResult;
@@ -726,6 +853,10 @@ async function collectFeeds(
           lastModified: undefined,
         };
     const entries = feedItemsWithIdentity(feed, response.feed.items);
+    const refreshStaticPages = entries.entries.some(({ item }) =>
+      shouldFetchStaticArticle(item, feed),
+    );
+    workingState = { ...workingState, refreshStaticPages };
     let feedFailed = false;
     for (const message of entries.problems) {
       feedFailed = true;
@@ -753,20 +884,30 @@ async function collectFeeds(
       if (entry.key === undefined) continue;
       if (entry.duplicate || duplicateSeen.has(entry.key)) continue;
       duplicateSeen.add(entry.key);
-      const body = prepareBody(entry.item, sourceRef(feed, entry.item));
+      const prepared = await prepareEntryBody(entry.item, feed, context.signal);
       const fingerprint = contentFingerprint(
         feed,
         response,
-        entry.item,
-        body,
+        prepared.item,
+        prepared.body,
         entry.key,
+        prepared.page,
       );
       const previous = previousEntries.get(entry.key);
       if (
         previous?.fingerprint === fingerprint &&
         !previous.pendingMedia &&
-        (body?.invalidMedia.length ?? 0) === 0
+        prepared.body.invalidMedia.length === 0
       ) {
+        if (prepared.page?.status === "unavailable") {
+          feedFailed = true;
+          problems.push({
+            feedId: feed.id,
+            message: `条目「${entry.key}」${prepared.page.reason}`,
+            path: ["feeds", feed.id, "items", entry.key],
+            suggestion: prepared.page.suggestion,
+          });
+        }
         continue;
       }
 
@@ -775,8 +916,10 @@ async function collectFeeds(
           context,
           feed,
           response,
-          entry.item,
+          prepared.item,
           entry.key,
+          prepared.body,
+          prepared.page,
         );
         const entryState: FeedEntryState = {
           identity: entry.key,
@@ -795,6 +938,15 @@ async function collectFeeds(
               path: ["feeds", feed.id, "items", entry.key],
             });
           }
+        }
+        if (prepared.page?.status === "unavailable") {
+          feedFailed = true;
+          problems.push({
+            feedId: feed.id,
+            message: `条目「${entry.key}」${prepared.page.reason}`,
+            path: ["feeds", feed.id, "items", entry.key],
+            suggestion: prepared.page.suggestion,
+          });
         }
       } catch (error) {
         if (context.signal.aborted) throw error;

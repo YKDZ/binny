@@ -17,6 +17,9 @@ let atomVersion = 1;
 let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
 let photoAvailable = true;
+let staticArticleVersion = 1;
+let staticPhotoAvailable = true;
+let recoveryPageAvailable = false;
 
 function sendJson(
   response: import("node:http").ServerResponse,
@@ -85,6 +88,25 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    "staticArticleVersion" in updates &&
+    (!Number.isSafeInteger(updates.staticArticleVersion) ||
+      Number(updates.staticArticleVersion) < 1)
+  ) {
+    return false;
+  }
+  if (
+    "staticPhotoAvailable" in updates &&
+    typeof updates.staticPhotoAvailable !== "boolean"
+  ) {
+    return false;
+  }
+  if (
+    "recoveryPageAvailable" in updates &&
+    typeof updates.recoveryPageAvailable !== "boolean"
+  ) {
+    return false;
+  }
   if (updates.rssVersion !== undefined) rssVersion = Number(updates.rssVersion);
   if (updates.atomVersion !== undefined)
     atomVersion = Number(updates.atomVersion);
@@ -96,6 +118,15 @@ function updateState(value: unknown): boolean {
   }
   if (typeof updates.photoAvailable === "boolean") {
     photoAvailable = updates.photoAvailable;
+  }
+  if (updates.staticArticleVersion !== undefined) {
+    staticArticleVersion = Number(updates.staticArticleVersion);
+  }
+  if (typeof updates.staticPhotoAvailable === "boolean") {
+    staticPhotoAvailable = updates.staticPhotoAvailable;
+  }
+  if (typeof updates.recoveryPageAvailable === "boolean") {
+    recoveryPageAvailable = updates.recoveryPageAvailable;
   }
   return true;
 }
@@ -134,9 +165,16 @@ const server = createServer((request, response) => {
   void (async () => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     if (
-      ["/rss", "/rss-edited", "/atom", "/temporary", "/bad-identity"].includes(
-        pathname,
-      )
+      [
+        "/rss",
+        "/rss-edited",
+        "/atom",
+        "/temporary",
+        "/bad-identity",
+        "/static-rss",
+      ].includes(pathname) ||
+      pathname.startsWith("/story/") ||
+      pathname.startsWith("/pages/")
     ) {
       const ifNoneMatch = request.headers["if-none-match"];
       const ifModifiedSince = request.headers["if-modified-since"];
@@ -185,6 +223,17 @@ const server = createServer((request, response) => {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/static-rss") {
+      sendFeed(
+        request,
+        response,
+        { etag: '"static-rss-1"' },
+        "application/rss+xml; charset=utf-8",
+        '<rss version="2.0"><channel><title>受控静态正文信源</title><item><guid isPermaLink="false">urn:binny:23:static-article</guid><title>RSS 静态补采文章</title><link>http://rss-e2e-source:8081/story/static</link><description>静态页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:javascript-shell</guid><title>JavaScript 页面文章</title><link>http://rss-e2e-source:8081/story/javascript</link><description>JavaScript 页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:login-page</guid><title>需要登录的文章</title><link>http://rss-e2e-source:8081/story/login</link><description>登录页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:recovery-page</guid><title>暂时无法访问的文章</title><link>http://rss-e2e-source:8081/story/recovery</link><description>恢复页面摘要</description></item></channel></rss>',
+      );
+      return;
+    }
+
     if (request.method === "GET" && pathname === "/atom") {
       const lastModified = new Date(
         Date.UTC(2026, 9, 27 + atomVersion),
@@ -228,6 +277,51 @@ const server = createServer((request, response) => {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/story/static") {
+      response.writeHead(302, { location: "/pages/2026/article.html" });
+      response.end();
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/pages/2026/article.html") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        `<!doctype html><html><head><title>受控公开文章</title></head><body><header><nav>导航文字不得归档</nav></header><main><article><h1>受控公开文章</h1><p>公开静态正文版本 ${String(staticArticleVersion)}。这段内容来自 RSS 条目链接所指向的普通公开文章页面，服务端直接返回完整 HTML，无需登录、脚本执行或特殊交互。</p><p>文章正文保留其有价值的段落、层级和图片。归档应使用这段静态页面正文，而不是订阅源中的短摘要。</p><p>页面更新独立于 feed 摘要版本；重新采集时应该再次取得页面，并只在正文或资料确实变化时生成新的归档版本。</p><img src="../../media/static-photo.png" alt="静态文章插图" /></article></main><aside>侧栏广告不得归档</aside></body></html>`,
+      );
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/story/javascript") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<!doctype html><html><head><title>JavaScript 页面</title></head><body><main id="app"><p>正在加载文章，请启用 JavaScript。</p></main><script>document.querySelector("#app").innerHTML="<article><p>需要执行脚本才能取得的正文内容</p></article>";</script></body></html>',
+      );
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/story/login") {
+      response.writeHead(401, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<!doctype html><html><head><title>登录</title></head><body><main><h1>需要登录</h1><form><label>账号<input name="account" /></label><label>密码<input type="password" /></label><button>继续</button></form></main></body></html>',
+      );
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/story/recovery") {
+      if (!recoveryPageAvailable) {
+        response.writeHead(503, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end("受控文章页面暂时不可用");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        "<!doctype html><html><head><title>恢复后的公开文章</title></head><body><main><article><h1>恢复后的公开文章</h1><p>恢复后静态正文。页面在首次采集时不可访问，后续可由公开 HTTP 页面取得。</p><p>这个文章正文足够长，可以验证正式正文提取只使用公开静态 HTML，而不沿用 feed 摘要或旧版本字段。</p><p>实际采集在页面恢复后应创建新版本，并保留 feed 条目相同的稳定身份。</p></article></main></body></html>",
+      );
+      return;
+    }
+
     if (request.method === "GET" && pathname.startsWith("/media/")) {
       const ifNoneMatch = request.headers["if-none-match"];
       const ifModifiedSince = request.headers["if-modified-since"];
@@ -244,6 +338,18 @@ const server = createServer((request, response) => {
         return;
       }
       if (pathname === "/media/photo.png" || pathname === "/media/atom.png") {
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end(photoBytes);
+        return;
+      }
+      if (pathname === "/media/static-photo.png") {
+        if (!staticPhotoAvailable) {
+          response.writeHead(503, {
+            "content-type": "text/plain; charset=utf-8",
+          });
+          response.end("受控静态文章图片暂时不可用");
+          return;
+        }
         response.writeHead(200, { "content-type": "image/png" });
         response.end(photoBytes);
         return;
