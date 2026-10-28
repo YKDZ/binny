@@ -16,6 +16,7 @@ import {
 import type {
   ArchiveSearchFilter,
   ArchiveSearchInput,
+  ArchiveSearchPathStep,
   ArchiveSearchRequest,
 } from "@binny/contracts";
 import type { AnySchema } from "ajv/dist/2020.js";
@@ -4335,6 +4336,168 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ],
   });
 
+  const pathRoot = { namespace: "e2e-relation-query", key: "path-root" };
+  const pathEmpty = { namespace: "e2e-relation-query", key: "path-empty" };
+  const pathB = { namespace: "e2e-relation-query", key: "path-b" };
+  const pathC = { namespace: "e2e-relation-query", key: "path-c" };
+  const pathD = { namespace: "e2e-relation-query", key: "path-d" };
+  const pathUnknown = {
+    namespace: "e2e-relation-query",
+    key: "path-unknown-hop",
+  };
+  const pathForeign = {
+    namespace: "e2e-relation-query",
+    key: "path-foreign-hop",
+  };
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:path-endpoints",
+    binId: "rss-secondary",
+    items: [pathUnknown, pathForeign].map((sourceKey) => ({
+      sourceKey,
+      body: { searchText: "只在次要来源观察的路径端点" },
+      capture: {
+        scope: { case: "bounded-path" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+  });
+  const pathRelation = (
+    relationId: string,
+    from: { readonly namespace: string; readonly key: string },
+    to:
+      | {
+          readonly sourceKey: {
+            readonly namespace: string;
+            readonly key: string;
+          };
+        }
+      | { readonly sourceRef: string },
+    name: string,
+  ) => ({
+    relationId,
+    value: {
+      from,
+      to,
+      name,
+      properties: { case: "bounded-path" },
+      cascade: false,
+    },
+  });
+  const pathCommit = await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:bounded-paths",
+    binId: "rss-main",
+    items: [
+      { sourceKey: pathRoot, searchText: "有限路径根" },
+      { sourceKey: pathEmpty, searchText: "无路径根" },
+      { sourceKey: pathB, searchText: "路径中间对象 B" },
+      { sourceKey: pathC, searchText: "路径中间对象 C" },
+      { sourceKey: pathD, searchText: "有限路径终点资料" },
+    ].map(({ sourceKey, searchText }) => ({
+      sourceKey,
+      body: { searchText },
+      properties: { pathRole: sourceKey.key },
+      capture: {
+        scope: { case: "bounded-path" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    relations: [
+      pathRelation(
+        "e2e:relation-query:path-first-a",
+        pathRoot,
+        { sourceKey: pathB },
+        "path-first",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-first-b",
+        pathRoot,
+        { sourceKey: pathB },
+        "path-first",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-first-c",
+        pathRoot,
+        { sourceKey: pathC },
+        "path-first",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-first-unknown",
+        pathRoot,
+        { sourceKey: pathUnknown },
+        "path-first",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-second-b",
+        pathB,
+        { sourceKey: pathD },
+        "path-second",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-second-c",
+        pathC,
+        { sourceKey: pathD },
+        "path-second",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-second-unknown",
+        pathUnknown,
+        { sourceKey: pathD },
+        "path-second",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-cross-incoming",
+        pathC,
+        { sourceKey: pathB },
+        "path-cross",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-self-loop",
+        pathRoot,
+        { sourceKey: pathRoot },
+        "path-self",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-cycle",
+        pathRoot,
+        { sourceKey: pathB },
+        "path-cycle",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-cycle-back",
+        pathB,
+        { sourceKey: pathRoot },
+        "path-cycle",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-external",
+        pathRoot,
+        { sourceRef: "https://example.test/bounded-path-endpoint" },
+        "path-external",
+      ),
+      pathRelation(
+        "e2e:relation-query:path-cross-bin-first",
+        pathRoot,
+        { sourceKey: pathForeign },
+        "path-cross-bin-first",
+      ),
+    ],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:path-cross-bin-second",
+    binId: "rss-secondary",
+    items: [],
+    relations: [
+      pathRelation(
+        "e2e:relation-query:path-cross-bin-second",
+        pathForeign,
+        { sourceKey: pathD },
+        "path-cross-bin-second",
+      ),
+    ],
+  });
+
   const query: ArchiveSearchRequest = {
     scope: { kind: "current", binId: "rss-main" },
     where: {
@@ -5219,6 +5382,760 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ),
     [{ relationId: "e2e:relation-query:matching-target", status: "deleted" }],
   );
+
+  const pathRootFilter: ArchiveSearchFilter = {
+    type: "field",
+    field: "sourceKey.key",
+    operator: "eq",
+    value: pathRoot.key,
+  };
+  const searchPathRoot = (
+    filter: ArchiveSearchFilter,
+    scope: ArchiveSearchRequest["scope"] = {
+      kind: "current",
+      binId: "rss-main",
+    },
+  ) =>
+    search({
+      scope,
+      where: { type: "and", conditions: [pathRootFilter, filter] },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    });
+  const twoHopPath: ArchiveSearchFilter = {
+    type: "path",
+    steps: [
+      { direction: "outgoing", name: "path-first" },
+      {
+        direction: "outgoing",
+        name: "path-second",
+        target: {
+          type: "text",
+          text: { kind: "literal", value: "有限路径终点资料" },
+        },
+      },
+    ],
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  };
+  const twoHopPage = await searchPathRoot(twoHopPath);
+  assert.equal(twoHopPage.unit, "item");
+  assert.deepEqual(
+    twoHopPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const twoHopExists = await searchPathRoot({
+    type: "path",
+    steps: twoHopPath.steps,
+    operator: "exists",
+  });
+  assert.deepEqual(
+    twoHopExists.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const zeroPathCount = await searchPathRoot({
+    type: "path",
+    steps: [
+      { direction: "outgoing", name: "path-first" },
+      { direction: "outgoing", name: "no-such-path-step" },
+    ],
+    operator: "count",
+    count: { operator: "eq", value: 0 },
+  });
+  assert.deepEqual(
+    zeroPathCount.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const absentPath = await searchPathRoot({
+    type: "path",
+    steps: [{ direction: "outgoing", name: "no-such-path-step" }],
+    operator: "notExists",
+  });
+  assert.deepEqual(
+    absentPath.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+
+  const twoHopExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "two-hop",
+        steps: [
+          { direction: "outgoing", name: "path-first" },
+          { direction: "outgoing", name: "path-second" },
+        ],
+        limit: 2,
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    twoHopExpansion.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const expandedPaths =
+    twoHopExpansion.results[0]?.matches[0]?.pathExpansions?.[0];
+  assert.ok(expandedPaths !== undefined);
+  assert.equal(expandedPaths.paths.length, 2);
+  assert.equal(expandedPaths.hasMore, true);
+  assert.deepEqual(
+    expandedPaths.paths.map((path) =>
+      path.steps.map(({ relationId }) => relationId),
+    ),
+    [
+      ["e2e:relation-query:path-first-a", "e2e:relation-query:path-second-b"],
+      ["e2e:relation-query:path-first-b", "e2e:relation-query:path-second-b"],
+    ],
+  );
+  assert.equal(expandedPaths.paths[0]?.steps[0]?.state.name, "path-first");
+  assert.match(
+    expandedPaths.paths[0]?.steps[0]?.observation.archiveSeq ?? "",
+    /^\d+$/u,
+  );
+  const directPathResponse = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current", binId: "rss-main" },
+      where: pathRootFilter,
+      expandPaths: [
+        {
+          key: "direct-two-hop",
+          steps: [
+            { direction: "outgoing", name: "path-first" },
+            { direction: "outgoing", name: "path-second" },
+          ],
+          limit: 1,
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    }),
+  });
+  assert.equal(directPathResponse.status, 200);
+  const directPathPage = archiveSearchPageSchema.parse(
+    await directPathResponse.json(),
+  );
+  assert.deepEqual(
+    directPathPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  assert.equal(
+    directPathPage.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.length,
+    1,
+  );
+  const unknownPath = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "unknown-hop",
+        steps: [
+          { direction: "outgoing", name: "path-first" },
+          { direction: "outgoing", name: "path-second" },
+        ],
+        limit: 10,
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  const unknownOnlyPath =
+    unknownPath.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.find(
+      ({ steps }) =>
+        steps[0]?.relationId === "e2e:relation-query:path-first-unknown",
+    );
+  assert.equal(unknownOnlyPath?.steps[0]?.to.kind, "item");
+  if (unknownOnlyPath?.steps[0]?.to.kind === "item") {
+    assert.equal(unknownOnlyPath.steps[0].to.status, "unknown");
+  }
+  assert.equal(unknownOnlyPath?.steps[1]?.from.status, "unknown");
+
+  const unknownTargetNot = await searchPathRoot({
+    type: "path",
+    steps: [
+      {
+        direction: "outgoing",
+        name: "path-first",
+        target: {
+          type: "not",
+          condition: {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "eq",
+            value: "not-present",
+          },
+        },
+      },
+    ],
+    operator: "count",
+    count: { operator: "eq", value: 2 },
+  });
+  assert.deepEqual(
+    unknownTargetNot.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+
+  const incomingEitherSteps = [
+    {
+      direction: "outgoing",
+      name: "path-first",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathB.key,
+      },
+    },
+    {
+      direction: "incoming",
+      name: "path-cross",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathC.key,
+      },
+    },
+    {
+      direction: "either",
+      name: "path-second",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathD.key,
+      },
+    },
+  ] satisfies ArchiveSearchPathStep[];
+  const incomingEither = await searchPathRoot({
+    type: "path",
+    steps: incomingEitherSteps,
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingEither.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const mixedExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [{ key: "mixed", steps: incomingEitherSteps, limit: 10 }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    mixedExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.map(
+      ({ steps }) => steps.map(({ direction }) => direction),
+    ),
+    [
+      ["outgoing", "incoming", "outgoing"],
+      ["outgoing", "incoming", "outgoing"],
+    ],
+  );
+
+  const repeatedCycleSteps = [
+    {
+      direction: "outgoing",
+      name: "path-cycle",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathB.key,
+      },
+    },
+    {
+      direction: "incoming",
+      name: "path-first",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathRoot.key,
+      },
+    },
+    {
+      direction: "outgoing",
+      name: "path-cycle",
+      target: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: pathB.key,
+      },
+    },
+  ] satisfies ArchiveSearchPathStep[];
+  const repeatedCycle = await searchPathRoot({
+    type: "path",
+    steps: repeatedCycleSteps,
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  });
+  assert.deepEqual(
+    repeatedCycle.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const repeatedCycleExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [{ key: "cycle", steps: repeatedCycleSteps, limit: 10 }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.ok(
+    repeatedCycleExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.some(
+      ({ steps }) =>
+        steps.map(({ relationId }) => relationId).join("|") ===
+        [
+          "e2e:relation-query:path-cycle",
+          "e2e:relation-query:path-first-a",
+          "e2e:relation-query:path-cycle",
+        ].join("|"),
+    ),
+  );
+
+  const selfLoopSteps = [
+    { direction: "either", name: "path-self" },
+  ] satisfies ArchiveSearchPathStep[];
+  const selfLoop = await searchPathRoot({
+    type: "path",
+    steps: selfLoopSteps,
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  });
+  assert.deepEqual(
+    selfLoop.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const selfLoopExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [{ key: "self", steps: selfLoopSteps, limit: 10 }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    selfLoopExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.map(
+      ({ steps }) =>
+        steps.map(({ direction, relationId }) => ({
+          direction,
+          relationId,
+        })),
+    ),
+    [
+      [
+        {
+          direction: "outgoing",
+          relationId: "e2e:relation-query:path-self-loop",
+        },
+      ],
+    ],
+  );
+
+  const externalPath = await searchPathRoot({
+    type: "path",
+    steps: [{ direction: "outgoing", name: "path-external" }],
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  });
+  assert.deepEqual(
+    externalPath.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const externalExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "external",
+        steps: [{ direction: "outgoing", name: "path-external" }],
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  const externalEndpoint =
+    externalExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths[0]
+      ?.steps[0]?.to;
+  assert.deepEqual(externalEndpoint, {
+    kind: "sourceRef",
+    sourceRef: "https://example.test/bounded-path-endpoint",
+  });
+  const sourceRefCannotContinue = await searchPathRoot({
+    type: "path",
+    steps: [
+      { direction: "outgoing", name: "path-external" },
+      { direction: "either", name: "path-second" },
+    ],
+    operator: "count",
+    count: { operator: "eq", value: 0 },
+  });
+  assert.deepEqual(
+    sourceRefCannotContinue.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+
+  const noCrossBinStitch = await searchPathRoot({
+    type: "path",
+    steps: [
+      { direction: "outgoing", name: "path-cross-bin-first" },
+      { direction: "outgoing", name: "path-cross-bin-second" },
+    ],
+    operator: "count",
+    count: { operator: "eq", value: 0 },
+  });
+  assert.deepEqual(
+    noCrossBinStitch.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+
+  const invalidPathThroughClient = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [],
+        operator: "exists",
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    },
+  });
+  assert.equal(invalidPathThroughClient.status, 400);
+  if (invalidPathThroughClient.status === 400) {
+    assert.equal(
+      (await invalidPathThroughClient.json()).error.code,
+      "invalid_input",
+    );
+  }
+
+  const wrongPathDirection = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [{ direction: "outgoing" }, { direction: "sideways" }],
+        operator: "exists",
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    }),
+  });
+  assert.equal(wrongPathDirection.status, 400);
+  const wrongPathDirectionBody = archiveErrorSchema.parse(
+    await wrongPathDirection.json(),
+  );
+  assert.equal(wrongPathDirectionBody.error.code, "invalid_input");
+  assert.deepEqual(wrongPathDirectionBody.error.path, [
+    "where",
+    "steps",
+    1,
+    "direction",
+  ]);
+
+  const invalidPathRegex = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [
+          {
+            direction: "outgoing",
+            target: {
+              type: "text",
+              text: { kind: "regex", pattern: "(" },
+            },
+          },
+        ],
+        operator: "exists",
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    }),
+  });
+  assert.equal(invalidPathRegex.status, 400);
+  const invalidPathRegexBody = archiveErrorSchema.parse(
+    await invalidPathRegex.json(),
+  );
+  assert.equal(invalidPathRegexBody.error.code, "invalid_input");
+  assert.deepEqual(invalidPathRegexBody.error.path, [
+    "where",
+    "steps",
+    0,
+    "target",
+    "text",
+    "pattern",
+  ]);
+  const invalidExpansionRegex = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      scope: { kind: "current", binId: "rss-main" },
+      where: pathRootFilter,
+      expandPaths: [
+        {
+          key: "invalid-regex",
+          steps: [
+            {
+              direction: "outgoing",
+              target: {
+                type: "text",
+                text: { kind: "regex", pattern: "(" },
+              },
+            },
+          ],
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    }),
+  });
+  assert.equal(invalidExpansionRegex.status, 400);
+  const invalidExpansionRegexBody = archiveErrorSchema.parse(
+    await invalidExpansionRegex.json(),
+  );
+  assert.equal(invalidExpansionRegexBody.error.code, "invalid_input");
+  assert.deepEqual(invalidExpansionRegexBody.error.path, [
+    "expandPaths",
+    0,
+    "steps",
+    0,
+    "target",
+    "text",
+    "pattern",
+  ]);
+
+  const historicalPathScope = {
+    kind: "asOf",
+    binId: "rss-main",
+    asOf: pathCommit.archiveSeq,
+  } as const;
+  const historicalPath = await searchPathRoot(twoHopPath, historicalPathScope);
+  assert.deepEqual(
+    historicalPath.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const historicalRevisionPath = await searchPathRoot(twoHopPath, {
+    kind: "revisions",
+    binId: "rss-main",
+    asOf: pathCommit.archiveSeq,
+  });
+  assert.equal(historicalRevisionPath.unit, "revision");
+  assert.deepEqual(
+    historicalRevisionPath.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  const historicalPathExpansion = await search({
+    scope: historicalPathScope,
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "two-hop-history",
+        steps: [
+          { direction: "outgoing", name: "path-first" },
+          { direction: "outgoing", name: "path-second" },
+        ],
+        limit: 10,
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.equal(
+    historicalPathExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths
+      .length,
+    4,
+  );
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:path-current-change",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: pathD,
+        body: { searchText: "更新后的路径终点资料" },
+        capture: {
+          scope: { case: "bounded-path" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [
+      pathRelation(
+        "e2e:relation-query:path-second-b",
+        pathB,
+        { sourceKey: pathD },
+        "renamed-path-second",
+      ),
+    ],
+  });
+  const currentHistoricalPredicate = await searchPathRoot(twoHopPath);
+  assert.deepEqual(currentHistoricalPredicate.results, []);
+  const retainedHistoricalPath = await searchPathRoot(
+    twoHopPath,
+    historicalPathScope,
+  );
+  assert.deepEqual(
+    retainedHistoricalPath.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+
+  const independentExpansion = await search({
+    scope: historicalPathScope,
+    where: { type: "and", conditions: [pathRootFilter, twoHopPath] },
+    expandPaths: [{ key: "self-only", steps: selfLoopSteps, limit: 1 }],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  assert.deepEqual(
+    independentExpansion.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.map(
+      ({ steps }) => steps.map(({ relationId }) => relationId),
+    ),
+    [["e2e:relation-query:path-self-loop"]],
+  );
+
+  const rootPageQuery: ArchiveSearchRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: [pathEmpty.key, pathRoot.key],
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 1,
+  };
+  const rootPage = await search(rootPageQuery);
+  const pathExpandedRootPage = await search({
+    ...rootPageQuery,
+    expandPaths: [
+      {
+        key: "one-step",
+        steps: [{ direction: "outgoing", name: "path-first" }],
+      },
+    ],
+  });
+  assert.deepEqual(
+    pathExpandedRootPage.results.map(({ sourceKey }) => sourceKey?.key),
+    rootPage.results.map(({ sourceKey }) => sourceKey?.key),
+  );
+  assert.deepEqual(
+    pathExpandedRootPage.results[0]?.matches[0]?.pathExpansions?.[0]?.paths,
+    [],
+  );
+  assert.ok(pathExpandedRootPage.nextCursor !== undefined);
+  const secondPathPage = await search({
+    ...rootPageQuery,
+    cursor: pathExpandedRootPage.nextCursor,
+    expandPaths: [
+      {
+        key: "one-step",
+        steps: [{ direction: "outgoing", name: "path-first" }],
+      },
+    ],
+  });
+  assert.deepEqual(
+    secondPathPage.results.map(({ sourceKey }) => sourceKey?.key),
+    [pathRoot.key],
+  );
+  assert.ok(
+    (secondPathPage.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.length ??
+      0) > 0,
+  );
+
+  const fanoutKeys = Array.from({ length: 10 }, (_, index) => ({
+    namespace: "e2e-relation-query",
+    key: `path-budget-${index}`,
+  }));
+  await submitArchive(client, {
+    requestId: "e2e:archive:relation-query:path-budget-fanout",
+    binId: "rss-main",
+    items: fanoutKeys.map((sourceKey) => ({
+      sourceKey,
+      body: { searchText: "有限路径预算扇出图" },
+      capture: {
+        scope: { case: "bounded-path-budget" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    relations: fanoutKeys.flatMap((from, fromIndex) =>
+      fanoutKeys.map((to, toIndex) =>
+        pathRelation(
+          `e2e:relation-query:path-budget:${fromIndex}:${toIndex}`,
+          from,
+          { sourceKey: to },
+          "path-budget",
+        ),
+      ),
+    ),
+  });
+  const fanoutRootQuery: ArchiveSearchRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: fanoutKeys[0]!.key,
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 1,
+    budgetMs: 250,
+  };
+  const fanoutSteps = Array.from({ length: 8 }, () => ({
+    direction: "outgoing" as const,
+    name: "path-budget",
+  }));
+  const fanoutRootPage = await client.archives.search.$post({
+    json: fanoutRootQuery,
+  });
+  assert.equal(fanoutRootPage.status, 200);
+  if (fanoutRootPage.status === 200) {
+    const expandedFanout = await client.archives.search.$post({
+      json: {
+        ...fanoutRootQuery,
+        expandPaths: [{ key: "fanout", steps: fanoutSteps, limit: 1 }],
+      },
+    });
+    assert.equal(expandedFanout.status, 422);
+    if (expandedFanout.status === 422) {
+      assert.equal(
+        (await expandedFanout.json()).error.code,
+        "query_budget_exceeded",
+      );
+    }
+  }
+  const directFanout = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ...fanoutRootQuery,
+      expandPaths: [{ key: "fanout", steps: fanoutSteps, limit: 1 }],
+    }),
+  });
+  assert.equal(directFanout.status, 422);
+  const directFanoutError = archiveErrorSchema.parse(await directFanout.json());
+  assert.equal(directFanoutError.error.code, "query_budget_exceeded");
 }
 async function verifyHardDeleteEntryPoint(
   client: ArchiveClient,

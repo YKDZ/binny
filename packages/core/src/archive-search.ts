@@ -4,6 +4,7 @@ import {
   archiveSearchInputSchema,
   archiveSearchJsonProjectionResultSchema,
   archiveSearchPageSchema,
+  archiveSearchPathExpansionPathSchema,
   archiveRelationStateSchema,
   archiveSnapshotSequenceSchema,
   postgresTextSchema,
@@ -13,6 +14,8 @@ import {
   type ArchiveSearchJsonFilter,
   type ArchiveSearchJsonProjection,
   type ArchiveSearchOperation,
+  type ArchiveSearchPathFilter,
+  type ArchiveSearchPathStep,
   type ArchiveSearchRelationFilter,
   type ArchiveSearchRequest,
   type ArchiveSearchTargetFilter,
@@ -42,6 +45,7 @@ import {
   sql,
   type SQL,
   type SQLWrapper,
+  type WithSubquery,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
@@ -400,6 +404,14 @@ function searchRegexPatterns(input: SearchInput): SearchRegexPattern[] {
     }
     if (filter.type === "relation" && filter.target !== undefined) {
       visitTarget(filter.target, [...path, "target"]);
+      return;
+    }
+    if (filter.type === "path") {
+      for (const [index, step] of filter.steps.entries()) {
+        if (step.target !== undefined) {
+          visitTarget(step.target, [...path, "steps", index, "target"]);
+        }
+      }
     }
   };
   const visitTarget = (
@@ -426,6 +438,19 @@ function searchRegexPatterns(input: SearchInput): SearchRegexPattern[] {
     }
   };
   if (input.where !== undefined) visit(input.where, ["where"]);
+  for (const [index, expansion] of (input.expandPaths ?? []).entries()) {
+    for (const [stepIndex, step] of expansion.steps.entries()) {
+      if (step.target !== undefined) {
+        visitTarget(step.target, [
+          "expandPaths",
+          index,
+          "steps",
+          stepIndex,
+          "target",
+        ]);
+      }
+    }
+  }
   return patterns;
 }
 
@@ -566,37 +591,14 @@ async function readCurrentSearchPage(
     }
     return and(isNotNull(searchText), sql`${searchText} ~ ${text.pattern}`)!;
   };
-  const compileFilter = (
-    filter: ArchiveSearchFilter | ArchiveSearchTargetFilter,
-    fields: SearchFields,
-    includeHit = true,
-  ): SQL => {
-    if (filter.type === "and" || filter.type === "or") {
-      const conditions = filter.conditions.map((condition) =>
-        compileFilter(condition, fields, includeHit),
-      );
-      return (filter.type === "and" ? and(...conditions) : or(...conditions))!;
-    }
-    if (filter.type === "not") {
-      return not(compileFilter(filter.condition, fields, includeHit))!;
-    }
-    if (filter.type === "text") {
-      return compileText(filter.text, fields, includeHit);
-    }
-    if (filter.type === "json") {
-      return compileJsonFilter(filter, fields.revision.stateData);
-    }
-    if (filter.type === "field") {
-      return compileFieldFilter(filter, fields);
-    }
-    return compileRelationFilter(filter, fields);
-  };
-
   let relationAliasIndex = 0;
-  const compileRelationFilter = (
-    filter: ArchiveSearchRelationFilter,
-    fields: SearchFields,
-  ): SQL => {
+  let pathAliasIndex = 0;
+  const buildRelationStepRows = (
+    step: ArchiveSearchPathStep,
+    currentItemId: SQLWrapper,
+    binId: SQLWrapper,
+    includeEvidence = false,
+  ) => {
     const suffix = relationAliasIndex.toString(10);
     relationAliasIndex += 1;
     const relation = alias(archiveRelations, `search_relation_${suffix}`);
@@ -604,19 +606,35 @@ async function readCurrentSearchPage(
       archiveRelationObservations,
       `search_relation_observation_${suffix}`,
     );
+    const relationCommit = alias(
+      archiveCommits,
+      `search_relation_commit_${suffix}`,
+    );
     const relationRevision = alias(
       archiveRelationRevisions,
       `search_relation_revision_${suffix}`,
     );
+    const relationLatestName = `search_relation_latest_${suffix}`;
     const latestRelation = transaction
       .select({
         relationRevisionId: relationObservation.relationRevisionId,
+        commitId: relationObservation.commitId,
+        archiveSequence: relationObservation.archiveSequence,
+        ordinal: relationObservation.ordinal,
+        observedAt: relationCommit.observedAt,
+        recordedAt: relationCommit.recordedAt,
+        runId: relationCommit.runId,
+        collectorVersion: relationCommit.collectorVersion,
       })
       .from(relationObservation)
+      .innerJoin(
+        relationCommit,
+        eq(relationCommit.commitId, relationObservation.commitId),
+      )
       .where(
         and(
           eq(relationObservation.relationId, relation.relationId),
-          eq(relationObservation.binId, fields.latest.binId),
+          eq(relationObservation.binId, binId),
           lte(relationObservation.archiveSequence, asOf),
         ),
       )
@@ -626,96 +644,43 @@ async function readCurrentSearchPage(
         desc(relationObservation.commitId),
       )
       .limit(1)
-      .as(`search_relation_latest_${suffix}`);
-    // RC 没有 CASE/COALESCE 构造器；表达式保留逻辑对端及 item/sourceRef 身份供同一 bin/K 筛选和去重。
+      .as(relationLatestName);
+    // CASE 与 COALESCE 是局部方向和身份表达式；关系和观察列仍来自 schema。
     const relatedItemId: SQLWrapper =
-      filter.direction === "outgoing"
+      step.direction === "outgoing"
         ? relation.targetItemId
-        : filter.direction === "incoming"
+        : step.direction === "incoming"
           ? relation.fromItemId
-          : sql`CASE WHEN ${relation.fromItemId} = ${fields.item.itemId} THEN ${relation.targetItemId} ELSE ${relation.fromItemId} END`;
+          : sql`CASE WHEN ${relation.fromItemId} = ${currentItemId} THEN ${relation.targetItemId} ELSE ${relation.fromItemId} END`;
     const relatedSourceRef: SQLWrapper =
-      filter.direction === "outgoing"
+      step.direction === "outgoing"
         ? relation.targetSourceRef
-        : filter.direction === "incoming"
+        : step.direction === "incoming"
           ? sql`NULL::text`
-          : sql`CASE WHEN ${relation.fromItemId} = ${fields.item.itemId} THEN ${relation.targetSourceRef} ELSE NULL::text END`;
-    const relationIdentity = sql`COALESCE('item:' || ${relatedItemId}::text, 'sourceRef:' || ${relatedSourceRef})`;
+          : sql`CASE WHEN ${relation.fromItemId} = ${currentItemId} THEN ${relation.targetSourceRef} ELSE NULL::text END`;
+    const endpointIdentity = sql`COALESCE('item:' || ${relatedItemId}::text, 'sourceRef:' || ${relatedSourceRef})`;
     const endpointCondition =
-      filter.direction === "outgoing"
-        ? eq(relation.fromItemId, fields.item.itemId)
-        : filter.direction === "incoming"
-          ? eq(relation.targetItemId, fields.item.itemId)
+      step.direction === "outgoing"
+        ? eq(relation.fromItemId, currentItemId)
+        : step.direction === "incoming"
+          ? eq(relation.targetItemId, currentItemId)
           : or(
-              eq(relation.fromItemId, fields.item.itemId),
-              eq(relation.targetItemId, fields.item.itemId),
+              eq(relation.fromItemId, currentItemId),
+              eq(relation.targetItemId, currentItemId),
             );
     const conditions: SQL[] = [
       endpointCondition!,
       lte(relation.createdSequence, asOf),
     ];
-    if (filter.name !== undefined) {
-      // RC 未提供 JSON ->> 与 COLLATE 表达式；关系名仍以 C 序比较。
+    if (step.name !== undefined) {
       conditions.push(
-        sql`${relationRevision.stateData}->>'name' COLLATE "C" = ${filter.name}::text COLLATE "C"`,
+        sql`${relationRevision.stateData}->>'name' COLLATE "C" = ${step.name}::text COLLATE "C"`,
       );
     }
-    if (filter.properties !== undefined) {
+    if (step.properties !== undefined) {
       conditions.push(
-        compileJsonFilter(filter.properties, relationRevision.stateData),
+        compileJsonFilter(step.properties, relationRevision.stateData),
       );
-    }
-
-    const relationRows = transaction
-      .select({ identity: relationIdentity.as("identity") })
-      .from(relation)
-      .innerJoinLateral(latestRelation, sql`true`)
-      .innerJoin(
-        relationRevision,
-        and(
-          eq(relationRevision.relationId, relation.relationId),
-          eq(
-            relationRevision.relationRevisionId,
-            latestRelation.relationRevisionId,
-          ),
-        ),
-      );
-    const compareRelationCount = (countExpression: SQL): SQL => {
-      if (filter.count === undefined) {
-        throw new Error("关系数量条件缺少比较符和值。");
-      }
-      switch (filter.count.operator) {
-        case "eq":
-          return eq(countExpression, filter.count.value);
-        case "gt":
-          return gt(countExpression, filter.count.value);
-        case "gte":
-          return gte(countExpression, filter.count.value);
-        case "lt":
-          return lt(countExpression, filter.count.value);
-        case "lte":
-          return lte(countExpression, filter.count.value);
-      }
-    };
-
-    if (filter.target === undefined) {
-      const matchingRelations = relationRows
-        .where(and(...conditions))!
-        .as(`search_matching_relations_${suffix}`);
-      if (filter.operator === "exists") {
-        return exists(
-          transaction.select({ present: sql`1` }).from(matchingRelations),
-        );
-      }
-      if (filter.operator === "notExists") {
-        return notExists(
-          transaction.select({ present: sql`1` }).from(matchingRelations),
-        );
-      }
-      const countQuery = transaction
-        .select({ count: countDistinct(matchingRelations.identity) })
-        .from(matchingRelations);
-      return compareRelationCount(sql`(${countQuery})`);
     }
 
     const targetObservation = alias(
@@ -748,7 +713,7 @@ async function readCurrentSearchPage(
       .where(
         and(
           eq(targetObservation.itemId, relatedItemId),
-          eq(targetCommit.binId, fields.latest.binId),
+          eq(targetCommit.binId, binId),
           lte(targetCommit.archiveSequence, asOf),
         ),
       )
@@ -774,20 +739,314 @@ async function readCurrentSearchPage(
         recordedAt: targetLatest.recordedAt,
       },
     };
-    const matchingRelations = relationRows
-      .innerJoinLateral(targetLatest, sql`true`)
-      .innerJoin(targetItem, eq(targetItem.itemId, relatedItemId))
+    const sourceItem = alias(archiveItems, `search_source_item_${suffix}`);
+    const sourceObservation = alias(
+      archiveObservations,
+      `search_source_observation_${suffix}`,
+    );
+    const sourceCommit = alias(
+      archiveCommits,
+      `search_source_commit_${suffix}`,
+    );
+    const sourceLatest = transaction
+      .select({ revisionId: sourceObservation.revisionId })
+      .from(sourceObservation)
       .innerJoin(
-        targetRevision,
-        and(
-          eq(targetRevision.itemId, targetItem.itemId),
-          eq(targetRevision.revisionId, targetLatest.revisionId),
-        ),
+        sourceCommit,
+        eq(sourceCommit.commitId, sourceObservation.commitId),
       )
       .where(
-        and(...conditions, compileFilter(filter.target, targetFields, false)),
-      )!
-      .as(`search_matching_relations_${suffix}`);
+        and(
+          eq(sourceObservation.itemId, relation.fromItemId),
+          eq(sourceCommit.binId, binId),
+          lte(sourceCommit.archiveSequence, asOf),
+        ),
+      )
+      .orderBy(
+        desc(sourceCommit.archiveSequence),
+        desc(sourceObservation.ordinal),
+        desc(sourceCommit.commitId),
+      )
+      .limit(1)
+      .as(`search_source_latest_${suffix}`);
+    const endpointTargetObservation = alias(
+      archiveObservations,
+      `search_endpoint_target_observation_${suffix}`,
+    );
+    const endpointTargetCommit = alias(
+      archiveCommits,
+      `search_endpoint_target_commit_${suffix}`,
+    );
+    const endpointTargetItem = alias(
+      archiveItems,
+      `search_endpoint_target_item_${suffix}`,
+    );
+    const endpointTargetLatest = transaction
+      .select({ revisionId: endpointTargetObservation.revisionId })
+      .from(endpointTargetObservation)
+      .innerJoin(
+        endpointTargetCommit,
+        eq(endpointTargetCommit.commitId, endpointTargetObservation.commitId),
+      )
+      .where(
+        and(
+          eq(endpointTargetObservation.itemId, relation.targetItemId),
+          eq(endpointTargetCommit.binId, binId),
+          lte(endpointTargetCommit.archiveSequence, asOf),
+        ),
+      )
+      .orderBy(
+        desc(endpointTargetCommit.archiveSequence),
+        desc(endpointTargetObservation.ordinal),
+        desc(endpointTargetCommit.commitId),
+      )
+      .limit(1)
+      .as(`search_endpoint_target_latest_${suffix}`);
+    const relationDirection =
+      step.direction === "either"
+        ? sql`CASE WHEN ${relation.fromItemId} = ${currentItemId} THEN 'outgoing' ELSE 'incoming' END`
+        : sql`${step.direction}::text`;
+    const fromJson = sql`jsonb_strip_nulls(jsonb_build_object(
+      'kind', 'item',
+      'itemId', ${relation.fromItemId},
+      'sourceKey', jsonb_build_object('namespace', ${sourceItem.namespace}, 'key', ${sourceItem.sourceKey}),
+      'status', CASE WHEN ${sourceLatest.revisionId} IS NULL THEN 'unknown' ELSE 'observed' END,
+      'revisionId', ${sourceLatest.revisionId}
+    ))`;
+    const toJson = sql`CASE WHEN ${relation.targetItemId} IS NULL THEN
+      jsonb_build_object('kind', 'sourceRef', 'sourceRef', ${relation.targetSourceRef})
+    ELSE jsonb_strip_nulls(jsonb_build_object(
+      'kind', 'item',
+      'itemId', ${relation.targetItemId},
+      'sourceKey', jsonb_build_object('namespace', ${endpointTargetItem.namespace}, 'key', ${endpointTargetItem.sourceKey}),
+      'status', CASE WHEN ${endpointTargetLatest.revisionId} IS NULL THEN 'unknown' ELSE 'observed' END,
+      'revisionId', ${endpointTargetLatest.revisionId}
+    )) END`;
+    const observationJson = sql`jsonb_strip_nulls(jsonb_build_object(
+      'commitId', ${latestRelation.commitId},
+      'archiveSeq', ${latestRelation.archiveSequence}::text,
+      'ordinal', ${latestRelation.ordinal},
+      'observedAt', ${latestRelation.observedAt},
+      'recordedAt', ${latestRelation.recordedAt},
+      'runId', ${latestRelation.runId},
+      'collectorVersion', ${latestRelation.collectorVersion}
+    ))`;
+    // JSON 只作为路径依据的局部投影；archiveSeq 在数据库端转成文本后再序列化。
+    const evidence = includeEvidence
+      ? sql`jsonb_build_object(
+          'relationId', ${relation.relationId},
+          'direction', ${relationDirection},
+          'status', 'observed',
+          'from', ${fromJson},
+          'to', ${toJson},
+          'revisionId', ${latestRelation.relationRevisionId},
+          'state', ${relationRevision.stateData},
+          'observation', ${observationJson}
+        )`
+      : sql`NULL::jsonb`;
+    let rows = transaction
+      .select({
+        identity: endpointIdentity.mapWith(String).as("identity"),
+        nextItemId: sql`${relatedItemId}`
+          .mapWith(String)
+          .nullable()
+          .as("nextItemId"),
+        relationId: relation.relationId,
+        direction: relationDirection.as("direction"),
+        evidence: evidence.mapWith(archiveRevisions.stateData).as("evidence"),
+      })
+      .from(relation)
+      .innerJoinLateral(latestRelation, sql`true`)
+      .innerJoin(
+        relationRevision,
+        and(
+          eq(relationRevision.relationId, relation.relationId),
+          eq(
+            relationRevision.relationRevisionId,
+            latestRelation.relationRevisionId,
+          ),
+        ),
+      );
+    if (includeEvidence) {
+      rows = rows
+        .leftJoin(sourceItem, eq(sourceItem.itemId, relation.fromItemId))
+        .leftJoinLateral(sourceLatest, sql`true`)
+        .leftJoin(
+          endpointTargetItem,
+          eq(endpointTargetItem.itemId, relation.targetItemId),
+        )
+        .leftJoinLateral(endpointTargetLatest, sql`true`);
+    }
+    if (step.target !== undefined) {
+      rows = rows
+        .innerJoinLateral(targetLatest, sql`true`)
+        .innerJoin(targetItem, eq(targetItem.itemId, relatedItemId))
+        .innerJoin(
+          targetRevision,
+          and(
+            eq(targetRevision.itemId, targetItem.itemId),
+            eq(targetRevision.revisionId, targetLatest.revisionId),
+          ),
+        );
+      conditions.push(compileFilter(step.target, targetFields, false));
+    }
+    return rows.where(and(...conditions))!.as(`search_relation_step_${suffix}`);
+  };
+
+  function compileFilter(
+    filter: ArchiveSearchFilter | ArchiveSearchTargetFilter,
+    fields: SearchFields,
+    includeHit = true,
+  ): SQL {
+    if (filter.type === "and" || filter.type === "or") {
+      const conditions = filter.conditions.map((condition) =>
+        compileFilter(condition, fields, includeHit),
+      );
+      return (filter.type === "and" ? and(...conditions) : or(...conditions))!;
+    }
+    if (filter.type === "not") {
+      return not(compileFilter(filter.condition, fields, includeHit))!;
+    }
+    if (filter.type === "text") {
+      return compileText(filter.text, fields, includeHit);
+    }
+    if (filter.type === "json") {
+      return compileJsonFilter(filter, fields.revision.stateData);
+    }
+    if (filter.type === "field") {
+      return compileFieldFilter(filter, fields);
+    }
+    if (filter.type === "relation") {
+      return compileRelationFilter(filter, fields);
+    }
+    return compilePathFilter(filter, fields);
+  }
+
+  const buildPathRows = (
+    steps: readonly ArchiveSearchPathStep[],
+    startItemId: SQLWrapper,
+    startBinId: SQLWrapper,
+    includeEvidence: boolean,
+    anchor?: {
+      readonly source: WithSubquery;
+      readonly resultId: SQLWrapper;
+      readonly itemId: SQLWrapper;
+      readonly binId: SQLWrapper;
+    },
+  ) => {
+    const prefix = `search_path_${pathAliasIndex.toString(10)}`;
+    pathAliasIndex += 1;
+    const ctes: WithSubquery[] = [];
+    let previous: WithSubquery | undefined;
+    let currentItemId = anchor?.itemId ?? startItemId;
+    let currentBinId = anchor?.binId ?? startBinId;
+    let currentResultId: SQLWrapper =
+      anchor?.resultId ?? sql`NULL::text`.mapWith(String).nullable();
+    let currentPathData: SQLWrapper = sql`NULL::jsonb`;
+    let currentOrderKey: SQLWrapper = sql`NULL::jsonb`;
+    let currentIdentity: SQLWrapper = sql`NULL::text`;
+    let finalPath: WithSubquery | undefined;
+
+    for (const [index, step] of steps.entries()) {
+      const stepRows = buildRelationStepRows(
+        step,
+        currentItemId,
+        currentBinId,
+        includeEvidence,
+      );
+      const nextPathData =
+        includeEvidence && index > 0
+          ? sql`${currentPathData} || jsonb_build_array(${stepRows.evidence})`
+          : includeEvidence
+            ? sql`jsonb_build_array(${stepRows.evidence})`
+            : sql`NULL::jsonb`;
+      const nextOrderKey =
+        includeEvidence && index > 0
+          ? sql`${currentOrderKey} || jsonb_build_array(jsonb_build_array(${stepRows.relationId}, ${stepRows.direction}))`
+          : includeEvidence
+            ? sql`jsonb_build_array(jsonb_build_array(${stepRows.relationId}, ${stepRows.direction}))`
+            : sql`NULL::jsonb`;
+      const selectFields = {
+        resultId: sql`${currentResultId}`
+          .mapWith(String)
+          .nullable()
+          .as("resultId"),
+        binId: sql`${currentBinId}`.mapWith(String).as("binId"),
+        identity: stepRows.identity,
+        nextItemId: stepRows.nextItemId,
+        pathData: nextPathData
+          .mapWith(archiveRevisions.stateData)
+          .as("pathData"),
+        orderKey: nextOrderKey
+          .mapWith(archiveRevisions.stateData)
+          .as("orderKey"),
+      };
+      const query =
+        previous === undefined
+          ? anchor === undefined
+            ? transaction.select(selectFields).from(stepRows)
+            : transaction
+                .select(selectFields)
+                .from(anchor.source)
+                .innerJoinLateral(stepRows, sql`true`)
+          : transaction
+              .select(selectFields)
+              .from(previous)
+              .innerJoinLateral(stepRows, sql`true`);
+      const cte = transaction.$with(`${prefix}_${index}`).as(query);
+      ctes.push(cte);
+      previous = cte;
+      finalPath = cte;
+      currentItemId = cte.nextItemId;
+      currentBinId = cte.binId;
+      currentResultId = cte.resultId;
+      currentPathData = cte.pathData;
+      currentOrderKey = cte.orderKey;
+      currentIdentity = cte.identity;
+    }
+    if (finalPath === undefined) {
+      throw new Error("有限关系路径至少需要一个步骤。");
+    }
+    return {
+      ctes,
+      finalPath,
+      identity: currentIdentity,
+      resultId: currentResultId,
+      binId: currentBinId,
+      pathData: currentPathData,
+      orderKey: currentOrderKey,
+    };
+  };
+
+  const compareRelationCount = (
+    count: ArchiveSearchRelationFilter["count"],
+    countExpression: SQL,
+    errorMessage: string,
+  ): SQL => {
+    if (count === undefined) throw new Error(errorMessage);
+    switch (count.operator) {
+      case "eq":
+        return eq(countExpression, count.value);
+      case "gt":
+        return gt(countExpression, count.value);
+      case "gte":
+        return gte(countExpression, count.value);
+      case "lt":
+        return lt(countExpression, count.value);
+      case "lte":
+        return lte(countExpression, count.value);
+    }
+  };
+
+  function compileRelationFilter(
+    filter: ArchiveSearchRelationFilter,
+    fields: SearchFields,
+  ): SQL {
+    const matchingRelations = buildRelationStepRows(
+      filter,
+      fields.item.itemId,
+      fields.latest.binId,
+    );
     if (filter.operator === "exists") {
       return exists(
         transaction.select({ present: sql`1` }).from(matchingRelations),
@@ -801,8 +1060,49 @@ async function readCurrentSearchPage(
     const countQuery = transaction
       .select({ count: countDistinct(matchingRelations.identity) })
       .from(matchingRelations);
-    return compareRelationCount(sql`(${countQuery})`);
-  };
+    return compareRelationCount(
+      filter.count,
+      sql`(${countQuery})`,
+      "关系数量条件缺少比较符和值。",
+    );
+  }
+
+  function compilePathFilter(
+    filter: ArchiveSearchPathFilter,
+    fields: SearchFields,
+  ): SQL {
+    const pathRows = buildPathRows(
+      filter.steps,
+      fields.item.itemId,
+      fields.latest.binId,
+      false,
+    );
+    if (filter.operator === "exists") {
+      return exists(
+        transaction
+          .with(...pathRows.ctes)
+          .select({ present: sql`1` })
+          .from(pathRows.finalPath),
+      );
+    }
+    if (filter.operator === "notExists") {
+      return notExists(
+        transaction
+          .with(...pathRows.ctes)
+          .select({ present: sql`1` })
+          .from(pathRows.finalPath),
+      );
+    }
+    const countQuery = transaction
+      .with(...pathRows.ctes)
+      .select({ count: countDistinct(pathRows.identity) })
+      .from(pathRows.finalPath);
+    return compareRelationCount(
+      filter.count,
+      sql`(${countQuery})`,
+      "路径数量条件缺少比较符和值。",
+    );
+  }
 
   const filters: ArchiveSearchFilter[] = [
     ...(input.text === undefined
@@ -1371,6 +1671,7 @@ async function readCurrentSearchPage(
   const hasMore = orderedResults.length > input.limit;
   const pageResults = orderedResults.slice(0, input.limit);
   const expansions = input.expand ?? [];
+  const pathExpansions = input.expandPaths ?? [];
   if (expansions.length > 0) {
     for (const result of pageResults) {
       for (const match of result.matches) {
@@ -1379,6 +1680,17 @@ async function readCurrentSearchPage(
           direction,
           ...(name === undefined ? {} : { name }),
           relations: [],
+          hasMore: false,
+        }));
+      }
+    }
+  }
+  if (pathExpansions.length > 0) {
+    for (const result of pageResults) {
+      for (const match of result.matches) {
+        match.pathExpansions = pathExpansions.map(({ key }) => ({
+          key,
+          paths: [],
           hasMore: false,
         }));
       }
@@ -1937,6 +2249,114 @@ async function readCurrentSearchPage(
             expansion.relations = groupedRows
               .slice(0, selector.limit)
               .map(relationForRow);
+            expansion.hasMore = groupedRows.length > selector.limit;
+          }
+        }
+      }
+    }
+  }
+
+  if (pathExpansions.length > 0) {
+    const views = pageResults.flatMap((result) =>
+      result.matches.map((match) => ({
+        result_id: result.resultId,
+        item_id: result.itemId,
+        bin_id: match.binId,
+      })),
+    );
+    if (views.length > 0) {
+      const keyForView = (resultId: string, binId: string): string =>
+        JSON.stringify([resultId, binId]);
+      for (const [selectorIndex, selector] of pathExpansions.entries()) {
+        // 页内根视图是唯一输入；每个选择器的有限路径在独立受限语句中展开。
+        const requestRows = sql`jsonb_to_recordset(${searchJsonValue(views)}) AS request(result_id text, item_id uuid, bin_id text)`;
+        const viewsCte = transaction.$with("path_views").as(
+          transaction
+            .selectDistinct({
+              resultId: sql`request.result_id`.mapWith(String).as("resultId"),
+              itemId: sql`request.item_id`.mapWith(String).as("itemId"),
+              binId: sql`request.bin_id`.mapWith(String).as("binId"),
+            })
+            .from(requestRows),
+        );
+        const pathRows = buildPathRows(
+          selector.steps,
+          viewsCte.itemId,
+          viewsCte.binId,
+          true,
+          {
+            source: viewsCte,
+            resultId: viewsCte.resultId,
+            itemId: viewsCte.itemId,
+            binId: viewsCte.binId,
+          },
+        );
+        const ranked = transaction
+          .$with(`path_ranked_${selectorIndex.toString(10)}`)
+          .as(
+            transaction
+              .select({
+                resultId: sql`${pathRows.resultId}`
+                  .mapWith(String)
+                  .as("resultId"),
+                binId: sql`${pathRows.binId}`.mapWith(String).as("binId"),
+                pathData: sql`${pathRows.pathData}`
+                  .mapWith(archiveRevisions.stateData)
+                  .as("pathData"),
+                pathRank: sql`row_number() OVER (
+                  PARTITION BY ${pathRows.resultId}, ${pathRows.binId}
+                  ORDER BY ${pathRows.orderKey}::text COLLATE "C"
+                )`
+                  .mapWith(Number)
+                  .as("pathRank"),
+              })
+              .from(pathRows.finalPath),
+          );
+        const limited = transaction
+          .$with(`path_limited_${selectorIndex.toString(10)}`)
+          .as(
+            transaction
+              .select()
+              .from(ranked)
+              .where(lte(ranked.pathRank, selector.limit + 1)),
+          );
+        const rows = await transaction
+          .with(viewsCte, ...pathRows.ctes, ranked, limited)
+          .select({
+            resultId: limited.resultId,
+            binId: limited.binId,
+            pathData: limited.pathData,
+          })
+          .from(limited)
+          .orderBy(
+            asc(sql`${limited.resultId} COLLATE "C"`),
+            asc(sql`${limited.binId} COLLATE "C"`),
+            asc(limited.pathRank),
+          );
+        const rowsByView = new Map<string, (typeof rows)[number][]>();
+        for (const row of rows) {
+          const key = keyForView(row.resultId, row.binId);
+          const groupedRows = rowsByView.get(key);
+          if (groupedRows === undefined) rowsByView.set(key, [row]);
+          else groupedRows.push(row);
+        }
+        for (const result of pageResults) {
+          for (const match of result.matches) {
+            const groupedRows =
+              rowsByView.get(keyForView(result.resultId, match.binId)) ?? [];
+            const expansion = match.pathExpansions?.find(
+              ({ key }) => key === selector.key,
+            );
+            if (expansion === undefined) {
+              throw new Error("路径展开结果缺少对应选择器。");
+            }
+            expansion.paths = groupedRows
+              .slice(0, selector.limit)
+              .map(({ pathData }) =>
+                archiveSearchPathExpansionPathSchema.parse({
+                  steps: pathData,
+                }),
+              );
             expansion.hasMore = groupedRows.length > selector.limit;
           }
         }
