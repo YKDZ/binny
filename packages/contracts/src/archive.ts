@@ -621,6 +621,56 @@ export const archiveRevisionReadSchema = withArchiveJsonSchemaProjection(
     .strict(),
 );
 
+const archiveRevisionDiffValueSnapshotSchema = z.discriminatedUnion("present", [
+  z.object({ present: z.literal(false) }).strict(),
+  z
+    .object({ present: z.literal(true), value: archiveJsonValueSchema })
+    .strict(),
+]);
+
+const archiveRevisionDiffFieldSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unchanged") }).strict(),
+  z
+    .object({
+      status: z.literal("changed"),
+      before: archiveRevisionDiffValueSnapshotSchema,
+      after: archiveRevisionDiffValueSnapshotSchema,
+    })
+    .strict(),
+]);
+
+/**
+ * 比较同一条目的两个完整状态。正文作为整体字段返回，包含其全部表示；JSON 对象键顺序不影响差异，
+ * 数组按位置比较。缺失字段用 present=false 表示，JSON null 保留为 present=true 的值。
+ * 资源清单按无序资源 ID 集合比较，结果中的新增与移除 ID 按字典序排列。
+ */
+export const archiveRevisionDiffSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      itemId: archiveIdSchema,
+      firstRevisionId: archiveIdSchema,
+      secondRevisionId: archiveIdSchema,
+      fields: z
+        .object({
+          sourceRef: archiveRevisionDiffFieldSchema,
+          sourceModifiedAt: archiveRevisionDiffFieldSchema,
+          metadata: archiveRevisionDiffFieldSchema,
+          properties: archiveRevisionDiffFieldSchema,
+          body: archiveRevisionDiffFieldSchema,
+          capture: archiveRevisionDiffFieldSchema,
+        })
+        .strict(),
+      resources: z
+        .object({
+          added: z.array(archiveIdentifierSchema),
+          removed: z.array(archiveIdentifierSchema),
+        })
+        .strict(),
+      hasChanges: z.boolean(),
+    })
+    .strict(),
+);
+
 export const archiveErrorSchema = z
   .object({
     error: z
@@ -634,6 +684,7 @@ export const archiveErrorSchema = z
           "item_not_found",
           "item_deleted",
           "revision_not_found",
+          "revision_item_mismatch",
           "resource_not_found",
           "resource_storage_unavailable",
           "commit_not_found",
@@ -655,6 +706,7 @@ export type ArchiveItemDeletionResult = z.infer<
 >;
 export type ArchiveItemRead = z.infer<typeof archiveItemReadSchema>;
 export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
+export type ArchiveRevisionDiff = z.infer<typeof archiveRevisionDiffSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
 
 export const archiveSearchFieldSchema = z.enum([
@@ -1936,6 +1988,10 @@ export type ArchiveOperations = {
   getArchiveRevision(
     revisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionRead>>;
+  compareArchiveRevisions(
+    firstRevisionId: string,
+    secondRevisionId: string,
+  ): Promise<ArchiveOperation<ArchiveRevisionDiff>>;
   searchArchive(
     input: ArchiveSearchRequest,
   ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;

@@ -8,6 +8,7 @@ import {
   archiveItemReadQuerySchema,
   archiveRelationPageSchema,
   archiveRelationReadQuerySchema,
+  archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
@@ -365,6 +366,41 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
       },
     )
     .get(
+      "/archives/revisions/:firstRevisionId/diff/:secondRevisionId",
+      zValidator(
+        "param",
+        z.object({
+          firstRevisionId: archiveIdentifierSchema,
+          secondRevisionId: archiveIdentifierSchema,
+        }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { firstRevisionId, secondRevisionId } = c.req.valid("param");
+        const result = await operations.compareArchiveRevisions(
+          firstRevisionId,
+          secondRevisionId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
       "/archives/commits/:commitId",
       zValidator(
         "param",
@@ -409,6 +445,7 @@ export const archiveApiSchemas: {
   readonly timelineQuery: Record<string, unknown>;
   readonly relationQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
+  readonly revisionDiff: Record<string, unknown>;
   readonly resource: Record<string, unknown>;
   readonly deletionResult: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
@@ -424,6 +461,7 @@ export const archiveApiSchemas: {
   timelineQuery: toArchiveJsonSchema(archiveTimelineQuerySchema, "input"),
   relationQuery: toArchiveJsonSchema(archiveRelationReadQuerySchema, "input"),
   revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
+  revisionDiff: toArchiveJsonSchema(archiveRevisionDiffSchema, "output"),
   resource: toArchiveJsonSchema(archiveResourceMetadataSchema, "output"),
   deletionResult: toArchiveJsonSchema(
     archiveItemDeletionResultSchema,
