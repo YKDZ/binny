@@ -13,6 +13,8 @@ import {
   archiveRelationPageSchema,
   archiveResourceMetadataSchema,
   archiveRevisionReadSchema,
+  archiveSearchInputSchema,
+  archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
   archiveTimelinePageSchema,
   binConfigurationSchema,
@@ -25,6 +27,8 @@ import {
   jsonObjectSchema,
   manualRunErrorSchema,
   manualRunSchema,
+  postgresTextSchema,
+  withArchiveJsonSchemaProjection,
   withPostgresJsonSchemaProjection,
 } from "@binny/contracts";
 import {
@@ -92,6 +96,9 @@ const jsonTextSchema = z.string().transform((source, context) => {
 
 const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
   jsonTextSchema.pipe(jsonObjectSchema),
+);
+const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
+  z.object({ query: postgresTextSchema.min(1) }).strict(),
 );
 const collectorTextSchema = withPostgresJsonSchemaProjection(
   jsonTextSchema.pipe(collectorManifestSchema),
@@ -169,6 +176,69 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "run",
         description: "触发采集动作并查询运行结果。",
       },
+      ...command("archiveSearch")({
+        kind: "command",
+        parent: "archive",
+        name: "search",
+        description: "在服务端组合检索正文与归档字段条件。",
+        fields: {
+          query: {
+            kind: "valueOption",
+            longOption: "--query",
+            description: "搜索请求 JSON（与 HTTP API 使用相同契约）",
+          },
+        },
+        input: cliArchiveSearchInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "归档搜索结果页",
+              exitCode: 0,
+              schema: archiveSearchPageSchema,
+              text: (page) => outputText("归档搜索结果", page),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          let request: unknown;
+          try {
+            request = JSON.parse(input.query) as unknown;
+          } catch {
+            const error = {
+              code: "invalid_input",
+              message: "搜索请求必须是有效 JSON。",
+              path: ["query"],
+            } as const;
+            return outcome.failure.apiError(error);
+          }
+          const checked = archiveSearchInputSchema.safeParse(request);
+          if (!checked.success) {
+            const issue = checked.error.issues[0];
+            const error = {
+              code: "invalid_input",
+              message: issue?.message ?? "归档搜索请求格式无效。",
+              ...(issue === undefined
+                ? {}
+                : {
+                    path: issue.path.map((part) =>
+                      typeof part === "symbol" ? String(part) : part,
+                    ),
+                  }),
+            } as const;
+            return outcome.failure.apiError(error);
+          }
+          const response = await dependencies
+            .createClient()
+            .archives.search.$post({ json: checked.data });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (response.status === 400 || response.status === 422)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档搜索状态。");
+        },
+      }),
       ...command("binList")({
         kind: "command",
         parent: "bin",

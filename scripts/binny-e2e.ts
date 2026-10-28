@@ -1439,11 +1439,44 @@ async function verifyRestartAndRemoval(
   );
   assert.deepEqual(cliSdkItem, expectedArchive.sdkItem);
 
+  const cliSearch = cliData<{
+    readonly unit: string;
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly revisionId: string;
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        text: { kind: "literal", value: "正文 A" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(cliSearch.unit, "item");
+  const cliSearchResult = cliSearch.results.find(
+    (result) => result.itemId === itemId,
+  );
+  assert.ok(cliSearchResult);
+  assert.ok(
+    cliSearchResult.matches.some(
+      (match) => match.binId === "rss-main" && match.revisionId === revisionId,
+    ),
+  );
+
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny15-resource-cli-"),
+    path.join(tmpdir(), "binny15fix-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny15-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny15fix-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -1565,7 +1598,7 @@ async function main(): Promise<void> {
   const e2eHost = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const baseUrl = "http://" + e2eHost + ":" + port;
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny15-compose-"),
+    path.join(tmpdir(), "binny15fix-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
