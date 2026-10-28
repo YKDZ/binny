@@ -456,6 +456,94 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await relatedSearch.json()).error.code;
   }
 
+  const relatedPathSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [
+          {
+            direction: "outgoing",
+            name: "reply",
+            target: {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "entry/8",
+            },
+          },
+          {
+            direction: "incoming",
+            name: "mentions",
+            target: {
+              type: "text",
+              text: { kind: "literal", value: "归档正文" },
+            },
+          },
+        ],
+        operator: "count",
+        count: { operator: "gte", value: 1 },
+      },
+      expandPaths: [
+        {
+          key: "replies-and-mentions",
+          steps: [
+            { direction: "outgoing", name: "reply" },
+            { direction: "either", name: "mentions" },
+          ],
+          limit: 2,
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  if (relatedPathSearch.status === 200) {
+    const pathPage = await relatedPathSearch.json();
+    const pathExpansion = pathPage.results[0]?.matches[0]?.pathExpansions?.[0];
+    if (pathExpansion !== undefined) {
+      void pathExpansion.hasMore;
+      const firstPath = pathExpansion.paths[0];
+      if (firstPath !== undefined) {
+        void firstPath.steps[0]?.observation.archiveSeq;
+        void firstPath.steps[0]?.state.name;
+        void firstPath.steps[1]?.direction;
+      }
+    }
+  } else if (
+    relatedPathSearch.status === 400 ||
+    relatedPathSearch.status === 422
+  ) {
+    void (await relatedPathSearch.json()).error.code;
+  }
+
+  const invalidPathFilter = {
+    type: "path",
+    steps: [{ direction: "outgoing" }],
+    operator: "count",
+    // @ts-expect-error count 路径必须声明最终目标数量比较。
+  } satisfies NonNullable<
+    Parameters<typeof client.archives.search.$post>[0]["json"]["where"]
+  >;
+  void invalidPathFilter;
+
+  void client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [{ direction: "outgoing" }],
+        operator: "exists",
+        // @ts-expect-error exists 路径不能声明 count 比较。
+        count: { operator: "eq", value: 0 },
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",

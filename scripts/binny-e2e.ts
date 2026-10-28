@@ -3566,6 +3566,114 @@ async function verifyRestartAndRemoval(
     ["e2e:relation-query:split-text"],
   );
 
+  const cliPathSearch = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly pathExpansions?: readonly {
+          readonly key: string;
+          readonly hasMore: boolean;
+          readonly paths: readonly {
+            readonly steps: readonly {
+              readonly relationId: string;
+              readonly direction: string;
+              readonly status: string;
+              readonly observation: { readonly archiveSeq: string };
+            }[];
+          }[];
+        }[];
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "path-root",
+            },
+            {
+              type: "path",
+              steps: [
+                { direction: "outgoing", name: "path-first" },
+                { direction: "outgoing", name: "path-second" },
+              ],
+              operator: "count",
+              count: { operator: "eq", value: 1 },
+            },
+          ],
+        },
+        expandPaths: [
+          {
+            key: "two-hop",
+            steps: [
+              { direction: "outgoing", name: "path-first" },
+              { direction: "outgoing", name: "path-second" },
+            ],
+            limit: 10,
+          },
+        ],
+        select: ["sourceKey"],
+        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    cliPathSearch.results.map(({ sourceKey }) => sourceKey?.key),
+    ["path-root"],
+  );
+  const cliPaths = cliPathSearch.results[0]?.matches[0]?.pathExpansions?.[0];
+  assert.ok(cliPaths !== undefined);
+  assert.equal(cliPaths.paths.length, 2);
+  assert.equal(cliPaths.hasMore, false);
+  assert.deepEqual(
+    cliPaths.paths.map(({ steps }) =>
+      steps.map(({ relationId }) => relationId),
+    ),
+    [
+      ["e2e:relation-query:path-first-c", "e2e:relation-query:path-second-c"],
+      [
+        "e2e:relation-query:path-first-unknown",
+        "e2e:relation-query:path-second-unknown",
+      ],
+    ],
+  );
+  assert.match(
+    cliPaths.paths[0]?.steps[0]?.observation.archiveSeq ?? "",
+    /^\d+$/u,
+  );
+
+  const cliInvalidPath = cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "path",
+          steps: [],
+          operator: "exists",
+        },
+        select: ["sourceKey"],
+        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+        limit: 10,
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.equal(cliInvalidPath.code, "invalid_input");
+
   const downloadDirectory = await mkdtemp(
     path.join(tmpdir(), "binny10-resource-cli-"),
   );
