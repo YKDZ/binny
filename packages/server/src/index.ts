@@ -20,15 +20,45 @@ export type ServerRuntime = {
   readonly close: () => Promise<void>;
 };
 
+function environmentMilliseconds(
+  name: string,
+  fallback: number,
+  minimum: number,
+): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new Error(`${name} 必须是大于等于 ${minimum} 的整数。`);
+  }
+  return parsed;
+}
+
 export async function createServerRuntime(options: {
   readonly databaseUrl: string;
 }): Promise<ServerRuntime> {
   const database = connectCoreDatabase(options.databaseUrl);
+  const archives = createArchiveStore(database, {
+    resourceDirectory:
+      process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
+    unreferencedResourceAgeMs: environmentMilliseconds(
+      "BINNY_RESOURCE_UNREFERENCED_AGE_MS",
+      24 * 60 * 60 * 1000,
+      0,
+    ),
+    resourceCleanupIntervalMs: environmentMilliseconds(
+      "BINNY_RESOURCE_CLEANUP_INTERVAL_MS",
+      60 * 60 * 1000,
+      100,
+    ),
+  });
   try {
     await initializeBinConfigurationSchema(database);
     await initializeArchiveSchema(database);
+    await archives.initializeResourceStorage();
     await initializeRuntimeConnectionSchema(database);
   } catch (error) {
+    await archives.close();
     await database.end();
     throw error;
   }
@@ -36,9 +66,12 @@ export async function createServerRuntime(options: {
     app: createApiRoutes({
       bins: createBinConfigurationStore(database),
       runtime: createRuntimeConnectionStore(database),
-      archives: createArchiveStore(database),
+      archives,
     }),
-    close: () => database.end(),
+    close: async () => {
+      await archives.close();
+      await database.end();
+    },
   };
 }
 

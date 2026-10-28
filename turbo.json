@@ -53,6 +53,7 @@
         "packages/api/scripts/**",
         "packages/api/test-consumer/**",
         "packages/binny/src/**",
+        "packages/collector-sdk/scripts/**",
         "packages/collector-sdk/src/**",
         "packages/contracts/src/**",
         "packages/core/src/**",

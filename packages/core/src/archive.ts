@@ -27,13 +27,13 @@ import {
 } from "@binny/contracts";
 import type postgres from "postgres";
 
+import {
+  advanceArchiveSequence,
+  withArchiveWriteLock,
+} from "./archive-lock.ts";
+import type { ArchiveTransaction } from "./archive-lock.ts";
+import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import type { CoreDatabase } from "./database.ts";
-
-type ArchiveTransaction = postgres.TransactionSql;
-
-type ClockRow = {
-  readonly last_seq: string;
-};
 
 type CommitRow = {
   readonly commit_id: string;
@@ -43,6 +43,10 @@ type CommitRow = {
   readonly collector_version: string | null;
   readonly observed_at: Date;
   readonly recorded_at: Date;
+};
+
+type ClockRow = {
+  readonly last_seq: string;
 };
 
 type CommitItemRow = {
@@ -151,7 +155,7 @@ type PreparedRelation = {
 };
 
 function failure<T>(
-  status: 400 | 404 | 409,
+  status: 400 | 404 | 409 | 503,
   code: ArchiveError["code"],
   message: string,
   path?: readonly (string | number)[],
@@ -344,55 +348,7 @@ function sourceKeyIdentity(sourceKey: {
   return JSON.stringify([sourceKey.namespace, sourceKey.key]);
 }
 
-/**
- * 每个归档写事务首先锁定同一时钟行；后续归档能力须复用此入口，
- * 以便身份合并、提交序号与未来的引用变更使用一致的写入顺序。
- */
-export async function withArchiveWriteLock<T>(
-  database: CoreDatabase,
-  operation: (
-    transaction: ArchiveTransaction,
-    currentSequence: bigint,
-  ) => Promise<T>,
-): Promise<T> {
-  const result = await database.begin(async (transaction) => {
-    const clocks = await transaction<ClockRow[]>`
-      SELECT last_seq::text AS last_seq
-      FROM archive_write_clock
-      WHERE clock_id = 1
-      FOR UPDATE
-    `;
-    const clock = clocks[0];
-    if (clock === undefined) {
-      throw new Error("归档写入时钟尚未初始化。");
-    }
-    return {
-      value: await operation(transaction, BigInt(clock.last_seq)),
-    };
-  });
-  return result.value;
-}
-
-/** 仅在同一写事务中提交新的归档观察时推进全局序号。 */
-export async function advanceArchiveSequence(
-  transaction: ArchiveTransaction,
-  currentSequence: bigint,
-): Promise<string> {
-  const nextSequence = (currentSequence + 1n).toString();
-  const rows = await transaction<{ readonly last_seq: string }[]>`
-    UPDATE archive_write_clock
-    SET last_seq = ${nextSequence}::bigint
-    WHERE clock_id = 1
-    RETURNING last_seq::text AS last_seq
-  `;
-  const row = rows[0];
-  if (row === undefined) {
-    throw new Error("无法推进归档写入时钟。");
-  }
-  return row.last_seq;
-}
-
-/** 初始化文本归档表；bin_id 保留为来源值，不建立会级联删除的外键。 */
+/** 初始化归档表；bin_id 保留为来源值，不建立会级联删除的外键。 */
 export async function initializeArchiveSchema(
   database: CoreDatabase,
 ): Promise<void> {
@@ -417,6 +373,25 @@ export async function initializeArchiveSchema(
         ")",
     );
     await transaction.unsafe(
+      "CREATE TABLE IF NOT EXISTS archive_resource (" +
+        "resource_id uuid PRIMARY KEY, " +
+        "sha256 text NOT NULL CHECK (length(sha256) = 64), " +
+        "media_type text NOT NULL, " +
+        "byte_size bigint NOT NULL CHECK (byte_size >= 0), " +
+        "storage_key uuid NOT NULL UNIQUE, " +
+        "status text NOT NULL CHECK (status IN ('ready', 'deleting')), " +
+        "uploaded_at timestamptz NOT NULL DEFAULT clock_timestamp()" +
+        ")",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_resource_digest_idx " +
+        "ON archive_resource (sha256, byte_size) WHERE status = 'ready'",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_resource_cleanup_idx " +
+        "ON archive_resource (uploaded_at) WHERE status = 'ready'",
+    );
+    await transaction.unsafe(
       "CREATE TABLE IF NOT EXISTS archive_revision (" +
         "revision_id uuid PRIMARY KEY, " +
         "item_id uuid NOT NULL REFERENCES archive_item(item_id) ON DELETE RESTRICT, " +
@@ -426,6 +401,19 @@ export async function initializeArchiveSchema(
         "UNIQUE (item_id, state_hash), " +
         "UNIQUE (item_id, revision_id)" +
         ")",
+    );
+    await transaction.unsafe(
+      "CREATE TABLE IF NOT EXISTS archive_revision_resource (" +
+        "revision_id uuid NOT NULL REFERENCES archive_revision(revision_id) ON DELETE RESTRICT, " +
+        "resource_id uuid NOT NULL REFERENCES archive_resource(resource_id) ON DELETE RESTRICT, " +
+        "ordinal integer NOT NULL CHECK (ordinal >= 0), " +
+        "PRIMARY KEY (revision_id, resource_id), " +
+        "UNIQUE (revision_id, ordinal)" +
+        ")",
+    );
+    await transaction.unsafe(
+      "CREATE INDEX IF NOT EXISTS archive_revision_resource_resource_idx " +
+        "ON archive_revision_resource (resource_id, revision_id)",
     );
     await transaction.unsafe(
       "CREATE TABLE IF NOT EXISTS archive_commit (" +
@@ -1200,9 +1188,33 @@ async function readRelationsPage(
   };
 }
 
-/** 创建使用共享 PostgreSQL 连接的原子文本归档操作。 */
-export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
+export type ArchiveStoreOptions = {
+  readonly resourceDirectory: string;
+  readonly unreferencedResourceAgeMs?: number;
+  readonly resourceCleanupIntervalMs?: number;
+};
+
+export type ArchiveStore = ArchiveOperations & {
+  readonly initializeResourceStorage: () => Promise<void>;
+  readonly close: () => Promise<void>;
+};
+
+/** 创建共享 PostgreSQL 与持久资源目录的原子归档操作。 */
+export function createArchiveStore(
+  database: CoreDatabase,
+  options: ArchiveStoreOptions,
+): ArchiveStore {
+  const resourceStorage = createArchiveResourceStorage(database, {
+    directory: options.resourceDirectory,
+    unreferencedAgeMs: options.unreferencedResourceAgeMs ?? 24 * 60 * 60 * 1000,
+    cleanupIntervalMs: options.resourceCleanupIntervalMs ?? 60 * 60 * 1000,
+  });
   return {
+    initializeResourceStorage: () => resourceStorage.initialize(),
+    close: () => resourceStorage.close(),
+    uploadArchiveResource: (body, mediaType) =>
+      resourceStorage.upload(body, mediaType),
+    getArchiveResource: (resourceId) => resourceStorage.get(resourceId),
     async submitArchive(input) {
       const checked = archiveSubmissionInputSchema.safeParse(input);
       if (!checked.success) return validationFailure(checked.error.issues);
@@ -1249,6 +1261,32 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
             return failure(404, "bin_not_found", "没有找到提交所声明的 bin。", [
               "binId",
             ]);
+          }
+
+          for (const [itemIndex, item] of submission.items.entries()) {
+            for (const [resourceIndex, resource] of (
+              item.resources ?? []
+            ).entries()) {
+              if (
+                !(await resourceStorage.isAvailable(
+                  transaction,
+                  resource.resourceId,
+                ))
+              ) {
+                return failure(
+                  400,
+                  "resource_not_found",
+                  "内容版本引用的归档资源尚未上传或已不可用。",
+                  [
+                    "items",
+                    itemIndex,
+                    "resources",
+                    resourceIndex,
+                    "resourceId",
+                  ],
+                );
+              }
+            }
           }
 
           const preparedItems: PreparedItem[] = [];
@@ -1429,6 +1467,21 @@ export function createArchiveStore(database: CoreDatabase): ArchiveOperations {
                   ${item.stateHash},
                   ${transaction.json(postgresJsonValue(item.state))}
                 )
+              `;
+            }
+            for (const [ordinal, resource] of (
+              item.state.resources ?? []
+            ).entries()) {
+              await transaction`
+                INSERT INTO archive_revision_resource (
+                  revision_id,
+                  resource_id,
+                  ordinal
+                ) VALUES (
+                  ${item.revisionId},
+                  ${resource.resourceId},
+                  ${ordinal}
+                ) ON CONFLICT (revision_id, resource_id) DO NOTHING
               `;
             }
           }
