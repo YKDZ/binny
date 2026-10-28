@@ -1,0 +1,60 @@
+{
+  "extends": ["//"],
+  "tags": ["app", "binny:cli"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": [],
+      "outputs": ["dist/**"],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "format:check": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "dependsOn": ["lint:fix"],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "lint": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "postbuild": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["work:lifecycle"]
+    },
+    "test": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "test:e2e": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    }
+  }
+}

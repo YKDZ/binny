@@ -1,0 +1,51 @@
+{
+  "name": "@binny/api",
+  "version": "0.0.0",
+  "private": true,
+  "description": "正式 HTTP 路由定义与类型化客户端，通过注入连接业务实现。",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "exports": {
+    "./client": {
+      "source": "./src/client.ts",
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./routes": {
+      "source": "./src/routes.ts",
+      "types": "./dist/routes.d.ts",
+      "default": "./dist/routes.js"
+    }
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
+  },
+  "dependencies": {
+    "@binny/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "workspace:*",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}

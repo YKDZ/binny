@@ -1,0 +1,27 @@
+nodeLinker: isolated
+preferSymlinkedExecutables: true
+shellEmulator: true
+autoInstallPeers: false
+injectWorkspacePackages: false
+dedupeInjectedDeps: false
+syncInjectedDepsAfterScripts:
+  - build
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: true
+allowBuilds:
+  esbuild: true
+overrides: {}
+packages:
+  - apps/*
+  - packages/*
+  - collectors/*
+catalog:
+  "@changesets/cli": 3.0.3
+  "@types/node": ^24.13.3
+  "@ykdz/cli-contract": 0.3.0
+  oxfmt: ^0.71.0
+  oxlint: ^1.77.0
+  oxlint-tsgolint: ^7.0.2001
+  turbo: 2.11.10
+  typescript-7: npm:typescript@^7.0.2
+  zod: ^4.6.7

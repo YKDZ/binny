@@ -1,0 +1,43 @@
+{
+  "name": "@binny/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "description": "共享资料、查询、运行与采集器契约，不依赖 HTTP 或业务实现。",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "workspace:*",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "binny",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "NODE_VERSION": "24.21.0"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["oxc.oxc-vscode"]
+    }
+  },
+  "mounts": [
+    {
+      "type": "volume",
+      "source": "${devcontainerId}-pnpm-store",
+      "target": "/pnpm/store"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "name": "@binny/binny",
+  "private": true,
+  "bin": {
+    "binny": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "postbuild": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "node --conditions=source --test --test-reporter=spec 'test/unit/**/*.test.ts' 'test/integration/**/*.test.ts'",
+    "test:e2e": "node --conditions=source --test --test-timeout=180000 --test-reporter=spec 'test/e2e/source-journeys.test.ts'",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@binny/api": "workspace:*",
+    "@ykdz/cli-contract": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "link:../tooling-config",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

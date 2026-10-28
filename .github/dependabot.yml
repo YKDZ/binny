@@ -1,0 +1,37 @@
+version: 2
+
+updates:
+  - package-ecosystem: devcontainers
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      drizzle:
+        patterns:
+          - drizzle-*
+          - drizzle-orm
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: pnpm
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /.devcontainer
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: mcr.microsoft.com/devcontainers/typescript-node
+        update-types:
+          - version-update:semver-major

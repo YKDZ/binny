@@ -1,0 +1,42 @@
+{
+  "extends": ["//"],
+  "tags": ["library", "binny:tooling"],
+  "tasks": {
+    "build": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": []
+    },
+    "format:check": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "dependsOn": ["lint:fix"],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "lint:fix": {
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "typecheck": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "lint": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    }
+  }
+}

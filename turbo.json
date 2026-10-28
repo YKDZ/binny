@@ -1,0 +1,126 @@
+{
+  "tasks": {
+    "//#boundaries": {
+      "tags": ["quality:light"]
+    },
+    "//#check": {
+      "tags": ["quality:entry"]
+    },
+    "//#check:full": {
+      "tags": ["quality:entry"]
+    },
+    "//#check:heavy": {
+      "tags": ["quality:entry"]
+    },
+    "//#fix": {
+      "tags": ["work:repair"]
+    },
+    "//#format:check": {
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "//#format:write": {
+      "cache": false,
+      "dependsOn": ["//#lint:fix"],
+      "tags": ["work:repair"]
+    },
+    "//#lint": {
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "//#lint:fix": {
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "//#typecheck": {
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "//#publication:pack": {
+      "tags": ["work:release"],
+      "cache": false
+    },
+    "//#publication:publish": {
+      "tags": ["work:release"],
+      "cache": false
+    }
+  },
+  "boundaries": {
+    "tags": {
+      "app": {
+        "dependencies": {
+          "allow": ["app", "library"]
+        }
+      },
+      "library": {
+        "dependencies": {
+          "allow": ["library"]
+        }
+      },
+      "binny:tooling": {
+        "dependencies": {
+          "allow": []
+        }
+      },
+      "binny:contracts": {
+        "dependencies": {
+          "allow": ["binny:tooling"]
+        }
+      },
+      "binny:core": {
+        "dependencies": {
+          "allow": ["binny:contracts", "binny:tooling"]
+        }
+      },
+      "binny:api": {
+        "dependencies": {
+          "allow": ["binny:contracts", "binny:tooling"]
+        }
+      },
+      "binny:server": {
+        "dependencies": {
+          "allow": [
+            "binny:core",
+            "binny:api",
+            "binny:contracts",
+            "binny:tooling"
+          ]
+        }
+      },
+      "binny:cli": {
+        "dependencies": {
+          "allow": ["binny:api", "binny:contracts", "binny:tooling"]
+        }
+      },
+      "binny:collector-sdk": {
+        "dependencies": {
+          "allow": ["binny:api", "binny:contracts", "binny:tooling"]
+        }
+      },
+      "binny:collector-runtime": {
+        "dependencies": {
+          "allow": [
+            "binny:collector-sdk",
+            "binny:api",
+            "binny:contracts",
+            "binny:tooling"
+          ]
+        }
+      },
+      "binny:collector": {
+        "dependencies": {
+          "allow": [
+            "binny:collector-sdk",
+            "binny:api",
+            "binny:contracts",
+            "binny:tooling"
+          ]
+        }
+      }
+    }
+  },
+  "globalDependencies": [
+    "packages/tooling-config/oxfmt.config.ts",
+    "packages/tooling-config/oxlint.config.ts"
+  ]
+}
