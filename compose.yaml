@@ -55,6 +55,17 @@ services:
       - "${BINNY15_SOURCE_HOST_PORT:-18815}:8081"
     restart: unless-stopped
 
+  rss-e2e-source:
+    <<: *binny-image
+    profiles: [binny22]
+    command:
+      - node
+      - --conditions=source
+      - scripts/binny-e2e-rss-source.ts
+    environment:
+      BINNY22_SOURCE_PORT: 8081
+    restart: unless-stopped
+
   runtime-one:
     image: ${BINNY14_RUNTIME_IMAGE:-binny14-lightweight:local}
     profiles: [binny14]
@@ -146,6 +157,56 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  runtime-rss:
+    image: ${BINNY22_RUNTIME_IMAGE:-binny22-rss:local}
+    profiles: [binny22]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny22-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+    volumes:
+      - rss-one-collector-state:/var/lib/binny/collector-state
+      - rss-one-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-rss-two:
+    image: ${BINNY22_RUNTIME_IMAGE:-binny22-rss:local}
+    profiles: [binny22]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny22-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+    volumes:
+      - rss-two-collector-state:/var/lib/binny/collector-state
+      - rss-two-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   bins:
@@ -154,3 +215,7 @@ volumes:
   runtime-two-owner:
   runtime-fifteen-one-owner:
   runtime-fifteen-two-owner:
+  rss-one-owner:
+  rss-one-collector-state:
+  rss-two-owner:
+  rss-two-collector-state:
