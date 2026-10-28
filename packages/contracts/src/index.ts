@@ -2,3 +2,4 @@
 export * from "./archive.ts";
 export * from "./archive-history.ts";
 export * from "./bin-configuration.ts";
+export * from "./postgres-text.ts";

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveErrorSchema,
   archiveIdentifierSchema,
   archiveSnapshotSequenceSchema,
   archiveSubmissionInputSchema,
@@ -16,6 +17,7 @@ type ArchiveTimelineQuery = Parameters<
 type ArchiveSubmission = Parameters<
   ArchiveClient["archives"]["$post"]
 >[0]["json"];
+type BinCreateRequest = Parameters<ArchiveClient["bins"]["$post"]>[0]["json"];
 type ArchiveJourney = {
   readonly itemId: string;
   readonly revisionId: string;
@@ -598,6 +600,312 @@ async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   assert.equal(retryRead.revisions.length, 1);
 }
 
+async function verifyArchivePrototypeKeys(
+  client: ArchiveClient,
+): Promise<void> {
+  const metadata = Object.fromEntries([
+    ["__proto__", { title: "自有元信息键" }],
+  ] as const);
+  const properties = Object.fromEntries([
+    ["__proto__", { title: "自有属性键" }],
+    [
+      "nested",
+      Object.fromEntries([["__proto__", { title: "嵌套自有键" }]] as const),
+    ],
+  ] as const);
+  const scope = Object.fromEntries([
+    ["__proto__", { title: "自有范围键" }],
+  ] as const);
+  const details = Object.fromEntries([
+    ["__proto__", { title: "自有诊断键" }],
+  ] as const);
+  const state = {
+    sourceKey: { namespace: "e2e", key: "prototype-json" },
+    metadata,
+    properties,
+    body: { text: "保留自有 JSON 键" },
+    capture: {
+      scope,
+      completeness: "complete" as const,
+      missing: [],
+    },
+    diagnostics: [
+      { code: "prototype_json", message: "保留诊断 JSON 键", details },
+    ],
+  };
+  const firstRequest = {
+    requestId: "e2e:archive:prototype-json:first",
+    binId: "rss-main",
+    items: [state],
+  };
+  const first = await submitArchive(client, firstRequest);
+  const itemId = first.items[0]?.itemId;
+  const revisionId = first.items[0]?.revisionId;
+  assert.ok(itemId);
+  assert.ok(revisionId);
+
+  const persisted = await readArchiveItem(client, itemId);
+  assert.deepEqual(persisted.views[0]?.state.metadata, metadata);
+  assert.deepEqual(persisted.views[0]?.state.properties, properties);
+  assert.deepEqual(persisted.views[0]?.state.capture.scope, scope);
+  assert.deepEqual(persisted.views[0]?.diagnostics?.[0]?.details, details);
+
+  const freshSameState = await submitArchive(client, {
+    ...firstRequest,
+    requestId: "e2e:archive:prototype-json:same-state",
+  });
+  assert.equal(freshSameState.items[0]?.revisionId, revisionId);
+  const observedAgain = await readArchiveItem(client, itemId);
+  assert.equal(observedAgain.observations.length, 2);
+  assert.equal(observedAgain.revisions.length, 1);
+
+  const firstConflictRequest = {
+    requestId: "e2e:archive:prototype-json:conflict",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "prototype-json-conflict" },
+        properties: Object.fromEntries([["__proto__", { value: 1 }]] as const),
+        body: { text: "幂等键冲突负例" },
+        capture: {
+          scope: { case: "prototype-conflict" },
+          completeness: "complete" as const,
+          missing: [],
+        },
+      },
+    ],
+  };
+  await submitArchive(client, firstConflictRequest);
+  const firstConflictItem = firstConflictRequest.items[0];
+  assert.ok(firstConflictItem);
+  const changedOwnKey = Object.fromEntries([
+    ["__proto__", { value: 2 }],
+  ] as const);
+  const conflictingResponse = await client.archives.$post({
+    json: {
+      ...firstConflictRequest,
+      items: [{ ...firstConflictItem, properties: changedOwnKey }],
+    },
+  });
+  if (conflictingResponse.status !== 409) {
+    throw new Error(
+      "自有 __proto__ 属性变化必须触发幂等冲突：" +
+        (await conflictingResponse.text()),
+    );
+  }
+  assert.equal(
+    (await conflictingResponse.json()).error.code,
+    "archive_request_conflict",
+  );
+}
+
+async function expectUnsupportedPostgresText(
+  response: Response,
+  path: readonly (string | number)[],
+  label: string,
+): Promise<void> {
+  if (response.status !== 400) {
+    throw new Error(label + " 应返回结构化 400：" + (await response.text()));
+  }
+  const body = archiveErrorSchema.parse(await response.json());
+  assert.equal(body.error.code, "invalid_input");
+  assert.equal(
+    body.error.message,
+    "文本不能包含空字符或未配对的 Unicode 代理项。",
+  );
+  assert.deepEqual(body.error.path, path);
+}
+
+async function verifyPersistableTextBoundary(
+  client: ArchiveClient,
+): Promise<void> {
+  const invalidArchiveBody = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:postgres-text-nul",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "postgres-text-nul" },
+          body: { text: "a\u0000b" },
+          capture: {
+            scope: {},
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidArchiveBody,
+    ["items", 0, "body", "text"],
+    "含空字符的归档正文",
+  );
+
+  const invalidArchiveKey = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive:postgres-text-key-nul",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: "postgres-text-key-nul" },
+          properties: { ["bad\u0000key"]: "value" },
+          body: { text: "正常中文正文🌿" },
+          capture: {
+            scope: {},
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  await expectUnsupportedPostgresText(
+    invalidArchiveKey,
+    ["items", 0, "properties", "bad\u0000key"],
+    "键中含空字符的归档属性",
+  );
+
+  const collector = {
+    id: "text-boundary",
+    version: "1.0.0",
+    configSchema: { type: "object" },
+    actions: {
+      collect: {
+        description: "采集验证资料",
+        params: { type: "object" },
+      },
+    },
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+  };
+  const binInput = {
+    id: "e2e-text-boundary-invalid",
+    collector,
+    identityId: "text-boundary",
+    config: { value: "正常中文🌿" },
+    targets: [{ value: "正常中文🌿" }],
+  };
+  const invalidBins: {
+    readonly label: string;
+    readonly input: BinCreateRequest;
+    readonly path: readonly (string | number)[];
+  }[] = [
+    {
+      label: "身份标识中的空字符",
+      input: { ...binInput, identityId: "a\u0000b" },
+      path: ["identityId"],
+    },
+    {
+      label: "身份标识中的未配对代理项",
+      input: { ...binInput, identityId: "a\ud800b" },
+      path: ["identityId"],
+    },
+    {
+      label: "配置字符串中的空字符",
+      input: { ...binInput, config: { value: "a\u0000b" } },
+      path: ["config", "value"],
+    },
+    {
+      label: "配置字符串中的未配对代理项",
+      input: { ...binInput, config: { value: "a\ud800b" } },
+      path: ["config", "value"],
+    },
+    {
+      label: "配置键中的空字符",
+      input: {
+        ...binInput,
+        config: { ["bad\u0000key"]: "value" },
+      },
+      path: ["config", "bad\u0000key"],
+    },
+    {
+      label: "目标中的空字符",
+      input: { ...binInput, targets: [{ value: "a\u0000b" }] },
+      path: ["targets", 0, "value"],
+    },
+    {
+      label: "采集器版本中的空字符",
+      input: {
+        ...binInput,
+        collector: { ...collector, version: "a\u0000b" },
+      },
+      path: ["collector", "version"],
+    },
+    {
+      label: "采集器 JSON Schema 中的空字符",
+      input: {
+        ...binInput,
+        collector: {
+          ...collector,
+          configSchema: { type: "object", description: "a\u0000b" },
+        },
+      },
+      path: ["collector", "configSchema", "description"],
+    },
+  ];
+
+  for (const testCase of invalidBins) {
+    const response = await client.bins.$post({ json: testCase.input });
+    await expectUnsupportedPostgresText(
+      response,
+      testCase.path,
+      testCase.label,
+    );
+  }
+
+  const validBinInput = {
+    ...binInput,
+    id: "e2e-text-boundary-" + process.pid.toString(10),
+    collector: { ...collector, version: "版本 1.0 🌿" },
+    identityId: "身份🌿",
+    config: { value: "配置🌿" },
+    targets: [{ value: "目标🌿" }],
+  };
+  const validBinResponse = await client.bins.$post({ json: validBinInput });
+  if (validBinResponse.status !== 201) {
+    throw new Error(
+      "合法中文和 emoji 应能持久化：" + (await validBinResponse.text()),
+    );
+  }
+  const validBin = await validBinResponse.json();
+  assert.equal(validBin.identityId, validBinInput.identityId);
+  assert.equal(validBin.collector.version, validBinInput.collector.version);
+  assert.deepEqual(validBin.config, validBinInput.config);
+  assert.deepEqual(validBin.targets, validBinInput.targets);
+  const removed = await client.bins[":binId"].$delete({
+    param: { binId: validBinInput.id },
+  });
+  assert.equal(removed.status, 200);
+
+  const validArchive = await submitArchive(client, {
+    requestId: "e2e:archive:postgres-text-valid",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "postgres-text-valid" },
+        body: { text: "合法中文和 emoji 🌿" },
+        capture: {
+          scope: { language: "中文🌿" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const validArchiveItemId = validArchive.items[0]?.itemId;
+  assert.ok(validArchiveItemId);
+  const validArchiveItem = await readArchiveItem(client, validArchiveItemId);
+  assert.equal(
+    validArchiveItem.views[0]?.state.body?.text,
+    "合法中文和 emoji 🌿",
+  );
+  assert.deepEqual(validArchiveItem.views[0]?.state.capture.scope, {
+    language: "中文🌿",
+  });
+}
+
 async function verifyArchiveABA(
   client: ArchiveClient,
 ): Promise<
@@ -618,7 +926,7 @@ async function verifyArchiveABA(
     sourceModifiedAt: "2026-10-28T12:00:00+08:00",
     metadata: { title: "状态 A", authors: ["writer"] },
     properties: { counts: { replies: 2, stars: 4 }, tags: ["a", "b"] },
-    body: { markdown: "正文 A", searchText: "正文 A" },
+    body: { markdown: "正文 A🌿", searchText: "正文 A🌿" },
     capture: {
       scope: { source: "e2e", topic: "42" },
       completeness: "complete" as const,
@@ -702,7 +1010,7 @@ async function verifyArchiveABA(
       abaThirdItem.revisionId,
     ],
   );
-  assert.equal(abaRead.views[0]?.state.body?.markdown, "正文 A");
+  assert.equal(abaRead.views[0]?.state.body?.markdown, "正文 A🌿");
   assert.equal(abaRead.views[0]?.diagnostics?.[0]?.message, "诊断已变化");
   assert.equal(abaRead.views[0]?.observedAt, "2026-10-28T04:03:00.000Z");
 
@@ -876,7 +1184,7 @@ async function verifyArchiveABA(
   const abaRevision = await abaRevisionResponse.json();
   assert.equal(abaRevision.state.sourceModifiedAt, "2026-10-28T04:00:00.000Z");
   assert.equal(abaRevision.state.metadata?.title, "状态 A");
-  assert.equal(abaRevision.state.body?.markdown, "正文 A");
+  assert.equal(abaRevision.state.body?.markdown, "正文 A🌿");
 
   return {
     itemId: abaThirdItem.itemId,
@@ -1070,6 +1378,8 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifyArchiveAtomicity(client);
   const resources = await verifyArchiveResourceHttp(client);
   await verifyArchiveIdempotency(client);
+  await verifyArchivePrototypeKeys(client);
+  await verifyPersistableTextBoundary(client);
   const aba = await verifyArchiveABA(client);
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);
@@ -1101,7 +1411,7 @@ async function verifyArchivePersistence(
     persistedArchive.views.map(({ binId }) => binId),
     ["rss-main"],
   );
-  assert.equal(persistedArchive.views[0]?.state.body?.markdown, "正文 A");
+  assert.equal(persistedArchive.views[0]?.state.body?.markdown, "正文 A🌿");
 
   const revisionResponse = await client.archives.revisions[":revisionId"].$get({
     param: { revisionId: archive.revisionId },
@@ -1112,7 +1422,7 @@ async function verifyArchivePersistence(
     );
   }
   const persistedRevision = await revisionResponse.json();
-  assert.equal(persistedRevision.state.body?.markdown, "正文 A");
+  assert.equal(persistedRevision.state.body?.markdown, "正文 A🌿");
 
   const resourceItem = await readArchiveItem(client, archive.resourceItemId);
   assert.equal(resourceItem.views[0]?.state.capture.completeness, "complete");

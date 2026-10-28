@@ -21,6 +21,7 @@ import {
   collectorManifestSchema,
   identityIdSchema,
   jsonObjectSchema,
+  withPostgresJsonSchemaProjection,
 } from "@binny/contracts";
 import {
   CliWriteError,
@@ -85,9 +86,19 @@ const jsonTextSchema = z.string().transform((source, context) => {
   }
 });
 
-const jsonObjectTextSchema = jsonTextSchema.pipe(jsonObjectSchema);
-const collectorTextSchema = jsonTextSchema.pipe(collectorManifestSchema);
+const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
+  jsonTextSchema.pipe(jsonObjectSchema),
+);
+const collectorTextSchema = withPostgresJsonSchemaProjection(
+  jsonTextSchema.pipe(collectorManifestSchema),
+);
 const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
+const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
+  binConfigurationSchema,
+);
+const cliBinListSchema = withPostgresJsonSchemaProjection(
+  z.object({ bins: z.array(cliBinConfigurationSchema) }),
+);
 const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
   archiveErrorSchema.shape.error,
@@ -160,7 +171,7 @@ function createCliContract(identity: CliCommandIdentity) {
             listed: {
               description: "bin 列表",
               exitCode: 0,
-              schema: z.object({ bins: z.array(binConfigurationSchema) }),
+              schema: cliBinListSchema,
               text: ({ bins }) => outputText("Bin 列表", bins),
             },
           },
@@ -200,28 +211,30 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "采集目标列表 JSON",
           },
         },
-        input: binCreateInputSchema
-          .omit({
-            id: true,
-            collector: true,
-            identityId: true,
-            config: true,
-            targets: true,
-          })
-          .extend({
-            id: binIdSchema,
-            collector: collectorTextSchema,
-            identityId: identityIdSchema,
-            config: jsonObjectTextSchema,
-            targets: targetsTextSchema,
-          }),
+        input: withPostgresJsonSchemaProjection(
+          binCreateInputSchema
+            .omit({
+              id: true,
+              collector: true,
+              identityId: true,
+              config: true,
+              targets: true,
+            })
+            .extend({
+              id: binIdSchema,
+              collector: collectorTextSchema,
+              identityId: identityIdSchema,
+              config: jsonObjectTextSchema,
+              targets: targetsTextSchema,
+            }),
+        ),
         success: {
           kind: "data",
           variants: {
             created: {
               description: "已登记的 bin",
               exitCode: 0,
-              schema: binConfigurationSchema,
+              schema: cliBinConfigurationSchema,
               text: (bin) => outputText("已登记 bin", bin),
             },
           },
@@ -253,7 +266,7 @@ function createCliContract(identity: CliCommandIdentity) {
             found: {
               description: "bin 配置",
               exitCode: 0,
-              schema: binConfigurationSchema,
+              schema: cliBinConfigurationSchema,
               text: (bin) => outputText("Bin 配置", bin),
             },
           },
@@ -283,11 +296,13 @@ function createCliContract(identity: CliCommandIdentity) {
             discovered: {
               description: "已声明动作",
               exitCode: 0,
-              schema: z.object({
-                actions: collectorManifestSchema.shape.actions,
-                environment: collectorManifestSchema.shape.environment,
-                execution: binConfigurationSchema.shape.execution,
-              }),
+              schema: withPostgresJsonSchemaProjection(
+                z.object({
+                  actions: collectorManifestSchema.shape.actions,
+                  environment: collectorManifestSchema.shape.environment,
+                  execution: binConfigurationSchema.shape.execution,
+                }),
+              ),
               text: (actions) => outputText("已声明动作", actions),
             },
           },
@@ -332,29 +347,31 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "采集目标列表 JSON",
           },
         },
-        input: z
-          .object({
-            id: binIdSchema,
-            collector: collectorTextSchema.optional(),
-            identityId: identityIdSchema.optional(),
-            config: jsonObjectTextSchema.optional(),
-            targets: targetsTextSchema.optional(),
-          })
-          .refine(
-            ({ collector, identityId, config, targets }) =>
-              collector !== undefined ||
-              identityId !== undefined ||
-              config !== undefined ||
-              targets !== undefined,
-            { message: "至少提供一个需要修改的字段。" },
-          ),
+        input: withPostgresJsonSchemaProjection(
+          z
+            .object({
+              id: binIdSchema,
+              collector: collectorTextSchema.optional(),
+              identityId: identityIdSchema.optional(),
+              config: jsonObjectTextSchema.optional(),
+              targets: targetsTextSchema.optional(),
+            })
+            .refine(
+              ({ collector, identityId, config, targets }) =>
+                collector !== undefined ||
+                identityId !== undefined ||
+                config !== undefined ||
+                targets !== undefined,
+              { message: "至少提供一个需要修改的字段。" },
+            ),
+        ),
         success: {
           kind: "data",
           variants: {
             updated: {
               description: "已修改的 bin",
               exitCode: 0,
-              schema: binConfigurationSchema,
+              schema: cliBinConfigurationSchema,
               text: (bin) => outputText("已修改 bin", bin),
             },
           },
@@ -392,7 +409,7 @@ function createCliContract(identity: CliCommandIdentity) {
             disabled: {
               description: "已停用的 bin",
               exitCode: 0,
-              schema: binConfigurationSchema,
+              schema: cliBinConfigurationSchema,
               text: (bin) => outputText("已停用 bin", bin),
             },
           },
@@ -422,7 +439,7 @@ function createCliContract(identity: CliCommandIdentity) {
             enabled: {
               description: "已启用的 bin",
               exitCode: 0,
-              schema: binConfigurationSchema,
+              schema: cliBinConfigurationSchema,
               text: (bin) => outputText("已启用 bin", bin),
             },
           },

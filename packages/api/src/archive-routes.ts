@@ -9,7 +9,7 @@ import {
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
   archiveSubmissionInputSchema,
-  toInputJsonSchema,
+  toArchiveJsonSchema,
   type ArchiveOperations,
 } from "@binny/contracts";
 // 文本归档 HTTP 子路由；公开客户端类型直接由这些正式路由推导。
@@ -310,15 +310,15 @@ export const archiveApiSchemas: {
   readonly timeline: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
-  submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
-  commit: z.toJSONSchema(archiveCommitSchema),
-  itemQuery: toInputJsonSchema(archiveItemReadQuerySchema),
-  item: z.toJSONSchema(archiveItemReadSchema),
-  timelineQuery: toInputJsonSchema(archiveTimelineQuerySchema),
-  revision: z.toJSONSchema(archiveRevisionReadSchema),
-  resource: z.toJSONSchema(archiveResourceMetadataSchema),
-  timeline: z.toJSONSchema(archiveTimelinePageSchema),
-  error: z.toJSONSchema(archiveErrorSchema),
+  submitInput: toArchiveJsonSchema(archiveSubmissionInputSchema, "input"),
+  commit: toArchiveJsonSchema(archiveCommitSchema, "output"),
+  itemQuery: toArchiveJsonSchema(archiveItemReadQuerySchema, "input"),
+  item: toArchiveJsonSchema(archiveItemReadSchema, "output"),
+  timelineQuery: toArchiveJsonSchema(archiveTimelineQuerySchema, "input"),
+  revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
+  resource: toArchiveJsonSchema(archiveResourceMetadataSchema, "output"),
+  timeline: toArchiveJsonSchema(archiveTimelinePageSchema, "output"),
+  error: toArchiveJsonSchema(archiveErrorSchema, "output"),
 };
 
 export function createArchiveRoutes(
