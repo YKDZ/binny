@@ -947,13 +947,18 @@ type RssManualRun = {
   readonly status: string;
   readonly runId: string;
   readonly binId: string;
+  readonly finishedAt?: string;
   readonly result?: {
     readonly completedScopes: readonly string[];
     readonly commits: readonly {
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
-    readonly error?: { readonly code: string; readonly message: string };
+    readonly error?: {
+      readonly code: string;
+      readonly message: string;
+      readonly suggestion?: string;
+    };
     readonly check?: {
       readonly availability: "available" | "unavailable" | "unknown";
       readonly checkedAt: string;
@@ -1118,7 +1123,10 @@ type RssArchiveRead = {
       };
     };
   }[];
-  readonly revisions: readonly unknown[];
+  readonly revisions: readonly {
+    readonly revisionId: string;
+    readonly stateHash: string;
+  }[];
   readonly observations: readonly unknown[];
 };
 
@@ -2234,6 +2242,7 @@ async function runRssAcceptance(
         url: "https://github.com/rowanmanning/feed-parser/releases.atom",
       },
       { id: "static-main", url: source.baseUrl + "/static-rss" },
+      { id: "real-bbc", url: source.baseUrl + "/real-static-rss" },
     ],
   };
   await Promise.all([
@@ -2343,6 +2352,41 @@ async function runRssAcceptance(
     sourceMediaBytes.photoBytes,
   );
 
+  const realBbcUrl =
+    "https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&at_campaign=rss";
+  const realBbcRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
+    feedIds: ["real-bbc"],
+  });
+  assert.equal(realBbcRun.status, "completed", JSON.stringify(realBbcRun));
+  const realBbcArticle = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "650 passengers",
+  );
+  assert.equal(realBbcArticle.sourceKey.namespace, "rss:real-bbc");
+  assert.equal(realBbcArticle.sourceKey.key, "id:urn:binny:23:real-static-bbc");
+  const realBbcState = rssArchiveView(realBbcArticle, "binny22-one");
+  assert.equal(realBbcState.capture.completeness, "complete");
+  assert.equal(realBbcState.capture.scope.bodySource, "static-html");
+  assert.equal(realBbcState.capture.scope.bodyUrl, realBbcUrl);
+  assert.match(realBbcState.body?.text ?? "", /650 passengers/u);
+  process.stdout.write(
+    "票 23 真实静态站点兼容性结果：" +
+      JSON.stringify({
+        url: realBbcUrl,
+        environment:
+          "Compose runtime-rss 正式轻量镜像、真实 PostgreSQL 与资源目录、正式 CLI",
+        action: "collect",
+        scope: ["real-bbc"],
+        runStatus: realBbcRun.status,
+        completeness: realBbcState.capture.completeness,
+        bodySource: realBbcState.capture.scope.bodySource,
+        finalUrl: realBbcState.capture.scope.bodyFinalUrl,
+        checkedAt: realBbcRun.finishedAt ?? new Date().toISOString(),
+      }) +
+      "\n",
+  );
+
   const staticSecondBinRun = await triggerRssAction(
     baseUrl,
     "binny22-two",
@@ -2377,7 +2421,9 @@ async function runRssAcceptance(
   assert.deepEqual(staticCheck.result?.check?.scope, ["static-main"]);
   assert.ok(
     staticCheck.result?.check?.problems.some(
-      ({ code }) => code === "rss_static_article_unavailable",
+      ({ code, suggestion }) =>
+        code === "rss_static_article_unavailable" &&
+        suggestion.includes("可公开访问的静态正文来源"),
     ),
   );
   const staticPageRequestsAfterCheck = (await source.requests()).filter(
@@ -2411,7 +2457,7 @@ async function runRssAcceptance(
   assert.ok(
     javascriptState.capture.missing.some(
       ({ path, reason }) =>
-        path === "body.fullText" && reason.includes("登录、脚本或特殊交互"),
+        path === "body.fullText" && reason.includes("脚本渲染"),
     ),
   );
 
@@ -2425,6 +2471,11 @@ async function runRssAcceptance(
   assert.ok(
     loginState.capture.missing.some(({ path }) => path === "body.fullText"),
   );
+  assert.ok(
+    loginState.capture.missing.some(({ reason }) =>
+      reason.includes("需要登录"),
+    ),
+  );
 
   const recoverySummary = await readRssArchive(
     baseUrl,
@@ -2435,6 +2486,16 @@ async function runRssAcceptance(
   assert.equal(recoveryState.capture.completeness, "partial");
   assert.ok(
     recoveryState.capture.missing.some(({ path }) => path === "body.fullText"),
+  );
+  const recoveryPartialRevision = recoverySummary.revisions[0];
+  assert.ok(recoveryPartialRevision !== undefined);
+  const archivedRecoveryPartialRevision = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "revision",
+      recoveryPartialRevision.revisionId,
+    ]),
+    "found",
   );
 
   const recoveryRequestsBeforeRetry = (await source.requests()).filter(
@@ -2448,6 +2509,11 @@ async function runRssAcceptance(
     { feedIds: ["static-main"] },
   );
   assert.equal(recoveredPageRun.status, "failed");
+  assert.ok(
+    recoveredPageRun.result?.error?.suggestion?.includes(
+      "可公开访问的静态正文来源",
+    ),
+  );
   assert.equal(
     (await source.requests()).filter(({ path }) => path === "/story/recovery")
       .length,
@@ -2467,6 +2533,25 @@ async function runRssAcceptance(
   assert.equal(
     rssArchiveView(recoveredArticle, "binny22-one").metadata?.item?.bodySource,
     "static-html",
+  );
+  assert.match(
+    rssArchiveView(recoveredArticle, "binny22-one").body?.text ?? "",
+    /恢复后静态正文/u,
+  );
+  assert.doesNotMatch(
+    rssArchiveView(recoveredArticle, "binny22-one").body?.text ?? "",
+    /恢复页面摘要/u,
+  );
+  assert.deepEqual(
+    cliData<unknown>(
+      await cli(baseUrl, [
+        "archive",
+        "revision",
+        recoveryPartialRevision.revisionId,
+      ]),
+      "found",
+    ),
+    archivedRecoveryPartialRevision,
   );
 
   const staticArticleV2ExpectedRequests = (await source.requests()).filter(
@@ -2538,6 +2623,17 @@ async function runRssAcceptance(
       path.startsWith("media."),
     ),
   );
+  const staticArticleV3PartialRevision =
+    staticArticleV3Partial.revisions.at(-1);
+  assert.ok(staticArticleV3PartialRevision !== undefined);
+  const archivedStaticArticleV3PartialRevision = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "revision",
+      staticArticleV3PartialRevision.revisionId,
+    ]),
+    "found",
+  );
 
   await source.setStaticPhotoAvailable(true);
   const recoveredStaticMediaRun = await triggerRssAction(
@@ -2554,6 +2650,17 @@ async function runRssAcceptance(
   );
   assert.equal(staticArticleV3.itemId, staticArticleV1.itemId);
   assert.equal(staticArticleV3.revisions.length, 4);
+  assert.deepEqual(
+    cliData<unknown>(
+      await cli(baseUrl, [
+        "archive",
+        "revision",
+        staticArticleV3PartialRevision.revisionId,
+      ]),
+      "found",
+    ),
+    archivedStaticArticleV3PartialRevision,
+  );
   assert.equal(
     rssArchiveView(staticArticleV3, "binny22-one").capture.completeness,
     "complete",

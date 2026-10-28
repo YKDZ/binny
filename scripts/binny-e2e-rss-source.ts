@@ -172,6 +172,7 @@ const server = createServer((request, response) => {
         "/temporary",
         "/bad-identity",
         "/static-rss",
+        "/real-static-rss",
       ].includes(pathname) ||
       pathname.startsWith("/story/") ||
       pathname.startsWith("/pages/")
@@ -234,6 +235,17 @@ const server = createServer((request, response) => {
       return;
     }
 
+    if (request.method === "GET" && pathname === "/real-static-rss") {
+      sendFeed(
+        request,
+        response,
+        { etag: '"real-static-rss-1"' },
+        "application/rss+xml; charset=utf-8",
+        '<rss version="2.0"><channel><title>真实静态站点兼容信源</title><item><guid isPermaLink="false">urn:binny:23:real-static-bbc</guid><title>BBC 真实静态正文兼容验证</title><link>https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&amp;at_campaign=rss</link><description>由受控 RSS 摘要指向真实 BBC 公开文章页面。</description></item></channel></rss>',
+      );
+      return;
+    }
+
     if (request.method === "GET" && pathname === "/atom") {
       const lastModified = new Date(
         Date.UTC(2026, 9, 27 + atomVersion),
@@ -286,7 +298,7 @@ const server = createServer((request, response) => {
     if (request.method === "GET" && pathname === "/pages/2026/article.html") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(
-        `<!doctype html><html><head><title>受控公开文章</title></head><body><header><nav>导航文字不得归档</nav></header><main><article><h1>受控公开文章</h1><p>公开静态正文版本 ${String(staticArticleVersion)}。这段内容来自 RSS 条目链接所指向的普通公开文章页面，服务端直接返回完整 HTML，无需登录、脚本执行或特殊交互。</p><p>文章正文保留其有价值的段落、层级和图片。归档应使用这段静态页面正文，而不是订阅源中的短摘要。</p><p>页面更新独立于 feed 摘要版本；重新采集时应该再次取得页面，并只在正文或资料确实变化时生成新的归档版本。</p><img src="../../media/static-photo.png" alt="静态文章插图" /></article></main><aside>侧栏广告不得归档</aside></body></html>`,
+        `<!doctype html><html><head><title>受控公开文章</title></head><body><header><nav>导航文字不得归档</nav></header><main><article><h1>受控公开文章</h1><p>公开静态正文版本 ${String(staticArticleVersion)}。这段内容来自 RSS 条目链接所指向的普通公开文章页面，服务端直接返回完整 HTML，无需登录、脚本执行或特殊交互。</p><p>文章正文保留其有价值的段落、层级和图片。归档应使用这段静态页面正文，而不是订阅源中的短摘要。</p><p>页面更新独立于 feed 摘要版本；重新采集时应该再次取得页面，并只在正文或资料确实变化时生成新的归档版本。</p><img src="../../media/static-photo.png" alt="静态文章插图" /></article></main><aside>侧栏广告不得归档<form><label>侧栏账号<input name="side-account" /></label><label>侧栏密码<input type="password" /></label></form></aside></body></html>`,
       );
       return;
     }
@@ -300,7 +312,7 @@ const server = createServer((request, response) => {
     }
 
     if (request.method === "GET" && pathname === "/story/login") {
-      response.writeHead(401, { "content-type": "text/html; charset=utf-8" });
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(
         '<!doctype html><html><head><title>登录</title></head><body><main><h1>需要登录</h1><form><label>账号<input name="account" /></label><label>密码<input type="password" /></label><button>继续</button></form></main></body></html>',
       );

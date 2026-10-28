@@ -1,4 +1,4 @@
-import { Readability, isProbablyReaderable } from "@mozilla/readability";
+import { Readability } from "@mozilla/readability";
 import { parseFeed } from "@rowanmanning/feed-parser";
 import { JSDOM } from "jsdom";
 import { parseFragment, serialize, type DefaultTreeAdapterMap } from "parse5";
@@ -91,6 +91,7 @@ export type StaticArticleResult =
 const maximumFeedBytes = 10 * 1024 * 1024;
 const maximumStaticPageBytes = 8 * 1024 * 1024;
 const maximumMediaBytes = 32 * 1024 * 1024;
+const minimumStaticArticleTextLength = 100;
 const fetchTimeoutMs = 20_000;
 const feedAccept =
   "application/atom+xml, application/rss+xml, application/xml, text/xml, application/*+xml;q=0.9, */*;q=0.8";
@@ -350,30 +351,25 @@ export async function fetchStaticArticle(
   }
   try {
     const document = page.window.document;
-    if (document.querySelector('input[type="password"]') !== null) {
-      return staticArticleUnavailable(
-        normalizedUrl,
-        "公开文章页面需要登录才能读取正文。",
-      );
-    }
-    if (!isProbablyReaderable(document)) {
-      return staticArticleUnavailable(
-        normalizedUrl,
-        "页面没有可直接提取的文章正文。",
-      );
-    }
-    const article = new Readability(document).parse();
+    const hasPasswordInput =
+      document.querySelector('input[type="password"]') !== null;
+    // 逐段预筛选会漏掉短段落组成的完整文章，改用解析后的总正文长度判断。
+    const article = new Readability(document, {
+      charThreshold: minimumStaticArticleTextLength,
+    }).parse();
     const text = article?.textContent?.trim();
     if (
       article === null ||
       article.content === null ||
       article.content === undefined ||
       text === undefined ||
-      text.length < 100
+      text.length < minimumStaticArticleTextLength
     ) {
       return staticArticleUnavailable(
         normalizedUrl,
-        "页面没有足够的静态文章正文可供提取。",
+        hasPasswordInput
+          ? "公开文章页面提示需要登录，且没有足够正文可供提取。"
+          : "页面没有足够的静态文章正文可供提取。",
       );
     }
     return {
