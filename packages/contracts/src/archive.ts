@@ -965,7 +965,7 @@ export type ArchiveSearchPathFilter =
       readonly type: "path";
       readonly steps: ArchiveSearchPathStep[];
       readonly operator: "exists" | "notExists";
-      readonly count?: ArchiveSearchRelationCount | undefined;
+      readonly count?: undefined;
     }
   | {
       readonly type: "path";

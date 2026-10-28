@@ -944,7 +944,6 @@ async function readCurrentSearchPage(
     let currentResultId: SQLWrapper =
       anchor?.resultId ?? sql`NULL::text`.mapWith(String).nullable();
     let currentPathData: SQLWrapper = sql`NULL::jsonb`;
-    let currentOrderKey: SQLWrapper = sql`NULL::jsonb`;
     let currentIdentity: SQLWrapper = sql`NULL::text`;
     let finalPath: WithSubquery | undefined;
 
@@ -961,12 +960,6 @@ async function readCurrentSearchPage(
           : includeEvidence
             ? sql`jsonb_build_array(${stepRows.evidence})`
             : sql`NULL::jsonb`;
-      const nextOrderKey =
-        includeEvidence && index > 0
-          ? sql`${currentOrderKey} || jsonb_build_array(jsonb_build_array(${stepRows.relationId}, ${stepRows.direction}))`
-          : includeEvidence
-            ? sql`jsonb_build_array(jsonb_build_array(${stepRows.relationId}, ${stepRows.direction}))`
-            : sql`NULL::jsonb`;
       const selectFields = {
         resultId: sql`${currentResultId}`
           .mapWith(String)
@@ -978,9 +971,6 @@ async function readCurrentSearchPage(
         pathData: nextPathData
           .mapWith(archiveRevisions.stateData)
           .as("pathData"),
-        orderKey: nextOrderKey
-          .mapWith(archiveRevisions.stateData)
-          .as("orderKey"),
       };
       const query =
         previous === undefined
@@ -1002,7 +992,6 @@ async function readCurrentSearchPage(
       currentBinId = cte.binId;
       currentResultId = cte.resultId;
       currentPathData = cte.pathData;
-      currentOrderKey = cte.orderKey;
       currentIdentity = cte.identity;
     }
     if (finalPath === undefined) {
@@ -1015,7 +1004,6 @@ async function readCurrentSearchPage(
       resultId: currentResultId,
       binId: currentBinId,
       pathData: currentPathData,
-      orderKey: currentOrderKey,
     };
   };
 
@@ -2292,6 +2280,14 @@ async function readCurrentSearchPage(
             binId: viewsCte.binId,
           },
         );
+        // 数组下标明确转为整数，逐步比较原始文本可避开 JSON 转义导致的错序。
+        const pathOrderBy = sql.join(
+          selector.steps.flatMap((_, stepIndex) => [
+            sql`(${pathRows.pathData}->${stepIndex}::integer->>'relationId') COLLATE "C"`,
+            sql`(${pathRows.pathData}->${stepIndex}::integer->>'direction') COLLATE "C"`,
+          ]),
+          sql`, `,
+        );
         const ranked = transaction
           .$with(`path_ranked_${selectorIndex.toString(10)}`)
           .as(
@@ -2306,7 +2302,7 @@ async function readCurrentSearchPage(
                   .as("pathData"),
                 pathRank: sql`row_number() OVER (
                   PARTITION BY ${pathRows.resultId}, ${pathRows.binId}
-                  ORDER BY ${pathRows.orderKey}::text COLLATE "C"
+                  ORDER BY ${pathOrderBy}
                 )`
                   .mapWith(Number)
                   .as("pathRank"),

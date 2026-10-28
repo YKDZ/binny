@@ -487,6 +487,22 @@ async function checkPublicArchiveContract(): Promise<void> {
   >;
   void invalidPathFilter;
 
+  void client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [{ direction: "outgoing" }],
+        operator: "exists",
+        // @ts-expect-error exists 路径不能声明 count 比较。
+        count: { operator: "eq", value: 0 },
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",

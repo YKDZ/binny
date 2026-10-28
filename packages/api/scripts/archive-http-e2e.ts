@@ -4477,6 +4477,18 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
         "path-external",
       ),
       pathRelation(
+        'e2e:relation-query:prefix:"edge',
+        pathRoot,
+        { sourceKey: pathB },
+        "path-sort",
+      ),
+      pathRelation(
+        "e2e:relation-query:prefix:Aedge",
+        pathRoot,
+        { sourceKey: pathB },
+        "path-sort",
+      ),
+      pathRelation(
         "e2e:relation-query:path-cross-bin-first",
         pathRoot,
         { sourceKey: pathForeign },
@@ -5530,6 +5542,57 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     directPathPage.results[0]?.matches[0]?.pathExpansions?.[0]?.paths.length,
     1,
   );
+
+  const pathSortIds = [
+    'e2e:relation-query:prefix:"edge',
+    "e2e:relation-query:prefix:Aedge",
+  ];
+  const completeSortExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "c-sorted",
+        steps: [{ direction: "outgoing", name: "path-sort" }],
+        limit: 10,
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  const completeSortedPaths =
+    completeSortExpansion.results[0]?.matches[0]?.pathExpansions?.[0];
+  assert.ok(completeSortedPaths !== undefined);
+  assert.deepEqual(
+    completeSortedPaths.paths.map(({ steps }) => steps[0]?.relationId),
+    pathSortIds,
+  );
+  assert.equal(completeSortedPaths.hasMore, false);
+
+  const limitedSortExpansion = await search({
+    scope: { kind: "current", binId: "rss-main" },
+    where: pathRootFilter,
+    expandPaths: [
+      {
+        key: "c-sorted-limit-one",
+        steps: [{ direction: "outgoing", name: "path-sort" }],
+        limit: 1,
+      },
+    ],
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 10,
+  });
+  const limitedSortedPaths =
+    limitedSortExpansion.results[0]?.matches[0]?.pathExpansions?.[0];
+  assert.ok(limitedSortedPaths !== undefined);
+  assert.deepEqual(
+    limitedSortedPaths.paths.map(({ steps }) => steps[0]?.relationId),
+    [pathSortIds[0]],
+  );
+  assert.equal(limitedSortedPaths.hasMore, true);
+
   const unknownPath = await search({
     scope: { kind: "current", binId: "rss-main" },
     where: pathRootFilter,
