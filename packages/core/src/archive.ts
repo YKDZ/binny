@@ -1932,6 +1932,26 @@ async function readCurrentSearchPage(
     }
 
     if (filter.type === "relation") {
+      const relatedItemId =
+        filter.direction === "outgoing"
+          ? "relation_filter.target_item_id"
+          : filter.direction === "incoming"
+            ? "relation_filter.from_item_id"
+            : `CASE
+                WHEN relation_filter.from_item_id = ${aliases.item}.item_id
+                THEN relation_filter.target_item_id
+                ELSE relation_filter.from_item_id
+              END`;
+      const relatedSourceRef =
+        filter.direction === "outgoing"
+          ? "relation_filter.target_source_ref"
+          : filter.direction === "incoming"
+            ? "NULL::text"
+            : `CASE
+                WHEN relation_filter.from_item_id = ${aliases.item}.item_id
+                THEN relation_filter.target_source_ref
+                ELSE NULL::text
+              END`;
       const relationConditions = [
         filter.direction === "outgoing"
           ? `relation_filter.from_item_id = ${aliases.item}.item_id`
@@ -1986,7 +2006,7 @@ async function readCurrentSearchPage(
           FROM archive_observation AS observation
           JOIN archive_commit AS commit
             ON commit.commit_id = observation.commit_id
-          WHERE observation.item_id = relation_filter.target_item_id
+          WHERE observation.item_id = ${relatedItemId}
             AND commit.bin_id = ${aliases.latest}.bin_id
             AND commit.archive_seq <= ${asOf}::bigint
           ORDER BY
@@ -1995,9 +2015,9 @@ async function readCurrentSearchPage(
             commit.commit_id DESC
           LIMIT 1
         ) AS target_latest
-          ON relation_filter.target_item_id IS NOT NULL
+          ON ${relatedItemId} IS NOT NULL
         JOIN archive_item AS target_item
-          ON target_item.item_id = relation_filter.target_item_id
+          ON target_item.item_id = ${relatedItemId}
         JOIN archive_revision AS target_revision
           ON target_revision.item_id = target_item.item_id
           AND target_revision.revision_id = target_latest.revision_id
@@ -2018,8 +2038,8 @@ async function readCurrentSearchPage(
               false,
             );
       const matchingRelations = `SELECT
-          relation_filter.target_item_id,
-          relation_filter.target_source_ref
+          ${relatedItemId} AS target_item_id,
+          ${relatedSourceRef} AS target_source_ref
         ${relationFrom}
         WHERE ${relationPredicate} AND (${targetPredicate})`;
       if (filter.operator === "exists") {

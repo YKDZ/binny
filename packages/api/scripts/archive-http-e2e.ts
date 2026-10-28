@@ -3994,6 +3994,26 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     namespace: "e2e-relation-query",
     key: "match-target",
   };
+  const directionRoot = {
+    namespace: "e2e-relation-query",
+    key: "direction-root",
+  };
+  const directionSourceA = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-a",
+  };
+  const directionSourceB = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-b",
+  };
+  const directionSourceC = {
+    namespace: "e2e-relation-query",
+    key: "direction-source-c",
+  };
+  const directionTargetD = {
+    namespace: "e2e-relation-query",
+    key: "direction-target-d",
+  };
   const fixtureCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation-query:same-target",
     binId: "rss-main",
@@ -4049,6 +4069,56 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
         sourceKey: targetMatch,
         properties: { author: "甲" },
         body: { searchText: "目标词和作者同在此目标" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionRoot,
+        properties: { rank: 0 },
+        body: { searchText: "root text" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceA,
+        properties: { rank: 2 },
+        body: { searchText: "source a" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceB,
+        properties: { rank: "2" },
+        body: { searchText: "source b" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionSourceC,
+        properties: { rank: 3 },
+        body: { searchText: "source c" },
+        capture: {
+          scope: { case: "relation-query" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: directionTargetD,
+        properties: { rank: 4 },
+        body: { searchText: "target d" },
         capture: {
           scope: { case: "relation-query" },
           completeness: "complete",
@@ -4117,6 +4187,37 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
           cascade: false,
         },
       },
+      ...[
+        {
+          from: directionSourceA,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceA,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceB,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionSourceC,
+          to: { sourceKey: directionRoot },
+        },
+        {
+          from: directionRoot,
+          to: { sourceKey: directionTargetD },
+        },
+      ].map(({ from, to }, index) => ({
+        relationId: `e2e:relation-query:direction-${index}`,
+        value: {
+          from,
+          to,
+          name: "links",
+          properties: { kind: "direction" },
+          cascade: false,
+        },
+      })),
     ],
   });
 
@@ -4161,6 +4262,25 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     }
     return response.json();
   };
+  const searchDirectionRoot = (filter: ArchiveSearchFilter) =>
+    search({
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "and",
+        conditions: [
+          {
+            type: "field",
+            field: "sourceKey.key",
+            operator: "eq",
+            value: "direction-root",
+          },
+          filter,
+        ],
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    });
   const page = await search(query);
   assert.deepEqual(
     page.results.map(({ sourceKey }) => sourceKey?.key),
@@ -4304,6 +4424,142 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     countMatches.results.map(({ sourceKey }) => sourceKey?.key),
     ["split-root"],
   );
+
+  const incomingCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    operator: "count",
+    count: { operator: "gte", value: 3 },
+  });
+  assert.deepEqual(
+    incomingCount.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingSingleCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    operator: "count",
+    count: { operator: "eq", value: 1 },
+  });
+  assert.deepEqual(incomingSingleCount.results, []);
+  const eitherCount = await searchDirectionRoot({
+    type: "relation",
+    direction: "either",
+    name: "links",
+    operator: "count",
+    count: { operator: "eq", value: 4 },
+  });
+  assert.deepEqual(
+    eitherCount.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const eitherIncomingTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "either",
+    name: "links",
+    target: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: "direction-source-a",
+        },
+        {
+          type: "text",
+          text: { kind: "literal", value: "source a" },
+        },
+        {
+          type: "json",
+          field: "properties",
+          path: ["rank"],
+          valueType: "number",
+          operator: "eq",
+          value: 2,
+        },
+      ],
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    eitherIncomingTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTargetKey = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "direction-source-a",
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingTargetKey.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTextTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "text",
+      text: { kind: "literal", value: "source a" },
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingTextTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingRootAsTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: "direction-root",
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(incomingRootAsTarget.results, []);
+  const incomingNumericTarget = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "json",
+      field: "properties",
+      path: ["rank"],
+      valueType: "number",
+      operator: "eq",
+      value: 2,
+    },
+    operator: "exists",
+  });
+  assert.deepEqual(
+    incomingNumericTarget.results.map(({ sourceKey }) => sourceKey?.key),
+    ["direction-root"],
+  );
+  const incomingTextNotExists = await searchDirectionRoot({
+    type: "relation",
+    direction: "incoming",
+    name: "links",
+    target: {
+      type: "text",
+      text: { kind: "literal", value: "source a" },
+    },
+    operator: "notExists",
+  });
+  assert.deepEqual(incomingTextNotExists.results, []);
 
   const notExists = await search({
     scope: { kind: "current", binId: "rss-main" },
