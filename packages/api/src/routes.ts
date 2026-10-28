@@ -10,6 +10,7 @@ import {
 // 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import * as z from "zod";
 export type { BinConfigurationOperations } from "@binny/contracts";
 
@@ -37,6 +38,26 @@ function validationFailure(issues: readonly z.core.$ZodIssue[]) {
 
 function makeApp(operations: BinConfigurationOperations) {
   return new Hono()
+    .onError((error, c) => {
+      if (
+        error instanceof HTTPException &&
+        error.status === 400 &&
+        error.message === "Malformed JSON in request body"
+      ) {
+        return c.json(
+          {
+            error: {
+              code: "invalid_input" as const,
+              message: "请求正文必须是有效 JSON。",
+            },
+          },
+          400,
+        );
+      }
+      if (error instanceof HTTPException) return error.getResponse();
+      console.error(error);
+      return c.text("Internal Server Error", 500);
+    })
     .get("/health", (c) => c.json({ status: "ok" as const }, 200))
     .get("/bins", async (c) => {
       return c.json({ bins: await operations.listBins() }, 200);

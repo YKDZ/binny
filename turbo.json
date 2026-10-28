@@ -37,12 +37,15 @@
       "tags": ["quality:light"]
     },
     "//#test:binny:e2e": {
-      "dependsOn": ["@binny/binny#build"],
+      "dependsOn": ["@binny/api#build", "@binny/binny#build"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
+        "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
         "packages/api/src/**",
+        "packages/api/scripts/**",
+        "packages/api/test-consumer/**",
         "packages/binny/src/**",
         "packages/contracts/src/**",
         "packages/core/src/**",

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -17,10 +21,23 @@ const repositoryRoot = path.resolve(
 const composeFile = path.join(repositoryRoot, "compose.yaml");
 const projectName = "binny01-" + process.pid.toString(10);
 const imageName = projectName + ":local";
+const composeOverrideFile = path.join(
+  tmpdir(),
+  "binny01-compose-" + process.pid.toString(10) + ".yaml",
+);
+const composeSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.1.0/24";
 let composePort = 0;
 
 function composePrefix(): readonly string[] {
-  return ["compose", "--project-name", projectName, "--file", composeFile];
+  return [
+    "compose",
+    "--project-name",
+    projectName,
+    "--file",
+    composeFile,
+    "--file",
+    composeOverrideFile,
+  ];
 }
 
 function composeEnvironment(): Readonly<Record<string, string>> {
@@ -156,15 +173,14 @@ async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
   throw new Error("等待 HTTP API 和 PostgreSQL 就绪超时：\n" + lastFailure);
 }
 
-async function validateApiInput(_baseUrl: string): Promise<void> {
+async function validateApiInput(): Promise<void> {
   const probe = [
-    'fetch("http://127.0.0.1:3000/bins", {',
-    'method: "POST",',
-    'headers: { "content-type": "application/json" },',
-    "body: JSON.stringify({ id: 7 }),",
-    "}).then(async (response) => {",
-    "process.stdout.write(JSON.stringify({ status: response.status, body: await response.json() }));",
-    "}).catch((error) => { console.error(error); process.exitCode = 1; });",
+    "(async () => {",
+    'const bodies = [JSON.stringify({ id: 7 }), "{"];',
+    'const responses = await Promise.all(bodies.map((body) => fetch("http://127.0.0.1:3000/bins", { method: "POST", headers: { "content-type": "application/json" }, body })));',
+    "const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));",
+    "process.stdout.write(JSON.stringify(results));",
+    "})().catch((error) => { console.error(error); process.exitCode = 1; });",
   ].join("");
   const result = await run(
     "docker",
@@ -172,21 +188,26 @@ async function validateApiInput(_baseUrl: string): Promise<void> {
     { env: composeEnvironment() },
   );
   assert.equal(result.code, 0, result.stderr);
-  const response = JSON.parse(result.stdout) as {
+  const responses = JSON.parse(result.stdout) as readonly {
     readonly status: number;
     readonly body: {
       readonly error: {
         readonly code: string;
         readonly message: string;
-        readonly path: readonly (string | number)[];
+        readonly path?: readonly (string | number)[];
       };
     };
-  };
-  assert.equal(response.status, 400);
-  const body = response.body;
-  assert.equal(body.error.code, "invalid_input");
-  assert.deepEqual(body.error.path, ["id"]);
-  assert.match(body.error.message, /字段|标识/u);
+  }[];
+  const invalidField = responses[0];
+  const malformedJson = responses[1];
+  assert.ok(invalidField !== undefined && malformedJson !== undefined);
+  assert.equal(invalidField.status, 400);
+  assert.equal(invalidField.body.error.code, "invalid_input");
+  assert.deepEqual(invalidField.body.error.path, ["id"]);
+  assert.match(invalidField.body.error.message, /字段|标识/u);
+  assert.equal(malformedJson.status, 400);
+  assert.equal(malformedJson.body.error.code, "invalid_input");
+  assert.match(malformedJson.body.error.message, /JSON|格式/u);
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
@@ -421,10 +442,21 @@ async function verifyRestartAndRemoval(
     "listed",
   );
   assert.deepEqual(empty.bins, []);
-  await validateApiInput(baseUrl);
+  await validateApiInput();
 }
 
 async function main(): Promise<void> {
+  await writeFile(
+    composeOverrideFile,
+    [
+      "networks:",
+      "  default:",
+      "    ipam:",
+      "      config:",
+      "        - subnet: " + composeSubnet,
+      "",
+    ].join("\n"),
+  );
   const port = await reservePort();
   composePort = port;
   const baseUrl = "http://127.0.0.1:" + port;
@@ -444,10 +476,18 @@ async function main(): Promise<void> {
       port,
     );
     await waitForApiAndDatabase(baseUrl);
+    const isolatedClient = await verifyIsolatedApiConsumer({
+      repositoryRoot,
+      projectName,
+    });
+    assert.deepEqual(isolatedClient, {
+      health: "ok",
+      binIds: [],
+    });
     await verifyConfigurationJourney(baseUrl);
     await verifyRestartAndRemoval(baseUrl, port);
     process.stdout.write(
-      "Compose、PostgreSQL、HTTP API 与构建 CLI bin 配置旅程通过。\n",
+      "隔离客户端、Compose、PostgreSQL、HTTP API 与构建 CLI bin 配置旅程通过。\n",
     );
   } finally {
     const cleanup = await run(
@@ -458,6 +498,8 @@ async function main(): Promise<void> {
         projectName,
         "--file",
         composeFile,
+        "--file",
+        composeOverrideFile,
         "down",
         "--rmi",
         "all",
@@ -471,6 +513,7 @@ async function main(): Promise<void> {
         "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
       );
     }
+    await rm(composeOverrideFile, { force: true });
   }
   if (cleanupError !== undefined) throw cleanupError;
 }
