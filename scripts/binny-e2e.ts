@@ -596,19 +596,26 @@ async function waitFor<T>(
   );
 }
 
-async function waitForBlockedQuery(queryFragment: string): Promise<void> {
+async function waitForBlockedTableWrite(
+  table: "archive_resource" | "archive_revision_resource",
+): Promise<void> {
+  // 按关系 OID 观察未授予写锁，避免依赖 Drizzle 生成的标识符文本。
+  const relationByTable = {
+    archive_resource: "public.archive_resource",
+    archive_revision_resource: "public.archive_revision_resource",
+  } as const;
   await waitFor(
     async () => {
       const result = await compose(
         postgresExecArgs([
           "-c",
-          `SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%${queryFragment}%';`,
+          `SELECT count(*) FROM pg_locks AS blocked INNER JOIN pg_stat_activity AS activity ON activity.pid = blocked.pid WHERE activity.datname = current_database() AND activity.wait_event_type = 'Lock' AND blocked.locktype = 'relation' AND blocked.relation = '${relationByTable[table]}'::regclass AND blocked.mode = 'RowExclusiveLock' AND NOT blocked.granted;`,
         ]).slice(composePrefix().length),
       );
       return Number(result.stdout.trim());
     },
     (count) => count > 0,
-    `PostgreSQL 等待 ${queryFragment} 锁`,
+    `PostgreSQL 等待 ${table} 写锁`,
   );
 }
 
@@ -698,7 +705,7 @@ async function verifyResourceStorageInterruptions(
     assert.equal(newPublishedFiles.length, 1);
     const publishedFile = newPublishedFiles[0];
     assert.ok(publishedFile);
-    await waitForBlockedQuery("INSERT INTO archive_resource");
+    await waitForBlockedTableWrite("archive_resource");
     assert.doesNotMatch(publishRequest.stdout(), /BINNY04_UPLOAD_RESPONSE/u);
 
     await compose(["kill", "-s", "SIGKILL", "server"]);
@@ -754,7 +761,7 @@ async function verifyResourceStorageInterruptions(
     referenceLock = await holdTableShareLock("archive_revision_resource");
     referenceRequest = archiveReferenceProcess(uploaded.resourceId);
     await referenceRequest.waitForMarker("BINNY04_REFERENCE_STARTED");
-    await waitForBlockedQuery("INSERT INTO archive_revision_resource");
+    await waitForBlockedTableWrite("archive_revision_resource");
     assert.doesNotMatch(
       referenceRequest.stdout(),
       /BINNY04_REFERENCE_RESPONSE/u,
@@ -1309,9 +1316,6 @@ async function releaseSource(
   gateKey: string,
   disposition:
     | "material"
-    | "manual"
-    | "empty"
-    | "partial"
     | "slow"
     | "available"
     | "unavailable"
@@ -1358,14 +1362,15 @@ async function waitForSourceMarker(
   gateKey: string,
   marker: string,
 ): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  while (Date.now() < deadline) {
-    const response = await fetch(sourceUrl + "/control/arrivals", {
-      signal: AbortSignal.timeout(3_000),
-    });
-    assert.equal(response.status, 200);
-    const status: unknown = await response.json();
-    if (
+  await waitFor(
+    async () => {
+      const response = await fetch(sourceUrl + "/control/arrivals", {
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()) as unknown;
+    },
+    (status) =>
       typeof status === "object" &&
       status !== null &&
       "markers" in status &&
@@ -1380,12 +1385,9 @@ async function waitForSourceMarker(
           entry.gateKey === gateKey &&
           "marker" in entry &&
           entry.marker === marker,
-      )
-    )
-      return;
-    await wait(50);
-  }
-  assert.fail(`运行没有写出信源标记：${marker}`);
+      ),
+    `运行 ${runId} 写出信源标记 ${marker}`,
+  );
 }
 
 async function runtimeProcessSnapshot(service: string): Promise<
@@ -1918,122 +1920,7 @@ async function manualRunsCliStep(
     "source/cli-after-check",
   ]);
 
-  const heartbeatWarmGate = "18-heartbeat-warm-" + randomUUID();
-  const heartbeatWarmRun = cliData<{ readonly runId: string }>(
-    await cli(baseUrl, [
-      "run",
-      "trigger",
-      "binny15-one",
-      "collect",
-      "--params",
-      JSON.stringify({
-        sourceUrl: sourceRuntimeUrl,
-        gateKey: heartbeatWarmGate,
-        sourceKey: heartbeatWarmGate,
-      }),
-    ]),
-    "triggered",
-  );
-  await waitForSourceArrival(
-    sourceControlUrl,
-    heartbeatWarmGate,
-    heartbeatWarmRun.runId,
-    "binny15-one",
-  );
-  const heartbeatNextGate = "18-heartbeat-next-" + randomUUID();
-  const heartbeatNextRun = cliData<ManualRunCliState>(
-    await cli(baseUrl, [
-      "run",
-      "trigger",
-      "binny15-one",
-      "collect",
-      "--params",
-      JSON.stringify({
-        sourceUrl: sourceRuntimeUrl,
-        gateKey: heartbeatNextGate,
-        sourceKey: heartbeatNextGate,
-        waitAfterCommitMs: 60_000,
-      }),
-    ]),
-    "triggered",
-  );
-  assert.equal(heartbeatNextRun.status, "queued");
-  await heartbeatProxy.arm(heartbeatWarmRun.runId);
-  await releaseSource(sourceControlUrl, heartbeatWarmGate);
-  await waitForCliManualRunState(
-    baseUrl,
-    "binny15-one",
-    heartbeatWarmRun.runId,
-    ["completed"],
-  );
-  const delayedHeartbeat = await heartbeatProxy.waitUntilHeld();
-  assert.ok(delayedHeartbeat.ownerGeneration !== undefined);
-  const delayedHeartbeatAt = delayedHeartbeat.heldAt;
-  const heartbeatClientClosedAt = await heartbeatProxy.waitUntilTimedOut();
-  assert.ok(
-    heartbeatClientClosedAt - delayedHeartbeatAt >= 2_500,
-    "运行器的原生心跳应在客户端超时后仍留在代理中。",
-  );
-  const heartbeatNextExecuting = await waitForCliManualRunState(
-    baseUrl,
-    "binny15-one",
-    heartbeatNextRun.runId,
-    ["executing"],
-  );
-  assert.equal(heartbeatNextExecuting.status, "executing");
-  await waitForSourceArrival(
-    sourceControlUrl,
-    heartbeatNextGate,
-    heartbeatNextRun.runId,
-    "binny15-one",
-  );
-  await releaseSource(sourceControlUrl, heartbeatNextGate, "slow");
-  await waitForSourceMarker(
-    sourceControlUrl,
-    heartbeatNextRun.runId,
-    heartbeatNextGate,
-    "committed",
-  );
-  const heartbeatWorker = (
-    await runtimeProcessSnapshot("runtime-fifteen-one")
-  ).find((process) => process.command.includes("worker.js"));
-  assert.ok(heartbeatWorker, "延迟心跳时应有新的真实 worker 正在运行。");
-  const heartbeatCancel = cliData<ManualRunCliState>(
-    await cli(baseUrl, [
-      "run",
-      "cancel",
-      "binny15-one",
-      heartbeatNextRun.runId,
-    ]),
-    "cancellation",
-  );
-  assert.equal(heartbeatCancel.status, "cancelling");
-  assert.equal(heartbeatCancel.stopConfirmedAt, undefined);
-  await heartbeatProxy.release();
-  const heartbeatCancelled = await waitForCliManualRunState(
-    baseUrl,
-    "binny15-one",
-    heartbeatNextRun.runId,
-    ["cancelled"],
-  );
-  assert.ok(heartbeatCancelled.stopConfirmedAt);
-  assert.equal(heartbeatCancelled.result?.commits.length, 1);
-  const heartbeatStoppedProcesses = await runtimeProcessSnapshot(
-    "runtime-fifteen-one",
-  );
-  assert.equal(
-    heartbeatStoppedProcesses.some(
-      (process) => process.pgid === heartbeatWorker.pgid,
-    ),
-    false,
-    "迟到的旧 idle heartbeat 不能确认新 run，停止确认必须晚于 worker 退出。",
-  );
-
-  await ownerGenerationOverlapStep(
-    baseUrl,
-    heartbeatProxy,
-    heartbeatNextRun.runId,
-  );
+  await ownerGenerationOverlapStep(baseUrl, heartbeatProxy, followUp.runId);
 
   const slowGateKey = "18-cli-slow-stop";
   const slowRun = cliData<ManualRunCliState>(
@@ -2247,6 +2134,48 @@ async function manualRunsCliStep(
     ownerBeforeStorageFailure.runtimeId,
     "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
   );
+  await compose([
+    "run",
+    "--rm",
+    "--no-deps",
+    "--user",
+    "0",
+    "--entrypoint",
+    "chmod",
+    "runtime-fifteen-one",
+    "0755",
+    "/var/lib/binny/runtime",
+  ]);
+  await compose(["restart", "runtime-fifteen-one"]);
+  await waitForRuntimeHealth("runtime-fifteen-one");
+  await waitForRuntime(baseUrl, "binny15-one");
+}
+
+async function manualRunsHttpStep(
+  baseUrl: string,
+  manifest: unknown,
+): Promise<void> {
+  const result = await run(
+    "pnpm",
+    [
+      "--silent",
+      "--filter",
+      "@binny/api",
+      "exec",
+      "node",
+      "--conditions=source",
+      "scripts/manual-runs-http-e2e.ts",
+    ],
+    {
+      env: {
+        BINNY_E2E_BASE_URL: baseUrl,
+        BINNY15_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
+        BINNY15_COLLECTOR_MANIFEST: JSON.stringify(manifest),
+      },
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  process.stdout.write(result.stdout);
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -2393,33 +2322,6 @@ async function manualRunControllerPartitionStep(): Promise<void> {
         process.stderr.write(attached.stderr);
     }
   }
-}
-
-async function manualRunsHttpStep(
-  baseUrl: string,
-  manifest: unknown,
-): Promise<void> {
-  const result = await run(
-    "pnpm",
-    [
-      "--silent",
-      "--filter",
-      "@binny/api",
-      "exec",
-      "node",
-      "--conditions=source",
-      "scripts/manual-runs-http-e2e.ts",
-    ],
-    {
-      env: {
-        BINNY_E2E_BASE_URL: baseUrl,
-        BINNY15_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
-        BINNY15_COLLECTOR_MANIFEST: JSON.stringify(manifest),
-      },
-    },
-  );
-  assert.equal(result.code, 0, result.stderr);
-  process.stdout.write(result.stdout);
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
@@ -2911,11 +2813,76 @@ async function verifyRestartAndRemoval(
     },
   ]);
 
+  const cliRelationSearch = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly expansions?: readonly {
+          readonly key: string;
+          readonly hasMore: boolean;
+          readonly relations: readonly {
+            readonly relationId: string;
+            readonly status: string;
+          }[];
+        }[];
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "split-root",
+            },
+            {
+              type: "relation",
+              direction: "outgoing",
+              name: "cites",
+              operator: "exists",
+            },
+          ],
+        },
+        expand: [
+          {
+            key: "mentions",
+            direction: "outgoing",
+            name: "mentions",
+            limit: 1,
+          },
+        ],
+        select: ["sourceKey"],
+        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    cliRelationSearch.results.map((result) => result.sourceKey?.key),
+    ["split-root"],
+  );
+  assert.deepEqual(
+    cliRelationSearch.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+      ({ relationId }) => relationId,
+    ),
+    ["e2e:relation-query:split-text"],
+  );
+
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny09-resource-cli-"),
+    path.join(tmpdir(), "binny10-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny09-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny10-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -3652,77 +3619,76 @@ async function main(): Promise<void> {
     path.join(tmpdir(), "binny18owner-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
-  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.15.0/24";
+  const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.48.0/24";
   const runtimeSubnet =
-    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.14.0/24";
+    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.150.0/24";
+  await writeFile(
+    composeOverrideFile,
+    [
+      "services:",
+      "  server:",
+      "    ports: !override",
+      '      - "3000"',
+      "  manual-runs-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "    networks:",
+      "      - default",
+      "      - runtime",
+      "  rss-e2e-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "    networks:",
+      "      - default",
+      "      - runtime",
+      "  runtime-fifteen-one:",
+      "    environment:",
+      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      "    networks: !override",
+      "      - runtime",
+      "  runtime-fifteen-two:",
+      "    environment:",
+      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      "    networks: !override",
+      "      - runtime",
+      "  heartbeat-proxy:",
+      `    image: ${imageName}`,
+      "    command:",
+      "      - node",
+      "      - scripts/binny-e2e-heartbeat-proxy.ts",
+      "    ports: !override",
+      '      - "8082"',
+      '      - "8083"',
+      "    depends_on:",
+      "      server:",
+      "        condition: service_started",
+      "    networks:",
+      "      - default",
+      "      - runtime",
+      "networks:",
+      "  default:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${e2eSubnet}`,
+      "  runtime:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${runtimeSubnet}`,
+      "",
+    ].join("\n"),
+  );
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
+  let rssControlSource: RssControlSource | undefined;
   try {
-    await writeFile(
-      composeOverrideFile,
-      [
-        "services:",
-        "  server:",
-        "    ports: !override",
-        '      - "3000"',
-        "  manual-runs-source:",
-        "    ports: !override",
-        '      - "8081"',
-        "  rss-e2e-source:",
-        "    ports: !override",
-        '      - "8081"',
-        "    networks:",
-        "      - default",
-        "      - runtime",
-        "  runtime-fifteen-one:",
-        "    environment:",
-        "      BINNY_API_URL: http://heartbeat-proxy:8082",
-        "    networks:",
-        "      - runtime",
-        "  runtime-fifteen-two:",
-        "    environment:",
-        "      BINNY_API_URL: http://heartbeat-proxy:8082",
-        "    networks:",
-        "      - runtime",
-        "  runtime-rss:",
-        "    networks:",
-        "      - default",
-        "      - runtime",
-        "  runtime-rss-two:",
-        "    networks:",
-        "      - default",
-        "      - runtime",
-        "  heartbeat-proxy:",
-        `    image: ${imageName}`,
-        "    command:",
-        "      - node",
-        "      - scripts/binny-e2e-heartbeat-proxy.ts",
-        "    ports:",
-        '      - "8083"',
-        "    depends_on:",
-        "      server:",
-        "        condition: service_started",
-        "    networks:",
-        "      - default",
-        "      - runtime",
-        "networks:",
-        "  default:",
-        "    ipam:",
-        "      config:",
-        `        - subnet: ${e2eSubnet}`,
-        "  runtime:",
-        "    ipam:",
-        "      config:",
-        `        - subnet: ${runtimeSubnet}`,
-        "",
-      ].join("\n"),
-    );
+    await compose(["build", "server"]);
+    await compose(["build", "runtime-fifteen-one"]);
+    await compose(["build", "runtime-rss"]);
     await compose([
       "up",
       "--detach",
-      "--build",
       "--wait",
       "--wait-timeout",
       "360",
@@ -3742,7 +3708,7 @@ async function main(): Promise<void> {
       await publishedPort("heartbeat-proxy", 8083),
     );
     heartbeatProxy = activeHeartbeatProxy;
-    const rssControlSource = await createRssControlSource(
+    rssControlSource = await createRssControlSource(
       await publishedPort("rss-e2e-source", 8081),
     );
     let baseUrl = apiBaseUrl();

@@ -345,6 +345,66 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await relations.json()).error.code;
   }
 
+  const relatedSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "asOf", binId: "rss-main", asOf: "12" },
+      where: {
+        type: "relation",
+        direction: "outgoing",
+        name: "reply",
+        properties: {
+          type: "json",
+          field: "properties",
+          path: ["rank"],
+          valueType: "number",
+          operator: "gte",
+          value: 1,
+        },
+        target: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "entry/8",
+            },
+            {
+              type: "text",
+              text: { kind: "literal", value: "归档正文" },
+            },
+          ],
+        },
+        operator: "count",
+        count: { operator: "gte", value: 2 },
+      },
+      expand: [
+        { key: "replies", direction: "outgoing", name: "reply", limit: 2 },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  if (relatedSearch.status === 200) {
+    const relatedPage = await relatedSearch.json();
+    const relatedMatch = relatedPage.results[0]?.matches[0];
+    if (relatedMatch !== undefined) {
+      void relatedMatch.binId;
+      const expansion = relatedMatch.expansions?.[0];
+      if (expansion !== undefined) {
+        void expansion.hasMore;
+        const relation = expansion.relations[0];
+        if (relation?.status === "observed") {
+          void relation.direction;
+          void relation.state.properties?.rank;
+        }
+      }
+    }
+  } else if (relatedSearch.status === 400 || relatedSearch.status === 422) {
+    void (await relatedSearch.json()).error.code;
+  }
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",

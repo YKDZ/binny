@@ -1,6 +1,8 @@
 import {
   collectorManifestSchema,
+  jsonObjectSchema,
   runtimeDisconnectInputSchema,
+  runtimeEnvironmentSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
   type BinError,
@@ -12,6 +14,7 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatInput,
 } from "@binny/contracts";
+import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
@@ -20,22 +23,21 @@ import {
   interruptExpiredManualRuns,
   interruptReplacedManualRuns,
 } from "./manual-run-fencing.ts";
+import { binConfigurations, runtimeConnections } from "./schema.ts";
 
-type RuntimeConnectionRow = {
-  readonly bin_id: string;
-  readonly configured_collector: CollectorManifest;
-  readonly config: JsonObject;
-  readonly runtime_id: string | null;
-  readonly runtime_collector: CollectorManifest | null;
-  readonly environment: RuntimeEnvironment | null;
-  readonly last_heartbeat_at: Date | null;
-  readonly disconnected: boolean | null;
-  readonly owner_state: "confirmed" | "unconfirmed" | null;
-  readonly owner_generation: string | null;
+const runtimeSelection = {
+  binId: binConfigurations.id,
+  configuredCollector: binConfigurations.collector,
+  config: binConfigurations.config,
+  runtimeId: runtimeConnections.runtimeId,
+  runtimeCollector: runtimeConnections.collector,
+  environment: runtimeConnections.environment,
+  lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
+  disconnected: runtimeConnections.disconnected,
+  ownerState: runtimeConnections.ownerState,
+  ownerGeneration: runtimeConnections.ownerGeneration,
 };
 
-const tableName = "runtime_connections";
-const jsonbType = 3802;
 type RuntimeCompatibilityError = {
   readonly code:
     | "runtime_manifest_mismatch"
@@ -44,10 +46,6 @@ type RuntimeCompatibilityError = {
   readonly message: string;
   readonly path: (string | number)[];
 };
-
-function jsonbParameter(database: CoreDatabase, value: unknown) {
-  return database.typed(value, jsonbType);
-}
 
 function failure<T>(status: 400 | 404 | 409, error: BinError): BinOperation<T> {
   return { ok: false, status, error };
@@ -179,67 +177,69 @@ function offline(
   return {
     status: "offline",
     reason,
-    ...(row?.runtime_id === null || row?.runtime_id === undefined
+    ...(row?.runtimeId === null || row?.runtimeId === undefined
       ? {}
-      : { runtimeId: row.runtime_id }),
-    ...(row?.last_heartbeat_at === null || row?.last_heartbeat_at === undefined
+      : { runtimeId: row.runtimeId }),
+    ...(row?.lastHeartbeatAt === null || row?.lastHeartbeatAt === undefined
       ? {}
-      : { lastHeartbeatAt: row.last_heartbeat_at.toISOString() }),
+      : { lastHeartbeatAt: row.lastHeartbeatAt.toISOString() }),
   };
 }
 
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   if (
-    row.runtime_id === null ||
-    row.runtime_collector === null ||
+    row.runtimeId === null ||
+    row.runtimeCollector === null ||
     row.environment === null ||
-    row.last_heartbeat_at === null
+    row.lastHeartbeatAt === null
   ) {
     return offline("runtime_not_connected", row);
   }
 
   const error = compatibilityError(
-    row.configured_collector,
-    row.config,
-    row.runtime_collector,
-    row.environment,
+    collectorManifestSchema.parse(row.configuredCollector),
+    jsonObjectSchema.parse(row.config),
+    collectorManifestSchema.parse(row.runtimeCollector),
+    runtimeEnvironmentSchema.parse(row.environment),
   );
   if (error !== undefined) {
     return {
       status: "incompatible",
-      runtimeId: row.runtime_id,
-      lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+      runtimeId: row.runtimeId,
+      lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
       error,
     };
   }
   if (row.disconnected === true) return offline("runtime_not_connected", row);
-  if (Date.now() - row.last_heartbeat_at.getTime() > runtimeHeartbeatTimeoutMs)
+  if (Date.now() - row.lastHeartbeatAt.getTime() > runtimeHeartbeatTimeoutMs)
     return offline("heartbeat_expired", row);
 
   return {
     status: "online",
-    runtimeId: row.runtime_id,
-    environment: row.environment,
-    lastHeartbeatAt: row.last_heartbeat_at.toISOString(),
+    runtimeId: row.runtimeId,
+    environment: runtimeEnvironmentSchema.parse(row.environment),
+    lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
   };
 }
 
 async function selectRuntimeConnection(
   database: CoreDatabase | CoreTransaction,
   binId: string,
-): Promise<RuntimeConnectionRow | undefined> {
-  const rows = await database.unsafe<RuntimeConnectionRow[]>(
-    "SELECT b.id AS bin_id, b.collector AS configured_collector, b.config, " +
-      "r.runtime_id, r.collector AS runtime_collector, r.environment, " +
-      "r.last_heartbeat_at, r.disconnected, r.owner_state, " +
-      "r.owner_generation::text AS owner_generation FROM bin_configurations b " +
-      "LEFT JOIN " +
-      tableName +
-      " r ON r.bin_id = b.id WHERE b.id = $1",
-    [binId],
-  );
-  return rows[0];
+) {
+  const [row] = await database
+    .select(runtimeSelection)
+    .from(binConfigurations)
+    .leftJoin(
+      runtimeConnections,
+      eq(runtimeConnections.binId, binConfigurations.id),
+    )
+    .where(eq(binConfigurations.id, binId));
+  return row;
 }
+
+type RuntimeConnectionRow = NonNullable<
+  Awaited<ReturnType<typeof selectRuntimeConnection>>
+>;
 
 export async function readRuntimeExecution(
   database: CoreDatabase | CoreTransaction,
@@ -253,56 +253,6 @@ export async function readRuntimeExecution(
         path: ["binId"],
       })
     : { ok: true, value: rowExecution(row) };
-}
-
-export async function initializeRuntimeConnectionSchema(
-  database: CoreDatabase,
-): Promise<void> {
-  await database.unsafe(
-    "CREATE TABLE IF NOT EXISTS " +
-      tableName +
-      " (" +
-      "bin_id text PRIMARY KEY REFERENCES bin_configurations(id) ON DELETE CASCADE, " +
-      "runtime_id text NOT NULL, " +
-      "collector jsonb NOT NULL, " +
-      "environment jsonb NOT NULL, " +
-      "last_heartbeat_at timestamptz NOT NULL DEFAULT now(), " +
-      "disconnected boolean NOT NULL DEFAULT false, " +
-      "owner_generation bigint NOT NULL DEFAULT 0, " +
-      "owner_state text NOT NULL DEFAULT 'confirmed' " +
-      "CHECK (owner_state IN ('confirmed', 'unconfirmed'))" +
-      ")",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " ADD COLUMN IF NOT EXISTS owner_state text NOT NULL DEFAULT 'confirmed'",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " ADD COLUMN IF NOT EXISTS owner_generation bigint NOT NULL DEFAULT 0",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " DROP CONSTRAINT IF EXISTS runtime_connections_owner_state_check",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " ADD CONSTRAINT runtime_connections_owner_state_check CHECK (owner_state IN ('confirmed', 'unconfirmed'))",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " DROP CONSTRAINT IF EXISTS runtime_connections_owner_generation_check",
-  );
-  await database.unsafe(
-    "ALTER TABLE " +
-      tableName +
-      " ADD CONSTRAINT runtime_connections_owner_generation_check CHECK (owner_generation >= 0)",
-  );
 }
 
 export function createRuntimeConnectionStore(
@@ -323,67 +273,79 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      return await database.begin(async (transaction) => {
-        const bins = await transaction.unsafe<{ readonly id: string }[]>(
-          "SELECT id FROM bin_configurations WHERE id = $1 FOR UPDATE",
-          [binId],
-        );
-        if (bins[0] === undefined)
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined) {
           return failure(404, {
             code: "bin_not_found",
             message: "没有找到这个 bin。",
             path: ["binId"],
           });
+        }
 
-        const current = await selectRuntimeConnection(transaction, binId);
+        const [current] = await transaction
+          .select({
+            runtimeId: runtimeConnections.runtimeId,
+            ownerState: runtimeConnections.ownerState,
+            ownerGeneration: runtimeConnections.ownerGeneration,
+          })
+          .from(runtimeConnections)
+          .where(eq(runtimeConnections.binId, binId));
         const incomingGeneration = BigInt(checked.data.ownerGeneration);
-        const currentGeneration =
-          current?.owner_generation === null ||
-          current?.owner_generation === undefined
-            ? undefined
-            : BigInt(current.owner_generation);
+        const currentGeneration = current?.ownerGeneration;
+        // 在 bin 行锁下比较已记录代际，使未登记的旧首包也会被新 owner 淘汰。
         if (
+          current !== undefined &&
           currentGeneration !== undefined &&
           incomingGeneration < currentGeneration
-        )
+        ) {
           return failure(409, {
             code: "runtime_owner_mismatch",
             message: "运行器所有权代际已过期，不能覆盖当前所有者。",
             path: ["ownerGeneration"],
           });
+        }
         if (
+          current !== undefined &&
           currentGeneration !== undefined &&
           incomingGeneration === currentGeneration &&
-          current?.runtime_id !== checked.data.runtimeId
-        )
+          current.runtimeId !== checked.data.runtimeId
+        ) {
           return failure(409, {
             code: "runtime_owner_mismatch",
             message: "相同所有权代际只能由原运行器继续持有。",
             path: ["ownerGeneration"],
           });
+        }
         if (
+          current !== undefined &&
           currentGeneration !== undefined &&
           incomingGeneration > currentGeneration &&
-          current?.runtime_id === checked.data.runtimeId
-        )
+          current.runtimeId === checked.data.runtimeId
+        ) {
           return failure(409, {
             code: "runtime_owner_mismatch",
             message: "运行器身份不能切换到新的所有权代际。",
             path: ["ownerGeneration"],
           });
+        }
 
         const expiredRunIds = await interruptExpiredManualRuns(
           transaction,
           binId,
         );
         let ownerState: "confirmed" | "unconfirmed" =
-          current?.owner_state === "unconfirmed" || expiredRunIds.length > 0
+          current?.ownerState === "unconfirmed" || expiredRunIds.length > 0
             ? "unconfirmed"
             : "confirmed";
 
         if (
-          current?.runtime_id != null &&
-          current.runtime_id !== checked.data.runtimeId
+          current !== undefined &&
+          current.runtimeId !== checked.data.runtimeId
         ) {
           if (
             checked.data.activeRunId !== null ||
@@ -399,7 +361,7 @@ export function createRuntimeConnectionStore(
           await interruptReplacedManualRuns(
             transaction,
             binId,
-            current.runtime_id,
+            current.runtimeId,
           );
           ownerState = "confirmed";
         } else if (checked.data.stoppedRunId !== undefined) {
@@ -412,24 +374,30 @@ export function createRuntimeConnectionStore(
           if (stopped) ownerState = "confirmed";
         }
 
-        await transaction.unsafe(
-          "INSERT INTO " +
-            tableName +
-            " (bin_id, runtime_id, collector, environment, last_heartbeat_at, disconnected, owner_state, owner_generation) " +
-            "VALUES ($1, $2, $3, $4, now(), false, $5, $6) " +
-            "ON CONFLICT (bin_id) DO UPDATE SET runtime_id = EXCLUDED.runtime_id, " +
-            "collector = EXCLUDED.collector, environment = EXCLUDED.environment, " +
-            "last_heartbeat_at = now(), disconnected = false, owner_state = EXCLUDED.owner_state, " +
-            "owner_generation = EXCLUDED.owner_generation",
-          [
+        await transaction
+          .insert(runtimeConnections)
+          .values({
             binId,
-            checked.data.runtimeId,
-            jsonbParameter(database, checked.data.collector),
-            jsonbParameter(database, checked.data.environment),
+            runtimeId: checked.data.runtimeId,
+            collector: checked.data.collector,
+            environment: checked.data.environment,
+            disconnected: false,
             ownerState,
-            checked.data.ownerGeneration,
-          ],
-        );
+            ownerGeneration: incomingGeneration,
+          })
+          .onConflictDoUpdate({
+            target: runtimeConnections.binId,
+            set: {
+              runtimeId: checked.data.runtimeId,
+              collector: checked.data.collector,
+              environment: checked.data.environment,
+              // 保持 PostgreSQL 服务端时钟语义。
+              lastHeartbeatAt: sql`clock_timestamp()`,
+              disconnected: false,
+              ownerState,
+              ownerGeneration: incomingGeneration,
+            },
+          });
 
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
@@ -450,23 +418,28 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      return await database.begin(async (transaction) => {
-        const bins = await transaction.unsafe<{ readonly id: string }[]>(
-          "SELECT id FROM bin_configurations WHERE id = $1 FOR UPDATE",
-          [binId],
-        );
-        if (bins[0] === undefined)
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+        if (bin === undefined) {
           return failure(404, {
             code: "bin_not_found",
             message: "没有找到这个 bin。",
             path: ["binId"],
           });
-        await transaction.unsafe(
-          "UPDATE " +
-            tableName +
-            " SET disconnected = true WHERE bin_id = $1 AND runtime_id = $2",
-          [binId, checked.data.runtimeId],
-        );
+        }
+        await transaction
+          .update(runtimeConnections)
+          .set({ disconnected: true })
+          .where(
+            and(
+              eq(runtimeConnections.binId, binId),
+              eq(runtimeConnections.runtimeId, checked.data.runtimeId),
+            ),
+          );
         const current = await selectRuntimeConnection(transaction, binId);
         if (current === undefined)
           throw new Error("运行器断开后 bin 配置意外消失。");

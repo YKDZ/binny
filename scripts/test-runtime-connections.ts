@@ -105,7 +105,7 @@ async function createNetworkOverlay(): Promise<void> {
     composeOverlayDirectory,
     "compose.network.yaml",
   );
-  const subnet = process.env.BINNY14_SUBNET ?? "10.253.14.0/24";
+  const subnet = process.env.BINNY14_SUBNET ?? "10.253.151.0/24";
   const subnetMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/24$/u.exec(
     subnet,
   );
@@ -540,6 +540,7 @@ try {
   await compose(["stop", "runtime-one", "runtime-two"]);
 
   await compose(["up", "--detach", "--force-recreate", "server"]);
+  await waitForApi();
   const persistedOne = cliData<{
     readonly id: string;
     readonly identityId: string;
