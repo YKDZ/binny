@@ -19,14 +19,17 @@ const apiErrorPathSchema = z.array(z.union([z.string(), z.number()]));
 export const manualRunStatusSchema = z.enum([
   "queued",
   "executing",
+  "cancelling",
   "completed",
   "failed",
+  "cancelled",
 ]);
 
 export const manualRunQueueReasonSchema = z.enum([
   "runtime_offline",
   "earlier_run_active",
   "earlier_run_queued",
+  "previous_execution_unconfirmed",
 ]);
 
 export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(
@@ -166,6 +169,8 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
       collectorVersion: postgresTextSchema.min(1),
       status: manualRunStatusSchema,
       queueReason: manualRunQueueReasonSchema.optional(),
+      cancellationRequestedAt: z.iso.datetime().optional(),
+      stopConfirmedAt: z.iso.datetime().optional(),
       createdAt: z.iso.datetime(),
       startedAt: z.iso.datetime().optional(),
       finishedAt: z.iso.datetime().optional(),
@@ -208,7 +213,10 @@ export const manualRunErrorSchema = withPostgresJsonSchemaProjection(
             "run_not_found",
             "runtime_not_connected",
             "runtime_mismatch",
+            "runtime_owner_unconfirmed",
             "run_not_executing",
+            "run_not_cancellable",
+            "run_cancellation_pending",
           ]),
           message: postgresTextSchema,
           path: apiErrorPathSchema.optional(),
@@ -245,6 +253,10 @@ export type ManualRunOperations = {
     input: ManualRunTriggerInput,
   ): Promise<ManualRunOperation<ManualRun>>;
   getRun(binId: string, runId: string): Promise<ManualRunOperation<ManualRun>>;
+  cancelRun(
+    binId: string,
+    runId: string,
+  ): Promise<ManualRunOperation<ManualRun>>;
   claimRun(
     binId: string,
     input: z.infer<typeof manualRunClaimInputSchema>,

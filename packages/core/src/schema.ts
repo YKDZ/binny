@@ -22,9 +22,12 @@ const archiveResourceStatuses = ["ready", "deleting"] as const;
 const manualRunStatuses = [
   "queued",
   "executing",
+  "cancelling",
   "completed",
   "failed",
+  "cancelled",
 ] as const;
+const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
 
 export const binConfigurations = pgTable(
   "bin_configurations",
@@ -50,21 +53,40 @@ export const binConfigurations = pgTable(
   ],
 );
 
-export const runtimeConnections = pgTable("runtime_connections", {
-  binId: text("bin_id")
-    .primaryKey()
-    .references(() => binConfigurations.id, { onDelete: "cascade" }),
-  runtimeId: text("runtime_id").notNull(),
-  collector: jsonb("collector").notNull(),
-  environment: jsonb("environment").notNull(),
-  lastHeartbeatAt: timestamp("last_heartbeat_at", {
-    withTimezone: true,
-    mode: "date",
-  })
-    .notNull()
-    .defaultNow(),
-  disconnected: boolean("disconnected").notNull().default(false),
-});
+export const runtimeConnections = pgTable(
+  "runtime_connections",
+  {
+    binId: text("bin_id")
+      .primaryKey()
+      .references(() => binConfigurations.id, { onDelete: "cascade" }),
+    runtimeId: text("runtime_id").notNull(),
+    collector: jsonb("collector").notNull(),
+    environment: jsonb("environment").notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", {
+      withTimezone: true,
+      mode: "date",
+    })
+      .notNull()
+      .defaultNow(),
+    disconnected: boolean("disconnected").notNull().default(false),
+    ownerState: text("owner_state", { enum: runtimeOwnerStates })
+      .notNull()
+      .default("confirmed"),
+    ownerGeneration: bigint("owner_generation", { mode: "bigint" })
+      .notNull()
+      .default(0n),
+  },
+  (table) => [
+    check(
+      "runtime_connections_owner_state_check",
+      inArray(table.ownerState, runtimeOwnerStates),
+    ),
+    check(
+      "runtime_connections_owner_generation_check",
+      gte(table.ownerGeneration, 0n),
+    ),
+  ],
+);
 
 export const archiveWriteClock = pgTable(
   "archive_write_clock",
@@ -457,6 +479,14 @@ export const manualRuns = pgTable(
     completedScopes: jsonb("completed_scopes").notNull().default([]),
     failure: jsonb("failure"),
     checkResult: jsonb("check_result"),
+    cancelRequestedAt: timestamp("cancel_requested_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
+    stopConfirmedAt: timestamp("stop_confirmed_at", {
+      withTimezone: true,
+      mode: "date",
+    }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .default(sql`clock_timestamp()`),
@@ -470,6 +500,6 @@ export const manualRuns = pgTable(
       .where(eq(table.status, "queued")),
     uniqueIndex("manual_runs_one_executing_bin_idx")
       .on(table.binId)
-      .where(eq(table.status, "executing")),
+      .where(inArray(table.status, ["executing", "cancelling"])),
   ],
 );

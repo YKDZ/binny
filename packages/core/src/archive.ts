@@ -31,6 +31,7 @@ import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
 import type { CoreDatabase, CoreTransaction } from "./database.ts";
+import { lockManualRunForArchiveWrite } from "./manual-run-fencing.ts";
 import {
   archiveCommits,
   archiveItemDeletions,
@@ -464,6 +465,19 @@ export function createArchiveStore(
                 409,
                 "check_run_archive_forbidden",
                 "可用性检查运行不能提交归档资料。",
+                ["runId"],
+              );
+            }
+            if (
+              !(await lockManualRunForArchiveWrite(
+                transaction,
+                submission.runId,
+              ))
+            ) {
+              return failure(
+                409,
+                "run_not_writable",
+                "对应运行已终结或正在取消，不能再写入新的归档资料。",
                 ["runId"],
               );
             }

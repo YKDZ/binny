@@ -630,6 +630,7 @@ export const archiveErrorSchema = z
           "bin_not_found",
           "check_run_archive_forbidden",
           "archive_request_conflict",
+          "run_not_writable",
           "item_not_found",
           "item_deleted",
           "revision_not_found",

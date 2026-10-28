@@ -127,7 +127,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 1;
+export const runtimeProtocolVersion = 3;
 export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
 export type RuntimeEnvironmentKind = z.infer<
   typeof runtimeEnvironmentKindSchema
@@ -141,10 +141,24 @@ export const runtimeEnvironmentSchema = z.object({
   }),
 });
 
+const runtimeOwnerGenerationSchema = postgresTextSchema
+  .regex(/^[1-9][0-9]*$/u, "运行器所有权代际必须是正十进制整数。")
+  .refine(
+    (value) =>
+      value.length < 19 ||
+      (value.length === 19 && value <= "9223372036854775807"),
+    "运行器所有权代际超出 PostgreSQL bigint 范围。",
+  );
+
 export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
   z.object({
     protocolVersion: z.literal(runtimeProtocolVersion),
     runtimeId: postgresTextSchema.min(1),
+    ownerGeneration: runtimeOwnerGenerationSchema,
+    ownerLockAcquired: z.literal(true),
+    activeRunId: z.string().uuid().nullable(),
+    claimInFlight: z.boolean(),
+    stoppedRunId: z.string().uuid().optional(),
     collector: collectorManifestSchema,
     environment: runtimeEnvironmentSchema,
   }),
@@ -152,6 +166,9 @@ export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
 
 export const runtimeDisconnectInputSchema = z.object({
   runtimeId: postgresTextSchema.min(1),
+  ownerLockAcquired: z.literal(true),
+  activeRunId: z.null(),
+  claimInFlight: z.literal(false),
 });
 
 export const runtimeExecutionSchema = z.discriminatedUnion("status", [
@@ -176,6 +193,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
         "runtime_manifest_mismatch",
         "runtime_configuration_incompatible",
         "runtime_environment_incompatible",
+        "runtime_owner_mismatch",
       ]),
       message: postgresTextSchema,
       path: z.array(z.union([z.string(), z.number()])),
@@ -208,6 +226,7 @@ export const binErrorSchema = z.object({
       "runtime_manifest_mismatch",
       "runtime_configuration_incompatible",
       "runtime_environment_incompatible",
+      "runtime_owner_mismatch",
     ]),
     message: postgresTextSchema,
     path: z.array(z.union([z.string(), z.number()])).optional(),

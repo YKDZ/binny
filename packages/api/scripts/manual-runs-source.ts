@@ -21,15 +21,22 @@ export const releaseInputSchema = z.object({
     "manual",
     "empty",
     "partial",
+    "slow",
     "available",
     "unavailable",
     "unknown",
     "execution-error",
   ]),
 });
+export const markerInputSchema = z.object({
+  runId: z.string().uuid(),
+  gateKey: z.string().min(1),
+  marker: z.string().min(1),
+});
 export const sourceControlStatusSchema = z.object({
   arrivals: z.array(sourceRequestSchema),
   waiting: z.array(z.string()),
+  markers: z.array(markerInputSchema),
 });
 
 type SourceRequest = z.infer<typeof sourceRequestSchema>;
@@ -79,9 +86,9 @@ function sourceMaterial(
 
 function sourceCheck(
   request: SourceRequest,
-  disposition: Exclude<
+  disposition: Extract<
     SourceDisposition,
-    "material" | "manual" | "empty" | "partial" | "execution-error"
+    "available" | "unavailable" | "unknown"
   >,
 ): unknown {
   const problem =
@@ -131,6 +138,7 @@ export async function startControlledSource(
   const sourceArrivals: SourceArrival[] = [];
   const released = new Map<string, SourceDisposition>();
   const pending = new Map<string, PendingSourceRequest>();
+  const markers: z.infer<typeof markerInputSchema>[] = [];
 
   const server = createServer((request, response) => {
     void (async () => {
@@ -138,7 +146,19 @@ export async function startControlledSource(
         sendJson(response, 200, {
           arrivals: sourceArrivals,
           waiting: [...pending.keys()],
+          markers,
         });
+        return;
+      }
+
+      if (request.method === "POST" && request.url === "/control/mark") {
+        const parsed = markerInputSchema.safeParse(await readJson(request));
+        if (!parsed.success) {
+          sendJson(response, 400, { error: "marker 请求格式无效。" });
+          return;
+        }
+        markers.push(parsed.data);
+        sendJson(response, 200, { recorded: true });
         return;
       }
 
@@ -174,7 +194,8 @@ export async function startControlledSource(
             parsed.data.disposition === "material" ||
             parsed.data.disposition === "manual" ||
             parsed.data.disposition === "empty" ||
-            parsed.data.disposition === "partial"
+            parsed.data.disposition === "partial" ||
+            parsed.data.disposition === "slow"
           ) {
             sendJson(
               waiting.response,
@@ -202,7 +223,8 @@ export async function startControlledSource(
           disposition === "material" ||
           disposition === "manual" ||
           disposition === "empty" ||
-          disposition === "partial"
+          disposition === "partial" ||
+          disposition === "slow"
         ) {
           sendJson(response, 200, sourceMaterial(sourceRequest, disposition));
           return;

@@ -1,0 +1,233 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "20c0fb4f-3c1c-4161-b6e0-c870bccd8399",
+  "prevIds": ["4d508d2b-ae0a-4a2f-bab8-d1e5a7905a20"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "manual_runs",
+        "cancel_requested_at"
+      ],
+      "writes": [
+        "s|col|public.manual_runs.cancel_requested_at",
+        "n|col|public.manual_runs.cancel_requested_at",
+        "e|col|public.manual_runs.cancel_requested_at"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "manual_runs",
+        "stop_confirmed_at"
+      ],
+      "writes": [
+        "s|col|public.manual_runs.stop_confirmed_at",
+        "n|col|public.manual_runs.stop_confirmed_at",
+        "e|col|public.manual_runs.stop_confirmed_at"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "owner_state"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.owner_state",
+        "n|col|public.runtime_connections.owner_state",
+        "e|col|public.runtime_connections.owner_state"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "owner_generation"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.owner_generation",
+        "n|col|public.runtime_connections.owner_generation",
+        "e|col|public.runtime_connections.owner_generation"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    },
+    {
+      "statementType": "recreate_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "manual_runs",
+        "manual_runs_one_executing_bin_idx"
+      ],
+      "writes": [
+        "s|idx|public.manual_runs_one_executing_bin_idx",
+        "n|idx|public.manual_runs_one_executing_bin_idx",
+        "e|idx|public.manual_runs_one_executing_bin_idx",
+        "n|rel|public.manual_runs_one_executing_bin_idx"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.bin_id"
+      ],
+      "sharedWrites": [],
+      "sqlHash": "44ed6da6846d955e"
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "runtime_connections"],
+      "writes": [
+        "s|ck|public.runtime_connections.runtime_connections_owner_state_check",
+        "n|ck|public.runtime_connections.runtime_connections_owner_state_check",
+        "e|ck|public.runtime_connections.runtime_connections_owner_state_check",
+        "n|con|public.runtime_connections.runtime_connections_owner_state_check"
+      ],
+      "reads": [
+        "n|tbl|public.runtime_connections",
+        "n|sch|public",
+        "n|col|public.runtime_connections.owner_state"
+      ]
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "runtime_connections"],
+      "writes": [
+        "s|ck|public.runtime_connections.runtime_connections_owner_generation_check",
+        "n|ck|public.runtime_connections.runtime_connections_owner_generation_check",
+        "e|ck|public.runtime_connections.runtime_connections_owner_generation_check",
+        "n|con|public.runtime_connections.runtime_connections_owner_generation_check"
+      ],
+      "reads": [
+        "n|tbl|public.runtime_connections",
+        "n|sch|public",
+        "n|col|public.runtime_connections.owner_generation"
+      ]
+    },
+    {
+      "statementType": "alter_check",
+      "statementTarget": ["table", "public", "manual_runs"],
+      "writes": ["s|ck|public.manual_runs.manual_runs_status_check"],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.status",
+        "e|col|public.manual_runs.status"
+      ],
+      "sqlHash": "1f9899858ddbc3dd"
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "cancel_requested_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "stop_confirmed_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "owner_state",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'confirmed'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "owner_generation",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "0",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "runtime_connections_owner_state_check",
+        "value": "\"owner_state\" in ('confirmed', 'unconfirmed')",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "runtime_connections_owner_generation_check",
+        "value": "\"owner_generation\" >= 0",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "alter",
+      "key": "indexes\u0000[\"public\",\"manual_runs_one_executing_bin_idx\"]",
+      "set": {
+        "where": "\"status\" in ('executing', 'cancelling')"
+      }
+    },
+    {
+      "op": "alter",
+      "key": "checks\u0000[\"public\",\"manual_runs\",\"manual_runs_status_check\"]",
+      "set": {
+        "value": "\"status\" in ('queued', 'executing', 'cancelling', 'completed', 'failed', 'cancelled')"
+      }
+    }
+  ]
+}

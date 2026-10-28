@@ -105,7 +105,7 @@ async function createNetworkOverlay(): Promise<void> {
     composeOverlayDirectory,
     "compose.network.yaml",
   );
-  const subnet = process.env.BINNY14_SUBNET ?? "10.253.14.0/24";
+  const subnet = process.env.BINNY14_SUBNET ?? "10.253.151.0/24";
   const subnetMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/24$/u.exec(
     subnet,
   );
@@ -292,7 +292,14 @@ async function postHeartbeat(
     {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ protocolVersion: 1, ...input }),
+      body: JSON.stringify({
+        protocolVersion: 3,
+        ownerLockAcquired: true,
+        ownerGeneration: "1",
+        activeRunId: null,
+        claimInFlight: false,
+        ...input,
+      }),
     },
   );
   return {
@@ -310,7 +317,12 @@ async function postDisconnect(
     {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify({ runtimeId }),
+      body: JSON.stringify({
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+      }),
     },
   );
   return {
@@ -344,7 +356,7 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 1);
+  assert.equal(runtimeOneManifest.protocolVersion, 3);
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 
