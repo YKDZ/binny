@@ -33,8 +33,7 @@
     "@binny/contracts": "workspace:*",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
-    "postgres": "^3.4.9",
-    "zod": "catalog:"
+    "postgres": "^3.4.9"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
