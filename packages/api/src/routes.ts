@@ -11,6 +11,7 @@ import {
   type BinConfigurationOperations,
   type RuntimeConnectionOperations,
   toInputJsonSchema,
+  toPostgresJsonSchema,
 } from "@binny/contracts";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
@@ -253,8 +254,8 @@ export const binApiSchemas = {
   update: toInputJsonSchema(binUpdateInputSchema),
   runtimeHeartbeat: toInputJsonSchema(runtimeHeartbeatInputSchema),
   runtimeDisconnect: toInputJsonSchema(runtimeDisconnectInputSchema),
-  output: z.toJSONSchema(binConfigurationSchema),
-  error: z.toJSONSchema(binErrorSchema),
+  output: toPostgresJsonSchema(binConfigurationSchema, "output"),
+  error: toPostgresJsonSchema(binErrorSchema, "output"),
 };
 
 export { archiveApiSchemas };

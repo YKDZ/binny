@@ -5,7 +5,7 @@ import {
   archiveItemReadSchema,
   archiveRevisionReadSchema,
   archiveSubmissionInputSchema,
-  toInputJsonSchema,
+  toArchiveJsonSchema,
   type ArchiveOperations,
 } from "@binny/contracts";
 // 文本归档 HTTP 子路由；公开客户端类型直接由这些正式路由推导。
@@ -129,11 +129,11 @@ export const archiveApiSchemas: {
   readonly revision: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
-  submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
-  commit: z.toJSONSchema(archiveCommitSchema),
-  item: z.toJSONSchema(archiveItemReadSchema),
-  revision: z.toJSONSchema(archiveRevisionReadSchema),
-  error: z.toJSONSchema(archiveErrorSchema),
+  submitInput: toArchiveJsonSchema(archiveSubmissionInputSchema, "input"),
+  commit: toArchiveJsonSchema(archiveCommitSchema, "output"),
+  item: toArchiveJsonSchema(archiveItemReadSchema, "output"),
+  revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
+  error: toArchiveJsonSchema(archiveErrorSchema, "output"),
 };
 
 export function createArchiveRoutes(

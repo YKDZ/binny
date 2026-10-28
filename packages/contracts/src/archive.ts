@@ -1,9 +1,15 @@
 import * as z from "zod";
 
 import { binIdSchema } from "./bin-configuration.ts";
+import {
+  addPostgresTextIssue,
+  postgresTextSchema,
+  registerPostgresJsonSchemaProjection,
+  toPostgresJsonSchema,
+  withPostgresJsonSchemaProjection,
+} from "./postgres-text.ts";
 
-const nonEmptyText = z
-  .string()
+const nonEmptyText = postgresTextSchema
   .min(1, "字段不能为空。")
   .max(4096, "字段不能超过 4096 个字符。")
   .refine((value) => value.trim().length > 0, "字段不能为空。");
@@ -24,14 +30,25 @@ const jsonNumberSchema = z
     "JSON 整数必须处于 JavaScript 安全整数范围内。",
   );
 
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function validateJsonValue(
   value: unknown,
   context: z.RefinementCtx,
   path: readonly (string | number)[],
   ancestors: WeakSet<object>,
 ): void {
-  if (value === null || typeof value === "string" || typeof value === "boolean")
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "string") {
+    addPostgresTextIssue(value, context, path);
     return;
+  }
   if (typeof value === "number") {
     const checked = jsonNumberSchema.safeParse(value);
     if (!checked.success) {
@@ -83,6 +100,7 @@ function validateJsonValue(
       });
     } else {
       for (const [key, nestedValue] of Object.entries(value)) {
+        addPostgresTextIssue(key, context, [...path, key]);
         validateJsonValue(nestedValue, context, [...path, key], ancestors);
       }
     }
@@ -90,21 +108,46 @@ function validateJsonValue(
   ancestors.delete(value);
 }
 
-const jsonObjectSchema = z
-  .record(z.string(), z.unknown())
-  .superRefine((object, context) => {
-    const ancestors = new WeakSet<object>([object]);
-    for (const [key, value] of Object.entries(object)) {
-      validateJsonValue(value, context, [key], ancestors);
-    }
-  });
+const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
+  isPlainJsonObject,
+  { message: "字段必须是 JSON 对象。" },
+);
+const jsonObjectSchema = jsonObjectBaseSchema.superRefine((object, context) => {
+  const ancestors = new WeakSet<object>([object]);
+  for (const [key, value] of Object.entries(object)) {
+    addPostgresTextIssue(key, context, [key]);
+    validateJsonValue(value, context, [key], ancestors);
+  }
+});
+
+const jsonObjectProjectionSchema = z.record(postgresTextSchema, z.json());
+registerPostgresJsonSchemaProjection(
+  jsonObjectBaseSchema,
+  jsonObjectSchema,
+  jsonObjectProjectionSchema,
+);
+
+/** 为含归档 JSON custom 节点的根 schema 绑定 Zod 原生 JSON Schema 投影。 */
+export function withArchiveJsonSchemaProjection<T extends z.ZodType>(
+  schema: T,
+): T {
+  return withPostgresJsonSchemaProjection(schema);
+}
+
+/** 使用 Zod 原生规则输出归档 JSON 的输入或输出 Schema。 */
+export function toArchiveJsonSchema(
+  schema: z.ZodType,
+  io: "input" | "output",
+): Record<string, unknown> {
+  return toPostgresJsonSchema(schema, io);
+}
 
 const archiveBodySchema = z
   .object({
-    html: z.string().optional(),
-    markdown: z.string().optional(),
-    text: z.string().optional(),
-    searchText: z.string().optional(),
+    html: postgresTextSchema.optional(),
+    markdown: postgresTextSchema.optional(),
+    text: postgresTextSchema.optional(),
+    searchText: postgresTextSchema.optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, {
@@ -303,25 +346,29 @@ export const archiveCommitSchema = z
   .strict();
 
 /** 条目读取同时返回各 bin 当前视图和用于还原观察顺序的轻量记录。 */
-export const archiveItemReadSchema = z
-  .object({
-    itemId: archiveIdSchema,
-    sourceKey: sourceKeySchema,
-    views: z.array(archiveViewSchema),
-    revisions: z.array(archiveRevisionSummarySchema),
-    observations: z.array(archiveObservationSchema),
-  })
-  .strict();
+export const archiveItemReadSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      itemId: archiveIdSchema,
+      sourceKey: sourceKeySchema,
+      views: z.array(archiveViewSchema),
+      revisions: z.array(archiveRevisionSummarySchema),
+      observations: z.array(archiveObservationSchema),
+    })
+    .strict(),
+);
 
-export const archiveRevisionReadSchema = z
-  .object({
-    revisionId: archiveIdSchema,
-    itemId: archiveIdSchema,
-    sourceKey: sourceKeySchema,
-    stateHash: archiveStateHashSchema,
-    state: archiveItemStateSchema,
-  })
-  .strict();
+export const archiveRevisionReadSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      revisionId: archiveIdSchema,
+      itemId: archiveIdSchema,
+      sourceKey: sourceKeySchema,
+      stateHash: archiveStateHashSchema,
+      state: archiveItemStateSchema,
+    })
+    .strict(),
+);
 
 export const archiveErrorSchema = z
   .object({

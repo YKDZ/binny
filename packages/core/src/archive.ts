@@ -143,11 +143,11 @@ function postgresJsonValue(value: unknown): postgres.JSONValue {
   if (Array.isArray(value))
     return value.map((entry) => postgresJsonValue(entry));
   if (typeof value === "object") {
-    const fields: Record<string, postgres.JSONValue> = {};
+    const fields: [string, postgres.JSONValue][] = [];
     for (const [key, entry] of Object.entries(value)) {
-      fields[key] = postgresJsonValue(entry);
+      fields.push([key, postgresJsonValue(entry)]);
     }
-    return fields;
+    return Object.fromEntries(fields);
   }
   throw new TypeError("归档状态必须是 JSON 值。");
 }
