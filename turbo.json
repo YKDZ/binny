@@ -89,6 +89,7 @@
     },
     "//#test:runtime-connections": {
       "dependsOn": ["@binny/binny#build"],
+      "passThroughEnv": ["BINNY14_PUBLISHED_HOST", "BINNY14_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
