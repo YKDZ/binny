@@ -718,7 +718,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "archive",
         name: "delete",
-        description: "删除归档条目及其全部资料。",
+        description: "删除归档条目及当前有效级联声明指向的条目。",
         fields: {
           itemId: { kind: "positional", description: "归档条目 ID" },
         },
@@ -730,7 +730,14 @@ function createCliContract(identity: CliCommandIdentity) {
               description: "已删除的归档条目",
               exitCode: 0,
               schema: archiveItemDeletionResultSchema,
-              text: ({ itemId }) => text.line("已删除归档条目：" + itemId),
+              text: ({ itemId, deletedItemIds }) =>
+                text.line(
+                  "已删除归档条目：" +
+                    itemId +
+                    "；本次共删除 " +
+                    String(deletedItemIds.length) +
+                    " 项，包含各 bin 当前未撤回声明指向的条目。",
+                ),
             },
           },
         },
