@@ -16,9 +16,15 @@ if (baseUrl === undefined || baseUrl.length === 0) {
 
 const client = createApiClient(baseUrl);
 const bytes = new TextEncoder().encode("collector sdk image v1");
+const mediaBody = new ReadableStream<Uint8Array>({
+  start(controller) {
+    controller.enqueue(bytes);
+    controller.close();
+  },
+});
 const uploaded = await uploadArchiveResource(
   client,
-  new Blob([bytes], { type: "image/svg+xml" }),
+  mediaBody,
   "image/svg+xml",
 );
 if (!uploaded.ok) throw new Error(uploaded.error.message);
@@ -67,6 +73,7 @@ const item = submitted.items[0];
 assert.ok(item);
 const read = await client.archives.items[":itemId"].$get({
   param: { itemId: item.itemId },
+  query: {},
 });
 if (read.status !== 200) {
   throw new Error("SDK 媒体条目读取失败：" + (await read.text()));

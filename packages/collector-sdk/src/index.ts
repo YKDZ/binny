@@ -22,9 +22,11 @@ export async function uploadArchiveResource(
   body: BodyInit,
   mediaType: string,
 ): Promise<ArchiveResourceUpload> {
+  const requestInit: RequestInit & { duplex?: "half" } = { body };
+  if (body instanceof ReadableStream) requestInit.duplex = "half";
   const response = await client.resources.$post(
     { header: { "content-type": mediaType } },
-    { init: { body } },
+    { init: requestInit },
   );
   if (response.status === 201) {
     return { ok: true, resource: await response.json() };

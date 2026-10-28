@@ -4,7 +4,10 @@ import {
   archiveIdentifierSchema,
   archiveItemReadSchema,
   archiveResourceMetadataSchema,
+  archiveItemReadQuerySchema,
   archiveRevisionReadSchema,
+  archiveTimelinePageSchema,
+  archiveTimelineQuerySchema,
   archiveSubmissionInputSchema,
   toInputJsonSchema,
   type ArchiveOperations,
@@ -158,9 +161,63 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
           return undefined;
         },
       ),
+      zValidator("query", archiveItemReadQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
       async (c) => {
+        const query = c.req.valid("query");
         const result = await operations.getArchiveItem(
           c.req.valid("param").itemId,
+          {
+            ...(query.binId === undefined ? {} : { binId: query.binId }),
+            ...(query.asOf === undefined ? {} : { asOf: query.asOf }),
+          },
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
+      "/archives/items/:itemId/timeline",
+      zValidator(
+        "param",
+        z.object({ itemId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("query", archiveTimelineQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const query = c.req.valid("query");
+        const result = await operations.getArchiveTimeline(
+          c.req.valid("param").itemId,
+          {
+            ...(query.binId === undefined ? {} : { binId: query.binId }),
+            ...(query.asOf === undefined ? {} : { asOf: query.asOf }),
+            ...(query.limit === undefined
+              ? {}
+              : { limit: Number(query.limit) }),
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+          },
         );
         if (!result.ok) {
           switch (result.status) {
@@ -206,6 +263,36 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
         }
         return c.json(result.value, 200);
       },
+    )
+    .get(
+      "/archives/commits/:commitId",
+      zValidator(
+        "param",
+        z.object({ commitId: archiveIdentifierSchema }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.getArchiveCommit(
+          c.req.valid("param").commitId,
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
     );
 }
 
@@ -215,16 +302,22 @@ export type ArchiveRoutes = ReturnType<typeof makeArchiveRoutes>;
 export const archiveApiSchemas: {
   readonly submitInput: Record<string, unknown>;
   readonly commit: Record<string, unknown>;
+  readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
+  readonly timelineQuery: Record<string, unknown>;
   readonly revision: Record<string, unknown>;
   readonly resource: Record<string, unknown>;
+  readonly timeline: Record<string, unknown>;
   readonly error: Record<string, unknown>;
 } = {
   submitInput: toInputJsonSchema(archiveSubmissionInputSchema),
   commit: z.toJSONSchema(archiveCommitSchema),
+  itemQuery: toInputJsonSchema(archiveItemReadQuerySchema),
   item: z.toJSONSchema(archiveItemReadSchema),
+  timelineQuery: toInputJsonSchema(archiveTimelineQuerySchema),
   revision: z.toJSONSchema(archiveRevisionReadSchema),
   resource: z.toJSONSchema(archiveResourceMetadataSchema),
+  timeline: z.toJSONSchema(archiveTimelinePageSchema),
   error: z.toJSONSchema(archiveErrorSchema),
 };
 

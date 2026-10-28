@@ -293,6 +293,8 @@ async function sdkResourceStep(baseUrl: string): Promise<string> {
 function archiveIds(state: string): {
   readonly itemId: string;
   readonly revisionId: string;
+  readonly commitId: string;
+  readonly historicalAsOf: string;
   readonly resourceItemId: string;
   readonly resourceRevisionId: string;
   readonly resourceId: string;
@@ -315,6 +317,8 @@ function archiveIds(state: string): {
   return {
     itemId: readText("itemId"),
     revisionId: readText("revisionId"),
+    commitId: readText("commitId"),
+    historicalAsOf: readText("historicalAsOf"),
     resourceItemId: readText("resourceItemId"),
     resourceRevisionId: readText("resourceRevisionId"),
     resourceId: readText("resourceId"),
@@ -326,6 +330,7 @@ function archiveIds(state: string): {
 
 function archiveResponses(response: string): {
   readonly item: unknown;
+  readonly historicalItem: unknown;
   readonly revision: unknown;
   readonly resourceItem: unknown;
   readonly resourceMarkerItem: unknown;
@@ -336,6 +341,9 @@ function archiveResponses(response: string): {
     readonly size: number;
     readonly sha256: string;
   };
+  readonly firstTimelinePage: unknown;
+  readonly secondTimelinePage: unknown;
+  readonly commit: unknown;
 } {
   const parsed: unknown = JSON.parse(response);
   assert.ok(typeof parsed === "object" && parsed !== null);
@@ -345,7 +353,11 @@ function archiveResponses(response: string): {
       "resourceItem" in parsed &&
       "resourceMarkerItem" in parsed &&
       "sdkItem" in parsed &&
-      "sdkResourceMetadata" in parsed,
+      "sdkResourceMetadata" in parsed &&
+      "historicalItem" in parsed &&
+      "firstTimelinePage" in parsed &&
+      "secondTimelinePage" in parsed &&
+      "commit" in parsed,
   );
   assert.ok(typeof parsed.sdkResourceMetadata === "object");
   assert.ok(parsed.sdkResourceMetadata !== null);
@@ -355,6 +367,7 @@ function archiveResponses(response: string): {
   assert.ok("sha256" in parsed.sdkResourceMetadata);
   return {
     item: parsed.item,
+    historicalItem: parsed.historicalItem,
     revision: parsed.revision,
     resourceItem: parsed.resourceItem,
     resourceMarkerItem: parsed.resourceMarkerItem,
@@ -365,6 +378,9 @@ function archiveResponses(response: string): {
       readonly size: number;
       readonly sha256: string;
     },
+    firstTimelinePage: parsed.firstTimelinePage,
+    secondTimelinePage: parsed.secondTimelinePage,
+    commit: parsed.commit,
   };
 }
 
@@ -1068,6 +1084,8 @@ async function verifyRestartAndRemoval(
   const {
     itemId,
     revisionId,
+    commitId,
+    historicalAsOf,
     resourceItemId,
     resourceRevisionId,
     resourceMarkerItemId,
@@ -1078,6 +1096,19 @@ async function verifyRestartAndRemoval(
     "found",
   );
   assert.deepEqual(cliArchiveItem, expectedArchive.item);
+  const cliHistoricalItem = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      itemId,
+      "--bin",
+      "rss-main",
+      "--as-of",
+      historicalAsOf,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliHistoricalItem, expectedArchive.historicalItem);
   const cliArchiveRevision = cliData<unknown>(
     await cli(baseUrl, ["archive", "revision", revisionId]),
     "found",
@@ -1154,6 +1185,39 @@ async function verifyRestartAndRemoval(
     ["exec", "--no-TTY", "server", "rm", "-f", containerResourcePath],
     port,
   );
+
+  const cliFirstTimelinePage = cliData<{ readonly nextCursor?: string }>(
+    await cli(baseUrl, [
+      "archive",
+      "timeline",
+      itemId,
+      "--bin",
+      "rss-main",
+      "--limit",
+      "1",
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliFirstTimelinePage, expectedArchive.firstTimelinePage);
+  assert.ok(cliFirstTimelinePage.nextCursor);
+  const cliSecondTimelinePage = cliData<unknown>(
+    await cli(baseUrl, [
+      "archive",
+      "timeline",
+      itemId,
+      "--limit",
+      "1",
+      "--cursor",
+      cliFirstTimelinePage.nextCursor,
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliSecondTimelinePage, expectedArchive.secondTimelinePage);
+  const cliArchiveCommit = cliData<unknown>(
+    await cli(baseUrl, ["archive", "commit", commitId]),
+    "found",
+  );
+  assert.deepEqual(cliArchiveCommit, expectedArchive.commit);
   await validateApiInput();
 }
 
