@@ -1206,7 +1206,7 @@ async function verifyDiscovery(): Promise<void> {
   const beforeCollection = await sourceState();
   const collection = await trigger("collect", {
     targetIds: ["latest", "category"],
-    maxTopics: 10,
+    maxTopics: 15,
   });
   assert.equal(collection.status, "completed", JSON.stringify(collection));
   assert.ok(collection.result?.completedScopes?.includes("target:latest"));
@@ -1223,15 +1223,14 @@ async function verifyDiscovery(): Promise<void> {
     "/t/2401.json",
     "/t/2402.json",
     "/t/2403.json",
+    "/t/2404.json",
+    "/t/2405.json",
+    "/t/2406.json",
+    "/t/2407.json",
+    "/t/2408.json",
+    "/t/2409.json",
+    "/t/2410.json",
   ]);
-  assert.ok(
-    afterCollection.events.some(
-      ({ action, path, authenticated }) =>
-        action === "topic-list" &&
-        path.startsWith("/latest.json?page=1") &&
-        authenticated === true,
-    ),
-  );
   assert.ok(
     afterCollection.events.some(
       ({ action, path, authenticated }) =>
@@ -1239,6 +1238,50 @@ async function verifyDiscovery(): Promise<void> {
         path.startsWith("/c/controlled/42/l/latest.json") &&
         authenticated === true,
     ),
+  );
+
+  const beforePaginatedCollection = await sourceState();
+  const paginatedCollection = await trigger("collect", {
+    targetIds: ["latest"],
+    maxTopics: 10,
+  });
+  assert.equal(
+    paginatedCollection.status,
+    "completed",
+    JSON.stringify(paginatedCollection),
+  );
+  assert.ok(
+    paginatedCollection.result?.completedScopes?.includes("target:latest"),
+  );
+  const afterPaginatedCollection = await sourceState();
+  const paginatedEvents = afterPaginatedCollection.events.slice(
+    beforePaginatedCollection.events.length,
+  );
+  assert.ok(
+    paginatedEvents.some(
+      ({ action, path, authenticated }) =>
+        action === "topic-list" &&
+        path.startsWith("/latest.json?page=1") &&
+        authenticated === true,
+    ),
+  );
+  assert.deepEqual(
+    paginatedEvents
+      .filter(({ action }) => action === "topic")
+      .map(({ path }) => path)
+      .toSorted(),
+    [
+      "/t/2401.json",
+      "/t/2402.json",
+      "/t/2403.json",
+      "/t/2404.json",
+      "/t/2405.json",
+      "/t/2406.json",
+      "/t/2407.json",
+      "/t/2408.json",
+      "/t/2409.json",
+      "/t/2410.json",
+    ],
   );
 
   const editedRoot = await searchArchiveItem("主题正文版本 3");

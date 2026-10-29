@@ -227,14 +227,17 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
 function discoveredTopicList(
   category: boolean,
   page: number,
+  perPage: number,
 ): Record<string, unknown> {
-  const topicIds = category
-    ? page === 0
-      ? [2402, 2403]
-      : [2403]
-    : page === 0
-      ? [2401, 2403, 2402]
-      : [2402, 2403];
+  const topicIds =
+    page === 0
+      ? (category
+          ? [2402, 2403, 2401, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
+          : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
+        ).slice(0, perPage)
+      : category
+        ? [2403, 2401].slice(0, perPage)
+        : [2402, 2403].slice(0, perPage);
   const pathname = category ? "/c/controlled/42/l/latest.json" : "/latest.json";
   return {
     topic_list: {
@@ -247,11 +250,9 @@ function discoveredTopicList(
               : "2026-10-26T00:00:00.000Z";
         return { id, created_at: createdAt };
       }),
-      ...(page === 0
+      ...(page === 0 && topicIds.length === perPage
         ? { more_topics_url: `${pathname}?page=1` }
-        : category
-          ? { more_topics_url: null }
-          : {}),
+        : {}),
     },
   };
 }
@@ -440,6 +441,7 @@ const server = createServer((request, response) => {
         discoveredTopicList(
           topicListMatch.category,
           Number(url.searchParams.get("page") ?? "0"),
+          Number(url.searchParams.get("per_page") ?? "30"),
         ),
       );
       return;
