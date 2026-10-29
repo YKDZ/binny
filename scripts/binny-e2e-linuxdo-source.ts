@@ -247,7 +247,11 @@ function discoveredTopicList(
               : "2026-10-26T00:00:00.000Z";
         return { id, created_at: createdAt };
       }),
-      more_topics_url: page === 0 ? `${pathname}?page=1` : null,
+      ...(page === 0
+        ? { more_topics_url: `${pathname}?page=1` }
+        : category
+          ? { more_topics_url: null }
+          : {}),
     },
   };
 }

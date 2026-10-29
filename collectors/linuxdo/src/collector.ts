@@ -112,7 +112,7 @@ const topicListResponseSchema = z
     topic_list: z
       .object({
         topics: z.array(discoveredTopicSchema),
-        more_topics_url: z.string().nullable(),
+        more_topics_url: z.string().nullable().optional(),
       })
       .passthrough(),
   })
@@ -891,7 +891,10 @@ async function checkTopic(context: CollectorCheckContext, params: CheckParams) {
           targetListUrl(site, target, 30, undefined),
           context.signal,
         );
-        if (response.more_topics_url !== null) {
+        if (
+          response.more_topics_url !== null &&
+          response.more_topics_url !== undefined
+        ) {
           paginationUrl(
             response.more_topics_url,
             targetListUrl(site, target, 30, undefined),
@@ -1584,7 +1587,10 @@ async function collectListTarget(
       );
       progress.collectedTopics += 1;
     }
-    if (topicList.more_topics_url === null) {
+    if (
+      topicList.more_topics_url === null ||
+      topicList.more_topics_url === undefined
+    ) {
       completedScopes.push(targetScope(target));
       return "complete";
     }
