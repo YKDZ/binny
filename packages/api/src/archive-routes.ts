@@ -12,6 +12,8 @@ import {
   archiveRevisionReadSchema,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
+  archiveAggregationInputSchema,
+  archiveAggregationResultSchema,
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
   archiveSubmissionInputSchema,
@@ -174,6 +176,26 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
           }
         }
         return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/archives/aggregate",
+      zValidator("json", archiveAggregationInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.aggregateArchive(c.req.valid("json"));
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 422:
+              return c.json({ error: result.error }, 422);
+          }
+        }
+        return c.json(archiveAggregationResultSchema.parse(result.value), 200);
       },
     )
     .get(
@@ -439,6 +461,8 @@ export const archiveApiSchemas: {
   readonly submitInput: Record<string, unknown>;
   readonly searchInput: Record<string, unknown>;
   readonly searchPage: Record<string, unknown>;
+  readonly aggregateInput: Record<string, unknown>;
+  readonly aggregateResult: Record<string, unknown>;
   readonly commit: Record<string, unknown>;
   readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
@@ -455,6 +479,11 @@ export const archiveApiSchemas: {
   submitInput: toArchiveJsonSchema(archiveSubmissionInputSchema, "input"),
   searchInput: toArchiveJsonSchema(archiveSearchInputSchema, "input"),
   searchPage: toArchiveJsonSchema(archiveSearchPageSchema, "output"),
+  aggregateInput: toArchiveJsonSchema(archiveAggregationInputSchema, "input"),
+  aggregateResult: toArchiveJsonSchema(
+    archiveAggregationResultSchema,
+    "output",
+  ),
   commit: toArchiveJsonSchema(archiveCommitSchema, "output"),
   itemQuery: toArchiveJsonSchema(archiveItemReadQuerySchema, "input"),
   item: toArchiveJsonSchema(archiveItemReadSchema, "output"),
