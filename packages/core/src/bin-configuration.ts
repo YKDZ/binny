@@ -26,6 +26,8 @@ import {
 } from "ajv/dist/2020.js";
 import { and, eq, sql } from "drizzle-orm";
 
+import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
+
 const binSelection = {
   id: binConfigurations.id,
   collector: binConfigurations.collector,
@@ -325,6 +327,7 @@ function notFound<T>(_id: string): BinOperation<T> {
 
 export function createBinConfigurationStore(
   database: Database,
+  browserCapacity: BrowserCapacityCoordinator,
 ): BinConfigurationOperations {
   return {
     async listBins() {
@@ -494,6 +497,20 @@ export function createBinConfigurationStore(
 
     async removeBin(id) {
       return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, id))
+          .for("update");
+        if (bin === undefined) return notFound(id);
+        if (await browserCapacity.hasReservation(transaction, id))
+          return failure(
+            409,
+            "browser_capacity_active",
+            "浏览器尚未确认退出；等待运行器停止后再移除这个 bin。",
+            ["binId"],
+          );
+
         await transaction
           .update(manualRuns)
           .set({

@@ -772,7 +772,11 @@ function createCliContract(identity: CliCommandIdentity) {
             .bins[":binId"].$delete({ param: { binId: input.id } });
           if (response.status === 200)
             return outcome.data.removed(await response.json());
-          if (response.status === 400 || response.status === 404)
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的移除状态。");
         },

@@ -359,7 +359,7 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 4);
+  assert.equal(runtimeOneManifest.protocolVersion, 5);
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 
