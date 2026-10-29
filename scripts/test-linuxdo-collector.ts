@@ -896,6 +896,7 @@ async function verifyTopicArchive(): Promise<void> {
     key: "post:240001",
   });
   assert.equal(rootState.capture.completeness, "complete");
+  assert.deepEqual(rootState.capture.missing, []);
   assert.equal(rootState.capture.scope.postNumber, 1);
   assert.equal(rootState.metadata?.postNumber, 1);
   const topicMetadata = rootState.metadata?.topic;
@@ -957,6 +958,19 @@ async function verifyTopicArchive(): Promise<void> {
     ),
     rootState.body?.html,
   );
+  assert.ok(
+    rootState.body?.html?.includes(
+      `href="binny://resource/${imageResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  assert.ok(
+    rootState.body?.html?.includes(
+      `data-download-href="binny://resource/${imageResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  assert.ok(!rootState.body?.html?.includes("topic-photo-download-hash"));
   assert.ok(!rootState.body?.html?.includes("srcset="), rootState.body?.html);
   assert.ok(
     !rootState.body?.html?.includes("topic-photo-small.webp") &&

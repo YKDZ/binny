@@ -28,6 +28,7 @@ const firstReplyId = 240_002;
 const secondReplyId = 240_003;
 const thirdReplyId = 240_004;
 const photoPath = "/uploads/default/original/2X/topic-photo.png";
+const lightboxDownloadPath = "/topic-photo-download-hash";
 const smallPhotoCandidate =
   "/uploads/default/original/2X/topic-photo-small.webp";
 const largePhotoCandidate =
@@ -130,7 +131,7 @@ function posts(): readonly Record<string, unknown>[] {
     post(
       rootPostId,
       1,
-      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}"><picture><source type="image/webp" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x"><img src="${photoPath}" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x" alt="主题封面"></picture></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p><p><a class="attachment" href="${jsonAttachmentPath}">主题元数据.json</a></p>${activeState.challengeMedia ? `<p><a class="attachment" href="${challengeMediaPath}">登录挑战.html</a></p>` : ""}`,
+      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}" data-download-href="${lightboxDownloadPath}"><picture><source type="image/webp" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x"><img src="${photoPath}" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x" alt="主题封面"></picture></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p><p><a class="attachment" href="${jsonAttachmentPath}">主题元数据.json</a></p>${activeState.challengeMedia ? `<p><a class="attachment" href="${challengeMediaPath}">登录挑战.html</a></p>` : ""}`,
       `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
     ),
     post(

@@ -1117,6 +1117,7 @@ async function prepareCookedBody(
   return await page.evaluate((html) => {
     const document = new DOMParser().parseFromString(html, "text/html");
     const media: MediaCandidate[] = [];
+    const imageLightboxes = new Set<Element>();
     let imageNumber = 0;
     let attachmentNumber = 0;
 
@@ -1141,13 +1142,18 @@ async function prepareCookedBody(
       const path = `body.images[${String(imageNumber)}]`;
       imageNumber += 1;
       image.setAttribute("data-binny-media-index", String(index));
-      lightbox?.setAttribute("data-binny-media-index", String(index));
+      if (lightbox !== null) {
+        lightbox.setAttribute("data-binny-media-index", String(index));
+        imageLightboxes.add(lightbox);
+      }
       media.push({ index, kind: "image", url, path });
     }
 
     for (const attachment of document.body.querySelectorAll(
       "a.attachment[href], a[data-download-href]",
     )) {
+      // Discourse 的 lightbox 下载别名指向图片变体，不是另一份附件。
+      if (imageLightboxes.has(attachment)) continue;
       const url =
         attachment.getAttribute("data-download-href") ??
         attachment.getAttribute("href");
