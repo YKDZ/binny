@@ -65,11 +65,13 @@ const capacityPhase =
 assert.ok(
   capacityPhase === "all" ||
     capacityPhase === "seed" ||
-    capacityPhase === "verify",
-  "BINNY_E2E_CAPACITY_PHASE 必须为 all、seed 或 verify。",
+    capacityPhase === "verify" ||
+    capacityPhase === "delete",
+  "BINNY_E2E_CAPACITY_PHASE 必须为 all、seed、verify 或 delete。",
 );
 const isFullCapacityRun = capacityProfile === "full";
-const preserveCapacityProject = isFullCapacityRun && capacityPhase === "seed";
+const preserveCapacityProject =
+  isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
   ? "binny26-capacity"
   : "binny12-revision-diff-" + process.pid.toString(10);
@@ -5783,7 +5785,7 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
     "postgres",
     "/var/lib/postgresql/data",
   );
-  if (preserveCapacityProject) {
+  if (preserveCapacityProject && capacityPhase === "seed") {
     assert.ok(
       resourceVolumeBefore.availableBytes >= 102_000_000_000,
       "百 GB 媒体负载前可用卷空间不足；没有开始上传。",
@@ -5930,8 +5932,7 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
           postgresVolumeDelta,
           postgresPerformance: { before, after, delta },
           capacity: capacityReport,
-          keptForFinalAggregation:
-            isFullCapacityRun && capacityPhase === "seed",
+          preservedForNextPhase: preserveCapacityProject,
         },
         null,
         2,
@@ -6062,7 +6063,12 @@ async function main(): Promise<void> {
     );
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    if (!(isFullCapacityRun && capacityPhase === "verify")) {
+    if (
+      !(
+        isFullCapacityRun &&
+        (capacityPhase === "verify" || capacityPhase === "delete")
+      )
+    ) {
       const isolatedClient = await verifyIsolatedApiConsumer({
         repositoryRoot,
         projectName,
@@ -6120,7 +6126,7 @@ async function main(): Promise<void> {
           error instanceof Error ? error : new Error(String(error));
       }
     }
-    if (isFullCapacityRun && (capacityPhase === "seed" || acceptanceFailed)) {
+    if (preserveCapacityProject || acceptanceFailed) {
       process.stdout.write(
         "保留本票 Compose 项目与持久卷供最终聚合验收：" + projectName + "。\n",
       );

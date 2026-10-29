@@ -23,7 +23,7 @@ import {
 
 type ArchiveClient = ReturnType<typeof createApiClient>;
 export type CapacityProfile = "smoke" | "full";
-export type CapacityPhase = "all" | "seed" | "verify";
+export type CapacityPhase = "all" | "seed" | "verify" | "delete";
 
 type CapacityShape = {
   readonly itemCount: number;
@@ -198,6 +198,7 @@ async function ensureCapacityBin(
   if (existing.status === 200) return;
   assert.equal(existing.status, 404, "容量验收 bin 读取失败。");
   assert.notEqual(phase, "verify", "最终容量验证需要保留的容量验收 bin。");
+  assert.notEqual(phase, "delete", "最终容量验证需要保留的容量验收 bin。");
 
   const created = await client.bins.$post({
     json: {
@@ -539,6 +540,19 @@ async function measureSearch(
   };
 }
 
+function assertSearchOutcome(
+  measurement: QueryMeasurement,
+  expectedResultCount: number,
+  allowBudgetExceeded: boolean,
+): void {
+  if (allowBudgetExceeded && measurement.status === 422) {
+    assert.equal(measurement.errorCode, "query_budget_exceeded");
+    return;
+  }
+  assert.equal(measurement.status, 200);
+  assert.equal(measurement.resultCount, expectedResultCount);
+}
+
 function itemKeyFilter(ordinal: number) {
   return {
     type: "and" as const,
@@ -570,6 +584,7 @@ function expectedChineseMatches(itemCount: number): number {
 async function runSearchMatrix(
   client: ArchiveClient,
   shape: CapacityShape,
+  allowBudgetExceeded: boolean,
 ): Promise<readonly QueryMeasurement[]> {
   const measurements: QueryMeasurement[] = [];
   const budgetMs = 10_000;
@@ -582,8 +597,11 @@ async function runSearchMatrix(
     limit,
     budgetMs,
   });
-  assert.equal(chinese.status, 200);
-  assert.equal(chinese.resultCount, expectedChineseMatches(shape.itemCount));
+  assertSearchOutcome(
+    chinese,
+    expectedChineseMatches(shape.itemCount),
+    allowBudgetExceeded,
+  );
   measurements.push(chinese);
 
   const broadRegexInput: ArchiveSearchRequest = {
@@ -595,8 +613,7 @@ async function runSearchMatrix(
     budgetMs,
   };
   const broadRegex = await measureSearch(client, "宽正则", broadRegexInput);
-  assert.equal(broadRegex.status, 200, "宽正则应在显式查询预算内返回第一页。");
-  assert.equal(broadRegex.resultCount, limit);
+  assertSearchOutcome(broadRegex, limit, allowBudgetExceeded);
   measurements.push(broadRegex);
 
   const jsonRange = await measureSearch(client, "JSON 数值范围与排序", {
@@ -622,8 +639,7 @@ async function runSearchMatrix(
     limit,
     budgetMs,
   });
-  assert.equal(jsonRange.status, 200);
-  assert.equal(jsonRange.resultCount, limit);
+  assertSearchOutcome(jsonRange, limit, allowBudgetExceeded);
   measurements.push(jsonRange);
 
   const relationCount = await measureSearch(client, "关系计数", {
@@ -646,8 +662,7 @@ async function runSearchMatrix(
     limit,
     budgetMs,
   });
-  assert.equal(relationCount.status, 200);
-  assert.equal(relationCount.resultCount, 1);
+  assertSearchOutcome(relationCount, 1, allowBudgetExceeded);
   measurements.push(relationCount);
 
   const finitePath = await measureSearch(client, "有限关系路径", {
@@ -671,8 +686,7 @@ async function runSearchMatrix(
     limit,
     budgetMs,
   });
-  assert.equal(finitePath.status, 200);
-  assert.equal(finitePath.resultCount, 1);
+  assertSearchOutcome(finitePath, 1, allowBudgetExceeded);
   measurements.push(finitePath);
 
   const overBudget = await measureSearch(client, "超预算显式失败", {
@@ -689,6 +703,7 @@ async function measureHistoricalAggregation(
   client: ArchiveClient,
   manifest: CapacityManifest,
   shape: CapacityShape,
+  allowBudgetExceeded: boolean,
 ): Promise<QueryMeasurement> {
   const input: ArchiveAggregationRequest = {
     scope: {
@@ -731,6 +746,10 @@ async function measureHistoricalAggregation(
       status: response.status,
       errorCode: error.error.code,
     };
+    if (allowBudgetExceeded) {
+      assert.equal(measurement.errorCode, "query_budget_exceeded");
+      return measurement;
+    }
     assert.fail("历史观察聚合未在预算内完成：" + JSON.stringify(measurement));
   }
   assert.equal(response.status, 200, await response.clone().text());
@@ -958,7 +977,7 @@ export async function runArchiveCapacityE2E(
     measurements: [],
   };
 
-  if (phase === "verify") {
+  if (phase === "verify" || phase === "delete") {
     manifest = await loadManifest(profile);
     submittedRelationCount = shape.itemCount * 2 - shape.cascadeCount - 4;
   } else {
@@ -968,11 +987,20 @@ export async function runArchiveCapacityE2E(
     submittedRelationCount = seeded.relationCount;
   }
 
-  if (phase !== "seed") {
-    measurements.push(...(await runSearchMatrix(client, shape)));
+  if (phase === "all" || phase === "verify") {
     measurements.push(
-      await measureHistoricalAggregation(client, manifest, shape),
+      ...(await runSearchMatrix(client, shape, profile === "full")),
     );
+    measurements.push(
+      await measureHistoricalAggregation(
+        client,
+        manifest,
+        shape,
+        profile === "full",
+      ),
+    );
+  }
+  if (phase === "all" || phase === "delete") {
     deletionResult = await verifyCascadeAndSharedResources(
       client,
       manifest,

@@ -8783,8 +8783,13 @@ async function main(): Promise<void> {
     if (profile !== "full" && profile !== "smoke") {
       throw new Error("容量验收需要 smoke 或 full 配置。");
     }
-    if (phase !== "all" && phase !== "seed" && phase !== "verify") {
-      throw new Error("容量验收阶段必须为 all、seed 或 verify。");
+    if (
+      phase !== "all" &&
+      phase !== "seed" &&
+      phase !== "verify" &&
+      phase !== "delete"
+    ) {
+      throw new Error("容量验收阶段必须为 all、seed、verify 或 delete。");
     }
     const report = await runArchiveCapacityE2E(
       baseUrl,
