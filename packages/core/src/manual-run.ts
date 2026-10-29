@@ -26,6 +26,7 @@ import {
   archiveCommits,
   archiveObservations,
   binConfigurations,
+  humanSessions,
   manualRuns,
   runtimeConnections,
   type Database,
@@ -35,6 +36,7 @@ import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { validateCollectorActionParameters } from "./bin-configuration.ts";
+import { hasActiveHumanSession } from "./human-session.ts";
 import {
   interruptExpiredManualRuns,
   isRuntimeOwnerWritable,
@@ -187,6 +189,22 @@ async function readRun(
             ),
           ),
       ),
+      humanSessionActive: exists(
+        database
+          .select({ sessionId: humanSessions.sessionId })
+          .from(humanSessions)
+          .where(
+            and(
+              eq(humanSessions.binId, manualRuns.binId),
+              inArray(humanSessions.status, [
+                "pending",
+                "opening",
+                "ready",
+                "closing",
+              ]),
+            ),
+          ),
+      ),
       earlierRunQueued: exists(
         database
           .select({ runId: earlierRuns.runId })
@@ -217,11 +235,13 @@ async function readRun(
         ? "previous_execution_unconfirmed"
         : !row.runtimeOnline
           ? "runtime_offline"
-          : row.earlierRunActive
-            ? "earlier_run_active"
-            : row.earlierRunQueued
-              ? "earlier_run_queued"
-              : null;
+          : row.humanSessionActive
+            ? "human_session_active"
+            : row.earlierRunActive
+              ? "earlier_run_active"
+              : row.earlierRunQueued
+                ? "earlier_run_queued"
+                : null;
   return { ...row, queueReason };
 }
 
@@ -491,6 +511,9 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           .from(runtimeConnections)
           .where(eq(runtimeConnections.binId, binId));
         if (owner?.ownerState !== "confirmed") return { ok: true, value: null };
+        if (await hasActiveHumanSession(transaction, binId)) {
+          return { ok: true, value: null };
+        }
 
         const collector = collectorManifestSchema.parse(bin.collector);
         const [active] = await transaction

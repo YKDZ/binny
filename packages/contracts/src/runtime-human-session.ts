@@ -16,12 +16,21 @@ export const runtimeHumanSessionEventSchema = z
   })
   .strict();
 
-export const runtimeHumanSessionControlSchema = z
-  .object({
-    sessionId: z.string().uuid(),
-    action: z.enum(["open", "close"]),
-  })
-  .strict();
+export const runtimeHumanSessionControlSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      sessionId: z.string().uuid(),
+      action: z.literal("open"),
+      tunnelToken: postgresTextSchema.min(1),
+    })
+    .strict(),
+  z
+    .object({
+      sessionId: z.string().uuid(),
+      action: z.literal("close"),
+    })
+    .strict(),
+]);
 
 export type RuntimeHumanSessionEvent = z.infer<
   typeof runtimeHumanSessionEventSchema

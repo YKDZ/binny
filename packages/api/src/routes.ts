@@ -4,6 +4,7 @@ import {
   binErrorSchema,
   binIdSchema,
   binUpdateInputSchema,
+  type HumanSessionOperations,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
   manualRunApiSchemas as contractManualRunApiSchemas,
@@ -28,6 +29,7 @@ import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
 export type {
   ArchiveOperations,
   BinConfigurationOperations,
+  HumanSessionOperations,
   ManualRunOperations,
   RuntimeConnectionOperations,
 } from "@binny/contracts";
@@ -37,6 +39,7 @@ export type ApiOperations = {
   readonly runtime: RuntimeConnectionOperations;
   readonly runs: ManualRunOperations;
   readonly archives: ArchiveOperations;
+  readonly humanSessions: HumanSessionOperations;
 };
 
 function validationFailure(issues: readonly z.core.$ZodIssue[]) {
@@ -149,6 +152,63 @@ function makeApp(operations: ApiOperations) {
           },
           200,
         );
+      },
+    )
+    .post(
+      "/bins/:binId/human-sessions",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.humanSessions.requestHumanSession(
+          c.req.valid("param").binId,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 201);
+      },
+    )
+    .get(
+      "/bins/:binId/human-sessions/:sessionId",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, sessionId } = c.req.valid("param");
+        const result = await operations.humanSessions.getHumanSession(
+          binId,
+          sessionId,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/human-sessions/:sessionId/close",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, sessionId } = c.req.valid("param");
+        const result = await operations.humanSessions.closeHumanSession(
+          binId,
+          sessionId,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
       },
     )
     .post(

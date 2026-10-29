@@ -7,3 +7,7 @@ export {
 export { createBinConfigurationStore } from "./bin-configuration.ts";
 export { createRuntimeConnectionStore } from "./runtime-connection.ts";
 export { createManualRunStore } from "./manual-run.ts";
+export {
+  createHumanSessionStore,
+  type HumanSessionStore,
+} from "./human-session.ts";

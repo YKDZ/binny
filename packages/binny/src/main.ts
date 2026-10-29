@@ -25,6 +25,9 @@ import {
   collectorActionNameSchema,
   collectorManifestSchema,
   identityIdSchema,
+  humanSessionCreatedSchema,
+  humanSessionErrorSchema,
+  humanSessionSchema,
   jsonObjectSchema,
   manualRunErrorSchema,
   manualRunSchema,
@@ -58,6 +61,7 @@ export type CliRuntime = {
 
 type CliDependencies = {
   readonly createClient: () => ReturnType<typeof createApiClient>;
+  readonly apiUrl: string;
 };
 
 async function saveResourceBody(
@@ -115,6 +119,7 @@ const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
   archiveErrorSchema.shape.error,
   manualRunErrorSchema.shape.error,
+  humanSessionErrorSchema.shape.error,
 ]);
 
 function createCliContract(identity: CliCommandIdentity) {
@@ -176,6 +181,12 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "run",
         description: "触发采集动作并查询运行结果。",
+      },
+      human: {
+        kind: "commandGroup",
+        parent: "cli",
+        name: "human",
+        description: "开启或关闭浏览器人工维护会话。",
       },
       ...command("archiveSearch")({
         kind: "command",
@@ -699,6 +710,123 @@ function createCliContract(identity: CliCommandIdentity) {
           throw new Error("服务返回了未声明的运行取消状态。");
         },
       }),
+      ...command("humanOpen")({
+        kind: "command",
+        parent: "human",
+        name: "open",
+        description: "开启同一持久浏览器的临时维护入口。",
+        fields: { binId: { kind: "positional", description: "bin 标识" } },
+        input: z.object({ binId: binIdSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            opened: {
+              description: "人工会话状态和临时入口",
+              exitCode: 0,
+              schema: humanSessionCreatedSchema.extend({
+                viewerUrl: z.url(),
+              }),
+              text: (session) => outputText("浏览器维护入口", session),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"]["human-sessions"].$post({
+              param: { binId: input.binId },
+            });
+          if (response.status === 201) {
+            const session = await response.json();
+            return outcome.data.opened({
+              ...session,
+              viewerUrl: new URL(session.viewerPath, dependencies.apiUrl).href,
+            });
+          }
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的浏览器会话状态。");
+        },
+      }),
+      ...command("humanGet")({
+        kind: "command",
+        parent: "human",
+        name: "get",
+        description: "读取浏览器人工会话状态。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          sessionId: { kind: "positional", description: "人工会话标识" },
+        },
+        input: z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "人工会话状态",
+              exitCode: 0,
+              schema: humanSessionSchema,
+              text: (session) => outputText("浏览器会话状态", session),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"]["human-sessions"][":sessionId"].$get({
+              param: { binId: input.binId, sessionId: input.sessionId },
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的浏览器会话读取状态。");
+        },
+      }),
+      ...command("humanClose")({
+        kind: "command",
+        parent: "human",
+        name: "close",
+        description: "关闭人工入口并回收实际连接。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          sessionId: { kind: "positional", description: "人工会话标识" },
+        },
+        input: z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            closed: {
+              description: "人工会话关闭状态",
+              exitCode: 0,
+              schema: humanSessionSchema,
+              text: (session) => outputText("浏览器会话关闭状态", session),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"]["human-sessions"][":sessionId"].close.$post({
+              param: { binId: input.binId, sessionId: input.sessionId },
+            });
+          if (response.status === 200)
+            return outcome.data.closed(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的浏览器会话关闭状态。");
+        },
+      }),
       ...command("archiveItem")({
         kind: "command",
         parent: "archive",
@@ -1106,12 +1234,14 @@ function createCliContract(identity: CliCommandIdentity) {
 export async function runCli(runtime: CliRuntime): Promise<number> {
   try {
     const contract = createCliContract(runtime.identity);
+    const apiUrl = runtime.apiUrl ?? "http://localhost:3000";
     const result = await executeCli(contract, {
       invocation: parseCliInvocation(contract, runtime.argv.slice(2)),
       dependencies: {
+        apiUrl,
         createClient: () =>
           createApiClient(
-            runtime.apiUrl ?? "http://localhost:3000",
+            apiUrl,
             runtime.fetch === undefined ? {} : { fetch: runtime.fetch },
           ),
       },

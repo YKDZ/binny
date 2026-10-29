@@ -41,6 +41,17 @@ services:
       - resource-data:/var/lib/binny/resources
     restart: unless-stopped
 
+  browser-session-source:
+    <<: *binny-image
+    profiles: [binny19]
+    command:
+      - node
+      - --conditions=source
+      - scripts/browser-session-source.ts
+    environment:
+      BINNY19_SOURCE_PORT: 8081
+    restart: unless-stopped
+
   manual-runs-source:
     <<: *binny-image
     profiles: [binny15]
@@ -207,6 +218,66 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  browser-one:
+    image: ${BINNY19_RUNTIME_IMAGE:-binny19-browser:local}
+    profiles: [binny19]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny19-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-one-owner:/var/lib/binny/runtime
+    restart: unless-stopped
+
+  browser-two:
+    image: ${BINNY19_RUNTIME_IMAGE:-binny19-browser:local}
+    profiles: [binny19]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny19-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-two-owner:/var/lib/binny/runtime
+    restart: unless-stopped
+
+  browser-one-contender:
+    image: ${BINNY19_RUNTIME_IMAGE:-binny19-browser:local}
+    profiles: [binny19-lock]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny19-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-one-owner:/var/lib/binny/runtime
+    restart: "no"
+
 volumes:
   postgres-data:
   bins:
@@ -219,3 +290,5 @@ volumes:
   rss-one-collector-state:
   rss-two-owner:
   rss-two-collector-state:
+  browser-one-owner:
+  browser-two-owner:

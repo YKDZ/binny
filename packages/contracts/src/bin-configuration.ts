@@ -2,16 +2,16 @@
 import * as z from "zod";
 
 import {
-  runtimeHumanSessionControlSchema,
-  runtimeHumanSessionEventSchema,
-} from "./runtime-human-session.ts";
-import {
   postgresTextSchema,
   registerPostgresJsonSchemaProjection,
   toPostgresJsonSchema,
   validatePostgresJsonText,
   withPostgresJsonSchemaProjection,
 } from "./postgres-text.ts";
+import {
+  runtimeHumanSessionControlSchema,
+  runtimeHumanSessionEventSchema,
+} from "./runtime-human-session.ts";
 
 export const binIdSchema = postgresTextSchema
   .min(1, "bin 标识不能为空。")

@@ -119,6 +119,7 @@ export const humanSessions = pgTable(
       .default("pending"),
     runtimeId: text("runtime_id"),
     ownerGeneration: bigint("owner_generation", { mode: "bigint" }),
+    runtimeTokenHash: text("runtime_token_hash"),
     gatewayClosed: boolean("gateway_closed").notNull().default(false),
     runtimeClosed: boolean("runtime_closed").notNull().default(false),
     failure: jsonb("failure"),
@@ -138,14 +139,12 @@ export const humanSessions = pgTable(
     ),
     check(
       "human_sessions_owner_generation_check",
-      or(isNull(table.ownerGeneration), gte(table.ownerGeneration, 1n)),
+      or(isNull(table.ownerGeneration), gte(table.ownerGeneration, 1n))!,
     ),
     index("human_sessions_bin_status_idx").on(table.binId, table.status),
     uniqueIndex("human_sessions_one_active_bin_idx")
       .on(table.binId)
-      .where(
-        inArray(table.status, ["pending", "opening", "ready", "closing"]),
-      ),
+      .where(inArray(table.status, ["pending", "opening", "ready", "closing"])),
   ],
 );
 

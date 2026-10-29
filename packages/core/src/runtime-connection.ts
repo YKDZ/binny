@@ -12,6 +12,7 @@ import {
   type RuntimeConnectionOperations,
   type RuntimeEnvironment,
   type RuntimeExecution,
+  type RuntimeHeartbeatResult,
   type RuntimeHeartbeatInput,
 } from "@binny/contracts";
 import {
@@ -23,6 +24,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
+import { applyRuntimeHumanSessionHeartbeat } from "./human-session.ts";
 import {
   confirmManualRunOwnerStopped,
   interruptExpiredManualRuns,
@@ -406,9 +408,28 @@ export function createRuntimeConnectionStore(
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
+        const humanSession = await applyRuntimeHumanSessionHeartbeat(
+          transaction,
+          {
+            binId,
+            runtimeId: checked.data.runtimeId,
+            ownerGeneration: checked.data.ownerGeneration,
+            ownerConfirmed:
+              ownerState === "confirmed" && execution.status === "online",
+            ...(checked.data.humanSessionEvent === undefined
+              ? {}
+              : { event: checked.data.humanSessionEvent }),
+          },
+        );
         return execution.status === "incompatible"
           ? { ok: false, status: 409, error: execution.error }
-          : { ok: true, value: execution };
+          : {
+              ok: true,
+              value: {
+                ...execution,
+                ...(humanSession === undefined ? {} : { humanSession }),
+              } satisfies RuntimeHeartbeatResult,
+            };
       });
     },
 

@@ -1,0 +1,1 @@
+ALTER TABLE "human_sessions" ADD COLUMN "runtime_token_hash" text;

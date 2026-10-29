@@ -1,4 +1,9 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 
 import {
   collectorManifestSchema,
@@ -6,7 +11,6 @@ import {
   humanSessionSchema,
   type HumanSession,
   type HumanSessionApiError,
-  type HumanSessionCreated,
   type HumanSessionFailure,
   type HumanSessionOperation,
   type HumanSessionOperations,
@@ -14,34 +18,31 @@ import {
   type RuntimeHumanSessionControl,
   type RuntimeHumanSessionEvent,
 } from "@binny/contracts";
-import { and, eq, inArray, sql } from "drizzle-orm";
-
-import type { CoreDatabase, CoreTransaction } from "./database.ts";
-import { binConfigurations, humanSessions, manualRuns } from "./schema.ts";
+import {
+  binConfigurations,
+  humanSessions,
+  manualRuns,
+  type Database,
+  type Transaction,
+} from "@binny/db";
+import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 
 const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
-
-const sessionSelection = {
-  sessionId: humanSessions.sessionId,
-  binId: humanSessions.binId,
-  status: humanSessions.status,
-  requestedAt: humanSessions.requestedAt,
-  updatedAt: humanSessions.updatedAt,
-  readyAt: humanSessions.readyAt,
-  closedAt: humanSessions.closedAt,
-  failure: humanSessions.failure,
-};
 
 type SessionRow = typeof humanSessions.$inferSelect;
 
 export type HumanSessionStore = HumanSessionOperations & {
   authorizeHumanTunnel(
     sessionId: string,
+    binId: string,
     runtimeId: string,
     ownerGeneration: string,
+    token: string,
   ): Promise<boolean>;
   authorizeHumanViewer(sessionId: string, token: string): Promise<boolean>;
   markHumanGatewayClosed(sessionId: string): Promise<void>;
+  expirePendingHumanSessions(maxAgeMs: number): Promise<number>;
+  beginHumanGatewayShutdown(): Promise<void>;
   reconcileHumanSessionsAfterGatewayRestart(): Promise<void>;
 };
 
@@ -93,7 +94,7 @@ function closingStatus(
 }
 
 async function readActiveSession(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   binId: string,
 ): Promise<SessionRow | undefined> {
   const [row] = await database
@@ -110,14 +111,14 @@ async function readActiveSession(
 }
 
 export async function hasActiveHumanSession(
-  database: CoreDatabase | CoreTransaction,
+  database: Database | Transaction,
   binId: string,
 ): Promise<boolean> {
   return (await readActiveSession(database, binId)) !== undefined;
 }
 
 export async function applyRuntimeHumanSessionHeartbeat(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   options: {
     readonly binId: string;
     readonly runtimeId: string;
@@ -142,7 +143,12 @@ export async function applyRuntimeHumanSessionHeartbeat(
     ) {
       await transaction
         .update(humanSessions)
-        .set({ status: "ready", readyAt: sql`clock_timestamp()`, updatedAt: sql`clock_timestamp()` })
+        .set({
+          status: "ready",
+          runtimeTokenHash: null,
+          readyAt: sql`clock_timestamp()`,
+          updatedAt: sql`clock_timestamp()`,
+        })
         .where(eq(humanSessions.sessionId, session.sessionId));
     } else if (
       event.event === "expired" &&
@@ -151,7 +157,11 @@ export async function applyRuntimeHumanSessionHeartbeat(
     ) {
       await transaction
         .update(humanSessions)
-        .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+        .set({
+          status: "closing",
+          runtimeTokenHash: null,
+          updatedAt: sql`clock_timestamp()`,
+        })
         .where(eq(humanSessions.sessionId, session.sessionId));
     } else if (
       event.event === "failed" &&
@@ -167,15 +177,14 @@ export async function applyRuntimeHumanSessionHeartbeat(
       await transaction
         .update(humanSessions)
         .set({
-          status: closingStatus(
-            "failed",
-            session.gatewayClosed,
-            true,
-          ),
+          status: closingStatus("failed", session.gatewayClosed, true),
           runtimeClosed: true,
+          runtimeTokenHash: null,
           failure,
           updatedAt: sql`clock_timestamp()`,
-          ...(session.gatewayClosed ? { closedAt: sql`clock_timestamp()` } : {}),
+          ...(session.gatewayClosed
+            ? { closedAt: sql`clock_timestamp()` }
+            : {}),
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
     } else if (
@@ -193,8 +202,11 @@ export async function applyRuntimeHumanSessionHeartbeat(
         .set({
           status: nextStatus,
           runtimeClosed: true,
+          runtimeTokenHash: null,
           updatedAt: sql`clock_timestamp()`,
-          ...(nextStatus === "closed" ? { closedAt: sql`clock_timestamp()` } : {}),
+          ...(nextStatus === "closed"
+            ? { closedAt: sql`clock_timestamp()` }
+            : {}),
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
     }
@@ -208,7 +220,11 @@ export async function applyRuntimeHumanSessionHeartbeat(
   ) {
     await transaction
       .update(humanSessions)
-      .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+      .set({
+        status: "closing",
+        runtimeTokenHash: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
       .where(eq(humanSessions.sessionId, session.sessionId));
     session = (await readActiveSession(transaction, options.binId)) ?? session;
   } else if (
@@ -218,7 +234,11 @@ export async function applyRuntimeHumanSessionHeartbeat(
   ) {
     await transaction
       .update(humanSessions)
-      .set({ status: "closing", updatedAt: sql`clock_timestamp()` })
+      .set({
+        status: "closing",
+        runtimeTokenHash: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
       .where(eq(humanSessions.sessionId, session.sessionId));
     session = (await readActiveSession(transaction, options.binId)) ?? session;
   }
@@ -230,7 +250,13 @@ export async function applyRuntimeHumanSessionHeartbeat(
       .where(
         and(
           eq(manualRuns.binId, options.binId),
-          inArray(manualRuns.status, ["executing", "cancelling"]),
+          or(
+            inArray(manualRuns.status, ["executing", "cancelling"]),
+            and(
+              isNotNull(manualRuns.startedAt),
+              isNull(manualRuns.stopConfirmedAt),
+            ),
+          ),
         ),
       )
       .limit(1);
@@ -247,14 +273,24 @@ export async function applyRuntimeHumanSessionHeartbeat(
           updatedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
-      session = (await readActiveSession(transaction, options.binId)) ?? session;
+      session =
+        (await readActiveSession(transaction, options.binId)) ?? session;
     }
   }
 
-  if (session.status === "opening") {
+  if (session.status === "opening" && options.ownerConfirmed) {
+    const tunnelToken = randomBytes(32).toString("base64url");
+    await transaction
+      .update(humanSessions)
+      .set({
+        runtimeTokenHash: tokenHash(tunnelToken),
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(humanSessions.sessionId, session.sessionId));
     return {
       sessionId: session.sessionId,
       action: "open",
+      tunnelToken,
     };
   }
   if (session.status === "closing") {
@@ -266,14 +302,15 @@ export async function applyRuntimeHumanSessionHeartbeat(
   return undefined;
 }
 
-export function createHumanSessionStore(
-  database: CoreDatabase,
-): HumanSessionStore {
+export function createHumanSessionStore(database: Database): HumanSessionStore {
   return {
     async requestHumanSession(binId) {
       return await database.transaction(async (transaction) => {
         const [bin] = await transaction
-          .select({ id: binConfigurations.id, collector: binConfigurations.collector })
+          .select({
+            id: binConfigurations.id,
+            collector: binConfigurations.collector,
+          })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
           .for("update");
@@ -376,6 +413,7 @@ export function createHumanSessionStore(
               status: "closed",
               gatewayClosed: true,
               runtimeClosed: true,
+              runtimeTokenHash: null,
               updatedAt: sql`clock_timestamp()`,
               closedAt: sql`clock_timestamp()`,
             })
@@ -392,6 +430,7 @@ export function createHumanSessionStore(
               row.status === "closed" || row.status === "failed"
                 ? row.status
                 : "closing",
+            runtimeTokenHash: null,
             updatedAt: sql`clock_timestamp()`,
           })
           .where(eq(humanSessions.sessionId, sessionId))
@@ -402,19 +441,33 @@ export function createHumanSessionStore(
       });
     },
 
-    async authorizeHumanTunnel(sessionId, runtimeId, ownerGeneration) {
+    async authorizeHumanTunnel(
+      sessionId,
+      binId,
+      runtimeId,
+      ownerGeneration,
+      token,
+    ) {
       const [row] = await database
         .select({
           status: humanSessions.status,
+          binId: humanSessions.binId,
           runtimeId: humanSessions.runtimeId,
           ownerGeneration: humanSessions.ownerGeneration,
+          runtimeTokenHash: humanSessions.runtimeTokenHash,
         })
         .from(humanSessions)
         .where(eq(humanSessions.sessionId, sessionId));
       return (
         row?.status === "opening" &&
+        row.binId === binId &&
         row.runtimeId === runtimeId &&
-        row.ownerGeneration === BigInt(ownerGeneration)
+        row.ownerGeneration === BigInt(ownerGeneration) &&
+        row.runtimeTokenHash !== null &&
+        timingSafeEqual(
+          Buffer.from(row.runtimeTokenHash, "hex"),
+          Buffer.from(tokenHash(token), "hex"),
+        )
       );
     },
 
@@ -429,7 +482,9 @@ export function createHumanSessionStore(
       if (row?.status !== "ready") return false;
       const stored = Buffer.from(row.accessTokenHash, "hex");
       const supplied = Buffer.from(tokenHash(token), "hex");
-      return stored.length === supplied.length && timingSafeEqual(stored, supplied);
+      return (
+        stored.length === supplied.length && timingSafeEqual(stored, supplied)
+      );
     },
 
     async markHumanGatewayClosed(sessionId) {
@@ -445,22 +500,94 @@ export function createHumanSessionStore(
           .for("update");
         if (row === undefined || row.status === "closed") return;
         if (row.status !== "closing" && row.status !== "failed") return;
-        const status = closingStatus(
-          row.status,
-          true,
-          row.runtimeClosed,
-        );
+        const status = closingStatus(row.status, true, row.runtimeClosed);
         await transaction
           .update(humanSessions)
           .set({
             status,
             gatewayClosed: true,
+            runtimeTokenHash: null,
             updatedAt: sql`clock_timestamp()`,
             ...(status === "closed" || status === "failed"
               ? { closedAt: sql`clock_timestamp()` }
               : {}),
           })
           .where(eq(humanSessions.sessionId, sessionId));
+      });
+    },
+
+    async expirePendingHumanSessions(maxAgeMs) {
+      if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1)
+        throw new Error("人工会话等待期限必须是正整数。");
+      return await database.transaction(async (transaction) => {
+        const bins = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .innerJoin(
+            humanSessions,
+            eq(humanSessions.binId, binConfigurations.id),
+          )
+          .where(
+            and(
+              eq(humanSessions.status, "pending"),
+              sql`${humanSessions.requestedAt} < clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+            ),
+          )
+          .orderBy(binConfigurations.id)
+          .for("update");
+        let expired = 0;
+        for (const bin of bins) {
+          const rows = await transaction
+            .update(humanSessions)
+            .set({
+              status: "closed",
+              gatewayClosed: true,
+              runtimeClosed: true,
+              runtimeTokenHash: null,
+              updatedAt: sql`clock_timestamp()`,
+              closedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(humanSessions.binId, bin.id),
+                eq(humanSessions.status, "pending"),
+                sql`${humanSessions.requestedAt} < clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+              ),
+            )
+            .returning({ sessionId: humanSessions.sessionId });
+          expired += rows.length;
+        }
+        return expired;
+      });
+    },
+
+    async beginHumanGatewayShutdown() {
+      await database.transaction(async (transaction) => {
+        const bins = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .innerJoin(
+            humanSessions,
+            eq(humanSessions.binId, binConfigurations.id),
+          )
+          .where(inArray(humanSessions.status, activeStatuses))
+          .orderBy(binConfigurations.id)
+          .for("update");
+        for (const bin of bins) {
+          await transaction
+            .update(humanSessions)
+            .set({
+              status: "closing",
+              runtimeTokenHash: null,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(humanSessions.binId, bin.id),
+                inArray(humanSessions.status, activeStatuses),
+              ),
+            );
+        }
       });
     },
 
@@ -482,6 +609,7 @@ export function createHumanSessionStore(
             .set({
               status: "closing",
               gatewayClosed: true,
+              runtimeTokenHash: null,
               updatedAt: sql`clock_timestamp()`,
             })
             .where(
@@ -497,7 +625,7 @@ export function createHumanSessionStore(
 }
 
 export async function applyHumanGatewayClosed(
-  transaction: CoreTransaction,
+  transaction: Transaction,
   sessionId: string,
 ): Promise<void> {
   const [row] = await transaction
@@ -516,6 +644,7 @@ export async function applyHumanGatewayClosed(
     .set({
       status,
       gatewayClosed: true,
+      runtimeTokenHash: null,
       updatedAt: sql`clock_timestamp()`,
       ...(status === "closed" || status === "failed"
         ? { closedAt: sql`clock_timestamp()` }
