@@ -331,7 +331,7 @@ services:
     restart: "no"
 
   runtime-linuxdo:
-    image: ${BINNY24_RUNTIME_IMAGE:-binny24-linuxdo:local}
+    image: ${BINNY25_RUNTIME_IMAGE:-binny24-linuxdo:local}
     profiles: [binny24]
     build:
       context: .
@@ -344,7 +344,7 @@ services:
         condition: service_started
     environment:
       BINNY_API_URL: http://server:3000
-      BINNY_BIN_ID: ${BINNY24_BIN_ID:-linuxdo}
+      BINNY_BIN_ID: ${BINNY25_BIN_ID:-linuxdo}
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
@@ -362,7 +362,7 @@ services:
       - --conditions=source
       - scripts/binny-e2e-linuxdo-source.ts
     environment:
-      BINNY24_SOURCE_PORT: 8081
+      BINNY25_SOURCE_PORT: 8081
     restart: unless-stopped
 
 volumes:

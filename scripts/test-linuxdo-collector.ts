@@ -24,7 +24,6 @@ type CliWire<T> = {
 type ManualRun = {
   readonly runId: string;
   readonly status: "queued" | "running" | "completed" | "failed";
-  readonly completedScopes: readonly string[];
   readonly result?: {
     readonly check?: {
       readonly availability: "available" | "unavailable" | "unknown";
@@ -37,6 +36,7 @@ type ManualRun = {
     readonly error?: {
       readonly code: string;
       readonly requiresHuman: boolean;
+      readonly path?: readonly (string | number)[];
     };
     readonly completedScopes?: readonly string[];
     readonly commits?: readonly {
@@ -54,7 +54,9 @@ type FixtureState = {
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
+  readonly discoveryAddedReply: boolean;
   readonly omittedPostIds: readonly number[];
+  readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
 };
@@ -108,13 +110,13 @@ const repositoryRoot = path.resolve(
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
-const projectName = `binny24-${suffix}`;
+const projectName = `binny25-${suffix}`;
 const serverImage = `${projectName}-server:local`;
 const browserImage = `${projectName}-linuxdo:local`;
 const outerBrowserContainer = `${projectName}-outer-browser`;
-const outerBrowserWsPath = `/binny24-${randomUUID()}`;
-const publishedHost = process.env.BINNY24_PUBLISHED_HOST ?? "172.17.0.1";
-const password = `binny24-${randomUUID().replaceAll("-", "")}`;
+const outerBrowserWsPath = `/binny25-${randomUUID()}`;
+const publishedHost = process.env.BINNY25_PUBLISHED_HOST ?? "172.17.0.1";
+const password = `binny25-${randomUUID().replaceAll("-", "")}`;
 let overlayDirectory: string | undefined;
 let overlayFile: string | undefined;
 let browser: Browser | undefined;
@@ -126,8 +128,8 @@ let outerBrowserStarted = false;
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY24_BIN_ID: "binny24-topic",
-    BINNY24_RUNTIME_IMAGE: browserImage,
+    BINNY25_BIN_ID: "binny25-topic",
+    BINNY25_RUNTIME_IMAGE: browserImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -214,13 +216,13 @@ function cliData<T>(result: ProcessResult, variant: string): T {
 }
 
 async function createOverlay(): Promise<void> {
-  overlayDirectory = await mkdtemp(path.join(tmpdir(), "binny24-compose-"));
+  overlayDirectory = await mkdtemp(path.join(tmpdir(), "binny25-compose-"));
   overlayFile = path.join(overlayDirectory, "compose.network.yaml");
   const subnets = {
-    api: process.env.BINNY24_API_SUBNET ?? "10.253.24.0/24",
-    runtime: process.env.BINNY24_RUNTIME_SUBNET ?? "10.253.178.0/24",
-    connections: process.env.BINNY24_CONNECTIONS_SUBNET ?? "10.253.179.0/24",
-    browser: process.env.BINNY24_BROWSER_SUBNET ?? "10.253.180.0/24",
+    api: process.env.BINNY25_API_SUBNET ?? "10.253.25.0/24",
+    runtime: process.env.BINNY25_RUNTIME_SUBNET ?? "10.253.187.0/24",
+    connections: process.env.BINNY25_CONNECTIONS_SUBNET ?? "10.253.188.0/24",
+    browser: process.env.BINNY25_BROWSER_SUBNET ?? "10.253.189.0/24",
   };
   await writeFile(
     overlayFile,
@@ -382,7 +384,7 @@ async function waitForRuntime(): Promise<void> {
   const deadline = Date.now() + 45_000;
   let latest = "运行器还没有上线。";
   while (Date.now() < deadline) {
-    const result = await cli(["bin", "get", "binny24-topic"]);
+    const result = await cli(["bin", "get", "binny25-topic"]);
     if (result.code === 0) {
       const bin = cliData<{
         readonly execution: { readonly status: string };
@@ -405,7 +407,7 @@ async function trigger(
     await cli([
       "run",
       "trigger",
-      "binny24-topic",
+      "binny25-topic",
       action,
       "--params",
       JSON.stringify(params),
@@ -417,7 +419,7 @@ async function trigger(
   let latest = queued;
   while (Date.now() < deadline) {
     latest = cliData<ManualRun>(
-      await cli(["run", "get", "binny24-topic", queued.runId]),
+      await cli(["run", "get", "binny25-topic", queued.runId]),
       "found",
     );
     if (latest.status === "completed" || latest.status === "failed")
@@ -446,7 +448,7 @@ async function startOuterBrowser(): Promise<Browser> {
     browserImage,
     "--input-type=module",
     "--eval",
-    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY24_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY25_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
   ]);
   assert.equal(launch.code, 0, `外层浏览器启动失败：\n${launch.stderr}`);
   outerBrowserStarted = true;
@@ -456,10 +458,10 @@ async function startOuterBrowser(): Promise<Browser> {
   while (Date.now() < deadline) {
     const result = await run("docker", ["logs", outerBrowserContainer]);
     logs = result.stdout + result.stderr;
-    if (logs.includes("BINNY24_OUTER_BROWSER_READY")) break;
+    if (logs.includes("BINNY25_OUTER_BROWSER_READY")) break;
     await delay(100);
   }
-  assert.ok(logs.includes("BINNY24_OUTER_BROWSER_READY"), logs);
+  assert.ok(logs.includes("BINNY25_OUTER_BROWSER_READY"), logs);
   const mapping = (
     await run("docker", ["port", outerBrowserContainer, "9224/tcp"])
   ).stdout.trim();
@@ -519,14 +521,14 @@ async function navigateThroughViewer(page: Page, url: string): Promise<void> {
 
 async function openHumanSession(): Promise<BrowserSession> {
   const opened = cliData<BrowserSession>(
-    await cli(["human", "open", "binny24-topic"]),
+    await cli(["human", "open", "binny25-topic"]),
     "opened",
   );
   const deadline = Date.now() + 90_000;
   let latest = opened.status ?? "pending";
   while (Date.now() < deadline) {
     const current = cliData<BrowserSession>(
-      await cli(["human", "get", "binny24-topic", opened.sessionId]),
+      await cli(["human", "get", "binny25-topic", opened.sessionId]),
       "found",
     );
     latest = current.status ?? "unknown";
@@ -540,12 +542,12 @@ async function openHumanSession(): Promise<BrowserSession> {
 }
 
 async function closeHumanSession(sessionId: string): Promise<void> {
-  cliData(await cli(["human", "close", "binny24-topic", sessionId]), "closed");
+  cliData(await cli(["human", "close", "binny25-topic", sessionId]), "closed");
 }
 
 async function searchArchiveItem(text: string): Promise<ArchiveItem> {
   const query = {
-    scope: { kind: "current", binId: "binny24-topic" },
+    scope: { kind: "current", binId: "binny25-topic" },
     text: { kind: "literal", value: text },
     select: ["sourceKey", "sourceRef", "capture.completeness"],
     limit: 10,
@@ -560,14 +562,14 @@ async function searchArchiveItem(text: string): Promise<ArchiveItem> {
   const result = page.results[0];
   assert.ok(result !== undefined);
   return cliData<ArchiveItem>(
-    await cli(["archive", "item", result.itemId, "--bin", "binny24-topic"]),
+    await cli(["archive", "item", result.itemId, "--bin", "binny25-topic"]),
     "found",
   );
 }
 
 async function readArchiveItem(itemId: string): Promise<ArchiveItem> {
   return cliData<ArchiveItem>(
-    await cli(["archive", "item", itemId, "--bin", "binny24-topic"]),
+    await cli(["archive", "item", itemId, "--bin", "binny25-topic"]),
     "found",
   );
 }
@@ -582,7 +584,7 @@ async function readArchiveRevision(
 }
 
 function binState(item: ArchiveItem): ArchiveItemState {
-  const view = item.views.find(({ binId }) => binId === "binny24-topic");
+  const view = item.views.find(({ binId }) => binId === "binny25-topic");
   assert.ok(view !== undefined, "归档条目缺少当前 bin 视图。");
   return view.state;
 }
@@ -612,7 +614,7 @@ async function readOutgoingRelations(itemId: string): Promise<
       "relations",
       itemId,
       "--bin",
-      "binny24-topic",
+      "binny25-topic",
       "--direction",
       "outgoing",
     ]),
@@ -710,7 +712,7 @@ async function verifyLoginRequired(): Promise<void> {
     await navigateThroughViewer(viewer, "http://linuxdo-e2e-source:8081/login");
     await waitForSourceEvent("login-page", loginPageCount + 1);
     await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type("binny24-user", { delay: 5 });
+    await viewer.keyboard.type("binny25-user", { delay: 5 });
     await viewer.keyboard.press("Tab");
     await viewer.keyboard.type("linuxdo-fixture", { delay: 5 });
     await viewer.keyboard.press("Tab");
@@ -752,7 +754,7 @@ async function verifyLoginRequired(): Promise<void> {
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "binny24-topic" },
+        scope: { kind: "current", binId: "binny25-topic" },
         text: { kind: "literal", value: "主题正文版本 1" },
         select: ["sourceKey"],
         limit: 10,
@@ -761,6 +763,47 @@ async function verifyLoginRequired(): Promise<void> {
     "found",
   );
   assert.equal(beforeCollection.results.length, 0);
+}
+
+async function verifyActionParameterValidation(): Promise<void> {
+  const before = cliData<{
+    readonly config: unknown;
+    readonly targets: readonly unknown[];
+  }>(await cli(["bin", "get", "binny25-topic"]), "found");
+  for (const [params, path] of [
+    [{ createdAfter: "yesterday" }, ["params", "createdAfter"]],
+    [{ maxTopics: 501 }, ["params", "maxTopics"]],
+    [{ targetIds: [1] }, ["params", "targetIds", "0"]],
+  ] as const) {
+    const response = await fetch(`${apiUrl()}/bins/binny25-topic/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "collect", params }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    assert.equal(response.status, 400);
+    const payload = (await response.json()) as {
+      readonly error: {
+        readonly code: string;
+        readonly path?: readonly (string | number)[];
+      };
+    };
+    assert.equal(payload.error.code, "invalid_action_parameters");
+    assert.deepEqual(payload.error.path, path);
+  }
+
+  const missingTarget = await trigger("collect", {
+    targetIds: ["not-configured"],
+  });
+  assert.equal(missingTarget.status, "failed");
+  assert.equal(missingTarget.result?.error?.code, "linuxdo_target_not_found");
+  assert.deepEqual(missingTarget.result?.error?.path, ["targetIds", 0]);
+  const after = cliData<{
+    readonly config: unknown;
+    readonly targets: readonly unknown[];
+  }>(await cli(["bin", "get", "binny25-topic"]), "found");
+  assert.deepEqual(after.config, before.config);
+  assert.deepEqual(after.targets, before.targets);
 }
 
 async function assertSignedInCheckFailures(): Promise<void> {
@@ -1015,7 +1058,7 @@ async function verifyTopicArchive(): Promise<void> {
   );
   const finiteRoot = await readArchiveItem(root.itemId);
   const finiteView = finiteRoot.views.find(
-    ({ binId }) => binId === "binny24-topic",
+    ({ binId }) => binId === "binny25-topic",
   );
   assert.ok(
     finiteView?.diagnostics?.some(
@@ -1044,7 +1087,7 @@ async function verifyTopicArchive(): Promise<void> {
   assert.equal(missingPhoto.reason, "媒体资源未能归档。");
   assert.equal(partialRootState.resources?.length, 2);
   const partialRootView = partialRoot.views.find(
-    ({ binId }) => binId === "binny24-topic",
+    ({ binId }) => binId === "binny25-topic",
   );
   assert.ok(
     partialRootView?.diagnostics?.some(
@@ -1066,7 +1109,7 @@ async function verifyTopicArchive(): Promise<void> {
     missingObservationCount + 1,
   );
   const retriedMissingView = retriedMissingRoot.views.find(
-    ({ binId }) => binId === "binny24-topic",
+    ({ binId }) => binId === "binny25-topic",
   );
   assert.ok(
     retriedMissingView?.diagnostics?.some(
@@ -1090,7 +1133,7 @@ async function verifyTopicArchive(): Promise<void> {
   );
   assert.equal(challengedRootState.resources?.length, 2);
   const challengedRootView = challengedRoot.views.find(
-    ({ binId }) => binId === "binny24-topic",
+    ({ binId }) => binId === "binny25-topic",
   );
   assert.ok(
     challengedRootView?.diagnostics?.some(
@@ -1132,6 +1175,126 @@ async function verifyTopicArchive(): Promise<void> {
     backfilledRootState.body?.html,
   );
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
+}
+
+async function verifyDiscovery(): Promise<void> {
+  await updateFixtureState({
+    topicVersion: 3,
+    replyVersion: 3,
+    discoveryAddedReply: true,
+    challengeMedia: false,
+    unavailableMedia: [],
+    unavailableTopicIds: [],
+  });
+
+  const beforeCheck = await sourceState();
+  const latestCheck = await trigger("check", { targetIds: ["latest"] });
+  assert.equal(latestCheck.status, "completed", JSON.stringify(latestCheck));
+  assert.equal(latestCheck.result?.check?.availability, "available");
+  assert.deepEqual(latestCheck.result?.check?.scope, ["target:latest"]);
+  const afterCheck = await sourceState();
+  const latestPage = afterCheck.events
+    .filter(
+      ({ action, path }) =>
+        action === "topic-list" && path.startsWith("/latest.json"),
+    )
+    .at(-1);
+  assert.ok(latestPage !== undefined);
+  assert.equal(latestPage.authenticated, true);
+  assert.ok(afterCheck.events.length > beforeCheck.events.length);
+
+  const beforeCollection = await sourceState();
+  const collection = await trigger("collect", {
+    targetIds: ["latest", "category"],
+    maxTopics: 10,
+  });
+  assert.equal(collection.status, "completed", JSON.stringify(collection));
+  assert.ok(collection.result?.completedScopes?.includes("target:latest"));
+  assert.ok(collection.result?.completedScopes?.includes("target:category"));
+  assert.ok(collection.result?.completedScopes?.includes("topic:2401"));
+  assert.ok(collection.result?.completedScopes?.includes("post:240005"));
+
+  const afterCollection = await sourceState();
+  const newTopicRequests = afterCollection.events
+    .slice(beforeCollection.events.length)
+    .filter(({ action }) => action === "topic")
+    .map(({ path }) => path);
+  assert.deepEqual(newTopicRequests.toSorted(), [
+    "/t/2401.json",
+    "/t/2402.json",
+    "/t/2403.json",
+  ]);
+  assert.ok(
+    afterCollection.events.some(
+      ({ action, path, authenticated }) =>
+        action === "topic-list" &&
+        path.startsWith("/latest.json?page=1") &&
+        authenticated === true,
+    ),
+  );
+  assert.ok(
+    afterCollection.events.some(
+      ({ action, path, authenticated }) =>
+        action === "topic-list" &&
+        path.startsWith("/c/controlled/42/l/latest.json") &&
+        authenticated === true,
+    ),
+  );
+
+  const editedRoot = await searchArchiveItem("主题正文版本 3");
+  assert.ok(binState(editedRoot).body?.text?.includes("主题正文版本 3"));
+  const addedReply = await searchArchiveItem("发现后新增的回复");
+  assert.equal(addedReply.sourceKey.key, "post:240005");
+  assert.ok(
+    (await readOutgoingRelations(editedRoot.itemId)).some(
+      ({ state }) => state?.to.sourceKey?.key === "post:240005",
+    ),
+  );
+
+  const cutoff = await trigger("collect", {
+    targetIds: ["latest"],
+    createdAfter: "2026-10-27T00:00:00.000Z",
+    maxTopics: 10,
+  });
+  assert.equal(cutoff.status, "completed", JSON.stringify(cutoff));
+  assert.ok(cutoff.result?.completedScopes?.includes("target:latest"));
+  assert.ok(cutoff.result?.completedScopes?.includes("topic:2402"));
+  assert.ok(cutoff.result?.completedScopes?.includes("post:240200"));
+  assert.ok(!cutoff.result?.completedScopes?.includes("topic:2403"));
+  assert.ok(!cutoff.result?.completedScopes?.includes("post:240300"));
+
+  const limited = await trigger("collect", {
+    targetIds: ["latest", "category"],
+    maxTopics: 1,
+  });
+  assert.equal(limited.status, "completed", JSON.stringify(limited));
+  assert.ok(
+    limited.result?.completedScopes?.includes(
+      "target:latest:limited:maxTopics=1",
+    ),
+  );
+  assert.ok(
+    limited.result?.completedScopes?.includes(
+      "target:category:not-visited:maxTopics=1",
+    ),
+  );
+
+  await updateFixtureState({ unavailableTopicIds: [2402] });
+  const failed = await trigger("collect", {
+    targetIds: ["latest"],
+    maxTopics: 3,
+  });
+  assert.equal(failed.status, "failed", JSON.stringify(failed));
+  assert.equal(failed.result?.error?.code, "discourse_topic_unavailable");
+  assert.ok(
+    failed.result?.completedScopes?.includes("topic:2401"),
+    `失败运行应报告已提交的主题范围：${JSON.stringify(failed)}`,
+  );
+  assert.ok(
+    failed.result?.completedScopes?.includes("post:240001"),
+    `失败运行应报告已提交的帖子范围：${JSON.stringify(failed)}`,
+  );
+  await updateFixtureState({ unavailableTopicIds: [] });
 }
 
 async function verifyLogout(): Promise<void> {
@@ -1196,21 +1359,32 @@ async function main(): Promise<void> {
       await cli([
         "bin",
         "create",
-        "binny24-topic",
+        "binny25-topic",
         "--collector",
         JSON.stringify(manifest),
         "--identity",
-        "binny24-profile",
+        "binny25-profile",
         "--config",
         JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
         "--targets",
-        "[]",
+        JSON.stringify([
+          { id: "latest", kind: "latest" },
+          {
+            id: "category",
+            kind: "category",
+            categoryId: 42,
+            categorySlugPath: "controlled",
+          },
+          { id: "pinned", kind: "topic", topicId: 2401 },
+        ]),
       ]),
       "created",
     );
-    assert.equal(created.id, "binny24-topic");
+    assert.equal(created.id, "binny25-topic");
     await waitForRuntime();
 
+    await verifyActionParameterValidation();
+    process.stdout.write("本次动作参数校验定位错误且不改长期配置通过。\n");
     await verifyLoginRequired();
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
     await assertSignedInCheckFailures();
@@ -1218,6 +1392,10 @@ async function main(): Promise<void> {
     await verifyTopicArchive();
     process.stdout.write(
       "主题、回复、关系、媒体、重复、编辑、新回复与有限观察通过。\n",
+    );
+    await verifyDiscovery();
+    process.stdout.write(
+      "latest/category 分页、去重、时间范围、数量限制和部分失败范围通过。\n",
     );
     await verifyLogout();
     process.stdout.write("退出登录后的全新检查和采集语义通过。\n");
@@ -1231,8 +1409,38 @@ async function main(): Promise<void> {
       await run("docker", ["rm", "--force", outerBrowserContainer]).catch(
         () => undefined,
       );
-    if (composeStarted)
+    if (composeStarted) {
       await rawCompose(["down", "--volumes", "--remove-orphans"]);
+      for (const service of [
+        "postgres",
+        "server",
+        "runtime-linuxdo",
+        "linuxdo-e2e-source",
+      ]) {
+        await run("docker", [
+          "rm",
+          "--force",
+          `${projectName}-${service}-1`,
+        ]).catch(() => undefined);
+      }
+      for (const network of ["default", "runtime", "connections", "browser"]) {
+        await run("docker", [
+          "network",
+          "rm",
+          `${projectName}_${network}`,
+        ]).catch(() => undefined);
+      }
+      for (const volume of [
+        "postgres-data",
+        "bins",
+        "resource-data",
+        "linuxdo-runtime-owner",
+      ]) {
+        await run("docker", ["volume", "rm", `${projectName}_${volume}`]).catch(
+          () => undefined,
+        );
+      }
+    }
     await run("docker", [
       "image",
       "rm",

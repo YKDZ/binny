@@ -197,11 +197,16 @@ export type CollectorRunContext = Omit<
 export class CollectorActionError extends Error {
   readonly type = collectorActionErrorType;
   readonly failure: ManualRunFailure;
+  readonly completedScopes: readonly string[];
 
-  constructor(failure: ManualRunFailure) {
+  constructor(
+    failure: ManualRunFailure,
+    completedScopes: readonly string[] = [],
+  ) {
     super(failure.message);
     this.name = "CollectorActionError";
     this.failure = failure;
+    this.completedScopes = [...completedScopes];
   }
 }
 
@@ -223,8 +228,9 @@ export function isCollectorActionError(
 
 export function collectorActionError(
   failure: ManualRunFailure,
+  completedScopes: readonly string[] = [],
 ): CollectorActionError {
-  return new CollectorActionError(failure);
+  return new CollectorActionError(failure, completedScopes);
 }
 
 /** 给动作提供固定 run/bin/version 的正式 API 归档提交能力。 */

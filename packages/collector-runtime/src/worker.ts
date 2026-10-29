@@ -156,9 +156,12 @@ async function executeRun(
       completedScopes: checked.success ? checked.data.completedScopes : [],
     };
   } catch (error) {
+    const completedScopes = isCollectorActionError(error)
+      ? [...error.completedScopes]
+      : [];
     return {
       status: "failed",
-      completedScopes: [],
+      completedScopes,
       error: failureFrom(error),
     };
   }
