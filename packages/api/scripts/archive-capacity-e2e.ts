@@ -864,25 +864,46 @@ async function verifyCascadeAndSharedResources(
   const cascadeRootId =
     itemIds?.get(mainItemCount) ?? manifest.cascadeRootItemId;
   const sharedOwnerId = itemIds?.get(10) ?? manifest.deletedSharedOwnerItemId;
-  const cascadeStartedAt = performance.now();
-  const cascadeResponse = await client.archives.items[":itemId"].$delete({
-    param: { itemId: cascadeRootId },
-  });
-  assert.equal(
-    cascadeResponse.status,
-    200,
-    await cascadeResponse.clone().text(),
-  );
-  const cascadeDeletion = archiveItemDeletionResultSchema.parse(
-    await cascadeResponse.json(),
-  );
-  assert.equal(cascadeDeletion.deletedItemIds.length, shape.cascadeCount);
-  const cascadeMeasurement: QueryMeasurement = {
-    name: "级联删除 " + String(shape.cascadeCount) + " 个条目",
-    elapsedMilliseconds: performance.now() - cascadeStartedAt,
-    status: cascadeResponse.status,
-    resultCount: cascadeDeletion.deletedItemIds.length,
-  };
+  const deletionAlreadyCompleted =
+    manifest.cascadeDeletionMilliseconds !== undefined;
+  let cascadeMeasurement: QueryMeasurement;
+  let deletedCascadeItems = 0;
+  if (deletionAlreadyCompleted) {
+    // manifest 仅在级联和共享媒体删除均验证成功后写入，可据此安全重验删除阶段。
+    const cascadeRootRead = await client.archives.items[":itemId"].$get({
+      param: { itemId: cascadeRootId },
+      query: { binId },
+    });
+    assert.equal(cascadeRootRead.status, 404);
+    deletedCascadeItems = shape.cascadeCount;
+    cascadeMeasurement = {
+      name: "级联删除 " + String(shape.cascadeCount) + " 个条目完成后复验",
+      elapsedMilliseconds: manifest.cascadeDeletionMilliseconds,
+      status: 200,
+      resultCount: shape.cascadeCount,
+    };
+  } else {
+    const cascadeStartedAt = performance.now();
+    const cascadeResponse = await client.archives.items[":itemId"].$delete({
+      param: { itemId: cascadeRootId },
+    });
+    assert.equal(
+      cascadeResponse.status,
+      200,
+      await cascadeResponse.clone().text(),
+    );
+    const cascadeDeletion = archiveItemDeletionResultSchema.parse(
+      await cascadeResponse.json(),
+    );
+    assert.equal(cascadeDeletion.deletedItemIds.length, shape.cascadeCount);
+    deletedCascadeItems = cascadeDeletion.deletedItemIds.length;
+    cascadeMeasurement = {
+      name: "级联删除 " + String(shape.cascadeCount) + " 个条目",
+      elapsedMilliseconds: performance.now() - cascadeStartedAt,
+      status: cascadeResponse.status,
+      resultCount: cascadeDeletion.deletedItemIds.length,
+    };
+  }
   const leafSearch = await measureSearch(client, "级联删除后查询", {
     scope: { kind: "current", binId },
     where: itemKeyFilter(shape.itemCount - 1),
@@ -893,27 +914,24 @@ async function verifyCascadeAndSharedResources(
   });
   assert.equal(leafSearch.status, 200);
   assert.equal(leafSearch.resultCount, 0);
-  const cascadeRootRead = await client.archives.items[":itemId"].$get({
-    param: { itemId: cascadeRootId },
-    query: { binId },
-  });
-  assert.equal(cascadeRootRead.status, 404);
-
-  const ownerStartedAt = performance.now();
-  const ownerDeletion = await client.archives.items[":itemId"].$delete({
-    param: { itemId: sharedOwnerId },
-  });
-  assert.equal(ownerDeletion.status, 200, await ownerDeletion.clone().text());
-  const ownerDeletionResult = archiveItemDeletionResultSchema.parse(
-    await ownerDeletion.json(),
-  );
-  assert.equal(ownerDeletionResult.deletedItemIds.length, 1);
-  const ownerMeasurement: QueryMeasurement = {
-    name: "删除共享媒体的一个拥有条目",
-    elapsedMilliseconds: performance.now() - ownerStartedAt,
-    status: ownerDeletion.status,
-    resultCount: ownerDeletionResult.deletedItemIds.length,
-  };
+  let ownerMeasurement: QueryMeasurement | undefined;
+  if (!deletionAlreadyCompleted) {
+    const ownerStartedAt = performance.now();
+    const ownerDeletion = await client.archives.items[":itemId"].$delete({
+      param: { itemId: sharedOwnerId },
+    });
+    assert.equal(ownerDeletion.status, 200, await ownerDeletion.clone().text());
+    const ownerDeletionResult = archiveItemDeletionResultSchema.parse(
+      await ownerDeletion.json(),
+    );
+    assert.equal(ownerDeletionResult.deletedItemIds.length, 1);
+    ownerMeasurement = {
+      name: "删除共享媒体的一个拥有条目",
+      elapsedMilliseconds: performance.now() - ownerStartedAt,
+      status: ownerDeletion.status,
+      resultCount: ownerDeletionResult.deletedItemIds.length,
+    };
+  }
   const deletedItemRead = await client.archives.items[":itemId"].$get({
     param: { itemId: sharedOwnerId },
     query: { binId },
@@ -949,9 +967,13 @@ async function verifyCascadeAndSharedResources(
     manifest.sharedBytes,
   );
   return {
-    deletedCascadeItems: cascadeDeletion.deletedItemIds.length,
-    deletedSharedOwnerItems: ownerDeletionResult.deletedItemIds.length,
-    measurements: [cascadeMeasurement, leafSearch, ownerMeasurement],
+    deletedCascadeItems,
+    deletedSharedOwnerItems: 1,
+    measurements: [
+      ...(deletionAlreadyCompleted ? [] : [cascadeMeasurement]),
+      leafSearch,
+      ...(ownerMeasurement === undefined ? [] : [ownerMeasurement]),
+    ],
   };
 }
 

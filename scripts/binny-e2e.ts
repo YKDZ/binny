@@ -5873,7 +5873,7 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
     readonly uniqueReferencedResourceCount: number;
     readonly expectedReferencedUniqueMediaBytes: number;
   };
-  if (capacityPhase !== "verify") {
+  if (capacityPhase === "seed" || capacityPhase === "all") {
     assert.equal(
       resourceVolumeDelta.fileCount,
       capacityReport.uniqueReferencedResourceCount,
@@ -5884,6 +5884,9 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
       capacityReport.expectedReferencedUniqueMediaBytes,
       "磁盘新增资源正文总字节数应与 HTTP 上传的唯一媒体字节相符。",
     );
+  } else if (capacityPhase === "delete") {
+    assert.equal(resourceVolumeDelta.fileCount, 0);
+    assert.equal(resourceVolumeDelta.apparentBytes, 0);
   }
   const commit = await run("git", ["rev-parse", "HEAD"]);
   assert.equal(commit.code, 0, commit.stderr);
