@@ -103,7 +103,8 @@ function computeNextDue(
       ok: false,
       error: {
         code: "invalid_schedule_expression",
-        message: "表达式必须符合六字段规则，日期与星期不能同时指定。",
+        message:
+          "表达式必须符合 cron-parser 的 strict 规则，且日期与星期不能同时指定。",
         path: ["expression"],
       },
     };

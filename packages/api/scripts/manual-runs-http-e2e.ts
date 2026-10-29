@@ -545,13 +545,13 @@ async function verifyAvailabilityChecks(): Promise<void> {
     assert.deepEqual((await search.json()).results, []);
 }
 
-function nextLastSundayUtc(month: number, hour: number): Date {
+function nextLastSundayAtUtc(month: number, hour: number, minute = 0): Date {
   const now = Date.now();
   for (let year = new Date(now).getUTCFullYear(); ; year += 1) {
     const lastDay = new Date(Date.UTC(year, month + 1, 0));
     const date = lastDay.getUTCDate() - lastDay.getUTCDay();
-    const transition = new Date(Date.UTC(year, month, date, hour));
-    if (transition.getTime() > now) return transition;
+    const dueAt = new Date(Date.UTC(year, month, date, hour, minute));
+    if (dueAt.getTime() > now) return dueAt;
   }
 }
 
@@ -702,7 +702,9 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   ].$get({ param: { binId, scheduleId: schedule.scheduleId } });
   assert.equal(afterRemoval.status, 404);
 
-  const springTransition = nextLastSundayUtc(2, 1);
+  // cron-parser 会跳过春季缺失的本地 01:30；先按转换点选年，再检查其后的到期点。
+  const springTransition = nextLastSundayAtUtc(2, 1);
+  const springDueAt = new Date(springTransition.getTime() + 30 * 60 * 1000);
   const springExpression = "0 30 1 * 3 SUNL";
   const springSchedule = await client.bins[":binId"].schedules.$post({
     param: { binId },
@@ -716,17 +718,14 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   assert.equal(springSchedule.status, 201);
   if (springSchedule.status === 201) {
     const value = await springSchedule.json();
-    assert.equal(
-      value.nextDueAt,
-      new Date(springTransition.getTime() + 30 * 60 * 1000).toISOString(),
-    );
+    assert.equal(value.nextDueAt, springDueAt.toISOString());
     const removedSpring = await client.bins[":binId"].schedules[
       ":scheduleId"
     ].$delete({ param: { binId, scheduleId: value.scheduleId } });
     assert.equal(removedSpring.status, 200);
   }
 
-  const autumnTransition = nextLastSundayUtc(9, 1);
+  const autumnDueAt = nextLastSundayAtUtc(9, 0, 30);
   const autumnExpression = "0 30 1 * 10 SUNL";
   const autumnSchedule = await client.bins[":binId"].schedules.$post({
     param: { binId },
@@ -740,10 +739,7 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   assert.equal(autumnSchedule.status, 201);
   if (autumnSchedule.status === 201) {
     const value = await autumnSchedule.json();
-    assert.equal(
-      value.nextDueAt,
-      new Date(autumnTransition.getTime() - 30 * 60 * 1000).toISOString(),
-    );
+    assert.equal(value.nextDueAt, autumnDueAt.toISOString());
     const removedAutumn = await client.bins[":binId"].schedules[
       ":scheduleId"
     ].$delete({ param: { binId, scheduleId: value.scheduleId } });

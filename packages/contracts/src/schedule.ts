@@ -13,7 +13,7 @@ import {
 
 const scheduleIdSchema = z.string().uuid();
 
-/** 使用六字段严格 cron，并要求调用方声明解释该表达式的 IANA 时区。 */
+/** 按 cron-parser 的 strict 规则解析（包括原生宏），并要求调用方声明 IANA 时区。 */
 export const scheduleCreateInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
@@ -117,7 +117,7 @@ export type ScheduleOperations = {
     binId: string,
     scheduleId: string,
   ): Promise<ScheduleOperation<Schedule>>;
-  /** 只接受严格六字段 cron；首次到期点从创建时刻之后计算。 */
+  /** 使用 cron-parser 的 strict 解析规则（包括原生宏）；首次到期点从创建时刻之后计算。 */
   createSchedule(
     binId: string,
     input: ScheduleCreateInput,
