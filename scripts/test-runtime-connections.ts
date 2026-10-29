@@ -261,6 +261,7 @@ async function createBin(
   id: string,
   collector: unknown,
   section: string,
+  browserIdleTimeout: number | "disabled" = 300,
 ): Promise<Record<string, unknown> & { readonly execution: RuntimeStatus }> {
   return cliData(
     await cli([
@@ -275,6 +276,8 @@ async function createBin(
       JSON.stringify({ section }),
       "--targets",
       "[]",
+      "--browser-idle-timeout-seconds",
+      String(browserIdleTimeout),
     ]),
     "created",
   );
@@ -293,7 +296,7 @@ async function postHeartbeat(
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify({
-        protocolVersion: 3,
+        protocolVersion: 4,
         ownerLockAcquired: true,
         ownerGeneration: "1",
         activeRunId: null,
@@ -356,7 +359,7 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 3);
+  assert.equal(runtimeOneManifest.protocolVersion, 4);
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 
@@ -388,16 +391,24 @@ try {
   const browserCollector = {
     ...collector,
     environment: {
-      browser: { required: true, profileReuseAfterRestart: false },
+      browser: {
+        required: true,
+        profileReuseAfterRestart: false,
+        profileReuseUnavailableReason: "该运行环境不保留跨重启浏览器会话。",
+      },
     },
   };
-  await createBin("binny14-browser", browserCollector, "browser");
+  await createBin("binny14-browser", browserCollector, "browser", "disabled");
   const incompatibleEnvironment = await postHeartbeat("binny14-browser", {
     runtimeId: "binny14-browser-probe",
     collector: browserCollector,
     environment: {
       kind: "lightweight",
-      browser: { available: false, profileReuseAfterRestart: false },
+      browser: {
+        available: false,
+        profileReuseAfterRestart: false,
+        power: { status: "unavailable" },
+      },
     },
   });
   assert.equal(incompatibleEnvironment.status, 409);
@@ -440,7 +451,11 @@ try {
     collector: allOfCollector,
     environment: {
       kind: "lightweight",
-      browser: { available: false, profileReuseAfterRestart: false },
+      browser: {
+        available: false,
+        profileReuseAfterRestart: false,
+        power: { status: "unavailable" },
+      },
     },
   });
   assert.equal(compatibleConfig.status, 200);
@@ -479,7 +494,11 @@ try {
     collector: allOfCollector,
     environment: {
       kind: "lightweight",
-      browser: { available: false, profileReuseAfterRestart: false },
+      browser: {
+        available: false,
+        profileReuseAfterRestart: false,
+        power: { status: "unavailable" },
+      },
     },
   });
   assert.equal(incompatibleConfig.status, 409);
@@ -501,7 +520,11 @@ try {
     collector: driftedManifest,
     environment: {
       kind: "lightweight",
-      browser: { available: false, profileReuseAfterRestart: false },
+      browser: {
+        available: false,
+        profileReuseAfterRestart: false,
+        power: { status: "unavailable" },
+      },
     },
   });
   assert.equal(manifestMismatch.status, 409);

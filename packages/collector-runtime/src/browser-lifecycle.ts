@@ -5,6 +5,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type { CollectorBrowserConnection } from "@binny/collector-sdk";
+import type { BrowserPower } from "@binny/contracts";
 import { chromium, type Browser, type BrowserContext } from "playwright-core";
 import WebSocket from "ws";
 
@@ -15,6 +16,7 @@ type BrowserOptions = {
   readonly ownerGeneration: string;
   readonly profileDirectory: string;
   readonly display?: string;
+  readonly onPowerChange: (power: BrowserPower) => void;
 };
 
 type HumanSessionEnd = {
@@ -135,6 +137,8 @@ export class BrowserLifecycle {
   private displayProcess: ChildProcess | undefined;
   private human: HumanConnection | undefined;
   private opening: Promise<void> | undefined;
+  private stopping: Promise<void> | undefined;
+  private power: BrowserPower = { status: "stopped" };
   private readonly options: BrowserOptions;
 
   constructor(options: BrowserOptions) {
@@ -142,19 +146,66 @@ export class BrowserLifecycle {
     this.display = options.display ?? ":99";
   }
 
+  /** 返回由实际 persistent context 与显示进程生命周期得出的当前状态。 */
+  get currentPower(): BrowserPower {
+    return this.power;
+  }
+
   async ensureReady(): Promise<void> {
-    if (this.context !== undefined && this.browser?.isConnected()) return;
     if (this.opening !== undefined) return this.opening;
-    const opening = (async () => {
-      if (this.context !== undefined || this.browser !== undefined)
-        await this.closeContext();
-      await this.launch();
-    })();
+    if (this.stopping !== undefined) {
+      const stopped = this.stopping;
+      const opening = stopped.then(() => this.startReady());
+      this.opening = opening;
+      try {
+        await opening;
+      } finally {
+        if (this.opening === opening) this.opening = undefined;
+      }
+      return;
+    }
+    if (this.context !== undefined && this.browser?.isConnected()) {
+      if (this.power.status !== "ready") this.setPower({ status: "ready" });
+      return;
+    }
+    const opening = this.startReady();
     this.opening = opening;
     try {
       await opening;
     } finally {
       if (this.opening === opening) this.opening = undefined;
+    }
+  }
+
+  /** 仅在调用方已释放自动与人工使用权后关闭浏览器和显示进程。 */
+  async closeWhenIdle(): Promise<void> {
+    if (this.stopping !== undefined) return this.stopping;
+    if (this.opening !== undefined)
+      throw new Error("浏览器仍在启动，暂时不能进入空闲关闭。");
+    if (this.human !== undefined)
+      throw new Error("人工操作仍持有浏览器，暂时不能进入空闲关闭。");
+
+    const stopping = (async () => {
+      this.setPower({ status: "stopping" });
+      try {
+        await this.closeBrowserLoad();
+        this.setPower({ status: "stopped" });
+      } catch (error) {
+        this.setPower({
+          status: "unknown",
+          error: {
+            code: "browser_stop_failed",
+            message: "浏览器或显示进程没有确认退出，当前状态未知。",
+          },
+        });
+        throw error;
+      }
+    })();
+    this.stopping = stopping;
+    try {
+      await stopping;
+    } finally {
+      if (this.stopping === stopping) this.stopping = undefined;
     }
   }
 
@@ -189,11 +240,18 @@ export class BrowserLifecycle {
     const context = this.context;
     if (context === undefined) return;
     try {
-      while (context.pages().length > 0) {
+      const pages = context.pages();
+      // 持久 Chromium 在关闭最后一个窗口后会退出；空闲复用期间留一个空白页。
+      const keeper = pages[0] ?? (await context.newPage());
+      while (context.pages().length > 1) {
         await Promise.all(
-          context.pages().map((page) => page.close({ runBeforeUnload: false })),
+          context
+            .pages()
+            .filter((page) => page !== keeper)
+            .map((page) => page.close({ runBeforeUnload: false })),
         );
       }
+      await keeper.goto("about:blank");
     } catch {
       // 已退出 worker 仍留下不能关闭的页面时，重启整个 context 才能确认交接。
       await this.closeContext();
@@ -332,11 +390,81 @@ export class BrowserLifecycle {
 
   async close(): Promise<void> {
     if (this.human !== undefined) await this.stopHuman(this.human);
+    if (this.stopping !== undefined) await this.stopping;
+    if (this.opening !== undefined) await this.opening;
+    if (
+      this.context === undefined &&
+      this.browser === undefined &&
+      this.displayProcess === undefined
+    ) {
+      if (this.power.status !== "unknown") this.setPower({ status: "stopped" });
+      return;
+    }
+    this.setPower({ status: "stopping" });
+    try {
+      await this.closeBrowserLoad();
+      this.setPower({ status: "stopped" });
+    } catch (error) {
+      this.setPower({
+        status: "unknown",
+        error: {
+          code: "browser_stop_failed",
+          message: "浏览器或显示进程没有确认退出，当前状态未知。",
+        },
+      });
+      throw error;
+    }
+  }
+
+  private setPower(power: BrowserPower): void {
+    this.power = power;
+    this.options.onPowerChange(power);
+  }
+
+  private async startReady(): Promise<void> {
+    if (this.stopping !== undefined) await this.stopping;
+    if (this.context !== undefined && this.browser?.isConnected()) {
+      if (this.power.status !== "ready") this.setPower({ status: "ready" });
+      return;
+    }
+    if (
+      this.power.status === "unknown" &&
+      this.context === undefined &&
+      this.browser === undefined
+    ) {
+      throw new Error(
+        this.power.error?.message ?? "浏览器当前状态未知，暂时不能启动新实例。",
+      );
+    }
+
+    this.setPower({ status: "starting" });
+    try {
+      if (this.context !== undefined || this.browser !== undefined)
+        await this.closeContext();
+      await this.launch();
+      if (this.browser?.isConnected() !== true)
+        throw new Error("持久浏览器在启动确认前已经断开连接。");
+      this.setPower({ status: "ready" });
+    } catch (error) {
+      this.setPower({
+        status: "unknown",
+        error: {
+          code: "browser_start_failed",
+          message: "浏览器或显示进程没有确认启动，当前状态未知。",
+        },
+      });
+      throw error;
+    }
+  }
+
+  private async closeBrowserLoad(): Promise<void> {
     await this.unbindWorkerEndpoint();
     await this.closeContext();
     const display = this.displayProcess;
-    this.displayProcess = undefined;
-    if (display !== undefined) await terminateChild(display);
+    if (display !== undefined) {
+      await terminateChild(display);
+      if (this.displayProcess === display) this.displayProcess = undefined;
+    }
   }
 
   private async launch(): Promise<void> {
@@ -386,6 +514,16 @@ export class BrowserLifecycle {
       }
       this.context = context;
       this.browser = browser;
+      browser.once("disconnected", () => {
+        if (this.context !== context || this.power.status !== "ready") return;
+        this.setPower({
+          status: "unknown",
+          error: {
+            code: "browser_interrupted",
+            message: "浏览器连接意外中断，当前进程状态未知。",
+          },
+        });
+      });
     } catch (error) {
       const display = this.displayProcess;
       this.displayProcess = undefined;
