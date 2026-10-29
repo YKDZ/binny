@@ -41,6 +41,7 @@ export const manualRunQueueReasonSchema = z.enum([
   "earlier_run_active",
   "earlier_run_queued",
   "previous_execution_unconfirmed",
+  "human_session_active",
 ]);
 
 export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(

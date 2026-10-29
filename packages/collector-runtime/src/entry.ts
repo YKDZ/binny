@@ -16,6 +16,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { createApiClient } from "@binny/api/client";
 import {
   collectorManifest,
+  type CollectorBrowserConnection,
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
@@ -25,9 +26,12 @@ import {
   type ManualRunCompletion,
   type ManualRunExecution,
   type ManualRun,
+  type RuntimeHumanSessionControl,
+  type RuntimeHumanSessionEvent,
   type RuntimeEnvironment,
 } from "@binny/contracts";
 
+import { BrowserLifecycle } from "./browser-lifecycle.ts";
 import { createRuntimeServer } from "./runtime-server.ts";
 
 const collectorPath = process.env.BINNY_COLLECTOR_ENTRY ?? "/app/dist/index.js";
@@ -202,6 +206,18 @@ const environment: RuntimeEnvironment = {
   },
 };
 const runtimeId = randomUUID();
+const browserLifecycle =
+  environmentKind === "browser"
+    ? new BrowserLifecycle({
+        apiUrl,
+        binId: runtimeBinId,
+        runtimeId,
+        ownerGeneration,
+        profileDirectory:
+          process.env.BINNY_BROWSER_PROFILE_DIRECTORY ??
+          "/var/lib/binny/runtime/browser-profile",
+      })
+    : undefined;
 const server = createRuntimeServer({ collector: activeCollector });
 const client = createApiClient(apiUrl, {
   fetch: (input, init) => {
@@ -217,6 +233,8 @@ let runInFlight: Promise<void> | undefined;
 let activeWorker: ActionWorker | undefined;
 let activeRunId: string | null = null;
 let pendingStoppedRunId: string | undefined;
+let activeHumanSessionId: string | undefined;
+let pendingHumanSessionEvent: RuntimeHumanSessionEvent | undefined;
 let claimInFlight = false;
 let stopping: Promise<void> | undefined;
 let lastStatus: string | undefined;
@@ -481,13 +499,30 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
 
   let worker: ActionWorker | undefined;
   let workerStopped = false;
+  let browserBound = false;
+  let browserConnection: CollectorBrowserConnection | undefined;
   async function stopWorker(): Promise<void> {
-    if (worker === undefined || workerStopped) return;
-    await stopActionWorker(worker);
-    workerStopped = true;
-    if (activeWorker === worker) activeWorker = undefined;
+    if (browserBound) await browserLifecycle?.unbindWorkerEndpoint();
+    if (worker !== undefined && !workerStopped) {
+      await stopActionWorker(worker);
+      workerStopped = true;
+      if (activeWorker === worker) activeWorker = undefined;
+    }
+    if (browserBound) {
+      if (browserLifecycle === undefined)
+        throw new Error("浏览器运行环境没有可用的生命周期控制器。");
+      await browserLifecycle.cleanAutomaticPages();
+      browserBound = false;
+    }
   }
   try {
+    if (activeCollector.environment.browser.required) {
+      if (browserLifecycle === undefined)
+        throw new Error("本次采集器需要浏览器，但运行镜像没有浏览器控制器。");
+      await browserLifecycle.ensureReady();
+      browserConnection = await browserLifecycle.bindWorkerEndpoint(run.runId);
+      browserBound = true;
+    }
     worker = startActionWorker();
     activeWorker = worker;
     const readyDeadline = Date.now() + 10_000;
@@ -518,7 +553,13 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       return;
     }
 
-    await sendWorkerMessage(worker, { type: "execute", run });
+    await sendWorkerMessage(worker, {
+      type: "execute",
+      run,
+      ...(browserConnection === undefined
+        ? {}
+        : { browser: browserConnection }),
+    });
     while (true) {
       const outcome = await Promise.race([
         worker.outcome,
@@ -603,9 +644,27 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
   }
 }
 
+async function closeHumanSessionAfterHeartbeatFailure(): Promise<void> {
+  const sessionId = activeHumanSessionId;
+  if (sessionId === undefined || browserLifecycle === undefined) return;
+  try {
+    // 核心不可达时先停掉本地画面与通道，状态事件留待下一次正常心跳回报。
+    await browserLifecycle.closeHumanSession(sessionId);
+    if (activeHumanSessionId === sessionId) activeHumanSessionId = undefined;
+    if (pendingHumanSessionEvent?.sessionId !== sessionId)
+      pendingHumanSessionEvent = { sessionId, event: "closed" };
+  } catch (error) {
+    process.stderr.write(
+      `核心心跳失败后浏览器通道仍未确认关闭：session=${sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
 async function heartbeat(allowStopping = false): Promise<void> {
   if (stopping !== undefined && !allowStopping) return;
   const stoppedRunId = pendingStoppedRunId;
+  const humanSessionEvent = pendingHumanSessionEvent;
+  let heartbeatAccepted = false;
   try {
     const response = await client.bins[":binId"].runtime.heartbeat.$post({
       param: { binId: runtimeBinId },
@@ -617,14 +676,23 @@ async function heartbeat(allowStopping = false): Promise<void> {
         activeRunId,
         claimInFlight,
         ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
+        ...(humanSessionEvent === undefined ? {} : { humanSessionEvent }),
         collector: manifest,
         environment,
       },
     });
     if (response.status === 200) {
       const execution = await response.json();
+      heartbeatAccepted = true;
       if (stoppedRunId !== undefined && pendingStoppedRunId === stoppedRunId)
         pendingStoppedRunId = undefined;
+      if (
+        humanSessionEvent !== undefined &&
+        pendingHumanSessionEvent === humanSessionEvent
+      )
+        pendingHumanSessionEvent = undefined;
+      if (execution.humanSession !== undefined)
+        await applyHumanSessionControl(execution.humanSession);
       logStatus(execution.status);
       if (
         execution.status === "online" &&
@@ -635,18 +703,25 @@ async function heartbeat(allowStopping = false): Promise<void> {
     } else {
       const result = await response.json();
       logStatus(result.error.code, result.error.message);
+      await closeHumanSessionAfterHeartbeatFailure();
     }
   } catch (error) {
     logStatus(
       "disconnected",
       error instanceof Error ? error.message : String(error),
     );
+    await closeHumanSessionAfterHeartbeatFailure();
   } finally {
     if (stopping === undefined) {
-      heartbeatTimer = setTimeout(() => {
-        heartbeatTimer = undefined;
-        startHeartbeat();
-      }, heartbeatInterval);
+      heartbeatTimer = setTimeout(
+        () => {
+          heartbeatTimer = undefined;
+          startHeartbeat();
+        },
+        heartbeatAccepted && pendingHumanSessionEvent !== undefined
+          ? 0
+          : heartbeatInterval,
+      );
     }
   }
 }
@@ -675,6 +750,90 @@ async function acknowledgeStoppedRun(runId: string): Promise<void> {
   pendingStoppedRunId = runId;
   if (activeRunId === runId) activeRunId = null;
   await sendHeartbeatNow(stopping !== undefined);
+}
+
+async function applyHumanSessionControl(
+  control: RuntimeHumanSessionControl,
+): Promise<void> {
+  if (control.action === "open") {
+    if (activeHumanSessionId === control.sessionId) return;
+    if (browserLifecycle === undefined) {
+      pendingHumanSessionEvent = {
+        sessionId: control.sessionId,
+        event: "failed",
+        failure: {
+          code: "browser_unavailable",
+          message: "运行器镜像没有浏览器环境。",
+        },
+      };
+      return;
+    }
+    try {
+      const { ended } = await browserLifecycle.openHumanSession(
+        control.sessionId,
+        control.tunnelToken,
+      );
+      activeHumanSessionId = control.sessionId;
+      pendingHumanSessionEvent = {
+        sessionId: control.sessionId,
+        event: "ready",
+      };
+      void ended.then((result) => {
+        if (activeHumanSessionId !== control.sessionId) return;
+        activeHumanSessionId = undefined;
+        pendingHumanSessionEvent =
+          result.failure === undefined
+            ? { sessionId: control.sessionId, event: "closed" }
+            : {
+                sessionId: control.sessionId,
+                event: "failed",
+                failure: result.failure,
+              };
+        startHeartbeat();
+      });
+    } catch (error) {
+      pendingHumanSessionEvent = {
+        sessionId: control.sessionId,
+        event: "failed",
+        failure: {
+          code: "browser_human_session_open_failed",
+          message: "浏览器维护入口没有正常启动。",
+        },
+      };
+      process.stderr.write(
+        `浏览器人工会话没有就绪：session=${control.sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+    return;
+  }
+
+  if (browserLifecycle === undefined) return;
+  try {
+    await browserLifecycle.closeHumanSession(control.sessionId);
+    if (activeHumanSessionId === control.sessionId)
+      activeHumanSessionId = undefined;
+    pendingHumanSessionEvent = {
+      sessionId: control.sessionId,
+      event: "closed",
+    };
+  } catch (error) {
+    process.stderr.write(
+      `浏览器人工会话仍未确认关闭：session=${control.sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+async function closeBrowserRuntime(): Promise<void> {
+  if (browserLifecycle === undefined) return;
+  try {
+    await browserLifecycle.close();
+  } catch (error) {
+    process.stderr.write(
+      `浏览器运行环境仍有资源未确认退出：${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    throw error;
+  }
+  if (pendingHumanSessionEvent !== undefined) await sendHeartbeatNow(true);
 }
 
 async function pollRun(): Promise<void> {
@@ -773,6 +932,7 @@ function shutdown(): Promise<void> {
     while (claimInFlight) await delay(25);
     if (activeWorker !== undefined) await stopActionWorker(activeWorker);
     if (runInFlight !== undefined) await runInFlight;
+    await closeBrowserRuntime();
     await disconnect();
     await closeServer();
   })();
