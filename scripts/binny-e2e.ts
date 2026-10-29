@@ -3028,8 +3028,10 @@ async function verifyLinuxdoArchiveJourney(
   const linuxdoAggregate = cliData<{
     readonly unit: string;
     readonly groups: readonly {
+      readonly keys: readonly unknown[];
       readonly metrics: readonly {
         readonly key: string;
+        readonly op: string;
         readonly value: string | null;
       }[];
     }[];
@@ -3182,7 +3184,9 @@ async function verifyLinuxdoArchiveJourney(
     ]),
     "aggregated",
   );
-  assert.deepEqual(deletedAggregate.groups, []);
+  assert.deepEqual(deletedAggregate.groups, [
+    { keys: [], metrics: [{ key: "items", op: "count", value: "0" }] },
+  ]);
   const rssStillPresent = cliData<{ readonly itemId: string }>(
     await cli(baseUrl, ["archive", "item", rss.itemId, "--bin", "binny22-one"]),
     "found",
@@ -7145,11 +7149,168 @@ async function runRssAcceptance(
     archiveBeforeCheck,
   );
 
+  const startHeldCheck = async (): Promise<string> => {
+    await source.holdFeed("/rss");
+    const triggered = cliData<{
+      readonly runId: string;
+      readonly status: string;
+    }>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        "binny22-one",
+        "check",
+        "--params",
+        JSON.stringify({ feedIds: ["rss-main"] }),
+      ]),
+      "triggered",
+    );
+    assert.equal(triggered.status, "queued");
+    await source.waitUntilFeedHeld("/rss");
+    const activeCheck = cliData<RssManualRun & { readonly action: string }>(
+      await cli(baseUrl, ["run", "get", "binny22-one", triggered.runId]),
+      "found",
+    );
+    assert.equal(activeCheck.status, "executing");
+    assert.equal(activeCheck.action, "check");
+    return triggered.runId;
+  };
+
+  const cancelledCheckRunId = await startHeldCheck();
+  const cancelledCheckWorker = (
+    await runtimeProcessSnapshot("runtime-rss")
+  ).find((process) => process.command.includes("worker.js"));
+  assert.ok(cancelledCheckWorker, "执行中的 RSS check 应有真实 worker 进程。");
+  const cancellationRequest = cliData<{ readonly status: string }>(
+    await cli(baseUrl, ["run", "cancel", "binny22-one", cancelledCheckRunId]),
+    "cancellation",
+  );
+  assert.equal(cancellationRequest.status, "cancelling");
+  const cancelledCheckResult = await waitFor(
+    async () =>
+      cliData<RssManualRun>(
+        await cli(baseUrl, ["run", "get", "binny22-one", cancelledCheckRunId]),
+        "found",
+      ),
+    (run) => run.status === "cancelled",
+    "执行中的 RSS check 收到取消并终结",
+  );
+  assert.ok(cancelledCheckResult.stopConfirmedAt);
+  assert.equal(cancelledCheckResult.result?.stopReason.code, "cancelled");
+  assert.equal(cancelledCheckResult.result?.commits.length, 0);
+  await waitFor(
+    () => runtimeProcessSnapshot("runtime-rss"),
+    (processes) =>
+      !processes.some(({ pgid }) => pgid === cancelledCheckWorker.pgid),
+    "取消确认后的 RSS check worker 退出",
+  );
+  await source.releaseFeed();
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    archiveBeforeCheck,
+  );
+
+  const oldCheckRuntimeContainerId = await runningContainerId("runtime-rss");
+  const interruptedCheckRunId = await startHeldCheck();
+  assert.ok(
+    (await runtimeProcessSnapshot("runtime-rss")).some((process) =>
+      process.command.includes("worker.js"),
+    ),
+    "被中断的 RSS check 应有真实 worker 进程。",
+  );
+  await compose(["stop", "--timeout", "30", "runtime-rss"]);
+  assert.equal(await containerStatus(oldCheckRuntimeContainerId), "exited");
+  const stoppedRuntimePid = await run("docker", [
+    "inspect",
+    "--format",
+    "{{.State.Pid}}",
+    oldCheckRuntimeContainerId,
+  ]);
+  assert.equal(stoppedRuntimePid.code, 0, stoppedRuntimePid.stderr);
+  assert.equal(stoppedRuntimePid.stdout.trim(), "0");
+  const interruptedCheckResult = await waitFor(
+    async () =>
+      cliData<RssManualRun>(
+        await cli(baseUrl, [
+          "run",
+          "get",
+          "binny22-one",
+          interruptedCheckRunId,
+        ]),
+        "found",
+      ),
+    (run) => run.status === "failed",
+    "RSS check 运行器停止后报中断并确认退出",
+  );
+  assert.equal(
+    interruptedCheckResult.result?.error?.code,
+    "runtime_interrupted",
+  );
+  assert.ok(interruptedCheckResult.stopConfirmedAt);
+  assert.equal(interruptedCheckResult.result?.commits.length, 0);
+  await source.releaseFeed();
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
+    "--no-deps",
+    "--no-build",
+    "--force-recreate",
+    "runtime-rss",
+  ]);
+  const resumedCheckRuntimeContainerId =
+    await runningContainerId("runtime-rss");
+  assert.notEqual(resumedCheckRuntimeContainerId, oldCheckRuntimeContainerId);
+  assert.equal(
+    await containerImageId("runtime-rss"),
+    imageUpdate.candidateImageId,
+  );
+  await waitForRuntimeHealth("runtime-rss");
+  await waitForRuntime(baseUrl, "binny22-one");
+  const persistedInterruptedCheck = cliData<RssManualRun>(
+    await cli(baseUrl, ["run", "get", "binny22-one", interruptedCheckRunId]),
+    "found",
+  );
+  assert.equal(persistedInterruptedCheck.status, "failed");
+  assert.equal(
+    persistedInterruptedCheck.result?.error?.code,
+    "runtime_interrupted",
+  );
+  assert.ok(persistedInterruptedCheck.stopConfirmedAt);
+  assert.deepEqual(
+    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    archiveBeforeCheck,
+  );
+  assert.equal(
+    (await source.requests()).filter(({ path }) => path.startsWith("/media/"))
+      .length,
+    mediaRequestCount,
+  );
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
+
   const afterCheck = await triggerRssAction(baseUrl, "binny22-one", "collect", {
     feedIds: ["rss-main"],
   });
   assert.equal(afterCheck.status, "completed");
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
+  process.stdout.write(
+    "票 28 RSS 独立 check 执行中取消与运行器中断：" +
+      JSON.stringify({
+        cancelledCheckRunId,
+        cancelledStatus: cancelledCheckResult.status,
+        cancelStopConfirmed: true,
+        cancelWorkerExited: true,
+        interruptedCheckRunId,
+        interruptedStatus: persistedInterruptedCheck.status,
+        interruptStopConfirmed: true,
+        oldRuntimeContainerExited: true,
+        newRuntimeContainerId: resumedCheckRuntimeContainerId,
+        nextCollectIfNoneMatch: (await latestRequest("/rss"))?.ifNoneMatch,
+      }) +
+      "\n",
+  );
   const rssItemV3 = await readRssArchive(
     baseUrl,
     "binny22-one",
