@@ -20,6 +20,9 @@ let photoAvailable = true;
 let staticArticleVersion = 1;
 let staticPhotoAvailable = true;
 let recoveryPageAvailable = false;
+let holdFeedPath: string | undefined;
+let heldFeedPath: string | undefined;
+let releaseFeedResponse: (() => void) | undefined;
 
 function sendJson(
   response: import("node:http").ServerResponse,
@@ -47,6 +50,7 @@ function state(): unknown {
     requests,
     photoBytes: photoBytes.toString("base64"),
     audioBytes: audioBytes.toString("base64"),
+    ...(heldFeedPath === undefined ? {} : { heldFeedPath }),
   };
 }
 
@@ -55,6 +59,14 @@ function updateState(value: unknown): boolean {
     return false;
   }
   const updates = value as Record<string, unknown>;
+  if (
+    "holdFeedPath" in updates &&
+    updates.holdFeedPath !== null &&
+    updates.holdFeedPath !== "/rss" &&
+    updates.holdFeedPath !== "/atom"
+  ) {
+    return false;
+  }
   if (
     "rssVersion" in updates &&
     (!Number.isSafeInteger(updates.rssVersion) ||
@@ -128,7 +140,37 @@ function updateState(value: unknown): boolean {
   if (typeof updates.recoveryPageAvailable === "boolean") {
     recoveryPageAvailable = updates.recoveryPageAvailable;
   }
+  if ("holdFeedPath" in updates) {
+    holdFeedPath =
+      typeof updates.holdFeedPath === "string"
+        ? updates.holdFeedPath
+        : undefined;
+  }
   return true;
+}
+
+async function waitForFeedRelease(
+  pathname: string,
+  response: import("node:http").ServerResponse,
+): Promise<void> {
+  if (holdFeedPath !== pathname) return;
+  holdFeedPath = undefined;
+  heldFeedPath = pathname;
+  await new Promise<void>((resolve) => {
+    const closed = (): void => {
+      releaseFeedResponse = undefined;
+      heldFeedPath = undefined;
+      resolve();
+    };
+    const release = (): void => {
+      response.off("close", closed);
+      releaseFeedResponse = undefined;
+      heldFeedPath = undefined;
+      resolve();
+    };
+    releaseFeedResponse = release;
+    response.once("close", closed);
+  });
 }
 
 function sendFeed(
@@ -208,11 +250,18 @@ const server = createServer((request, response) => {
       sendJson(response, 200, state());
       return;
     }
+    if (request.method === "POST" && pathname === "/control/release-feed") {
+      releaseFeedResponse?.();
+      sendJson(response, 200, state());
+      return;
+    }
 
     if (
       request.method === "GET" &&
       ["/rss", "/rss-edited"].includes(pathname)
     ) {
+      await waitForFeedRelease(pathname, response);
+      if (response.destroyed) return;
       const etag = `"rss-${String(rssVersion)}"`;
       sendFeed(
         request,
@@ -247,6 +296,8 @@ const server = createServer((request, response) => {
     }
 
     if (request.method === "GET" && pathname === "/atom") {
+      await waitForFeedRelease(pathname, response);
+      if (response.destroyed) return;
       const lastModified = new Date(
         Date.UTC(2026, 9, 27 + atomVersion),
       ).toUTCString();
