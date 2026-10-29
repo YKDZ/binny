@@ -52,6 +52,8 @@ type FixtureState = {
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
   readonly legacyTags: boolean;
+  readonly targetUnavailablePage: number | null;
+  readonly targetChallengePage: number | null;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -1218,6 +1220,50 @@ async function verifyDiscovery(): Promise<void> {
     unavailableTopicIds: [],
   });
 
+  await updateFixtureState({ targetUnavailablePage: 0 });
+  const unavailableListCheck = await trigger("check", {
+    targetIds: ["latest"],
+  });
+  assert.equal(
+    unavailableListCheck.status,
+    "completed",
+    JSON.stringify(unavailableListCheck),
+  );
+  assert.equal(unavailableListCheck.result?.check?.availability, "unavailable");
+  assert.deepEqual(unavailableListCheck.result?.check?.scope, [
+    "target:latest",
+  ]);
+  assert.ok(
+    unavailableListCheck.result?.check?.problems.some(
+      ({ code, requiresHuman }) =>
+        code === "discourse_target_unavailable" && !requiresHuman,
+    ),
+  );
+  assert.equal(unavailableListCheck.result?.commits?.length ?? 0, 0);
+
+  await updateFixtureState({
+    targetUnavailablePage: null,
+    targetChallengePage: 0,
+  });
+  const challengedListCheck = await trigger("check", {
+    targetIds: ["latest"],
+  });
+  assert.equal(
+    challengedListCheck.status,
+    "completed",
+    JSON.stringify(challengedListCheck),
+  );
+  assert.equal(challengedListCheck.result?.check?.availability, "unknown");
+  assert.deepEqual(challengedListCheck.result?.check?.scope, ["target:latest"]);
+  assert.ok(
+    challengedListCheck.result?.check?.problems.some(
+      ({ code, requiresHuman }) =>
+        code === "discourse_target_challenge_response" && requiresHuman,
+    ),
+  );
+  assert.equal(challengedListCheck.result?.commits?.length ?? 0, 0);
+  await updateFixtureState({ targetChallengePage: null });
+
   const beforeCheck = await sourceState();
   const latestCheck = await trigger("check", { targetIds: ["latest"] });
   assert.equal(latestCheck.status, "completed", JSON.stringify(latestCheck));
@@ -1232,7 +1278,27 @@ async function verifyDiscovery(): Promise<void> {
     .at(-1);
   assert.ok(latestPage !== undefined);
   assert.equal(latestPage.authenticated, true);
+  assert.ok(latestPage.path.includes("per_page=1"));
   assert.ok(afterCheck.events.length > beforeCheck.events.length);
+
+  const categoryCheck = await trigger("check", { targetIds: ["category"] });
+  assert.equal(
+    categoryCheck.status,
+    "completed",
+    JSON.stringify(categoryCheck),
+  );
+  assert.equal(categoryCheck.result?.check?.availability, "available");
+  assert.deepEqual(categoryCheck.result?.check?.scope, ["target:category"]);
+  const afterCategoryCheck = await sourceState();
+  const categoryCheckPage = afterCategoryCheck.events
+    .filter(
+      ({ action, path }) =>
+        action === "topic-list" &&
+        path.startsWith("/c/controlled/42/l/latest.json"),
+    )
+    .at(-1);
+  assert.ok(categoryCheckPage !== undefined);
+  assert.ok(categoryCheckPage.path.includes("per_page=1"));
 
   const beforeCollection = await sourceState();
   const collection = await trigger("collect", {
@@ -1314,6 +1380,94 @@ async function verifyDiscovery(): Promise<void> {
       "/t/2410.json",
     ],
   );
+
+  const beforeCategoryPagination = await sourceState();
+  const categoryPagination = await trigger("collect", {
+    targetIds: ["category"],
+    maxTopics: 10,
+  });
+  assert.equal(
+    categoryPagination.status,
+    "completed",
+    JSON.stringify(categoryPagination),
+  );
+  assert.ok(
+    categoryPagination.result?.completedScopes?.includes("target:category"),
+  );
+  const afterCategoryPagination = await sourceState();
+  const categoryPaginationEvents = afterCategoryPagination.events.slice(
+    beforeCategoryPagination.events.length,
+  );
+  assert.ok(
+    categoryPaginationEvents.some(
+      ({ action, path, authenticated }) =>
+        action === "topic-list" &&
+        path.startsWith("/c/controlled/42/l/latest.json?page=1") &&
+        authenticated === true,
+    ),
+  );
+  assert.deepEqual(
+    categoryPaginationEvents
+      .filter(({ action }) => action === "topic")
+      .map(({ path }) => path)
+      .toSorted(),
+    [
+      "/t/2401.json",
+      "/t/2402.json",
+      "/t/2403.json",
+      "/t/2404.json",
+      "/t/2405.json",
+      "/t/2406.json",
+      "/t/2407.json",
+      "/t/2408.json",
+      "/t/2409.json",
+      "/t/2410.json",
+    ],
+  );
+
+  await updateFixtureState({ targetUnavailablePage: 1 });
+  const unavailableTargetCollection = await trigger("collect", {
+    targetIds: ["latest"],
+    maxTopics: 1,
+  });
+  assert.equal(unavailableTargetCollection.status, "failed");
+  assert.equal(
+    unavailableTargetCollection.result?.error?.code,
+    "discourse_target_unavailable",
+  );
+  assert.equal(unavailableTargetCollection.result?.error?.requiresHuman, false);
+  assert.ok(
+    unavailableTargetCollection.result?.completedScopes?.includes(
+      "post:240001",
+    ),
+    JSON.stringify(unavailableTargetCollection),
+  );
+  assert.ok(
+    unavailableTargetCollection.result?.completedScopes?.includes("topic:2401"),
+  );
+
+  await updateFixtureState({
+    targetUnavailablePage: null,
+    targetChallengePage: 1,
+  });
+  const challengedTargetCollection = await trigger("collect", {
+    targetIds: ["latest"],
+    maxTopics: 1,
+  });
+  assert.equal(challengedTargetCollection.status, "failed");
+  assert.equal(
+    challengedTargetCollection.result?.error?.code,
+    "discourse_target_challenge_response",
+  );
+  assert.equal(challengedTargetCollection.result?.error?.requiresHuman, true);
+  assert.ok(
+    challengedTargetCollection.result?.completedScopes?.includes("post:240001"),
+    JSON.stringify(challengedTargetCollection),
+  );
+  assert.ok(
+    challengedTargetCollection.result?.completedScopes?.includes("topic:2401"),
+  );
+  await updateFixtureState({ targetChallengePage: null });
 
   const editedRoot = await searchArchiveItem("主题正文版本 3");
   assert.ok(binState(editedRoot).body?.text?.includes("主题正文版本 3"));

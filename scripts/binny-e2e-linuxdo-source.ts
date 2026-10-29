@@ -7,6 +7,8 @@ type SourceState = {
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
   readonly legacyTags: boolean;
+  readonly targetUnavailablePage: number | null;
+  readonly targetChallengePage: number | null;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -53,6 +55,8 @@ let activeState: SourceState = {
   challengeMedia: false,
   topicVisible: true,
   legacyTags: false,
+  targetUnavailablePage: null,
+  targetChallengePage: null,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
@@ -259,7 +263,7 @@ function discoveredTopicList(
         return { id, created_at: createdAt };
       }),
       ...(page === 0 && topicIds.length === perPage
-        ? { more_topics_url: `${pathname}?page=1` }
+        ? { more_topics_url: `${pathname.replace(/\.json$/u, "")}?page=1` }
         : {}),
     },
   };
@@ -274,6 +278,15 @@ function updateState(value: unknown): boolean {
     if (
       key in updates &&
       (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 1)
+    ) {
+      return false;
+    }
+  }
+  for (const key of ["targetUnavailablePage", "targetChallengePage"] as const) {
+    if (
+      key in updates &&
+      updates[key] !== null &&
+      (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 0)
     ) {
       return false;
     }
@@ -444,12 +457,22 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
+      const listPage = Number(url.searchParams.get("page") ?? "0");
+      if (activeState.targetUnavailablePage === listPage) {
+        sendJson(response, 404, { errors: ["列表目标当前不可见。"] });
+        return;
+      }
+      if (activeState.targetChallengePage === listPage) {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><html><body>受控列表挑战页</body></html>");
+        return;
+      }
       sendJson(
         response,
         200,
         discoveredTopicList(
           topicListMatch.category,
-          Number(url.searchParams.get("page") ?? "0"),
+          listPage,
           Number(url.searchParams.get("per_page") ?? "30"),
         ),
       );

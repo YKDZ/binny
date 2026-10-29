@@ -747,19 +747,30 @@ function paginationUrl(
       requiresHuman: false,
     });
   }
-  const validPath =
+  const targetPath =
     target.kind === "latest"
-      ? nextUrl.pathname === "/latest.json"
-      : nextUrl.pathname ===
-          `/c/${target.categorySlugPath
-            .split("/")
-            .map(encodeURIComponent)
-            .join("/")}/${String(target.categoryId)}/l/latest.json` ||
-        (nextUrl.pathname === "/latest.json" &&
-          nextUrl.searchParams.get("category") === String(target.categoryId));
+      ? "/latest.json"
+      : `/c/${target.categorySlugPath
+          .split("/")
+          .map(encodeURIComponent)
+          .join("/")}/${String(target.categoryId)}/l/latest.json`;
+  const extensionlessTargetPath = targetPath.replace(/\.json$/u, "");
+  const latestCategoryPath =
+    target.kind === "category" &&
+    (nextUrl.pathname === "/latest.json" || nextUrl.pathname === "/latest") &&
+    nextUrl.searchParams.get("category") === String(target.categoryId);
+  const validPath =
+    nextUrl.pathname === targetPath ||
+    nextUrl.pathname === extensionlessTargetPath ||
+    latestCategoryPath;
+  const validCategoryFilter =
+    nextUrl.searchParams.get("category") === null ||
+    (target.kind === "category" &&
+      nextUrl.searchParams.get("category") === String(target.categoryId));
   if (
     nextUrl.origin !== currentUrl.origin ||
     !validPath ||
+    !validCategoryFilter ||
     nextUrl.username.length > 0 ||
     nextUrl.password.length > 0 ||
     nextUrl.hash.length > 0
@@ -771,6 +782,11 @@ function paginationUrl(
       suggestion: "检查受控目标的 Discourse 列表响应后重新运行 collect。",
       requiresHuman: false,
     });
+  }
+  if (nextUrl.pathname === extensionlessTargetPath) {
+    nextUrl.pathname = targetPath;
+  } else if (latestCategoryPath && nextUrl.pathname === "/latest") {
+    nextUrl.pathname = "/latest.json";
   }
   for (const key of ["per_page", "order", "ascending"]) {
     const valueFromCurrent = currentUrl.searchParams.get(key);
@@ -857,6 +873,35 @@ function targetCheckResult(
   };
 }
 
+function listCheckDiagnostic(
+  error: unknown,
+):
+  | { availability: "unavailable" | "unknown"; problem: DiscourseProblem }
+  | undefined {
+  if (!isCollectorActionError(error)) return undefined;
+  const { failure } = error;
+  if (
+    (failure.code !== "discourse_target_unavailable" &&
+      failure.code !== "discourse_target_challenge_response") ||
+    failure.suggestion === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    availability:
+      failure.code === "discourse_target_unavailable"
+        ? "unavailable"
+        : "unknown",
+    problem: {
+      code: failure.code,
+      message: failure.message,
+      impact: failure.impact,
+      suggestion: failure.suggestion,
+      requiresHuman: failure.requiresHuman,
+    },
+  };
+}
+
 async function checkTopic(context: CollectorCheckContext, params: CheckParams) {
   const site = siteFromConfig(context.config);
   if (params.topicId !== undefined) {
@@ -897,20 +942,23 @@ async function checkTopic(context: CollectorCheckContext, params: CheckParams) {
         }
         problems.push(...topicProblems(access, posts));
       } else {
-        const response = await readTopicListPage(
-          page,
-          targetListUrl(site, target, 30, undefined),
-          context.signal,
-        );
+        // 单条主题足以诊断目标可读性，也能检查 Discourse 的下一页链接。
+        const listUrl = targetListUrl(site, target, 1, undefined);
+        let response: z.output<typeof topicListResponseSchema>["topic_list"];
+        try {
+          response = await readTopicListPage(page, listUrl, context.signal);
+        } catch (error) {
+          const diagnostic = listCheckDiagnostic(error);
+          if (diagnostic === undefined) throw error;
+          problems.push(diagnostic.problem);
+          availability = diagnostic.availability;
+          continue;
+        }
         if (
           response.more_topics_url !== null &&
           response.more_topics_url !== undefined
         ) {
-          paginationUrl(
-            response.more_topics_url,
-            targetListUrl(site, target, 30, undefined),
-            target,
-          );
+          paginationUrl(response.more_topics_url, listUrl, target);
         }
       }
     }
