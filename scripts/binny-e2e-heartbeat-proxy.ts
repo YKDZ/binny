@@ -2,6 +2,7 @@ import {
   createServer,
   request as createRequest,
   type IncomingMessage,
+  type OutgoingHttpHeaders,
   type ServerResponse,
 } from "node:http";
 import { connect as createConnection } from "node:net";
@@ -12,10 +13,12 @@ const controlPort = readPort("BINNY_E2E_PROXY_CONTROL_PORT", 8083);
 let armed = false;
 let heldAt: number | undefined;
 let clientClosedAt: number | undefined;
+let heldForHumanOpenResponse = false;
 let heldForward: (() => Promise<void>) | undefined;
 let armedForStoppedRunId: string | undefined;
 let armedForBinId = "binny15-one";
 let armedForIdleHeartbeat = false;
+let armedForHumanOpenResponse = false;
 let heldRuntimeId: string | undefined;
 let heldOwnerGeneration: string | undefined;
 let heldStoppedRunId: string | undefined;
@@ -54,13 +57,37 @@ function sendFailure(response: ServerResponse, error: unknown): void {
   });
 }
 
+type ForwardedResponse = {
+  readonly body: Buffer;
+  readonly deliver: () => void;
+};
+
 function forward(
   request: IncomingMessage,
   response: ServerResponse,
   body: Buffer,
-): Promise<Buffer> {
+): Promise<ForwardedResponse> {
   return new Promise((resolve) => {
     const responseChunks: Buffer[] = [];
+    let statusCode = 502;
+    let headers: OutgoingHttpHeaders = {
+      "content-type": "application/json",
+    };
+    let delivered = false;
+    let finished = false;
+    let responseBody = Buffer.alloc(0);
+    const deliver = (): void => {
+      if (delivered || response.destroyed) return;
+      delivered = true;
+      response.writeHead(statusCode, headers);
+      response.end(responseBody);
+    };
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      responseBody = Buffer.concat(responseChunks);
+      resolve({ body: responseBody, deliver });
+    };
     const upstream = createRequest(
       {
         hostname: "server",
@@ -70,34 +97,53 @@ function forward(
         headers: { ...request.headers, host: "server:3000" },
       },
       (upstreamResponse) => {
-        if (!response.destroyed)
-          response.writeHead(
-            upstreamResponse.statusCode ?? 502,
-            upstreamResponse.headers,
-          );
-        response.once("close", () => {
-          if (!response.writableEnded) upstreamResponse.resume();
-        });
+        statusCode = upstreamResponse.statusCode ?? 502;
+        headers = upstreamResponse.headers;
         upstreamResponse.once("end", () => {
-          if (!response.destroyed) response.end();
-          resolve(Buffer.concat(responseChunks));
+          finish();
         });
         upstreamResponse.once("error", (error: unknown) => {
-          sendFailure(response, error);
-          resolve(Buffer.concat(responseChunks));
+          statusCode = 502;
+          headers = { "content-type": "application/json" };
+          responseChunks.push(
+            Buffer.from(
+              JSON.stringify({
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            ),
+          );
+          finish();
         });
         upstreamResponse.on("data", (chunk: Buffer) => {
           responseChunks.push(chunk);
-          if (!response.destroyed) response.write(chunk);
         });
       },
     );
     upstream.once("error", (error: unknown) => {
-      sendFailure(response, error);
-      resolve(Buffer.concat(responseChunks));
+      statusCode = 502;
+      headers = { "content-type": "application/json" };
+      responseChunks.push(
+        Buffer.from(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        ),
+      );
+      finish();
     });
     upstream.end(body);
   });
+}
+
+function holdsHumanOpenResponse(body: Buffer): boolean {
+  try {
+    const value = JSON.parse(body.toString("utf8")) as {
+      readonly humanSession?: { readonly action?: unknown };
+    };
+    return value.humanSession?.action === "open";
+  } catch {
+    return false;
+  }
 }
 
 async function handleRuntimeRequest(
@@ -131,6 +177,7 @@ async function handleRuntimeRequest(
       decoded.stoppedRunId === armedForStoppedRunId);
   if (
     armed &&
+    armedForIdleHeartbeat &&
     requestBinId === armedForBinId &&
     isIdleHeartbeat &&
     matchesStoppedRun
@@ -138,6 +185,7 @@ async function handleRuntimeRequest(
     armed = false;
     heldAt = Date.now();
     clientClosedAt = undefined;
+    heldForHumanOpenResponse = false;
     if (
       typeof decoded === "object" &&
       decoded !== null &&
@@ -166,7 +214,8 @@ async function handleRuntimeRequest(
       if (!response.writableEnded) clientClosedAt = Date.now();
     });
     heldForward = async () => {
-      await forward(request, response, body);
+      const forwarded = await forward(request, response, body);
+      forwarded.deliver();
     };
     return;
   }
@@ -188,19 +237,40 @@ async function handleRuntimeRequest(
   ) {
     forwardedOwnerGeneration = decoded.ownerGeneration;
   }
-  const forwardedBody = await forward(request, response, body);
+  const forwarded = await forward(request, response, body);
+  const holdHumanOpenResponse =
+    armed &&
+    armedForHumanOpenResponse &&
+    requestBinId === armedForBinId &&
+    holdsHumanOpenResponse(forwarded.body);
+  if (holdHumanOpenResponse) {
+    armed = false;
+    heldAt = Date.now();
+    clientClosedAt = undefined;
+    heldForHumanOpenResponse = true;
+    response.once("close", () => {
+      if (!response.writableEnded) clientClosedAt = Date.now();
+    });
+    heldForward = async () => {
+      forwarded.deliver();
+    };
+    return;
+  }
+  forwarded.deliver();
   if (requestBinId !== undefined && decoded !== undefined) {
     try {
-      const forwarded = JSON.parse(forwardedBody.toString("utf8")) as unknown;
+      const forwardedBody = JSON.parse(
+        forwarded.body.toString("utf8"),
+      ) as unknown;
       if (
-        typeof forwarded === "object" &&
-        forwarded !== null &&
-        "browserIdleTimeoutSeconds" in forwarded &&
-        (typeof forwarded.browserIdleTimeoutSeconds === "number" ||
-          forwarded.browserIdleTimeoutSeconds === null)
+        typeof forwardedBody === "object" &&
+        forwardedBody !== null &&
+        "browserIdleTimeoutSeconds" in forwardedBody &&
+        (typeof forwardedBody.browserIdleTimeoutSeconds === "number" ||
+          forwardedBody.browserIdleTimeoutSeconds === null)
       ) {
         forwardedBrowserIdleTimeoutSeconds =
-          forwarded.browserIdleTimeoutSeconds;
+          forwardedBody.browserIdleTimeoutSeconds;
         forwardedAt = Date.now();
       }
     } catch {}
@@ -245,12 +315,13 @@ const control = createServer((request, response) => {
       sendJson(response, 200, {
         armed,
         held: heldForward !== undefined,
+        heldForHumanOpenResponse,
         ...(heldAt === undefined ? {} : { heldAt }),
         ...(clientClosedAt === undefined ? {} : { clientClosedAt }),
         ...(heldRuntimeId === undefined ? {} : { heldRuntimeId }),
         ...(heldOwnerGeneration === undefined ? {} : { heldOwnerGeneration }),
         ...(heldStoppedRunId === undefined ? {} : { heldStoppedRunId }),
-        ...(armed ? { armedForBinId } : {}),
+        ...(armed ? { armedForBinId, armedForHumanOpenResponse } : {}),
         ...(forwardedRuntimeId === undefined ? {} : { forwardedRuntimeId }),
         ...(forwardedOwnerGeneration === undefined
           ? {}
@@ -275,6 +346,11 @@ const control = createServer((request, response) => {
         value !== null &&
         "idleHeartbeat" in value &&
         value.idleHeartbeat === true;
+      const humanOpenResponse =
+        typeof value === "object" &&
+        value !== null &&
+        "humanOpenResponse" in value &&
+        value.humanOpenResponse === true;
       const binId =
         typeof value === "object" &&
         value !== null &&
@@ -291,7 +367,7 @@ const control = createServer((request, response) => {
           : undefined;
       if (
         binId.length === 0 ||
-        (!idleHeartbeat && stoppedRunId === undefined)
+        (!idleHeartbeat && !humanOpenResponse && stoppedRunId === undefined)
       ) {
         sendJson(response, 400, {
           error: "必须指定 bin 以及 idle heartbeat 或待确认的 run。",
@@ -305,9 +381,11 @@ const control = createServer((request, response) => {
       armed = true;
       armedForBinId = binId;
       armedForIdleHeartbeat = idleHeartbeat;
+      armedForHumanOpenResponse = humanOpenResponse;
       armedForStoppedRunId = stoppedRunId;
       heldAt = undefined;
       clientClosedAt = undefined;
+      heldForHumanOpenResponse = false;
       heldRuntimeId = undefined;
       heldOwnerGeneration = undefined;
       heldStoppedRunId = undefined;

@@ -142,20 +142,29 @@ const projectName = `binny19-${suffix}`;
 const serverImage = `binny19-server-${suffix}:local`;
 const browserImage = `binny19-browser-${suffix}:local`;
 const browserBaselineImage = `binny19-browser-${suffix}-image-a:local`;
+const protocol4SourceCommit = "c35af108a42db12c1a5bce627f198423abb6574d";
+const protocol4ProjectName = `binny21-upgrade-${suffix}`;
+const protocol4ServerImage = `binny21-upgrade-server-${suffix}:local`;
+const protocol4BrowserImage = `binny21-upgrade-browser-${suffix}:local`;
 const outerBrowserContainer = `${projectName}-outer-browser`;
 const outerBrowserWsPath = `/binny19-${randomUUID()}`;
 const processObserver = `${projectName}-process-observer`;
 const password = `binny19${randomUUID().replaceAll("-", "")}`;
+const protocol4Password = `binny21${randomUUID().replaceAll("-", "")}`;
 const publishedHost = process.env.BINNY19_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort: number | undefined;
 let sitePort: number | undefined;
 let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
+let protocol4OverlayFile: string | undefined;
+let protocol4Worktree: string | undefined;
+let protocol4Subnet: string | undefined;
 let composeProjectDirectory = "";
 let activeBrowserImage = browserImage;
 let playwrightBrowser: PlaywrightBrowser | undefined;
 let composeStarted = false;
+let protocol4ComposeStarted = false;
 const builtImages = new Set<string>();
 let processObserverStarted = false;
 
@@ -364,14 +373,24 @@ async function dockerNetworkSubnets(): Promise<string[]> {
   return inspected.flat();
 }
 
-async function freeBrowserSubnet(): Promise<string> {
+async function freeBrowserSubnet(useConfiguredSubnet = true): Promise<string> {
   const existing = await dockerNetworkSubnets();
-  const requested = process.env.BINNY21_SUBNET ?? "10.253.21.0/24";
-  assert.ok(
-    existing.every((subnet) => !rangesOverlap(requested, subnet)),
-    `BINNY21_SUBNET ${requested} 与现有 Docker 网络重叠。`,
+  if (useConfiguredSubnet) {
+    const requested = process.env.BINNY21_SUBNET ?? "10.253.21.0/24";
+    assert.ok(
+      existing.every((subnet) => !rangesOverlap(requested, subnet)),
+      `BINNY21_SUBNET ${requested} 与现有 Docker 网络重叠。`,
+    );
+    return requested;
+  }
+  for (let octet = 168; octet < 184; octet += 1) {
+    const candidate = `10.253.${String(octet)}.0/24`;
+    if (existing.every((subnet) => !rangesOverlap(candidate, subnet)))
+      return candidate;
+  }
+  throw new Error(
+    "10.253.168.0/24 到 10.253.183.0/24 均与现有 Docker 网络冲突。",
   );
-  return requested;
 }
 
 async function createComposeOverlay(): Promise<void> {
@@ -412,6 +431,350 @@ async function createComposeOverlay(): Promise<void> {
   );
 }
 
+async function createProtocol4Overlay(): Promise<void> {
+  assert.ok(testDirectory !== undefined);
+  protocol4OverlayFile = path.join(testDirectory, "protocol4.network.yaml");
+  protocol4Subnet = await freeBrowserSubnet(false);
+  await writeFile(
+    protocol4OverlayFile,
+    [
+      "services:",
+      "  server:",
+      "    ports: !override",
+      '      - "3000"',
+      "  browser-session-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "networks:",
+      "  default:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${protocol4Subnet}`,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function protocol4Compose(
+  args: readonly string[],
+  images: { readonly server: string; readonly browser: string },
+): Promise<ProcessResult> {
+  assert.ok(protocol4OverlayFile !== undefined);
+  const result = await run(
+    "docker",
+    [
+      "compose",
+      "--project-name",
+      protocol4ProjectName,
+      "--file",
+      composeFile,
+      "--profile",
+      "binny19",
+      "--file",
+      protocol4OverlayFile,
+      ...args,
+    ],
+    {
+      BINNY_IMAGE: images.server,
+      BINNY19_RUNTIME_IMAGE: images.browser,
+      BINNY_POSTGRES_PASSWORD: protocol4Password,
+      BINNY_BROWSER_CAPACITY_LIMIT: "1",
+    },
+  );
+  assert.equal(
+    result.code,
+    0,
+    `Protocol 4 Compose ${args.join(" ")} 失败：\n${(result.stdout + result.stderr).slice(-12_000)}`,
+  );
+  return result;
+}
+
+async function protocol4Cli(
+  args: readonly string[],
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<ProcessResult> {
+  return await protocol4Compose(
+    [
+      "exec",
+      "--no-TTY",
+      "server",
+      "node",
+      "packages/binny/dist/cli.js",
+      ...args,
+    ],
+    {
+      server: serverImageForProject,
+      browser: browserImageForProject,
+    },
+  );
+}
+
+async function protocol4CliData<T>(
+  args: readonly string[],
+  serverImageForProject: string,
+  browserImageForProject: string,
+  variant: string,
+): Promise<T> {
+  return cliData(
+    await protocol4Cli(args, serverImageForProject, browserImageForProject),
+    variant,
+  );
+}
+
+async function protocol4RuntimeManifest(
+  service: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 60_000;
+  let lastError = "运行器 HTTP 入口尚未就绪。";
+  while (Date.now() < deadline) {
+    try {
+      const payload = await protocol4Compose(
+        [
+          "exec",
+          "--no-TTY",
+          service,
+          "node",
+          "--input-type=module",
+          "-e",
+          'const response = await fetch("http://127.0.0.1:8080/manifest"); if (!response.ok) process.exit(2); console.log(JSON.stringify(await response.json()));',
+        ],
+        {
+          server: serverImageForProject,
+          browser: browserImageForProject,
+        },
+      );
+      const result = JSON.parse(payload.stdout) as {
+        readonly collector?: Record<string, unknown>;
+      };
+      assert.ok(result.collector !== undefined);
+      return result.collector;
+    } catch (error) {
+      lastError = String(error);
+      await delay(250);
+    }
+  }
+  throw new Error(`旧运行器 ${service} 没有发布清单：${lastError}`);
+}
+
+async function protocol4WaitForApi(
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  let lastError = "服务尚未就绪。";
+  while (Date.now() < deadline) {
+    try {
+      await protocol4Cli(
+        ["bin", "list"],
+        serverImageForProject,
+        browserImageForProject,
+      );
+      return;
+    } catch (error) {
+      lastError = String(error);
+      await delay(500);
+    }
+  }
+  throw new Error(`Protocol 4 core API就绪超时：${lastError}`);
+}
+
+async function protocol4WaitForRuntime(
+  binId: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const bin = await protocol4CliData<Bin>(
+      ["bin", "get", binId],
+      serverImageForProject,
+      browserImageForProject,
+      "found",
+    );
+    if (bin.execution.status === "online") return;
+    lastState = JSON.stringify(bin.execution);
+    await delay(250);
+  }
+  throw new Error(`等待旧运行器 ${binId} 在线超时：${lastState}`);
+}
+
+async function protocol4ReadRun(
+  binId: string,
+  runId: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<Run> {
+  return await protocol4CliData(
+    ["run", "get", binId, runId],
+    serverImageForProject,
+    browserImageForProject,
+    "found",
+  );
+}
+
+async function protocol4WaitForRun(
+  binId: string,
+  runId: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+  predicate: (run: Run) => boolean,
+): Promise<Run> {
+  const deadline = Date.now() + 120_000;
+  let last: Run | undefined;
+  while (Date.now() < deadline) {
+    last = await protocol4ReadRun(
+      binId,
+      runId,
+      serverImageForProject,
+      browserImageForProject,
+    );
+    if (predicate(last)) return last;
+    await delay(250);
+  }
+  throw new Error(`旧运行 ${runId} 等待超时：${JSON.stringify(last)}`);
+}
+
+async function protocol4WaitForBrowserPower(
+  binId: string,
+  expected: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const bin = await protocol4CliData<Bin>(
+      ["bin", "get", binId],
+      serverImageForProject,
+      browserImageForProject,
+      "found",
+    );
+    lastState = JSON.stringify(bin.execution);
+    if (
+      bin.execution.status === "online" &&
+      bin.execution.environment?.browser?.power?.status === expected
+    )
+      return;
+    await delay(150);
+  }
+  throw new Error(`旧运行器 ${binId} 未到达 ${expected}：${lastState}`);
+}
+
+async function protocol4ActiveBrowserMainProcessCount(
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<number> {
+  let count = 0;
+  for (const service of ["browser-one", "browser-two"]) {
+    count += await protocol4BrowserMainProcessCount(
+      service,
+      serverImageForProject,
+      browserImageForProject,
+    );
+  }
+  return count;
+}
+
+async function protocol4BrowserMainProcessCount(
+  service: string,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<number> {
+  const containers = await protocol4Compose(
+    ["ps", "--all", "--quiet", service],
+    {
+      server: serverImageForProject,
+      browser: browserImageForProject,
+    },
+  );
+  const containerId = containers.stdout.trim();
+  if (containerId.length === 0) return 0;
+  const inspected = await run("docker", [
+    "inspect",
+    "--format",
+    "{{.State.Status}}",
+    containerId,
+  ]);
+  assert.equal(inspected.code, 0, inspected.stderr);
+  if (inspected.stdout.trim() !== "running") return 0;
+  const processes = await run("docker", [
+    "top",
+    containerId,
+    "-eo",
+    "pid,args",
+  ]);
+  assert.equal(processes.code, 0, processes.stderr);
+  return processes.stdout
+    .split("\n")
+    .filter(
+      (line) =>
+        /(?:chrom(?:e|ium))/iu.test(line) &&
+        !line.includes("--type=") &&
+        !line.includes("chrome_crashpad_handler"),
+    ).length;
+}
+
+async function buildAcceptedProtocol4Images(): Promise<void> {
+  assert.ok(testDirectory !== undefined);
+  protocol4Worktree = path.join(testDirectory, "accepted-c35-source");
+  builtImages.add(protocol4ServerImage);
+  builtImages.add(protocol4BrowserImage);
+  const added = await run("git", [
+    "worktree",
+    "add",
+    "--detach",
+    protocol4Worktree,
+    protocol4SourceCommit,
+  ]);
+  assert.equal(added.code, 0, added.stderr);
+
+  const serverBuild = await run("docker", [
+    "build",
+    "--tag",
+    protocol4ServerImage,
+    "--file",
+    path.join(protocol4Worktree, "Dockerfile"),
+    protocol4Worktree,
+  ]);
+  assert.equal(
+    serverBuild.code,
+    0,
+    `接受的20 core镜像构建失败：\n${(serverBuild.stdout + serverBuild.stderr).slice(-12_000)}`,
+  );
+  const browserBuild = await run("docker", [
+    "build",
+    "--tag",
+    protocol4BrowserImage,
+    "--file",
+    path.join(
+      protocol4Worktree,
+      "packages/collector-runtime/Dockerfile.browser",
+    ),
+    "--build-arg",
+    "BINNY_COLLECTOR_PACKAGE=@binny/collector-runtime",
+    "--build-arg",
+    "BINNY_COLLECTOR_ENTRY=fixture-dist/browser-session-collector.js",
+    protocol4Worktree,
+  ]);
+  assert.equal(
+    browserBuild.code,
+    0,
+    `接受的20浏览器镜像构建失败：\n${(browserBuild.stdout + browserBuild.stderr).slice(-12_000)}`,
+  );
+  const removed = await run("git", [
+    "worktree",
+    "remove",
+    "--force",
+    protocol4Worktree,
+  ]);
+  assert.equal(removed.code, 0, removed.stderr);
+  protocol4Worktree = undefined;
+}
+
 async function armIdleHeartbeatGate(binId: string): Promise<void> {
   assert.ok(heartbeatProxyControlPort !== undefined);
   const response = await fetch(
@@ -424,6 +787,63 @@ async function armIdleHeartbeatGate(binId: string): Promise<void> {
     },
   );
   assert.equal(response.status, 200, await response.text());
+}
+
+async function armHumanOpenResponseGate(binId: string): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/arm`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ binId, humanOpenResponse: true }),
+      signal: AbortSignal.timeout(3_000),
+    },
+  );
+  assert.equal(response.status, 200, await response.text());
+}
+
+async function waitForHumanOpenResponseGate(): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly held: boolean;
+      readonly heldForHumanOpenResponse: boolean;
+    };
+    if (state.held && state.heldForHumanOpenResponse) return;
+    await delay(100);
+  }
+  throw new Error("心跳代理没有拦住人工 open 响应。");
+}
+
+async function waitForHeldHeartbeatClientClosed(): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly heldAt?: number;
+      readonly clientClosedAt?: number;
+    };
+    if (
+      typeof state.heldAt === "number" &&
+      typeof state.clientClosedAt === "number" &&
+      state.clientClosedAt >= state.heldAt
+    )
+      return;
+    await delay(100);
+  }
+  throw new Error("运行器没有因超时放弃已拦截的人工 open 响应。");
 }
 
 async function waitForHeartbeatForwardedAfter(
@@ -496,13 +916,17 @@ async function holdIdleProbeAtDeadline(
   await waitForIdleHeartbeatGate(binId);
 }
 
-async function releaseIdleHeartbeatGate(): Promise<void> {
+async function releaseHeartbeatGate(): Promise<void> {
   assert.ok(heartbeatProxyControlPort !== undefined);
   const response = await fetch(
     `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/release`,
     { method: "POST", signal: AbortSignal.timeout(30_000) },
   );
   assert.equal(response.status, 200, await response.text());
+}
+
+async function releaseIdleHeartbeatGate(): Promise<void> {
+  await releaseHeartbeatGate();
 }
 
 async function waitForApi(): Promise<void> {
@@ -1353,9 +1777,17 @@ async function closeHumanSession(
   binId: string,
   sessionId: string,
 ): Promise<HumanSessionStatus> {
-  const result = await cli(["human", "close", binId, sessionId.toUpperCase()]);
-  cliData<HumanSessionStatus>(result, "closed");
+  const requested = await requestHumanSessionClose(binId, sessionId);
+  assert.ok(requested.status === "closing" || requested.status === "closed");
   return await waitForHuman(binId, sessionId, "closed");
+}
+
+async function requestHumanSessionClose(
+  binId: string,
+  sessionId: string,
+): Promise<HumanSessionStatus> {
+  const result = await cli(["human", "close", binId, sessionId.toUpperCase()]);
+  return cliData<HumanSessionStatus>(result, "closed");
 }
 
 async function verifyPlaywrightDeploys(service: string): Promise<void> {
@@ -1679,6 +2111,306 @@ async function diagnostics(): Promise<string> {
   return `\nCompose 状态：\n${services.stdout}${services.stderr}\n浏览器显示进程：\n${browserProcesses.stdout}${browserProcesses.stderr}\nCompose 日志：\n${(logs.stdout + logs.stderr).slice(-24_000)}`;
 }
 
+async function protocol4Diagnostics(): Promise<string> {
+  try {
+    const [services, logs] = await Promise.all([
+      protocol4Compose(["ps", "--all"], {
+        server: serverImage,
+        browser: browserImage,
+      }),
+      protocol4Compose(["logs", "--tail", "120"], {
+        server: serverImage,
+        browser: browserImage,
+      }),
+    ]);
+    return `\n票21升级项目 ${protocol4ProjectName}：\n${services.stdout}\n升级项目日志：\n${(logs.stdout + logs.stderr).slice(-18_000)}`;
+  } catch (error) {
+    return `\n票21升级项目诊断失败：${String(error)}`;
+  }
+}
+
+async function runProtocol4UpgradeAcceptance(): Promise<void> {
+  await createProtocol4Overlay();
+  await buildAcceptedProtocol4Images();
+  const protocol4Images = {
+    server: protocol4ServerImage,
+    browser: protocol4BrowserImage,
+  };
+  const currentImages = { server: serverImage, browser: browserImage };
+  protocol4ComposeStarted = true;
+  await protocol4Compose(
+    [
+      "up",
+      "--detach",
+      "--no-build",
+      "postgres",
+      "server",
+      "browser-session-source",
+      "browser-one",
+    ],
+    protocol4Images,
+  );
+  await protocol4WaitForApi(protocol4Images.server, protocol4Images.browser);
+  const legacyManifest = await protocol4RuntimeManifest(
+    "browser-one",
+    protocol4Images.server,
+    protocol4Images.browser,
+  );
+  const legacyConfiguration = {
+    baseUrl: "http://browser-session-source:8081/",
+  };
+  cliData(
+    await protocol4Cli(
+      [
+        "bin",
+        "create",
+        "binny19-one",
+        "--collector",
+        JSON.stringify(legacyManifest),
+        "--identity",
+        "identity-binny21-legacy",
+        "--config",
+        JSON.stringify(legacyConfiguration),
+        "--targets",
+        "[]",
+        "--browser-idle-timeout-seconds",
+        "disabled",
+      ],
+      protocol4Images.server,
+      protocol4Images.browser,
+    ),
+    "created",
+  );
+  await protocol4WaitForRuntime(
+    "binny19-one",
+    protocol4Images.server,
+    protocol4Images.browser,
+  );
+  const legacyWarmRun = cliData<Run>(
+    await protocol4Cli(
+      ["run", "trigger", "binny19-one", "check", "--params", "{}"],
+      protocol4Images.server,
+      protocol4Images.browser,
+    ),
+    "triggered",
+  );
+  const legacyWarmResult = await protocol4WaitForRun(
+    "binny19-one",
+    legacyWarmRun.runId,
+    protocol4Images.server,
+    protocol4Images.browser,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(legacyWarmResult.status, "completed");
+  await protocol4WaitForBrowserPower(
+    "binny19-one",
+    "ready",
+    protocol4Images.server,
+    protocol4Images.browser,
+  );
+  const legacyWarmProcessCount = await protocol4ActiveBrowserMainProcessCount(
+    protocol4Images.server,
+    protocol4Images.browser,
+  );
+  assert.equal(legacyWarmProcessCount, 1);
+
+  await protocol4Compose(
+    ["up", "--detach", "--no-deps", "--force-recreate", "--no-build", "server"],
+    currentImages,
+  );
+  await protocol4WaitForApi(currentImages.server, currentImages.browser);
+  await protocol4WaitForRuntime(
+    "binny19-one",
+    currentImages.server,
+    protocol4Images.browser,
+  );
+  const legacyAfterUpgradeProcessCount =
+    await protocol4ActiveBrowserMainProcessCount(
+      currentImages.server,
+      protocol4Images.browser,
+    );
+  assert.equal(legacyAfterUpgradeProcessCount, 1);
+
+  await protocol4Compose(
+    ["up", "--detach", "--no-deps", "--no-build", "browser-two"],
+    currentImages,
+  );
+  const currentManifest = await protocol4RuntimeManifest(
+    "browser-two",
+    currentImages.server,
+    currentImages.browser,
+  );
+  cliData(
+    await protocol4Cli(
+      [
+        "bin",
+        "create",
+        "binny19-two",
+        "--collector",
+        JSON.stringify(currentManifest),
+        "--identity",
+        "identity-binny21-current",
+        "--config",
+        JSON.stringify(legacyConfiguration),
+        "--targets",
+        "[]",
+        "--browser-idle-timeout-seconds",
+        "disabled",
+      ],
+      currentImages.server,
+      currentImages.browser,
+    ),
+    "created",
+  );
+  await protocol4WaitForRuntime(
+    "binny19-two",
+    currentImages.server,
+    currentImages.browser,
+  );
+  const currentQueuedRun = cliData<Run>(
+    await protocol4Cli(
+      ["run", "trigger", "binny19-two", "check", "--params", "{}"],
+      currentImages.server,
+      currentImages.browser,
+    ),
+    "triggered",
+  );
+  assert.equal(currentQueuedRun.status, "queued");
+  assert.equal(currentQueuedRun.queueReason, "browser_capacity_exhausted");
+  const upgradeQueuedProcessCount =
+    await protocol4ActiveBrowserMainProcessCount(
+      currentImages.server,
+      currentImages.browser,
+    );
+  assert.equal(upgradeQueuedProcessCount, 1);
+  assert.equal(
+    await protocol4BrowserMainProcessCount(
+      "browser-one",
+      currentImages.server,
+      protocol4Images.browser,
+    ),
+    1,
+    "旧 protocol4 容器升级新 core 后必须仍持有实际浏览器进程。",
+  );
+
+  cliData(
+    await protocol4Cli(
+      ["bin", "update", "binny19-one", "--browser-idle-timeout-seconds", "0"],
+      currentImages.server,
+      protocol4Images.browser,
+    ),
+    "updated",
+  );
+  await protocol4WaitForBrowserPower(
+    "binny19-one",
+    "stopped",
+    currentImages.server,
+    protocol4Images.browser,
+  );
+  const legacyStoppedProcessCount =
+    await protocol4ActiveBrowserMainProcessCount(
+      currentImages.server,
+      protocol4Images.browser,
+    );
+  assert.equal(legacyStoppedProcessCount, 0);
+  const currentAfterLegacyStop = await protocol4WaitForRun(
+    "binny19-two",
+    currentQueuedRun.runId,
+    currentImages.server,
+    currentImages.browser,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(currentAfterLegacyStop.status, "completed");
+  await protocol4WaitForBrowserPower(
+    "binny19-two",
+    "ready",
+    currentImages.server,
+    currentImages.browser,
+  );
+  const currentAfterLegacyStartProcessCount =
+    await protocol4ActiveBrowserMainProcessCount(
+      currentImages.server,
+      currentImages.browser,
+    );
+  assert.equal(currentAfterLegacyStartProcessCount, 1);
+
+  const unsupportedLegacyRun = cliData<Run>(
+    await protocol4Cli(
+      ["run", "trigger", "binny19-one", "check", "--params", "{}"],
+      currentImages.server,
+      protocol4Images.browser,
+    ),
+    "triggered",
+  );
+  assert.equal(unsupportedLegacyRun.status, "queued");
+  assert.equal(unsupportedLegacyRun.queueReason, "runtime_protocol_outdated");
+  assert.equal(
+    await protocol4BrowserMainProcessCount(
+      "browser-one",
+      currentImages.server,
+      protocol4Images.browser,
+    ),
+    0,
+    "没有 legacy 预约的旧 v4 controller 不能启动浏览器。",
+  );
+  cliData(
+    await protocol4Cli(
+      ["bin", "update", "binny19-two", "--browser-idle-timeout-seconds", "0"],
+      currentImages.server,
+      currentImages.browser,
+    ),
+    "updated",
+  );
+  await protocol4WaitForBrowserPower(
+    "binny19-two",
+    "stopped",
+    currentImages.server,
+    currentImages.browser,
+  );
+  assert.equal(
+    await protocol4ActiveBrowserMainProcessCount(
+      currentImages.server,
+      currentImages.browser,
+    ),
+    0,
+  );
+  assert.equal(
+    (
+      await protocol4ReadRun(
+        "binny19-one",
+        unsupportedLegacyRun.runId,
+        currentImages.server,
+        protocol4Images.browser,
+      )
+    ).queueReason,
+    "runtime_protocol_outdated",
+    "容量释放后，未承接 legacy 占位的旧 v4 请求仍不得启动。",
+  );
+  process.stdout.write(
+    `票21 protocol4 活体升级实测：${JSON.stringify({
+      project: protocol4ProjectName,
+      subnet: protocol4Subnet,
+      acceptedRuntimeSourceCommit: protocol4SourceCommit,
+      oldServerImageId: await imageId(protocol4ServerImage),
+      oldBrowserImageId: await imageId(protocol4BrowserImage),
+      currentServerImageId: await imageId(serverImage),
+      currentBrowserImageId: await imageId(browserImage),
+      browserProcessCounts: [
+        legacyWarmProcessCount,
+        legacyAfterUpgradeProcessCount,
+        upgradeQueuedProcessCount,
+        legacyStoppedProcessCount,
+        currentAfterLegacyStartProcessCount,
+        0,
+      ],
+      currentV5WaitedForLegacyStop:
+        currentQueuedRun.queueReason === "browser_capacity_exhausted",
+      legacyV4WithoutReservation: unsupportedLegacyRun.queueReason,
+      legacyStoppedBeforeV5Started: true,
+    })}\n`,
+  );
+}
+
 async function main(): Promise<void> {
   await createComposeOverlay();
   assert.ok(testDirectory !== undefined);
@@ -1843,6 +2575,161 @@ async function main(): Promise<void> {
   assert.equal(oneBindings["5900/tcp"], undefined);
   assert.equal(oneBindings["6000/tcp"], undefined);
   assert.equal(oneBindings["9222/tcp"], undefined);
+
+  const concurrentFirstLaunches = await Promise.all([
+    triggerRun("binny19-one", "check"),
+    triggerRun("binny19-two", "check"),
+  ]);
+  const concurrentBrowserSamples = [await activeBrowserMainProcessCount()];
+  assert.equal(concurrentBrowserSamples.at(-1), 0);
+  const concurrentRunDeadline = Date.now() + 90_000;
+  let concurrentWinner:
+    | { readonly binId: string; readonly service: string }
+    | undefined;
+  let concurrentLoser:
+    | { readonly binId: string; readonly service: string; readonly run: Run }
+    | undefined;
+  let concurrentRunStates: readonly [Run, Run] | undefined;
+  while (Date.now() < concurrentRunDeadline) {
+    const current = await Promise.all([
+      readRun("binny19-one", concurrentFirstLaunches[0].runId),
+      readRun("binny19-two", concurrentFirstLaunches[1].runId),
+    ]);
+    concurrentRunStates = current;
+    const processCount = await activeBrowserMainProcessCount();
+    concurrentBrowserSamples.push(processCount);
+    assert.ok(processCount <= 1, "并发首次启动突破了部署容量上限。");
+    const winnerIndex = current.findIndex(
+      (run) => run.status === "completed" || run.status === "failed",
+    );
+    const loserIndex = winnerIndex === 0 ? 1 : 0;
+    if (
+      winnerIndex !== -1 &&
+      current[loserIndex]?.status === "queued" &&
+      current[loserIndex]?.queueReason === "browser_capacity_exhausted" &&
+      processCount === 1
+    ) {
+      concurrentWinner = {
+        binId: winnerIndex === 0 ? "binny19-one" : "binny19-two",
+        service: winnerIndex === 0 ? "browser-one" : "browser-two",
+      };
+      concurrentLoser = {
+        binId: loserIndex === 0 ? "binny19-one" : "binny19-two",
+        service: loserIndex === 0 ? "browser-one" : "browser-two",
+        run: current[loserIndex]!,
+      };
+      break;
+    }
+    await delay(250);
+  }
+  assert.ok(
+    concurrentWinner !== undefined && concurrentLoser !== undefined,
+    `并发首次启动没有形成一个就绪占位和一个容量等待：${JSON.stringify(concurrentRunStates)}`,
+  );
+  assert.ok(Math.max(...concurrentBrowserSamples) <= 1);
+  assert.equal(concurrentLoser.run.queueReason, "browser_capacity_exhausted");
+
+  await compose(["restart", "server"]);
+  await waitForApi();
+  serverPort = await publishedPort("server", 3000);
+  await Promise.all([
+    waitForRuntime("binny19-one"),
+    waitForRuntime("binny19-two"),
+  ]);
+  assert.equal(
+    (await readRun(concurrentLoser.binId, concurrentLoser.run.runId))
+      .queueReason,
+    "browser_capacity_exhausted",
+    "核心重启后仍运行的浏览器没有继续占用容量。",
+  );
+  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.equal(concurrentBrowserSamples.at(-1), 1);
+
+  await updateBin(concurrentWinner.binId, 0);
+  await waitForBrowserPower(concurrentWinner.binId, "stopped");
+  await waitForBrowserProcessesStopped(concurrentWinner.service);
+  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.ok(concurrentBrowserSamples.at(-1)! <= 1);
+  const releasedConcurrentRun = await waitForRun(
+    concurrentLoser.binId,
+    concurrentLoser.run.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(releasedConcurrentRun.status, "completed");
+  await waitForBrowserPower(concurrentLoser.binId, "ready");
+  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.equal(concurrentBrowserSamples.at(-1), 1);
+  await updateBin(concurrentLoser.binId, 0);
+  await waitForBrowserPower(concurrentLoser.binId, "stopped");
+  await waitForBrowserProcessesStopped(concurrentLoser.service);
+  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.equal(concurrentBrowserSamples.at(-1), 0);
+  await updateBin("binny19-one", 30);
+  await updateBin("binny19-two", "disabled");
+  assert.ok(Math.max(...concurrentBrowserSamples) <= 1);
+  process.stdout.write(
+    `票21并发准入与核心重启实测：${JSON.stringify({
+      limit: 1,
+      winner: concurrentWinner.binId,
+      queuedBin: concurrentLoser.binId,
+      queuedReason: "browser_capacity_exhausted",
+      observedBrowserProcessCounts: concurrentBrowserSamples,
+      reservationRetainedAcrossServerRestart: true,
+      releasedAfterRealExit: true,
+    })}\n`,
+  );
+
+  await armHumanOpenResponseGate("binny19-one");
+  const lostOpenSession = await startHumanSession("binny19-one");
+  await waitForHumanOpenResponseGate();
+  assert.equal(
+    (await waitForHuman("binny19-one", lostOpenSession.sessionId, "opening"))
+      .status,
+    "opening",
+  );
+  const runDuringLostOpen = await triggerRun("binny19-two", "check");
+  assert.equal(runDuringLostOpen.status, "queued");
+  assert.equal(runDuringLostOpen.queueReason, "browser_capacity_exhausted");
+  const lostOpenBrowserSamples = [await activeBrowserMainProcessCount()];
+  assert.deepEqual(lostOpenBrowserSamples, [0]);
+
+  const lostOpenCloseRequest = await requestHumanSessionClose(
+    "binny19-one",
+    lostOpenSession.sessionId,
+  );
+  assert.equal(lostOpenCloseRequest.status, "closing");
+  await waitForHeldHeartbeatClientClosed();
+  await releaseHeartbeatGate();
+  assert.equal(
+    (await waitForHuman("binny19-one", lostOpenSession.sessionId, "closed"))
+      .status,
+    "closed",
+  );
+  const runAfterLostOpen = await waitForRun(
+    "binny19-two",
+    runDuringLostOpen.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(runAfterLostOpen.status, "completed");
+  await waitForBrowserPower("binny19-two", "ready");
+  lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.equal(lostOpenBrowserSamples.at(-1), 1);
+  await updateBin("binny19-two", 0);
+  await waitForBrowserPower("binny19-two", "stopped");
+  await waitForBrowserProcessesStopped("browser-two");
+  lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
+  assert.equal(lostOpenBrowserSamples.at(-1), 0);
+  assert.ok(Math.max(...lostOpenBrowserSamples) <= 1);
+  await updateBin("binny19-two", "disabled");
+  process.stdout.write(
+    `票21人工 open 回包丢失实测：${JSON.stringify({
+      heldReservationQueueReason: runDuringLostOpen.queueReason,
+      closedSession: lostOpenSession.sessionId,
+      browserProcessCounts: lostOpenBrowserSamples,
+      queuedRunCompletedAfterCancellation:
+        runAfterLostOpen.status === "completed",
+    })}\n`,
+  );
 
   const initialCheck = await triggerRun("binny19-one", "check");
   const initialResult = await waitForRun(
@@ -2556,6 +3443,7 @@ async function main(): Promise<void> {
     await cli(["bin", "remove", "binny19-two"]),
     "removed",
   );
+  await runProtocol4UpgradeAcceptance();
 }
 
 try {
@@ -2566,7 +3454,7 @@ try {
     );
   } catch (error) {
     throw new Error(
-      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}${protocol4ComposeStarted ? await protocol4Diagnostics() : ""}`,
     );
   }
 } finally {
@@ -2579,11 +3467,23 @@ try {
     await run("docker", ["rm", "--force", processObserver]).catch(
       () => undefined,
     );
+  if (protocol4ComposeStarted)
+    await protocol4Compose(["down", "--volumes", "--remove-orphans"], {
+      server: serverImage,
+      browser: browserImage,
+    }).catch(() => undefined);
   if (composeStarted)
     await rawCompose(
       ["down", "--volumes", "--remove-orphans"],
       "binny19,binny19-lock",
     ).catch(() => undefined);
+  if (protocol4Worktree !== undefined)
+    await run("git", [
+      "worktree",
+      "remove",
+      "--force",
+      protocol4Worktree,
+    ]).catch(() => undefined);
   if (builtImages.size > 0)
     await run("docker", ["image", "rm", "--force", ...builtImages]).catch(
       () => undefined,

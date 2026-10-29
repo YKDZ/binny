@@ -29,6 +29,7 @@ export const runtimeHumanSessionControlSchema = z.discriminatedUnion("action", [
     .object({
       sessionId: z.string().uuid(),
       action: z.literal("close"),
+      browserReservationId: z.string().uuid().optional(),
     })
     .strict(),
 ]);

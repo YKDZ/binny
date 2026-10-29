@@ -402,9 +402,20 @@ export async function applyRuntimeHumanSessionHeartbeat(
     };
   }
   if (session.status === "closing") {
+    const reservation =
+      ownsSession && options.supportsReservationId
+        ? await browserCapacity.reservation(transaction, {
+            binId: options.binId,
+            runtimeId: options.runtimeId,
+            ownerGeneration: generation,
+          })
+        : undefined;
     return {
       sessionId: session.sessionId,
       action: "close",
+      ...(reservation === undefined
+        ? {}
+        : { browserReservationId: reservation.reservationId }),
     };
   }
   return undefined;

@@ -1206,6 +1206,8 @@ async function applyHumanSessionControl(
 
   if (browserLifecycle === undefined) return;
   try {
+    if (control.browserReservationId !== undefined)
+      await browserLifecycle.confirmNotStarted(control.browserReservationId);
     await browserLifecycle.closeHumanSession(control.sessionId);
     if (activeHumanSessionId === control.sessionId)
       activeHumanSessionId = undefined;
