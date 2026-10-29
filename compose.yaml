@@ -29,6 +29,7 @@ services:
       DATABASE_URL: postgres://binny:${BINNY_POSTGRES_PASSWORD:?请设置数据库密码}@postgres:5432/binny
       BINNY_API_URL: http://127.0.0.1:3000
       BINNY_BROWSER_CAPACITY_LIMIT: ${BINNY_BROWSER_CAPACITY_LIMIT:-1}
+      BINNY_HUMAN_SESSION_VIEWER_WAIT_MS: ${BINNY_HUMAN_SESSION_VIEWER_WAIT_MS:-60000}
       BINNY_RESOURCE_DIRECTORY: /var/lib/binny/resources
       PORT: 3000
     ports:
