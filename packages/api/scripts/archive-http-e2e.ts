@@ -2461,6 +2461,26 @@ async function verifySearchRoute(
     {
       path: "/archives/search",
       request: {
+        scope: { kind: "invalid" },
+        text: { kind: "literal", value: "x" },
+      },
+      message: "字段值不符合要求。",
+      issuePath: ["scope", "kind"],
+    },
+    {
+      path: "/archives/aggregate",
+      request: {
+        scope: { kind: "invalid" },
+        unit: "item",
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      },
+      message: "字段值不符合要求。",
+      issuePath: ["scope", "kind"],
+    },
+    {
+      path: "/archives/search",
+      request: {
         scope: { kind: "current", binId: "rss-main" },
         where: {
           type: "json",

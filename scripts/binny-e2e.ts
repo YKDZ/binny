@@ -534,7 +534,10 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
       "archive",
       "search",
       "--query",
-      JSON.stringify({ scope: { kind: "current", binId: "rss-main" } }),
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        text: { kind: "literal", value: "正文 A" },
+      }),
     ]),
     "found",
   );
@@ -561,6 +564,28 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
             groupBy: [],
             metrics: [{ key: "items", op: "count" }],
           };
+    const invalidScope = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          scope: { kind: "invalid" },
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.equal(invalidScope.message, "字段值不符合要求。");
+    assert.deepEqual(invalidScope.path, ["scope", "kind"]);
+
     const unknownKey = cliFailure<{
       readonly code: string;
       readonly message: string;
