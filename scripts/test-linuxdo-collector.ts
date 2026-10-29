@@ -51,6 +51,7 @@ type FixtureState = {
   readonly challengePosts: boolean;
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
+  readonly legacyTags: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -897,6 +898,12 @@ async function verifyTopicArchive(): Promise<void> {
   assert.equal(rootState.capture.completeness, "complete");
   assert.equal(rootState.capture.scope.postNumber, 1);
   assert.equal(rootState.metadata?.postNumber, 1);
+  const topicMetadata = rootState.metadata?.topic;
+  assert.ok(topicMetadata !== null && typeof topicMetadata === "object");
+  assert.deepEqual("tags" in topicMetadata ? topicMetadata.tags : undefined, [
+    "受控",
+    "归档",
+  ]);
   assert.equal(
     rootState.metadata?.author && typeof rootState.metadata.author,
     "object",
@@ -991,8 +998,18 @@ async function verifyTopicArchive(): Promise<void> {
     ["post:240002", "post:240003"],
   );
 
+  await updateFixtureState({ legacyTags: true });
   await collectTopic();
   const duplicateRoot = await readArchiveItem(root.itemId);
+  const duplicateTopicMetadata = binState(duplicateRoot).metadata?.topic;
+  assert.ok(
+    duplicateTopicMetadata !== null &&
+      typeof duplicateTopicMetadata === "object",
+  );
+  assert.deepEqual(
+    "tags" in duplicateTopicMetadata ? duplicateTopicMetadata.tags : undefined,
+    ["受控", "归档"],
+  );
   assert.equal(
     duplicateRoot.revisions.length,
     initialRootRevisionCount,

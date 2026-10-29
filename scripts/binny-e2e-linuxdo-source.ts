@@ -6,6 +6,7 @@ type SourceState = {
   readonly challengePosts: boolean;
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
+  readonly legacyTags: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -50,6 +51,7 @@ let activeState: SourceState = {
   challengePosts: false,
   challengeMedia: false,
   topicVisible: true,
+  legacyTags: false,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
@@ -190,7 +192,12 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
       posts_count: availablePosts.length,
       reply_count: availablePosts.length - 1,
       category_id: 42,
-      tags: ["受控", "归档"],
+      tags: activeState.legacyTags
+        ? ["受控", "归档"]
+        : [
+            { id: 42, name: "受控", slug: "controlled" },
+            { id: 43, name: "归档", slug: "archive" },
+          ],
       post_stream: {
         posts: [availablePosts[0]],
         stream: availablePosts.map(({ id }) => id),
@@ -276,6 +283,7 @@ function updateState(value: unknown): boolean {
     "challengePosts",
     "challengeMedia",
     "topicVisible",
+    "legacyTags",
     "addedReply",
     "discoveryAddedReply",
   ] as const) {
