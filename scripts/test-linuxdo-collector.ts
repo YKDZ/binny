@@ -7,7 +7,20 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Browser, type Page } from "playwright-core";
+import { type Browser, type Page } from "playwright-core";
+
+import {
+  closeLinuxdoHumanSession,
+  linuxdoUserJourney,
+  navigateThroughLinuxdoViewer,
+  openLinuxdoHumanSession,
+  openLinuxdoViewer,
+  startLinuxdoViewerBrowser,
+  triggerLinuxdoRun,
+  type LinuxdoBrowserSession,
+  type LinuxdoManualRun,
+  type LinuxdoViewerBrowser,
+} from "./binny-e2e-linuxdo-journey.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -21,30 +34,7 @@ type CliWire<T> = {
   readonly data: T;
 };
 
-type ManualRun = {
-  readonly runId: string;
-  readonly status: "queued" | "running" | "completed" | "failed";
-  readonly result?: {
-    readonly check?: {
-      readonly availability: "available" | "unavailable" | "unknown";
-      readonly scope: readonly string[];
-      readonly problems: readonly {
-        readonly code: string;
-        readonly requiresHuman: boolean;
-        readonly suggestion?: string;
-      }[];
-    };
-    readonly error?: {
-      readonly code: string;
-      readonly requiresHuman: boolean;
-      readonly path?: readonly (string | number)[];
-    };
-    readonly completedScopes?: readonly string[];
-    readonly commits?: readonly {
-      readonly items: readonly { readonly itemId: string }[];
-    }[];
-  };
-};
+type ManualRun = LinuxdoManualRun;
 
 type FixtureState = {
   readonly challengePage: boolean;
@@ -103,11 +93,7 @@ type ArchiveRevision = {
   readonly state: ArchiveItemState;
 };
 
-type BrowserSession = {
-  readonly sessionId: string;
-  readonly viewerUrl: string;
-  readonly status?: string;
-};
+type BrowserSession = LinuxdoBrowserSession;
 
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -118,23 +104,21 @@ const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny25-${suffix}`;
 const serverImage = `${projectName}-server:local`;
 const browserImage = `${projectName}-linuxdo:local`;
-const outerBrowserContainer = `${projectName}-outer-browser`;
-const outerBrowserWsPath = `/binny25-${randomUUID()}`;
 const publishedHost = process.env.BINNY25_PUBLISHED_HOST ?? "172.17.0.1";
 const password = `binny25-${randomUUID().replaceAll("-", "")}`;
 let overlayDirectory: string | undefined;
 let overlayFile: string | undefined;
 let browser: Browser | undefined;
+let viewerBrowser: LinuxdoViewerBrowser | undefined;
 let serverPort = 0;
 let sourcePort = 0;
 let composeStarted = false;
-let outerBrowserStarted = false;
 
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY25_BIN_ID: "binny25-topic",
-    BINNY25_RUNTIME_IMAGE: browserImage,
+    BINNY24_BIN_ID: "binny25-topic",
+    BINNY24_RUNTIME_IMAGE: browserImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -408,146 +392,34 @@ async function trigger(
   action: "check" | "collect",
   params: Readonly<Record<string, unknown>>,
 ): Promise<ManualRun> {
-  const queued = cliData<ManualRun>(
-    await cli([
-      "run",
-      "trigger",
-      "binny25-topic",
-      action,
-      "--params",
-      JSON.stringify(params),
-    ]),
-    "triggered",
-  );
-  assert.equal(queued.status, "queued");
-  const deadline = Date.now() + 90_000;
-  let latest = queued;
-  while (Date.now() < deadline) {
-    latest = cliData<ManualRun>(
-      await cli(["run", "get", "binny25-topic", queued.runId]),
-      "found",
-    );
-    if (latest.status === "completed" || latest.status === "failed")
-      return latest;
-    await delay(100);
-  }
-  assert.fail(
-    `等待 Linux.do ${action} 运行终结超时：${JSON.stringify(latest)}`,
-  );
+  return await triggerLinuxdoRun(cli, "binny25-topic", action, params);
 }
 
 async function startOuterBrowser(): Promise<Browser> {
-  const launch = await run("docker", [
-    "run",
-    "--detach",
-    "--name",
-    outerBrowserContainer,
-    "--network",
-    "bridge",
-    "--publish",
-    `${publishedHost}::9224`,
-    "--workdir",
-    "/app/binny-runtime",
-    "--entrypoint",
-    "node",
-    browserImage,
-    "--input-type=module",
-    "--eval",
-    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY25_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
-  ]);
-  assert.equal(launch.code, 0, `外层浏览器启动失败：\n${launch.stderr}`);
-  outerBrowserStarted = true;
-
-  const deadline = Date.now() + 30_000;
-  let logs = "";
-  while (Date.now() < deadline) {
-    const result = await run("docker", ["logs", outerBrowserContainer]);
-    logs = result.stdout + result.stderr;
-    if (logs.includes("BINNY25_OUTER_BROWSER_READY")) break;
-    await delay(100);
-  }
-  assert.ok(logs.includes("BINNY25_OUTER_BROWSER_READY"), logs);
-  const mapping = (
-    await run("docker", ["port", outerBrowserContainer, "9224/tcp"])
-  ).stdout.trim();
-  const portText = /:(\d+)$/u.exec(mapping)?.[1];
-  assert.ok(portText !== undefined, `没有外层浏览器端口：${mapping}`);
-  const endpoint = new URL(`ws://127.0.0.1:9224${outerBrowserWsPath}`);
-  endpoint.hostname = publishedHost;
-  endpoint.port = portText;
-  return await chromium.connect(endpoint.href);
+  viewerBrowser = await startLinuxdoViewerBrowser({
+    projectName,
+    image: browserImage,
+    publishedHost,
+    run,
+  });
+  return viewerBrowser.browser;
 }
 
 async function openViewer(session: BrowserSession): Promise<Page> {
   assert.ok(browser !== undefined);
-  const viewer = new URL(session.viewerUrl);
-  viewer.hostname = publishedHost;
-  viewer.port = String(serverPort);
-  const page = await browser.newPage();
-  await page.goto(viewer.href);
-  try {
-    await page
-      .locator("#screen canvas")
-      .waitFor({ state: "visible", timeout: 30_000 });
-  } catch (error) {
-    throw new Error(
-      `noVNC 画面没有加载：url=${page.url()} title=${await page.title()} body=${(
-        await page
-          .locator("body")
-          .innerText()
-          .catch(() => "<无法读取>")
-      ).slice(
-        0,
-        2_000,
-      )} 原因=${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  await page.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent ===
-      "已连接，可以操作浏览器。",
-    undefined,
-    { timeout: 30_000 },
-  );
-  return page;
+  return await openLinuxdoViewer(browser, session, publishedHost, serverPort);
 }
 
 async function navigateThroughViewer(page: Page, url: string): Promise<void> {
-  const canvas = page.locator("#screen canvas");
-  const bounds = await canvas.boundingBox();
-  assert.ok(bounds !== null);
-  await canvas.click({
-    position: { x: bounds.width / 2, y: bounds.height * 0.09 },
-  });
-  await page.keyboard.press("Control+a");
-  await page.keyboard.type(url, { delay: 5 });
-  await page.keyboard.press("Enter");
+  await navigateThroughLinuxdoViewer(page, url);
 }
 
 async function openHumanSession(): Promise<BrowserSession> {
-  const opened = cliData<BrowserSession>(
-    await cli(["human", "open", "binny25-topic"]),
-    "opened",
-  );
-  const deadline = Date.now() + 90_000;
-  let latest = opened.status ?? "pending";
-  while (Date.now() < deadline) {
-    const current = cliData<BrowserSession>(
-      await cli(["human", "get", "binny25-topic", opened.sessionId]),
-      "found",
-    );
-    latest = current.status ?? "unknown";
-    if (latest === "ready") return opened;
-    if (latest === "failed" || latest === "closed") {
-      throw new Error(`浏览器人工会话未就绪：${JSON.stringify(current)}`);
-    }
-    await delay(250);
-  }
-  throw new Error(`等待浏览器人工会话就绪超时：${latest}`);
+  return await openLinuxdoHumanSession(cli, "binny25-topic");
 }
 
 async function closeHumanSession(sessionId: string): Promise<void> {
-  cliData(await cli(["human", "close", "binny25-topic", sessionId]), "closed");
+  await closeLinuxdoHumanSession(cli, "binny25-topic", sessionId);
 }
 
 async function searchArchiveItem(text: string): Promise<ArchiveItem> {
@@ -674,100 +546,22 @@ async function diagnostics(): Promise<string> {
   return `\nCompose 状态：\n${services.stdout}${services.stderr}\nCompose 日志：\n${(logs.stdout + logs.stderr).slice(-18_000)}`;
 }
 
-async function verifyLoginRequired(): Promise<void> {
-  const check = await trigger("check", { topicId: 2401 });
-  assert.equal(check.status, "completed");
-  assert.equal(
-    check.result?.check?.availability,
-    "unavailable",
-    JSON.stringify({
-      check: check.result?.check,
-      sourceEvents: (await sourceState()).events,
-    }),
-  );
-  assert.deepEqual(check.result?.check?.scope, ["topic:2401"]);
-  assert.ok(
-    check.result?.check?.problems.some(
-      ({ code, requiresHuman }) => code === "login_required" && requiresHuman,
-    ),
-  );
-
-  const collect = await trigger("collect", { topicId: 2401 });
-  assert.equal(collect.status, "failed");
-  assert.equal(collect.result?.error?.code, "login_required");
-  assert.equal(collect.result?.error?.requiresHuman, true);
-  const current = await sourceState();
-  assert.equal(
-    current.events.some(({ action }) => action === "topic"),
-    false,
-  );
-
-  const loginPageCount = current.events.filter(
-    ({ action }) => action === "login-page",
-  ).length;
-  const loginCompleteCount = current.events.filter(
-    ({ action }) => action === "login-complete",
-  ).length;
-  const sessionReadCount = current.events.filter(
-    ({ action }) => action === "session-current",
-  ).length;
-  const session = await openHumanSession();
-  const viewer = await openViewer(session);
-  try {
-    await navigateThroughViewer(viewer, "http://linuxdo-e2e-source:8081/login");
-    await waitForSourceEvent("login-page", loginPageCount + 1);
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type("binny25-user", { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type("linuxdo-fixture", { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.press("Enter");
-    await waitForSourceEvent("login-complete", loginCompleteCount + 1);
-    await navigateThroughViewer(
-      viewer,
-      "http://linuxdo-e2e-source:8081/session/current.json",
-    );
-    await waitForSourceEvent("session-current", sessionReadCount + 1);
-    const browserSessionRead = (await sourceState()).events
-      .filter(({ action }) => action === "session-current")
-      .at(-1);
-    assert.equal(
-      browserSessionRead?.authenticated,
-      true,
-      "noVNC 浏览器没有在登录响应后保留受控站点会话。",
-    );
-  } finally {
-    await closeHumanSession(session.sessionId);
-    await viewer.close();
-  }
-
-  const authenticatedCheck = await trigger("check", { topicId: 2401 });
-  assert.equal(authenticatedCheck.status, "completed");
-  assert.equal(
-    authenticatedCheck.result?.check?.availability,
-    "available",
-    JSON.stringify({
-      check: authenticatedCheck.result?.check,
-      recentSourceEvents: (await sourceState()).events.slice(-12),
-    }),
-  );
-  const beforeCollection = cliData<{
-    readonly results: readonly unknown[];
-  }>(
-    await cli([
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny25-topic" },
-        text: { kind: "literal", value: "主题正文版本 1" },
-        select: ["sourceKey"],
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.equal(beforeCollection.results.length, 0);
+async function verifyLoginRequired(): Promise<
+  Awaited<ReturnType<typeof linuxdoUserJourney>>
+> {
+  assert.ok(browser !== undefined);
+  return await linuxdoUserJourney({
+    binId: "binny25-topic",
+    topicId: 2401,
+    cli,
+    browser,
+    publishedHost,
+    serverPort,
+    sourceOrigin: "http://linuxdo-e2e-source:8081",
+    sourceControlUrl: sourceUrl("/__control/state"),
+    username: "binny25-user",
+    password: "linuxdo-fixture",
+  });
 }
 
 async function verifyActionParameterValidation(): Promise<void> {
@@ -889,9 +683,12 @@ async function collectTopic(): Promise<ManualRun> {
   return run;
 }
 
-async function verifyTopicArchive(): Promise<void> {
-  const firstCollection = await collectTopic();
+async function verifyTopicArchive(
+  firstCollection: ManualRun,
+  firstItemIds: readonly string[],
+): Promise<void> {
   const root = await searchArchiveItem("主题正文版本 1");
+  assert.ok(firstItemIds.includes(root.itemId));
   const firstReply = await searchArchiveItem("回复正文版本 1");
   const unchangedReply = await searchArchiveItem("保持不变的另一条回复");
   const rootState = binState(root);
@@ -1658,11 +1455,11 @@ async function main(): Promise<void> {
 
     await verifyActionParameterValidation();
     process.stdout.write("本次动作参数校验定位错误且不改长期配置通过。\n");
-    await verifyLoginRequired();
+    const journey = await verifyLoginRequired();
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
     await assertSignedInCheckFailures();
     process.stdout.write("挑战页面与指定主题不可用分支通过。\n");
-    await verifyTopicArchive();
+    await verifyTopicArchive(journey.firstCollection, journey.itemIds);
     process.stdout.write(
       "主题、回复、关系、媒体、重复、编辑、新回复与有限观察通过。\n",
     );
@@ -1677,11 +1474,7 @@ async function main(): Promise<void> {
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,
     );
   } finally {
-    await browser?.close().catch(() => undefined);
-    if (outerBrowserStarted)
-      await run("docker", ["rm", "--force", outerBrowserContainer]).catch(
-        () => undefined,
-      );
+    await viewerBrowser?.close().catch(() => undefined);
     if (composeStarted) {
       await rawCompose(["down", "--volumes", "--remove-orphans"]);
       for (const service of [

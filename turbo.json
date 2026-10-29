@@ -50,7 +50,10 @@
         "BINNY_E2E_CAPACITY_PROFILE",
         "BINNY_E2E_CAPACITY_PHASE",
         "BINNY_E2E_SUBNET",
-        "BINNY_E2E_RUNTIME_SUBNET"
+        "BINNY_E2E_RUNTIME_SUBNET",
+        "BINNY_E2E_CONNECTIONS_SUBNET",
+        "BINNY_E2E_BROWSER_SUBNET",
+        "BINNY_E2E_LINUXDO_SUBNET"
       ],
       "inputs": [
         "compose.yaml",
@@ -59,6 +62,7 @@
         "scripts/binny-e2e.ts",
         "scripts/binny-e2e-heartbeat-proxy.ts",
         "scripts/binny-image-update-context.ts",
+        "scripts/binny-e2e-linuxdo-journey.ts",
         "scripts/binny-e2e-rss-source.ts",
         "pnpm-lock.yaml",
         "packages/api/package.json",
@@ -98,6 +102,7 @@
         "packages/collector-runtime/Dockerfile.browser",
         "scripts/test-linuxdo-collector.ts",
         "scripts/binny-e2e-linuxdo-source.ts",
+        "scripts/binny-e2e-linuxdo-journey.ts",
         "packages/api/src/**",
         "packages/binny/src/**",
         "packages/collector-runtime/package.json",
