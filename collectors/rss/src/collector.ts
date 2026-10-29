@@ -998,7 +998,7 @@ async function collectFeeds(
 
 export const collector = defineCollector({
   id: "rss-atom",
-  version: "1.0.0",
+  version: "1.0.1",
   description: "读取多个 RSS/Atom feed，保存直接提供的正文、结构和可取得媒体。",
   environment: {
     browser: { required: false, profileReuseAfterRestart: false },

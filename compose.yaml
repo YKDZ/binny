@@ -4,6 +4,50 @@ x-binny-image: &binny-image
     context: .
     dockerfile: Dockerfile
 
+x-binny-runtime-watch: &binny-runtime-watch
+  - path: ./collectors/rss/src
+    action: rebuild
+  - path: ./collectors/rss/package.json
+    action: rebuild
+  - path: ./packages/collector-runtime
+    action: rebuild
+  - path: ./packages/collector-sdk/src
+    action: rebuild
+  - path: ./packages/api/src
+    action: rebuild
+  - path: ./packages/contracts/src
+    action: rebuild
+  - path: ./packages/core/src
+    action: rebuild
+  - path: ./packages/db
+    action: rebuild
+  - path: ./packages/server/src
+    action: rebuild
+  - path: ./packages/collector-runtime/package.json
+    action: rebuild
+  - path: ./packages/collector-sdk/package.json
+    action: rebuild
+  - path: ./packages/api/package.json
+    action: rebuild
+  - path: ./packages/contracts/package.json
+    action: rebuild
+  - path: ./packages/core/package.json
+    action: rebuild
+  - path: ./packages/db/package.json
+    action: rebuild
+  - path: ./packages/server/package.json
+    action: rebuild
+  - path: ./packages/tooling-config
+    action: rebuild
+  - path: ./package.json
+    action: rebuild
+  - path: ./pnpm-lock.yaml
+    action: rebuild
+  - path: ./pnpm-workspace.yaml
+    action: rebuild
+  - path: ./.dockerignore
+    action: rebuild
+
 services:
   postgres:
     image: postgres:17.11-alpine
@@ -191,6 +235,8 @@ services:
       - rss-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    develop:
+      watch: *binny-runtime-watch
     restart: unless-stopped
 
   runtime-rss-two:
@@ -216,6 +262,8 @@ services:
       - rss-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    develop:
+      watch: *binny-runtime-watch
     restart: unless-stopped
 
   browser-one:
@@ -238,6 +286,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-one-owner:/var/lib/binny/runtime
+    develop:
+      watch: *binny-runtime-watch
     restart: unless-stopped
 
   browser-two:
@@ -260,6 +310,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-two-owner:/var/lib/binny/runtime
+    develop:
+      watch: *binny-runtime-watch
     restart: unless-stopped
 
   browser-one-contender:
