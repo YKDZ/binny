@@ -7,10 +7,15 @@ type SourceState = {
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
   readonly legacyTags: boolean;
+  readonly targetUnavailablePage: number | null;
+  readonly targetChallengePage: number | null;
+  readonly targetInvalidResponsePage: number | null;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
+  readonly discoveryAddedReply: boolean;
   readonly omittedPostIds: readonly number[];
+  readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
 };
@@ -51,10 +56,15 @@ let activeState: SourceState = {
   challengeMedia: false,
   topicVisible: true,
   legacyTags: false,
+  targetUnavailablePage: null,
+  targetChallengePage: null,
+  targetInvalidResponsePage: null,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
+  discoveryAddedReply: false,
   omittedPostIds: [],
+  unavailableTopicIds: [],
   unavailableMedia: [],
   unavailableMediaStatus: 503,
 };
@@ -85,7 +95,7 @@ function isAuthenticated(
 ): boolean {
   return (request.headers.cookie ?? "")
     .split(";")
-    .some((value) => value.trim() === "binny24_session=fixture");
+    .some((value) => value.trim() === "binny25_session=fixture");
 }
 
 function record(action: string, path: string, authenticated?: boolean): void {
@@ -155,9 +165,110 @@ function posts(): readonly Record<string, unknown>[] {
           ),
         ]
       : []),
+    ...(activeState.discoveryAddedReply
+      ? [
+          post(
+            240_005,
+            5,
+            "<p>发现后新增的回复。</p>",
+            "2026-10-28T05:00:00.000Z",
+            1,
+          ),
+        ]
+      : []),
   ].map((value, index) =>
     index === 0 ? { ...value, title: rootTitle } : value,
   );
+}
+
+function discoveredTopic(topicId: number): Record<string, unknown> {
+  const createdAt =
+    topicId === 2401
+      ? "2026-10-28T00:00:00.000Z"
+      : topicId === 2402
+        ? "2026-10-27T00:00:00.000Z"
+        : "2026-10-26T00:00:00.000Z";
+  if (topicId === 2401) {
+    const availablePosts = posts();
+    return {
+      id: topicId,
+      title: `受控主题标题版本 ${String(activeState.topicVersion)}`,
+      slug: "controlled-linuxdo-topic",
+      created_at: createdAt,
+      updated_at: `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
+      posts_count: availablePosts.length,
+      reply_count: availablePosts.length - 1,
+      category_id: 42,
+      tags: activeState.legacyTags
+        ? ["受控", "归档"]
+        : [
+            { id: 42, name: "受控", slug: "controlled" },
+            { id: 43, name: "归档", slug: "archive" },
+          ],
+      post_stream: {
+        posts: [availablePosts[0]],
+        stream: availablePosts.map(({ id }) => id),
+      },
+    };
+  }
+
+  const postId = topicId * 100;
+  const topicName = `发现主题 ${String(topicId)}`;
+  return {
+    id: topicId,
+    title: topicName,
+    slug: `controlled-topic-${String(topicId)}`,
+    created_at: createdAt,
+    category_id: 42,
+    post_stream: {
+      posts: [
+        {
+          id: postId,
+          topic_id: topicId,
+          post_number: 1,
+          username: "fixture-discovery-author",
+          name: "发现主题作者",
+          created_at: createdAt,
+          updated_at: createdAt,
+          cooked: `<p>${topicName} 的正文。</p>`,
+        },
+      ],
+      stream: [postId],
+    },
+  };
+}
+
+function discoveredTopicList(
+  category: boolean,
+  page: number,
+  perPage: number,
+): Record<string, unknown> {
+  const topicIds =
+    page === 0
+      ? (category
+          ? [2402, 2403, 2401, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
+          : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
+        ).slice(0, perPage)
+      : category
+        ? [2403, 2401].slice(0, perPage)
+        : [2402, 2403].slice(0, perPage);
+  const pathname = category ? "/c/controlled/42/l/latest.json" : "/latest.json";
+  return {
+    topic_list: {
+      topics: topicIds.map((id) => {
+        const createdAt =
+          id === 2401
+            ? "2026-10-28T00:00:00.000Z"
+            : id === 2402
+              ? "2026-10-27T00:00:00.000Z"
+              : "2026-10-26T00:00:00.000Z";
+        return { id, created_at: createdAt };
+      }),
+      ...(page === 0 && topicIds.length === perPage
+        ? { more_topics_url: `${pathname.replace(/\.json$/u, "")}?page=1` }
+        : {}),
+    },
+  };
 }
 
 function updateState(value: unknown): boolean {
@@ -174,6 +285,19 @@ function updateState(value: unknown): boolean {
     }
   }
   for (const key of [
+    "targetUnavailablePage",
+    "targetChallengePage",
+    "targetInvalidResponsePage",
+  ] as const) {
+    if (
+      key in updates &&
+      updates[key] !== null &&
+      (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 0)
+    ) {
+      return false;
+    }
+  }
+  for (const key of [
     "challengePage",
     "challengeTopic",
     "challengePosts",
@@ -181,6 +305,7 @@ function updateState(value: unknown): boolean {
     "topicVisible",
     "legacyTags",
     "addedReply",
+    "discoveryAddedReply",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
   }
@@ -251,7 +376,7 @@ const server = createServer((request, response) => {
     if (request.method === "POST" && pathname === "/login") {
       const form = new URLSearchParams(await readBody(request));
       if (
-        form.get("username") !== "binny24-user" ||
+        form.get("username") !== "binny25-user" ||
         form.get("password") !== "linuxdo-fixture"
       ) {
         record("login-rejected", pathname);
@@ -265,7 +390,7 @@ const server = createServer((request, response) => {
       response.writeHead(303, {
         location: "/",
         "set-cookie":
-          "binny24_session=fixture; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
+          "binny25_session=fixture; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
       });
       response.end();
       return;
@@ -275,7 +400,7 @@ const server = createServer((request, response) => {
       response.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "set-cookie":
-          "binny24_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+          "binny25_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
       });
       response.end("<!doctype html><html><body>已退出登录。</body></html>");
       return;
@@ -293,50 +418,79 @@ const server = createServer((request, response) => {
         return;
       }
       sendJson(response, 200, {
-        current_user: { id: 24, username: "binny24-user" },
+        current_user: { id: 24, username: "binny25-user" },
       });
       return;
     }
-    if (pathname === "/t/2401.json" && request.method === "GET") {
+    const topicJsonMatch = /^\/t\/(\d+)\.json$/u.exec(pathname);
+    if (topicJsonMatch !== null && request.method === "GET") {
+      const topicId = Number(topicJsonMatch[1]);
       record("topic", pathname, authenticated);
       if (!authenticated) {
         response.writeHead(404);
         response.end();
         return;
       }
-      if (activeState.challengeTopic) {
+      if (topicId === 2401 && activeState.challengeTopic) {
         response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
         response.end("<!doctype html><html><body>受控主题挑战页</body></html>");
         return;
       }
-      if (!activeState.topicVisible) {
+      if (
+        (topicId === 2401 && !activeState.topicVisible) ||
+        activeState.unavailableTopicIds.includes(topicId)
+      ) {
         sendJson(response, 404, { errors: ["主题当前不可见。"] });
         return;
       }
-      const availablePosts = posts();
-      sendJson(response, 200, {
-        id: 2401,
-        title: `受控主题标题版本 ${String(activeState.topicVersion)}`,
-        slug: "controlled-linuxdo-topic",
-        created_at: "2026-10-28T00:00:00.000Z",
-        updated_at: `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
-        posts_count: availablePosts.length,
-        reply_count: availablePosts.length - 1,
-        category_id: 42,
-        tags: activeState.legacyTags
-          ? ["受控", "归档"]
-          : [
-              { id: 42, name: "受控", slug: "controlled" },
-              { id: 43, name: "归档", slug: "archive" },
-            ],
-        post_stream: {
-          posts: [availablePosts[0]],
-          stream: availablePosts.map(({ id }) => id),
-        },
-      });
+      sendJson(response, 200, discoveredTopic(topicId));
       return;
     }
-    if (pathname === "/t/2401/posts.json" && request.method === "GET") {
+    const topicListMatch =
+      pathname === "/latest.json"
+        ? { category: false }
+        : pathname === "/c/controlled/42/l/latest.json"
+          ? { category: true }
+          : undefined;
+    if (topicListMatch !== undefined && request.method === "GET") {
+      record(
+        "topic-list",
+        `${pathname}?${url.searchParams.toString()}`,
+        authenticated,
+      );
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      const listPage = Number(url.searchParams.get("page") ?? "0");
+      if (activeState.targetUnavailablePage === listPage) {
+        sendJson(response, 404, { errors: ["列表目标当前不可见。"] });
+        return;
+      }
+      if (activeState.targetChallengePage === listPage) {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><html><body>受控列表挑战页</body></html>");
+        return;
+      }
+      if (activeState.targetInvalidResponsePage === listPage) {
+        sendJson(response, 200, {});
+        return;
+      }
+      sendJson(
+        response,
+        200,
+        discoveredTopicList(
+          topicListMatch.category,
+          listPage,
+          Number(url.searchParams.get("per_page") ?? "30"),
+        ),
+      );
+      return;
+    }
+    const postsMatch = /^\/t\/(\d+)\/posts\.json$/u.exec(pathname);
+    if (postsMatch !== null && request.method === "GET") {
+      const topicId = Number(postsMatch[1]);
       record(
         "posts",
         `${pathname}?${url.searchParams.toString()}`,
@@ -347,14 +501,14 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
-      if (activeState.challengePosts) {
+      if (topicId === 2401 && activeState.challengePosts) {
         response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
         response.end(
           "<!doctype html><html><body>受控帖子补取挑战页</body></html>",
         );
         return;
       }
-      if (!activeState.topicVisible) {
+      if (topicId === 2401 && !activeState.topicVisible) {
         sendJson(response, 404, { errors: ["主题当前不可见。"] });
         return;
       }
@@ -362,11 +516,14 @@ const server = createServer((request, response) => {
         .getAll("post_ids[]")
         .map(Number)
         .filter(Number.isSafeInteger);
-      const selectedPosts = posts().filter(
-        ({ id }) =>
-          requestedIds.includes(Number(id)) &&
-          !activeState.omittedPostIds.includes(Number(id)),
-      );
+      const selectedPosts =
+        topicId === 2401
+          ? posts().filter(
+              ({ id }) =>
+                requestedIds.includes(Number(id)) &&
+                !activeState.omittedPostIds.includes(Number(id)),
+            )
+          : [];
       sendJson(response, 200, {
         post_stream: { posts: selectedPosts },
       });
@@ -424,7 +581,7 @@ const server = createServer((request, response) => {
   });
 });
 
-const port = Number(process.env.BINNY24_SOURCE_PORT ?? "8081");
+const port = Number(process.env.BINNY25_SOURCE_PORT ?? "8081");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
   throw new Error("受控 Linux.do 信源端口配置无效。");
 }

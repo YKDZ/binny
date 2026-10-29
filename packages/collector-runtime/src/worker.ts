@@ -156,9 +156,15 @@ async function executeRun(
       completedScopes: checked.success ? checked.data.completedScopes : [],
     };
   } catch (error) {
+    const completedScopes =
+      isCollectorActionError(error) && Array.isArray(error.completedScopes)
+        ? error.completedScopes.filter(
+            (scope): scope is string => typeof scope === "string",
+          )
+        : [];
     return {
       status: "failed",
-      completedScopes: [],
+      completedScopes,
       error: failureFrom(error),
     };
   }
