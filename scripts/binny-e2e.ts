@@ -574,6 +574,7 @@ async function seedUpgradeRun(
 ): Promise<string> {
   const binId = "rss-main";
   const runtimeId = "binny36-upgrade-baseline-runtime";
+  // 基线协议3心跳会将不含 power 的旧 environment 快照写入真实 PostgreSQL。
   const heartbeat = await fetch(`${baseUrl}/bins/${binId}/runtime/heartbeat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -590,7 +591,6 @@ async function seedUpgradeRun(
         browser: {
           available: false,
           profileReuseAfterRestart: false,
-          power: { status: "unavailable" },
         },
       },
     }),
@@ -775,7 +775,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   let baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
-  const legacyBrowserManifest = (withReason: boolean) => ({
+  const legacyBrowserManifest = (reason?: string) => ({
     id: "binny36.upgrade-browser",
     version: "1.0.0",
     configSchema: { type: "object" },
@@ -786,9 +786,9 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
       browser: {
         required: true,
         profileReuseAfterRestart: false,
-        ...(withReason
-          ? { profileReuseUnavailableReason: "旧浏览器不能复用配置文件。" }
-          : {}),
+        ...(reason === undefined
+          ? {}
+          : { profileReuseUnavailableReason: reason }),
       },
     },
   });
@@ -809,11 +809,46 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     });
     assert.equal(response.status, 201, await response.clone().text());
   };
-  const legacyBrowserWithoutReason = legacyBrowserManifest(false);
-  const legacyBrowserWithReason = legacyBrowserManifest(true);
+  const legacyBrowserWithoutReason = legacyBrowserManifest();
+  const legacyBrowserWithEmptyReason = legacyBrowserManifest("");
+  const legacyBrowserWithReason = legacyBrowserManifest(
+    "旧浏览器不能复用配置文件。",
+  );
   await createLegacyBrowserBin(
     "binny36-upgrade-browser-no-reason",
     legacyBrowserWithoutReason,
+  );
+  await createLegacyBrowserBin(
+    "binny36-upgrade-browser-empty-reason",
+    legacyBrowserWithEmptyReason,
+  );
+  const oldEmptyReasonHeartbeat = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        protocolVersion: 3,
+        runtimeId: "binny36-upgrade-empty-reason-runtime",
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        collector: legacyBrowserWithEmptyReason,
+        environment: {
+          kind: "browser",
+          browser: {
+            available: true,
+            profileReuseAfterRestart: false,
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(
+    oldEmptyReasonHeartbeat.status,
+    200,
+    await oldEmptyReasonHeartbeat.clone().text(),
   );
   await createLegacyBrowserBin(
     "binny36-upgrade-browser-with-reason",
@@ -932,36 +967,124 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     "升级没有应用票20浏览器空闲策略迁移。",
   );
 
-  // 基线运行器使用协议3；先用公开心跳续接测试夹具，避免旧环境快照干扰本票的 bin 列表验证。
-  const upgradedRuntimeHeartbeat = await fetch(
-    `${baseUrl}/bins/rss-main/runtime/heartbeat`,
+  // 先通过公开读取验证旧持久行；后续才发送新协议心跳或 PATCH 修复配置。
+  const oldEmptyReasonResponse = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+  );
+  assert.equal(
+    oldEmptyReasonResponse.status,
+    200,
+    await oldEmptyReasonResponse.clone().text(),
+  );
+  const oldEmptyReason = (await oldEmptyReasonResponse.json()) as {
+    readonly browserIdleTimeoutSeconds: number | null;
+    readonly collector: {
+      readonly environment: {
+        readonly browser: { readonly profileReuseUnavailableReason?: string };
+      };
+    };
+    readonly execution: {
+      readonly status: string;
+      readonly reason?: string;
+      readonly runtimeId?: string;
+      readonly lastHeartbeatAt?: string;
+    };
+  };
+  assert.equal(oldEmptyReason.browserIdleTimeoutSeconds, null);
+  assert.equal(
+    oldEmptyReason.collector.environment.browser.profileReuseUnavailableReason,
+    "",
+  );
+  assert.equal(oldEmptyReason.execution.status, "offline");
+  assert.equal(oldEmptyReason.execution.reason, "runtime_protocol_outdated");
+  assert.equal(
+    oldEmptyReason.execution.runtimeId,
+    "binny36-upgrade-empty-reason-runtime",
+  );
+  assert.ok(oldEmptyReason.execution.lastHeartbeatAt);
+
+  const oldBinListBeforeHeartbeat = await fetch(`${baseUrl}/bins`);
+  assert.equal(
+    oldBinListBeforeHeartbeat.status,
+    200,
+    await oldBinListBeforeHeartbeat.clone().text(),
+  );
+  const oldBinListBeforeHeartbeatBody =
+    (await oldBinListBeforeHeartbeat.json()) as {
+      readonly bins: readonly {
+        readonly id: string;
+        readonly browserIdleTimeoutSeconds: number | null;
+        readonly collector: {
+          readonly environment: {
+            readonly browser: {
+              readonly profileReuseUnavailableReason?: string;
+            };
+          };
+        };
+        readonly execution: {
+          readonly status: string;
+          readonly reason?: string;
+        };
+      }[];
+    };
+  const oldEmptyReasonInList = oldBinListBeforeHeartbeatBody.bins.find(
+    ({ id }) => id === "binny36-upgrade-browser-empty-reason",
+  );
+  assert.ok(oldEmptyReasonInList);
+  assert.equal(oldEmptyReasonInList.browserIdleTimeoutSeconds, null);
+  assert.equal(
+    oldEmptyReasonInList.collector.environment.browser
+      .profileReuseUnavailableReason,
+    "",
+  );
+  assert.equal(oldEmptyReasonInList.execution.status, "offline");
+  assert.equal(
+    oldEmptyReasonInList.execution.reason,
+    "runtime_protocol_outdated",
+  );
+  const oldRuntimeInList = oldBinListBeforeHeartbeatBody.bins.find(
+    ({ id }) => id === "rss-main",
+  );
+  assert.ok(oldRuntimeInList);
+  assert.equal(oldRuntimeInList.execution.status, "offline");
+  assert.equal(oldRuntimeInList.execution.reason, "runtime_protocol_outdated");
+
+  const missingPowerHeartbeat = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         protocolVersion: 4,
-        runtimeId: "binny36-upgrade-baseline-runtime",
+        runtimeId: "binny36-upgrade-empty-reason-runtime",
         ownerGeneration: "1",
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        collector: manifest,
+        collector: legacyBrowserWithEmptyReason,
         environment: {
-          kind: "lightweight",
+          kind: "browser",
           browser: {
-            available: false,
+            available: true,
             profileReuseAfterRestart: false,
-            power: { status: "unavailable" },
           },
         },
       }),
     },
   );
-  assert.equal(
-    upgradedRuntimeHeartbeat.status,
-    200,
-    await upgradedRuntimeHeartbeat.clone().text(),
-  );
+  assert.equal(missingPowerHeartbeat.status, 400);
+  const missingPowerError = (await missingPowerHeartbeat.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(missingPowerError.error.code, "invalid_input");
+  assert.deepEqual(missingPowerError.error.path, [
+    "environment",
+    "browser",
+    "power",
+  ]);
 
   const oldWithoutReasonResponse = await fetch(
     `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
@@ -1006,12 +1129,159 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   for (const oldBinId of [
     "binny36-upgrade-browser-no-reason",
+    "binny36-upgrade-browser-empty-reason",
     "binny36-upgrade-browser-with-reason",
   ]) {
     const oldBin = oldBinList.bins.find(({ id }) => id === oldBinId);
     assert.ok(oldBin, `列表没有返回旧配置 ${oldBinId}。`);
     assert.equal(oldBin.browserIdleTimeoutSeconds, null);
   }
+
+  const newEmptyReasonCreate = await fetch(`${baseUrl}/bins`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "binny36-upgrade-new-empty-reason",
+      collector: legacyBrowserWithEmptyReason,
+      identityId: "identity-binny36-upgrade-new-empty-reason",
+      config: {},
+      targets: [],
+    }),
+  });
+  assert.equal(newEmptyReasonCreate.status, 400);
+  const newEmptyReasonCreateError = (await newEmptyReasonCreate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(newEmptyReasonCreateError.error.code, "invalid_input");
+  assert.deepEqual(newEmptyReasonCreateError.error.path, [
+    "collector",
+    "environment",
+    "browser",
+    "profileReuseUnavailableReason",
+  ]);
+
+  const emptyReasonUpdate = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collector: legacyBrowserWithEmptyReason }),
+    },
+  );
+  assert.equal(emptyReasonUpdate.status, 400);
+  const emptyReasonUpdateError = (await emptyReasonUpdate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(emptyReasonUpdateError.error.code, "invalid_input");
+  assert.deepEqual(emptyReasonUpdateError.error.path, [
+    "collector",
+    "environment",
+    "browser",
+    "profileReuseUnavailableReason",
+  ]);
+
+  const repairedEmptyReasonManifest = {
+    ...legacyBrowserWithEmptyReason,
+    environment: {
+      browser: {
+        ...legacyBrowserWithEmptyReason.environment.browser,
+        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
+      },
+    },
+  };
+  const repairedEmptyReasonResponse = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collector: repairedEmptyReasonManifest }),
+    },
+  );
+  assert.equal(
+    repairedEmptyReasonResponse.status,
+    200,
+    await repairedEmptyReasonResponse.clone().text(),
+  );
+  const repairedEmptyReasonBin = (await repairedEmptyReasonResponse.json()) as {
+    readonly browserIdleTimeoutSeconds: number | null;
+    readonly collector: {
+      readonly environment: {
+        readonly browser: { readonly profileReuseUnavailableReason?: string };
+      };
+    };
+  };
+  assert.equal(repairedEmptyReasonBin.browserIdleTimeoutSeconds, null);
+  assert.equal(
+    repairedEmptyReasonBin.collector.environment.browser
+      .profileReuseUnavailableReason,
+    "经公开配置修正后的兼容原因。",
+  );
+
+  const upgradedRuntimeHeartbeat = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        protocolVersion: 4,
+        runtimeId: "binny36-upgrade-empty-reason-runtime",
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        collector: repairedEmptyReasonManifest,
+        environment: {
+          kind: "browser",
+          browser: {
+            available: true,
+            profileReuseAfterRestart: false,
+            power: { status: "ready" },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(
+    upgradedRuntimeHeartbeat.status,
+    200,
+    await upgradedRuntimeHeartbeat.clone().text(),
+  );
+  const upgradedRuntimeHeartbeatResult =
+    (await upgradedRuntimeHeartbeat.json()) as {
+      readonly status: string;
+      readonly environment?: {
+        readonly browser: { readonly power?: { readonly status: string } };
+      };
+    };
+  assert.equal(upgradedRuntimeHeartbeatResult.status, "online");
+  assert.equal(
+    upgradedRuntimeHeartbeatResult.environment?.browser.power?.status,
+    "ready",
+  );
+  const oldRuntimeAfterHeartbeat = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+  );
+  assert.equal(oldRuntimeAfterHeartbeat.status, 200);
+  const oldRuntimeAfterHeartbeatBin =
+    (await oldRuntimeAfterHeartbeat.json()) as {
+      readonly execution: {
+        readonly status: string;
+        readonly environment?: {
+          readonly browser: { readonly power?: { readonly status: string } };
+        };
+      };
+    };
+  assert.equal(oldRuntimeAfterHeartbeatBin.execution.status, "online");
+  assert.equal(
+    oldRuntimeAfterHeartbeatBin.execution.environment?.browser.power?.status,
+    "ready",
+  );
 
   const legacyRuntimeHeartbeat = await fetch(
     `${baseUrl}/bins/binny36-upgrade-browser-no-reason/runtime/heartbeat`,
@@ -1194,6 +1464,12 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
       }) +
       "\n",
   );
+}
+
+async function runDatabasePackageUpgradeAcceptance(): Promise<void> {
+  await verifyDatabasePackageUpgrade();
+  await compose(["down", "--volumes", "--remove-orphans"]);
+  process.stdout.write("票 36 升级专用数据库与资源卷已清理。\n");
 }
 
 function archiveIds(state: string): {
@@ -6189,6 +6465,7 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const upgradeOnly = process.env.BINNY_E2E_UPGRADE_ONLY === "1";
   const overrideDirectory = await mkdtemp(
     path.join(tmpdir(), "binny12-revision-diff-compose-"),
   );
@@ -6263,21 +6540,30 @@ async function main(): Promise<void> {
   let rssControlSource: RssControlSource | undefined;
   try {
     assert.ok(
+      !upgradeOnly ||
+        (process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
+          process.env.BINNY_E2E_BASELINE_IMAGE.length > 0),
+      "只运行升级步骤时必须提供冻结基线镜像。",
+    );
+    assert.ok(
       !isFullCapacityRun ||
         process.env.BINNY_E2E_BASELINE_IMAGE === undefined ||
         process.env.BINNY_E2E_BASELINE_IMAGE.length === 0,
       "容量项目不能与会清空其数据库和资源卷的拆包升级路径并行运行。",
     );
     await compose(["build", "server"]);
+    if (upgradeOnly) {
+      // 复用正式 E2E 的冻结升级步骤，定向复验时不启动其余重型旅程。
+      await runDatabasePackageUpgradeAcceptance();
+      return;
+    }
     await compose(["build", "runtime-fifteen-one"]);
     await compose(["build", "runtime-rss"]);
     if (
       process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
       process.env.BINNY_E2E_BASELINE_IMAGE.length > 0
     ) {
-      await verifyDatabasePackageUpgrade();
-      await compose(["down", "--volumes", "--remove-orphans"]);
-      process.stdout.write("票 36 升级专用数据库与资源卷已清理。\n");
+      await runDatabasePackageUpgradeAcceptance();
     } else {
       process.stdout.write(
         "票 36 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",

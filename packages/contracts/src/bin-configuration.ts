@@ -86,7 +86,22 @@ const collectorActionsSchema = z
   .record(collectorActionNameSchema, collectorActionSchema)
   .and(z.object({ check: collectorActionSchema }));
 
-const collectorManifestFieldsSchema = z.object({
+const collectorManifestStoredFieldsSchema = z.object({
+  id: collectorIdSchema,
+  version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+  description: postgresTextSchema.optional(),
+  configSchema: jsonSchemaDocumentSchema,
+  actions: collectorActionsSchema,
+  environment: z.object({
+    browser: z.object({
+      required: z.boolean(),
+      profileReuseAfterRestart: z.boolean(),
+      profileReuseUnavailableReason: postgresTextSchema.optional(),
+    }),
+  }),
+});
+
+const collectorManifestInputFieldsSchema = z.object({
   id: collectorIdSchema,
   version: postgresTextSchema.min(1, "采集器版本不能为空。"),
   description: postgresTextSchema.optional(),
@@ -104,7 +119,7 @@ const collectorManifestFieldsSchema = z.object({
 });
 
 const collectorManifestCheckedSchema =
-  collectorManifestFieldsSchema.superRefine((collector, context) => {
+  collectorManifestInputFieldsSchema.superRefine((collector, context) => {
     if (
       collector.environment.browser.required &&
       !collector.environment.browser.profileReuseAfterRestart &&
@@ -119,14 +134,14 @@ const collectorManifestCheckedSchema =
   });
 
 registerPostgresJsonSchemaProjection(
-  collectorManifestFieldsSchema,
+  collectorManifestInputFieldsSchema,
   collectorManifestCheckedSchema,
-  collectorManifestFieldsSchema,
+  collectorManifestInputFieldsSchema,
 );
 
-/** 持久化清单解析器，允许读取旧版尚未要求填写复用原因的配置。 */
+/** 持久化清单解析器保留旧版允许为空或缺失的复用原因。 */
 export const collectorManifestStoredSchema = withPostgresJsonSchemaProjection(
-  collectorManifestFieldsSchema,
+  collectorManifestStoredFieldsSchema,
 );
 
 /** 新建或更新清单时使用；必需浏览器不支持复用 profile 时必须给出原因。 */
@@ -247,11 +262,22 @@ export type RuntimeEnvironmentKind = z.infer<
   typeof runtimeEnvironmentKindSchema
 >;
 
+const runtimeEnvironmentBrowserFieldsSchema = z.object({
+  available: z.boolean(),
+  profileReuseAfterRestart: z.boolean(),
+});
+
+/** 旧协议持久快照可以没有 power；该缺省不能用于校验新心跳。 */
+export const runtimeEnvironmentStoredSchema = z.object({
+  kind: runtimeEnvironmentKindSchema,
+  browser: runtimeEnvironmentBrowserFieldsSchema.extend({
+    power: browserPowerSchema.optional(),
+  }),
+});
+
 export const runtimeEnvironmentSchema = z.object({
   kind: runtimeEnvironmentKindSchema,
-  browser: z.object({
-    available: z.boolean(),
-    profileReuseAfterRestart: z.boolean(),
+  browser: runtimeEnvironmentBrowserFieldsSchema.extend({
     power: browserPowerSchema,
   }),
 });
@@ -296,7 +322,11 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
   }),
   z.object({
     status: z.literal("offline"),
-    reason: z.enum(["runtime_not_connected", "heartbeat_expired"]),
+    reason: z.enum([
+      "runtime_not_connected",
+      "heartbeat_expired",
+      "runtime_protocol_outdated",
+    ]),
     runtimeId: postgresTextSchema.optional(),
     lastHeartbeatAt: z.iso.datetime().optional(),
   }),
@@ -357,6 +387,9 @@ export type BinCreateInput = z.infer<typeof binCreateInputSchema>;
 export type BinUpdateInput = z.infer<typeof binUpdateInputSchema>;
 export type BinConfiguration = z.infer<typeof binConfigurationSchema>;
 export type RuntimeEnvironment = z.infer<typeof runtimeEnvironmentSchema>;
+export type RuntimeEnvironmentStored = z.infer<
+  typeof runtimeEnvironmentStoredSchema
+>;
 export type RuntimeHeartbeatInput = z.infer<typeof runtimeHeartbeatInputSchema>;
 export type RuntimeDisconnectInput = z.infer<
   typeof runtimeDisconnectInputSchema

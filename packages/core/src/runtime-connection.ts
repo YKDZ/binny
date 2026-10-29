@@ -3,6 +3,7 @@ import {
   jsonObjectSchema,
   runtimeDisconnectInputSchema,
   runtimeEnvironmentSchema,
+  runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
   type BinError,
@@ -178,7 +179,10 @@ function compatibilityError(
 }
 
 function offline(
-  reason: "runtime_not_connected" | "heartbeat_expired",
+  reason:
+    | "runtime_not_connected"
+    | "heartbeat_expired"
+    | "runtime_protocol_outdated",
   row?: RuntimeConnectionRow,
 ): RuntimeExecution {
   return {
@@ -203,11 +207,29 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     return offline("runtime_not_connected", row);
   }
 
+  const configuredCollector = collectorManifestStoredSchema.parse(
+    row.configuredCollector,
+  );
+  const runtimeCollector = collectorManifestStoredSchema.parse(
+    row.runtimeCollector,
+  );
+  const config = jsonObjectSchema.parse(row.config);
+  const storedEnvironment = runtimeEnvironmentStoredSchema.parse(
+    row.environment,
+  );
+
+  if (storedEnvironment.browser.power === undefined) {
+    if (row.disconnected === true) return offline("runtime_not_connected", row);
+    // 旧协议快照没有报告浏览器电源状态，不能据此推断已停止或就绪。
+    return offline("runtime_protocol_outdated", row);
+  }
+
+  const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
   const error = compatibilityError(
-    collectorManifestStoredSchema.parse(row.configuredCollector),
-    jsonObjectSchema.parse(row.config),
-    collectorManifestStoredSchema.parse(row.runtimeCollector),
-    runtimeEnvironmentSchema.parse(row.environment),
+    configuredCollector,
+    config,
+    runtimeCollector,
+    environment,
   );
   if (error !== undefined) {
     return {
@@ -224,7 +246,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   return {
     status: "online",
     runtimeId: row.runtimeId,
-    environment: runtimeEnvironmentSchema.parse(row.environment),
+    environment,
     lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
   };
 }
