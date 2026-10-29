@@ -1,8 +1,9 @@
 import {
   binConfigurationSchema,
+  binConfigurationSettingsSchema,
   binCreateInputSchema,
   binUpdateInputSchema,
-  collectorManifestSchema,
+  collectorManifestStoredSchema,
   type BinConfiguration,
   type BinConfigurationOperations,
   type BinError,
@@ -178,7 +179,7 @@ export function validateCollectorConfiguration(
   collector: CollectorManifest,
   config: JsonObject,
 ): BinError | undefined {
-  const checked = collectorManifestSchema.safeParse(collector);
+  const checked = collectorManifestStoredSchema.safeParse(collector);
   if (!checked.success) {
     const issue = checked.error.issues[0];
     return {
@@ -245,7 +246,7 @@ export function validateCollectorActionParameters(
   actionName: string,
   params: JsonObject,
 ): CollectorActionValidation {
-  const checked = collectorManifestSchema.safeParse(collector);
+  const checked = collectorManifestStoredSchema.safeParse(collector);
   if (!checked.success) {
     const issue = checked.error.issues[0];
     return {
@@ -413,7 +414,7 @@ export function createBinConfigurationStore(
           .for("update");
         if (previous === undefined) return notFound(id);
 
-        const existing = binCreateInputSchema.parse({
+        const existing = binConfigurationSettingsSchema.parse({
           id: previous.id,
           collector: previous.collector,
           identityId: previous.identityId,

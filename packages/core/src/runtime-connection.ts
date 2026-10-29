@@ -1,5 +1,5 @@
 import {
-  collectorManifestSchema,
+  collectorManifestStoredSchema,
   jsonObjectSchema,
   runtimeDisconnectInputSchema,
   runtimeEnvironmentSchema,
@@ -113,7 +113,7 @@ function compatibilityError(
   environment: RuntimeEnvironment,
 ): RuntimeCompatibilityError | undefined {
   const checkedRuntimeManifest =
-    collectorManifestSchema.safeParse(runtimeCollector);
+    collectorManifestStoredSchema.safeParse(runtimeCollector);
   if (!checkedRuntimeManifest.success) {
     const issue = checkedRuntimeManifest.error.issues[0];
     return {
@@ -204,9 +204,9 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   }
 
   const error = compatibilityError(
-    collectorManifestSchema.parse(row.configuredCollector),
+    collectorManifestStoredSchema.parse(row.configuredCollector),
     jsonObjectSchema.parse(row.config),
-    collectorManifestSchema.parse(row.runtimeCollector),
+    collectorManifestStoredSchema.parse(row.runtimeCollector),
     runtimeEnvironmentSchema.parse(row.environment),
   );
   if (error !== undefined) {

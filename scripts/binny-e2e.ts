@@ -556,18 +556,16 @@ async function networkSubnet(network: string): Promise<string> {
   return result.stdout.trim();
 }
 
-async function migrationHistory(): Promise<string> {
+async function migrationHistory(): Promise<unknown[]> {
   const result = await compose(
     postgresExecArgs([
       "-c",
       "SELECT COALESCE(json_agg(json_build_object('id', id, 'hash', hash, 'created_at', created_at, 'name', name, 'applied_at', applied_at) ORDER BY id), '[]'::json)::text FROM drizzle.__drizzle_migrations;",
     ]).slice(composePrefix().length),
   );
-  const history = result.stdout.trim();
-  const records: unknown = JSON.parse(history);
+  const records: unknown = JSON.parse(result.stdout.trim());
   assert.ok(Array.isArray(records));
-  assert.equal(records.length, 2, "基线库应保留两条既有迁移记录。");
-  return history;
+  return records;
 }
 
 async function seedUpgradeRun(
@@ -580,7 +578,7 @@ async function seedUpgradeRun(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      protocolVersion: 4,
+      protocolVersion: 3,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true,
@@ -777,6 +775,51 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   let baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
+  const legacyBrowserManifest = (withReason: boolean) => ({
+    id: "binny36.upgrade-browser",
+    version: "1.0.0",
+    configSchema: { type: "object" },
+    actions: {
+      check: { description: "检查旧浏览器配置。", params: { type: "object" } },
+    },
+    environment: {
+      browser: {
+        required: true,
+        profileReuseAfterRestart: false,
+        ...(withReason
+          ? { profileReuseUnavailableReason: "旧浏览器不能复用配置文件。" }
+          : {}),
+      },
+    },
+  });
+  const createLegacyBrowserBin = async (
+    binId: string,
+    collector: ReturnType<typeof legacyBrowserManifest>,
+  ) => {
+    const response = await fetch(`${baseUrl}/bins`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: binId,
+        collector,
+        identityId: `identity-${binId}`,
+        config: {},
+        targets: [],
+      }),
+    });
+    assert.equal(response.status, 201, await response.clone().text());
+  };
+  const legacyBrowserWithoutReason = legacyBrowserManifest(false);
+  const legacyBrowserWithReason = legacyBrowserManifest(true);
+  await createLegacyBrowserBin(
+    "binny36-upgrade-browser-no-reason",
+    legacyBrowserWithoutReason,
+  );
+  await createLegacyBrowserBin(
+    "binny36-upgrade-browser-with-reason",
+    legacyBrowserWithReason,
+  );
+
   const manifest = await createSdkManifest();
   await createRssBin(baseUrl, "rss-main", manifest, {
     userAgent: "Binny E2E",
@@ -851,6 +894,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(oldRun.status, "completed");
   assert.equal(await containerImageId("server"), expectedBaselineId);
   const baselineHistory = await migrationHistory();
+  assert.equal(baselineHistory.length, 2, "旧版数据库应保留两条迁移记录。");
 
   await compose(["stop", "server"]);
   activeServerImage = imageName;
@@ -869,8 +913,186 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.notEqual(runningCandidateId, runningBaselineId);
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();
-  await waitForApiAndDatabase(baseUrl);
-  assert.equal(await migrationHistory(), baselineHistory);
+  await waitForApiHealth(baseUrl);
+  const upgradedHistory = await migrationHistory();
+  assert.ok(upgradedHistory.length > baselineHistory.length);
+  assert.deepEqual(
+    upgradedHistory.slice(0, baselineHistory.length),
+    baselineHistory,
+    "升级后应保留旧版数据库的迁移历史前缀。",
+  );
+  assert.ok(
+    upgradedHistory.some(
+      (record) =>
+        typeof record === "object" &&
+        record !== null &&
+        "name" in record &&
+        record.name === "20261029021307_wide_surge",
+    ),
+    "升级没有应用票20浏览器空闲策略迁移。",
+  );
+
+  // 基线运行器使用协议3；先用公开心跳续接测试夹具，避免旧环境快照干扰本票的 bin 列表验证。
+  const upgradedRuntimeHeartbeat = await fetch(
+    `${baseUrl}/bins/rss-main/runtime/heartbeat`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        protocolVersion: 4,
+        runtimeId: "binny36-upgrade-baseline-runtime",
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        collector: manifest,
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(
+    upgradedRuntimeHeartbeat.status,
+    200,
+    await upgradedRuntimeHeartbeat.clone().text(),
+  );
+
+  const oldWithoutReasonResponse = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+  );
+  assert.equal(
+    oldWithoutReasonResponse.status,
+    200,
+    await oldWithoutReasonResponse.clone().text(),
+  );
+  const oldWithoutReason = (await oldWithoutReasonResponse.json()) as {
+    readonly id: string;
+    readonly browserIdleTimeoutSeconds: number | null;
+  };
+  assert.equal(oldWithoutReason.id, "binny36-upgrade-browser-no-reason");
+  assert.equal(oldWithoutReason.browserIdleTimeoutSeconds, null);
+
+  const oldWithReasonResponse = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-with-reason`,
+  );
+  assert.equal(oldWithReasonResponse.status, 200);
+  const oldWithReason = (await oldWithReasonResponse.json()) as {
+    readonly browserIdleTimeoutSeconds: number | null;
+    readonly collector: {
+      readonly environment: {
+        readonly browser: { readonly profileReuseUnavailableReason?: string };
+      };
+    };
+  };
+  assert.equal(oldWithReason.browserIdleTimeoutSeconds, null);
+  assert.equal(
+    oldWithReason.collector.environment.browser.profileReuseUnavailableReason,
+    "旧浏览器不能复用配置文件。",
+  );
+
+  const oldBinListResponse = await fetch(`${baseUrl}/bins`);
+  assert.equal(oldBinListResponse.status, 200);
+  const oldBinList = (await oldBinListResponse.json()) as {
+    readonly bins: readonly {
+      readonly id: string;
+      readonly browserIdleTimeoutSeconds: number | null;
+    }[];
+  };
+  for (const oldBinId of [
+    "binny36-upgrade-browser-no-reason",
+    "binny36-upgrade-browser-with-reason",
+  ]) {
+    const oldBin = oldBinList.bins.find(({ id }) => id === oldBinId);
+    assert.ok(oldBin, `列表没有返回旧配置 ${oldBinId}。`);
+    assert.equal(oldBin.browserIdleTimeoutSeconds, null);
+  }
+
+  const legacyRuntimeHeartbeat = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-no-reason/runtime/heartbeat`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        protocolVersion: 4,
+        runtimeId: "binny36-upgrade-browser-old-runtime",
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        collector: legacyBrowserWithoutReason,
+        environment: {
+          kind: "browser",
+          browser: {
+            available: true,
+            profileReuseAfterRestart: false,
+            power: { status: "ready" },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(
+    legacyRuntimeHeartbeat.status,
+    200,
+    await legacyRuntimeHeartbeat.clone().text(),
+  );
+  const oldRuntimePolicy = (await legacyRuntimeHeartbeat.json()) as {
+    readonly browserIdleTimeoutSeconds: number | null;
+  };
+  assert.equal(oldRuntimePolicy.browserIdleTimeoutSeconds, null);
+
+  const repairedLegacyManifest = {
+    ...legacyBrowserWithoutReason,
+    environment: {
+      browser: {
+        ...legacyBrowserWithoutReason.environment.browser,
+        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
+      },
+    },
+  };
+  const repairedLegacyResponse = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collector: repairedLegacyManifest }),
+    },
+  );
+  assert.equal(
+    repairedLegacyResponse.status,
+    200,
+    await repairedLegacyResponse.clone().text(),
+  );
+  const repairedLegacyBin = (await repairedLegacyResponse.json()) as {
+    readonly browserIdleTimeoutSeconds: number | null;
+  };
+  assert.equal(repairedLegacyBin.browserIdleTimeoutSeconds, null);
+
+  const incompatibleLegacyUpdate = await fetch(
+    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ browserIdleTimeoutSeconds: 300 }),
+    },
+  );
+  assert.equal(incompatibleLegacyUpdate.status, 400);
+  const incompatibleLegacyError = (await incompatibleLegacyUpdate.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(incompatibleLegacyError.error.code, "invalid_configuration");
+  assert.deepEqual(incompatibleLegacyError.error.path, [
+    "browserIdleTimeoutSeconds",
+  ]);
 
   const candidateArchive = await readUpgradeArchive(baseUrl, archiveItemId);
   assert.equal(candidateArchive.revisions.length, 2);
@@ -927,7 +1149,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
   assert.equal(await containerImageId("server"), candidateImageId);
-  assert.equal(await migrationHistory(), baselineHistory);
+  assert.deepEqual(await migrationHistory(), upgradedHistory);
   const restartedRun = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["run", "get", "rss-main", runId]),
     "found",
@@ -967,7 +1189,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         candidateRevisionId: continuedItem.revisionId,
         previousRevisionId: lastObservation.revisionId,
         resourceId,
-        migrationHistory: JSON.parse(baselineHistory) as unknown,
+        migrationHistory: baselineHistory,
         candidateRestarted: true,
       }) +
       "\n",
@@ -1112,6 +1334,24 @@ async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
   }
   throw new Error("等待 HTTP API 和 PostgreSQL 就绪超时：\n" + lastFailure);
+}
+
+async function waitForApiHealth(baseUrl: string): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  let lastFailure = "服务尚未就绪。";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/health`, {
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (response.status === 200) return;
+      lastFailure = `HTTP ${String(response.status)}`;
+    } catch (error) {
+      lastFailure = String(error);
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+  }
+  throw new Error("等待 HTTP API 健康检查就绪超时：\n" + lastFailure);
 }
 
 type HeldTableLock = {

@@ -128,6 +128,7 @@ const password = `binny19${randomUUID().replaceAll("-", "")}`;
 const publishedHost = process.env.BINNY19_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort: number | undefined;
 let sitePort: number | undefined;
+let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
 let playwrightBrowser: PlaywrightBrowser | undefined;
@@ -368,6 +369,20 @@ async function createComposeOverlay(): Promise<void> {
       "  browser-session-source:",
       "    ports: !override",
       '      - "8081"',
+      "  browser-one:",
+      "    environment:",
+      "      BINNY_API_URL: http://browser-idle-heartbeat-proxy:8082",
+      "    depends_on:",
+      "      browser-idle-heartbeat-proxy:",
+      "        condition: service_started",
+      "  browser-idle-heartbeat-proxy:",
+      `    image: ${serverImage}`,
+      "    profiles: [binny19]",
+      "    command:",
+      "      - node",
+      "      - scripts/binny-e2e-heartbeat-proxy.ts",
+      "    ports:",
+      '      - "8083"',
       "networks:",
       "  default:",
       "    ipam:",
@@ -376,6 +391,99 @@ async function createComposeOverlay(): Promise<void> {
       "",
     ].join("\n"),
   );
+}
+
+async function armIdleHeartbeatGate(binId: string): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/arm`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ binId, idleHeartbeat: true }),
+      signal: AbortSignal.timeout(3_000),
+    },
+  );
+  assert.equal(response.status, 200, await response.text());
+}
+
+async function waitForHeartbeatForwardedAfter(
+  after: number,
+  browserIdleTimeoutSeconds: number,
+): Promise<number> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly forwardedAt?: number;
+      readonly forwardedRuntimeId?: string;
+      readonly forwardedBrowserIdleTimeoutSeconds?: number | null;
+    };
+    if (
+      typeof state.forwardedAt === "number" &&
+      state.forwardedAt > after &&
+      state.forwardedRuntimeId !== undefined &&
+      state.forwardedBrowserIdleTimeoutSeconds === browserIdleTimeoutSeconds
+    )
+      return state.forwardedAt;
+    await delay(50);
+  }
+  throw new Error("更新空闲策略后没有观察到运行器完成的真实心跳。");
+}
+
+async function waitForIdleHeartbeatGate(binId: string): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly held: boolean;
+      readonly armedForBinId?: string;
+      readonly heldAt?: number;
+    };
+    if (state.held && typeof state.heldAt === "number") return;
+    assert.equal(
+      state.armedForBinId,
+      binId,
+      "代理没有等待指定 bin 的空闲心跳。",
+    );
+    await delay(100);
+  }
+  throw new Error(`运行器没有发出 ${binId} 的空闲探测心跳。`);
+}
+
+async function holdIdleProbeAtDeadline(
+  binId: string,
+  timeoutSeconds: number,
+): Promise<void> {
+  const updateStartedAt = Date.now();
+  await updateBin(binId, timeoutSeconds);
+  const acceptedAt = await waitForHeartbeatForwardedAfter(
+    updateStartedAt,
+    timeoutSeconds,
+  );
+  const remainingMs = timeoutSeconds * 1_000 - (Date.now() - acceptedAt) - 750;
+  if (remainingMs > 0) await delay(remainingMs);
+  await armIdleHeartbeatGate(binId);
+  await waitForIdleHeartbeatGate(binId);
+}
+
+async function releaseIdleHeartbeatGate(): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/release`,
+    { method: "POST", signal: AbortSignal.timeout(30_000) },
+  );
+  assert.equal(response.status, 200, await response.text());
 }
 
 async function waitForApi(): Promise<void> {
@@ -1388,12 +1496,17 @@ async function main(): Promise<void> {
     "--build",
     "server",
     "browser-session-source",
+    "browser-idle-heartbeat-proxy",
     "browser-one",
     "browser-two",
   ]);
   playwrightBrowser = await startOuterBrowser();
   serverPort = await publishedPort("server", 3000);
   sitePort = await publishedPort("browser-session-source", 8081);
+  heartbeatProxyControlPort = await publishedPort(
+    "browser-idle-heartbeat-proxy",
+    8083,
+  );
   await waitForApi();
   await waitForSource();
 
@@ -1525,6 +1638,16 @@ async function main(): Promise<void> {
   await waitForBrowserPower("binny19-one", "ready");
   const awakeMemory = await browserContainerMemoryBytes("browser-one");
   const initialBrowserProcess = await browserMainProcess("browser-one");
+  await holdIdleProbeAtDeadline("binny19-one", 4);
+  await updateBin("binny19-one", "disabled");
+  await releaseIdleHeartbeatGate();
+  await delay(4_500);
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "关闭尚未开始时禁用空闲关闭，探测完成后仍关闭了浏览器。",
+  );
   await updateBin("binny19-one", 4);
   const stoppedBin = await waitForBrowserPower("binny19-one", "stopped");
   assert.equal(stoppedBin.execution.status, "online");
@@ -1628,6 +1751,16 @@ async function main(): Promise<void> {
     "collect 没有从已停止状态重新启动浏览器。",
   );
 
+  await holdIdleProbeAtDeadline("binny19-one", 4);
+  await updateBin("binny19-one", 30);
+  await releaseIdleHeartbeatGate();
+  await delay(5_000);
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "关闭尚未开始时延长空闲时限，旧截止时间仍关闭了浏览器。",
+  );
   await updateBin("binny19-one", 4);
   await waitForBrowserPower("binny19-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");

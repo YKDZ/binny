@@ -124,6 +124,12 @@ registerPostgresJsonSchemaProjection(
   collectorManifestFieldsSchema,
 );
 
+/** 持久化清单解析器，允许读取旧版尚未要求填写复用原因的配置。 */
+export const collectorManifestStoredSchema = withPostgresJsonSchemaProjection(
+  collectorManifestFieldsSchema,
+);
+
+/** 新建或更新清单时使用；必需浏览器不支持复用 profile 时必须给出原因。 */
 export const collectorManifestSchema = withPostgresJsonSchemaProjection(
   collectorManifestCheckedSchema,
 );
@@ -203,6 +209,17 @@ export const binCreateInputSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
+/** 持久化 bin 的运行配置切片，不将旧清单误当作新建输入重新校验。 */
+export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
+  z.object({
+    id: binIdSchema,
+    collector: collectorManifestStoredSchema,
+    identityId: identityIdSchema,
+    config: jsonObjectSchema,
+    targets: targetsSchema,
+  }),
+);
+
 export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
@@ -258,7 +275,7 @@ export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
     claimInFlight: z.boolean(),
     stoppedRunId: z.string().uuid().optional(),
     humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
-    collector: collectorManifestSchema,
+    collector: collectorManifestStoredSchema,
     environment: runtimeEnvironmentSchema,
   }),
 );
@@ -303,7 +320,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
 export const binConfigurationSchema = withPostgresJsonSchemaProjection(
   z.object({
     id: binIdSchema,
-    collector: collectorManifestSchema,
+    collector: collectorManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,

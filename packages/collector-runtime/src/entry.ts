@@ -695,6 +695,16 @@ function browserHasActiveUse(): boolean {
   );
 }
 
+function browserIdleCloseIsDue(): boolean {
+  if (
+    browserIdleSince === undefined ||
+    browserIdleTimeoutSeconds === undefined ||
+    browserIdleTimeoutSeconds === null
+  )
+    return false;
+  return Date.now() >= browserIdleSince + browserIdleTimeoutSeconds * 1_000;
+}
+
 function scheduleBrowserIdleClose(waitMs: number): void {
   clearBrowserIdleTimer();
   const timer = setTimeout(
@@ -759,10 +769,9 @@ function closeBrowserWhenIdle(): Promise<void> {
 async function runBrowserIdleClose(): Promise<void> {
   if (
     browserLifecycle === undefined ||
-    browserIdleTimeoutSeconds === undefined ||
-    browserIdleTimeoutSeconds === null ||
     browserHasActiveUse() ||
-    browserPower.status !== "ready"
+    browserPower.status !== "ready" ||
+    !browserIdleCloseIsDue()
   ) {
     refreshBrowserIdle();
     return;
@@ -790,7 +799,8 @@ async function runBrowserIdleClose(): Promise<void> {
     return;
   }
 
-  if (browserIdleSince === undefined) {
+  // heartbeat 与领取探测会让出事件循环，期间策略及空闲起点都可能改变。
+  if (!browserIdleCloseIsDue()) {
     refreshBrowserIdle();
     return;
   }
