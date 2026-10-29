@@ -51,6 +51,7 @@ type FixtureState = {
   readonly challengePosts: boolean;
   readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
+  readonly legacyTags: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -852,8 +853,15 @@ async function verifyTopicArchive(): Promise<void> {
     key: "post:240001",
   });
   assert.equal(rootState.capture.completeness, "complete");
+  assert.deepEqual(rootState.capture.missing, []);
   assert.equal(rootState.capture.scope.postNumber, 1);
   assert.equal(rootState.metadata?.postNumber, 1);
+  const topicMetadata = rootState.metadata?.topic;
+  assert.ok(topicMetadata !== null && typeof topicMetadata === "object");
+  assert.deepEqual("tags" in topicMetadata ? topicMetadata.tags : undefined, [
+    "受控",
+    "归档",
+  ]);
   assert.equal(
     rootState.metadata?.author && typeof rootState.metadata.author,
     "object",
@@ -907,6 +915,19 @@ async function verifyTopicArchive(): Promise<void> {
     ),
     rootState.body?.html,
   );
+  assert.ok(
+    rootState.body?.html?.includes(
+      `href="binny://resource/${imageResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  assert.ok(
+    rootState.body?.html?.includes(
+      `data-download-href="binny://resource/${imageResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  assert.ok(!rootState.body?.html?.includes("topic-photo-download-hash"));
   assert.ok(!rootState.body?.html?.includes("srcset="), rootState.body?.html);
   assert.ok(
     !rootState.body?.html?.includes("topic-photo-small.webp") &&
@@ -948,8 +969,18 @@ async function verifyTopicArchive(): Promise<void> {
     ["post:240002", "post:240003"],
   );
 
+  await updateFixtureState({ legacyTags: true });
   await collectTopic();
   const duplicateRoot = await readArchiveItem(root.itemId);
+  const duplicateTopicMetadata = binState(duplicateRoot).metadata?.topic;
+  assert.ok(
+    duplicateTopicMetadata !== null &&
+      typeof duplicateTopicMetadata === "object",
+  );
+  assert.deepEqual(
+    "tags" in duplicateTopicMetadata ? duplicateTopicMetadata.tags : undefined,
+    ["受控", "归档"],
+  );
   assert.equal(
     duplicateRoot.revisions.length,
     initialRootRevisionCount,

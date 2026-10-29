@@ -63,6 +63,17 @@ const discoursePostSchema = z
   })
   .passthrough();
 
+const discourseTopicTagSchema = z.union([
+  z.string(),
+  z
+    .object({
+      id: postIdSchema,
+      name: z.string(),
+      slug: z.string(),
+    })
+    .passthrough(),
+]);
+
 const discourseTopicSchema = z
   .object({
     id: topicIdSchema,
@@ -70,7 +81,7 @@ const discourseTopicSchema = z
     slug: z.string().optional(),
     created_at: z.string().optional(),
     category_id: topicIdSchema.nullable().optional(),
-    tags: z.array(z.string()).optional(),
+    tags: z.array(discourseTopicTagSchema).optional(),
     post_stream: z
       .object({
         posts: z.array(discoursePostSchema),
@@ -664,6 +675,7 @@ async function prepareCookedBody(
   return await page.evaluate((html) => {
     const document = new DOMParser().parseFromString(html, "text/html");
     const media: MediaCandidate[] = [];
+    const imageLightboxes = new Set<Element>();
     let imageNumber = 0;
     let attachmentNumber = 0;
 
@@ -688,13 +700,18 @@ async function prepareCookedBody(
       const path = `body.images[${String(imageNumber)}]`;
       imageNumber += 1;
       image.setAttribute("data-binny-media-index", String(index));
-      lightbox?.setAttribute("data-binny-media-index", String(index));
+      if (lightbox !== null) {
+        lightbox.setAttribute("data-binny-media-index", String(index));
+        imageLightboxes.add(lightbox);
+      }
       media.push({ index, kind: "image", url, path });
     }
 
     for (const attachment of document.body.querySelectorAll(
       "a.attachment[href], a[data-download-href]",
     )) {
+      // Discourse 的 lightbox 下载别名指向图片变体，不是另一份附件。
+      if (imageLightboxes.has(attachment)) continue;
       const url =
         attachment.getAttribute("data-download-href") ??
         attachment.getAttribute("href");
@@ -968,7 +985,10 @@ async function archivePost(
               title: topic.title ?? null,
               slug: topic.slug ?? null,
               categoryId: topic.category_id ?? null,
-              tags: topic.tags ?? [],
+              tags:
+                topic.tags?.map((tag) =>
+                  typeof tag === "string" ? tag : tag.name,
+                ) ?? [],
               ...(topic.created_at === undefined
                 ? {}
                 : { createdAt: topic.created_at }),
