@@ -210,6 +210,86 @@ void checkPublicManualRunCancellationContract;
 
 void checkPublicManualRunContract;
 
+async function checkPublicScheduleContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "rss-main";
+  const scheduleId = "650e8400-e29b-41d4-a716-446655440000";
+  const createInput = {
+    expression: "0 */15 * * * *",
+    timeZone: "Europe/London",
+    action: "collect",
+    params: { feedIds: ["rss-main"] },
+  };
+
+  const created = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: createInput,
+  });
+  if (created.status === 201) {
+    const schedule = await created.json();
+    const timezone: string = schedule.timeZone;
+    const nextDueAt: string = schedule.nextDueAt;
+    void timezone;
+    void nextDueAt;
+    // @ts-expect-error schedule output has no undeclared action alias.
+    void schedule.operation;
+  } else if (
+    created.status === 400 ||
+    created.status === 404 ||
+    created.status === 409
+  ) {
+    const error = await created.json();
+    void error.error.code;
+    // @ts-expect-error schedule errors do not expose a created schedule.
+    void error.scheduleId;
+  }
+
+  void client.bins[":binId"].schedules.$post({
+    param: { binId },
+    // @ts-expect-error schedule parameters must be a JSON object.
+    json: { ...createInput, params: ["invalid"] },
+  });
+
+  const listed = await client.bins[":binId"].schedules.$get({
+    param: { binId },
+  });
+  if (listed.status === 200) {
+    void (await listed.json()).schedules;
+  } else if (listed.status === 404) {
+    void (await listed.json()).error.code;
+  }
+
+  const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
+    param: { binId, scheduleId },
+    json: { expression: "0 30 2 * * *", timeZone: "Europe/London" },
+  });
+  if (updated.status === 200) {
+    void (await updated.json()).nextDueAt;
+  } else if (
+    updated.status === 400 ||
+    updated.status === 404 ||
+    updated.status === 409
+  ) {
+    void (await updated.json()).error.message;
+  }
+
+  const disabled = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].disable.$post({
+    param: { binId, scheduleId },
+  });
+  if (disabled.status === 200) void (await disabled.json()).enabled;
+  else if (disabled.status === 404) void (await disabled.json()).error.code;
+
+  const removed = await client.bins[":binId"].schedules[":scheduleId"].$delete({
+    param: { binId, scheduleId },
+  });
+  if (removed.status === 200) void (await removed.json()).scheduleId;
+  else if (removed.status === 404) void (await removed.json()).error.code;
+}
+
+void checkPublicScheduleContract;
+
 async function checkPublicArchiveContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
 

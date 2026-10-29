@@ -545,6 +545,208 @@ async function verifyAvailabilityChecks(): Promise<void> {
     assert.deepEqual((await search.json()).results, []);
 }
 
+function nextLastSundayAtUtc(month: number, hour: number, minute = 0): Date {
+  const now = Date.now();
+  for (let year = new Date(now).getUTCFullYear(); ; year += 1) {
+    const lastDay = new Date(Date.UTC(year, month + 1, 0));
+    const date = lastDay.getUTCDate() - lastDay.getUTCDay();
+    const dueAt = new Date(Date.UTC(year, month, date, hour, minute));
+    if (dueAt.getTime() > now) return dueAt;
+  }
+}
+
+async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
+  const binId = "binny15-one";
+  const expression = "0 0 0 1 1 *";
+  const params = {
+    sourceUrl: runtimeSourceUrl,
+    gateKey: "17-schedule-crud",
+    sourceKey: "17-schedule-crud",
+  };
+
+  const invalidExpression = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression: "every minute",
+      timeZone: "UTC",
+      action: "collect",
+      params,
+    },
+  });
+  assert.equal(invalidExpression.status, 400);
+  if (invalidExpression.status === 400)
+    assert.equal(
+      (await invalidExpression.json()).error.code,
+      "invalid_schedule_expression",
+    );
+
+  const invalidTimeZone = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression,
+      timeZone: "Mars/Olympus_Mons",
+      action: "collect",
+      params,
+    },
+  });
+  assert.equal(invalidTimeZone.status, 400);
+  if (invalidTimeZone.status === 400)
+    assert.equal(
+      (await invalidTimeZone.json()).error.code,
+      "invalid_time_zone",
+    );
+
+  const invalidActionParameters = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: { expression, timeZone: "UTC", action: "collect", params: {} },
+  });
+  assert.equal(invalidActionParameters.status, 400);
+  if (invalidActionParameters.status === 400)
+    assert.equal(
+      (await invalidActionParameters.json()).error.code,
+      "invalid_action_parameters",
+    );
+
+  const created = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: { expression, timeZone: "UTC", action: "collect", params },
+  });
+  assert.equal(created.status, 201);
+  if (created.status !== 201) return;
+  const schedule = await created.json();
+  assert.equal(schedule.binId, binId);
+  assert.equal(schedule.expression, expression);
+  assert.equal(schedule.timeZone, "UTC");
+  assert.equal(schedule.action, "collect");
+  assert.deepEqual(schedule.params, params);
+  assert.ok(Date.parse(schedule.nextDueAt) > Date.now());
+
+  const listed = await client.bins[":binId"].schedules.$get({
+    param: { binId },
+  });
+  assert.equal(listed.status, 200);
+  if (listed.status === 200)
+    assert.ok(
+      (await listed.json()).schedules.some(
+        ({ scheduleId }) => scheduleId === schedule.scheduleId,
+      ),
+    );
+
+  const read = await client.bins[":binId"].schedules[":scheduleId"].$get({
+    param: { binId, scheduleId: schedule.scheduleId },
+  });
+  assert.equal(read.status, 200);
+  if (read.status === 200)
+    assert.equal((await read.json()).scheduleId, schedule.scheduleId);
+
+  const invalidUpdate = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$patch({
+    param: { binId, scheduleId: schedule.scheduleId },
+    json: { params: {} },
+  });
+  assert.equal(invalidUpdate.status, 400);
+  if (invalidUpdate.status === 400)
+    assert.equal(
+      (await invalidUpdate.json()).error.code,
+      "invalid_action_parameters",
+    );
+
+  const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
+    param: { binId, scheduleId: schedule.scheduleId },
+    json: {
+      expression: "0 30 2 * * *",
+      timeZone: "Europe/London",
+      action: "check",
+      params: { ...params, gateKey: "17-schedule-updated" },
+    },
+  });
+  assert.equal(updated.status, 200);
+  if (updated.status === 200) {
+    const value = await updated.json();
+    assert.equal(value.expression, "0 30 2 * * *");
+    assert.equal(value.timeZone, "Europe/London");
+    assert.equal(value.action, "check");
+    assert.equal(value.params.gateKey, "17-schedule-updated");
+  }
+
+  const disabled = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].disable.$post({
+    param: { binId, scheduleId: schedule.scheduleId },
+  });
+  assert.equal(disabled.status, 200);
+  if (disabled.status === 200)
+    assert.equal((await disabled.json()).enabled, false);
+
+  const enabled = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].enable.$post({
+    param: { binId, scheduleId: schedule.scheduleId },
+  });
+  assert.equal(enabled.status, 200);
+  if (enabled.status === 200)
+    assert.equal((await enabled.json()).enabled, true);
+
+  const removed = await client.bins[":binId"].schedules[":scheduleId"].$delete({
+    param: { binId, scheduleId: schedule.scheduleId },
+  });
+  assert.equal(removed.status, 200);
+  if (removed.status === 200)
+    assert.deepEqual(await removed.json(), {
+      removed: true,
+      scheduleId: schedule.scheduleId,
+    });
+  const afterRemoval = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$get({ param: { binId, scheduleId: schedule.scheduleId } });
+  assert.equal(afterRemoval.status, 404);
+
+  // cron-parser 会跳过春季缺失的本地 01:30；先按转换点选年，再检查其后的到期点。
+  const springTransition = nextLastSundayAtUtc(2, 1);
+  const springDueAt = new Date(springTransition.getTime() + 30 * 60 * 1000);
+  const springExpression = "0 30 1 * 3 SUNL";
+  const springSchedule = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression: springExpression,
+      timeZone: "Europe/London",
+      action: "check",
+      params,
+    },
+  });
+  assert.equal(springSchedule.status, 201);
+  if (springSchedule.status === 201) {
+    const value = await springSchedule.json();
+    assert.equal(value.nextDueAt, springDueAt.toISOString());
+    const removedSpring = await client.bins[":binId"].schedules[
+      ":scheduleId"
+    ].$delete({ param: { binId, scheduleId: value.scheduleId } });
+    assert.equal(removedSpring.status, 200);
+  }
+
+  const autumnDueAt = nextLastSundayAtUtc(9, 0, 30);
+  const autumnExpression = "0 30 1 * 10 SUNL";
+  const autumnSchedule = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression: autumnExpression,
+      timeZone: "Europe/London",
+      action: "check",
+      params,
+    },
+  });
+  assert.equal(autumnSchedule.status, 201);
+  if (autumnSchedule.status === 201) {
+    const value = await autumnSchedule.json();
+    assert.equal(value.nextDueAt, autumnDueAt.toISOString());
+    const removedAutumn = await client.bins[":binId"].schedules[
+      ":scheduleId"
+    ].$delete({ param: { binId, scheduleId: value.scheduleId } });
+    assert.equal(removedAutumn.status, 200);
+  }
+}
+
 async function verifyRunCommit(run: ManualRun): Promise<{
   readonly itemId: string;
   readonly commitId: string;
@@ -907,6 +1109,7 @@ async function main(): Promise<void> {
   );
   await verifyDisabledQueueBoundary(sourceRuntimeUrl, sourceControlUrl);
   await verifyAvailabilityChecks();
+  await verifySchedulesCrud(sourceRuntimeUrl);
   process.stdout.write(
     "运行 HTTP 队列、check 诊断、串行并行、归档约束和错误结果旅程通过。\n",
   );
