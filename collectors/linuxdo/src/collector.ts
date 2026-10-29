@@ -63,6 +63,17 @@ const discoursePostSchema = z
   })
   .passthrough();
 
+const discourseTopicTagSchema = z.union([
+  z.string(),
+  z
+    .object({
+      id: postIdSchema,
+      name: z.string(),
+      slug: z.string(),
+    })
+    .passthrough(),
+]);
+
 const discourseTopicSchema = z
   .object({
     id: topicIdSchema,
@@ -70,7 +81,7 @@ const discourseTopicSchema = z
     slug: z.string().optional(),
     created_at: z.string().optional(),
     category_id: topicIdSchema.nullable().optional(),
-    tags: z.array(z.string()).optional(),
+    tags: z.array(discourseTopicTagSchema).optional(),
     post_stream: z
       .object({
         posts: z.array(discoursePostSchema),
@@ -968,7 +979,10 @@ async function archivePost(
               title: topic.title ?? null,
               slug: topic.slug ?? null,
               categoryId: topic.category_id ?? null,
-              tags: topic.tags ?? [],
+              tags:
+                topic.tags?.map((tag) =>
+                  typeof tag === "string" ? tag : tag.name,
+                ) ?? [],
               ...(topic.created_at === undefined
                 ? {}
                 : { createdAt: topic.created_at }),
