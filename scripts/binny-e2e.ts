@@ -217,9 +217,9 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY18_STOP_GRACE_MS: "1500",
     BINNY22_RUNTIME_IMAGE: activeRssRuntimeImage,
-    BINNY24_BIN_ID: "binny28-linuxdo",
-    BINNY24_BIN_ID_TWO: "binny28-linuxdo-two",
-    BINNY24_RUNTIME_IMAGE: linuxdoRuntimeImageName,
+    BINNY25_BIN_ID: "binny28-linuxdo",
+    BINNY25_BIN_ID_TWO: "binny28-linuxdo-two",
+    BINNY25_RUNTIME_IMAGE: linuxdoRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
