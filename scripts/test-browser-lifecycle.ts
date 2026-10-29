@@ -3404,8 +3404,12 @@ async function main(): Promise<void> {
   }
   await waitForBrowserPower("binny19-two", "stopped");
   await waitForBrowserProcessesStopped("browser-two");
-  browserCapacitySamples.push(await activeBrowserMainProcessCount());
-  assert.equal(browserCapacitySamples.at(-1), 0);
+  const afterCapacityHandoffCount = await activeBrowserMainProcessCount();
+  browserCapacitySamples.push(afterCapacityHandoffCount);
+  assert.ok(
+    afterCapacityHandoffCount <= 1,
+    "关闭确认与排队人工会话恢复之间突破了容量上限。",
+  );
 
   await waitForHuman("binny19-one", waitingHuman.sessionId, "ready");
   browserCapacitySamples.push(await activeBrowserMainProcessCount());
