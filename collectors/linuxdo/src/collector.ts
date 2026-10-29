@@ -880,18 +880,24 @@ function listCheckDiagnostic(
   | undefined {
   if (!isCollectorActionError(error)) return undefined;
   const { failure } = error;
-  if (
-    (failure.code !== "discourse_target_unavailable" &&
-      failure.code !== "discourse_target_challenge_response") ||
-    failure.suggestion === undefined
-  ) {
+  // 只转换列表读取和分页校验识别的源站结果；其他执行故障仍按失败上抛。
+  const availabilityBySourceCode: Readonly<
+    Record<string, "unavailable" | "unknown">
+  > = {
+    linuxdo_source_unreachable: "unknown",
+    discourse_target_unavailable: "unavailable",
+    discourse_target_challenge_response: "unknown",
+    discourse_target_response_invalid: "unavailable",
+    discourse_target_request_failed: "unknown",
+    discourse_topic_list_response_invalid: "unknown",
+    discourse_topic_list_pagination_invalid: "unknown",
+  };
+  const availability = availabilityBySourceCode[failure.code];
+  if (availability === undefined || failure.suggestion === undefined) {
     return undefined;
   }
   return {
-    availability:
-      failure.code === "discourse_target_unavailable"
-        ? "unavailable"
-        : "unknown",
+    availability,
     problem: {
       code: failure.code,
       message: failure.message,
@@ -944,21 +950,24 @@ async function checkTopic(context: CollectorCheckContext, params: CheckParams) {
       } else {
         // 单条主题足以诊断目标可读性，也能检查 Discourse 的下一页链接。
         const listUrl = targetListUrl(site, target, 1, undefined);
-        let response: z.output<typeof topicListResponseSchema>["topic_list"];
         try {
-          response = await readTopicListPage(page, listUrl, context.signal);
+          const response = await readTopicListPage(
+            page,
+            listUrl,
+            context.signal,
+          );
+          if (
+            response.more_topics_url !== null &&
+            response.more_topics_url !== undefined
+          ) {
+            paginationUrl(response.more_topics_url, listUrl, target);
+          }
         } catch (error) {
           const diagnostic = listCheckDiagnostic(error);
           if (diagnostic === undefined) throw error;
           problems.push(diagnostic.problem);
           availability = diagnostic.availability;
           continue;
-        }
-        if (
-          response.more_topics_url !== null &&
-          response.more_topics_url !== undefined
-        ) {
-          paginationUrl(response.more_topics_url, listUrl, target);
         }
       }
     }

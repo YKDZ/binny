@@ -9,6 +9,7 @@ type SourceState = {
   readonly legacyTags: boolean;
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
+  readonly targetInvalidResponsePage: number | null;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -57,6 +58,7 @@ let activeState: SourceState = {
   legacyTags: false,
   targetUnavailablePage: null,
   targetChallengePage: null,
+  targetInvalidResponsePage: null,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
@@ -282,7 +284,11 @@ function updateState(value: unknown): boolean {
       return false;
     }
   }
-  for (const key of ["targetUnavailablePage", "targetChallengePage"] as const) {
+  for (const key of [
+    "targetUnavailablePage",
+    "targetChallengePage",
+    "targetInvalidResponsePage",
+  ] as const) {
     if (
       key in updates &&
       updates[key] !== null &&
@@ -465,6 +471,10 @@ const server = createServer((request, response) => {
       if (activeState.targetChallengePage === listPage) {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         response.end("<!doctype html><html><body>受控列表挑战页</body></html>");
+        return;
+      }
+      if (activeState.targetInvalidResponsePage === listPage) {
+        sendJson(response, 200, {});
         return;
       }
       sendJson(

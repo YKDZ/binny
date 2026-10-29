@@ -31,6 +31,7 @@ type ManualRun = {
       readonly problems: readonly {
         readonly code: string;
         readonly requiresHuman: boolean;
+        readonly suggestion?: string;
       }[];
     };
     readonly error?: {
@@ -54,6 +55,7 @@ type FixtureState = {
   readonly legacyTags: boolean;
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
+  readonly targetInvalidResponsePage: number | null;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -1264,6 +1266,29 @@ async function verifyDiscovery(): Promise<void> {
   assert.equal(challengedListCheck.result?.commits?.length ?? 0, 0);
   await updateFixtureState({ targetChallengePage: null });
 
+  await updateFixtureState({ targetInvalidResponsePage: 0 });
+  const invalidListCheck = await trigger("check", {
+    targetIds: ["latest"],
+  });
+  assert.equal(
+    invalidListCheck.status,
+    "completed",
+    JSON.stringify(invalidListCheck),
+  );
+  assert.equal(invalidListCheck.result?.check?.availability, "unknown");
+  assert.deepEqual(invalidListCheck.result?.check?.scope, ["target:latest"]);
+  assert.ok(
+    invalidListCheck.result?.check?.problems.some(
+      ({ code, requiresHuman, suggestion }) =>
+        code === "discourse_topic_list_response_invalid" &&
+        !requiresHuman &&
+        suggestion !== undefined,
+    ),
+    JSON.stringify(invalidListCheck),
+  );
+  assert.equal(invalidListCheck.result?.commits?.length ?? 0, 0);
+  await updateFixtureState({ targetInvalidResponsePage: null });
+
   const beforeCheck = await sourceState();
   const latestCheck = await trigger("check", { targetIds: ["latest"] });
   assert.equal(latestCheck.status, "completed", JSON.stringify(latestCheck));
@@ -1468,6 +1493,26 @@ async function verifyDiscovery(): Promise<void> {
     challengedTargetCollection.result?.completedScopes?.includes("topic:2401"),
   );
   await updateFixtureState({ targetChallengePage: null });
+
+  await updateFixtureState({ targetInvalidResponsePage: 1 });
+  const invalidTargetCollection = await trigger("collect", {
+    targetIds: ["latest"],
+    maxTopics: 1,
+  });
+  assert.equal(invalidTargetCollection.status, "failed");
+  assert.equal(
+    invalidTargetCollection.result?.error?.code,
+    "discourse_topic_list_response_invalid",
+  );
+  assert.ok(
+    invalidTargetCollection.result?.completedScopes?.includes("post:240001"),
+    JSON.stringify(invalidTargetCollection),
+  );
+  assert.ok(
+    invalidTargetCollection.result?.completedScopes?.includes("topic:2401"),
+    JSON.stringify(invalidTargetCollection),
+  );
+  await updateFixtureState({ targetInvalidResponsePage: null });
 
   const editedRoot = await searchArchiveItem("主题正文版本 3");
   assert.ok(binState(editedRoot).body?.text?.includes("主题正文版本 3"));
