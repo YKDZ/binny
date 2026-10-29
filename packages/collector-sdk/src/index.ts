@@ -101,6 +101,19 @@ export function archiveResourceManifest(
   );
 }
 
+/** 浏览器执行器向采集器提供的本机 Playwright 连接描述。 */
+export const collectorBrowserConnectionSchema = z
+  .object({
+    protocol: z.literal("playwright"),
+    endpoint: z.url(),
+    playwrightVersion: z.string().min(1),
+  })
+  .strict();
+
+export type CollectorBrowserConnection = z.infer<
+  typeof collectorBrowserConnectionSchema
+>;
+
 export interface CollectorContext {
   readonly binId: string;
   readonly identityId: string;
@@ -109,6 +122,7 @@ export interface CollectorContext {
   readonly config: unknown;
   readonly targets: readonly unknown[];
   readonly signal: AbortSignal;
+  readonly browser?: CollectorBrowserConnection;
   readonly archive: {
     submit(input: CollectorArchiveSubmission): Promise<ArchiveCommit>;
   };

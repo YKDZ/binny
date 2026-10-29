@@ -1,0 +1,1477 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+
+import type { Browser as PlaywrightBrowser, Page } from "playwright-core";
+
+type ProcessResult = {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+};
+
+type CliWire<T> = {
+  readonly kind: string;
+  readonly variant: string;
+  readonly data: T;
+};
+
+type HumanSessionStatus = {
+  readonly sessionId: string;
+  readonly status: string;
+  readonly readyAt?: string;
+  readonly closedAt?: string;
+  readonly failure?: { readonly code: string; readonly message: string };
+};
+
+type HumanSessionCreated = HumanSessionStatus & {
+  readonly viewerUrl: string;
+};
+
+type Run = {
+  readonly runId: string;
+  readonly status: string;
+  readonly queueReason?: string;
+  readonly startedAt?: string;
+  readonly finishedAt?: string;
+  readonly stopConfirmedAt?: string;
+  readonly result?: {
+    readonly commits: readonly unknown[];
+    readonly check?: {
+      readonly availability: string;
+      readonly problems: readonly { readonly requiresHuman: boolean }[];
+    };
+    readonly error?: {
+      readonly code: string;
+      readonly requiresHuman: boolean;
+    };
+  };
+};
+
+type Gate = {
+  started: boolean;
+  released: boolean;
+  touches: number;
+  lastTouchAt?: number;
+  unloadedAt?: number;
+};
+
+type HostProcess = { readonly pid: number; readonly startTime: string };
+type SourceGate = Gate;
+
+type SourceMetrics = {
+  readonly loginSubmissions: readonly {
+    readonly maxAge: number;
+    readonly at: number;
+  }[];
+  readonly loginPageViews: readonly number[];
+  readonly authenticatedProtectedVisits: readonly number[];
+  readonly gates: Readonly<Record<string, SourceGate>>;
+};
+
+type ViewerFrameStats = {
+  receivedFrames: number;
+  receivedBytes: number;
+  receivedSamples: string[];
+  sentFrames: number;
+  sentBytes: number;
+  sentSamples: string[];
+  sentKeyEvents: string[];
+  errors: string[];
+};
+
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+const composeFile = path.join(repositoryRoot, "compose.yaml");
+const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
+const projectName = `binny19-${suffix}`;
+const serverImage = `binny19-server-${suffix}:local`;
+const browserImage = `binny19-browser-${suffix}:local`;
+const outerBrowserContainer = `${projectName}-outer-browser`;
+const outerBrowserWsPath = `/binny19-${randomUUID()}`;
+const processObserver = `${projectName}-process-observer`;
+const password = `binny19${randomUUID().replaceAll("-", "")}`;
+const publishedHost = process.env.BINNY19_PUBLISHED_HOST ?? "172.17.0.1";
+let serverPort: number | undefined;
+let sitePort: number | undefined;
+let testDirectory: string | undefined;
+let overlayFile: string | undefined;
+let playwrightBrowser: PlaywrightBrowser | undefined;
+let composeStarted = false;
+let imageBuilt = false;
+let processObserverStarted = false;
+
+function environment(): Readonly<Record<string, string>> {
+  return {
+    BINNY_IMAGE: serverImage,
+    BINNY19_RUNTIME_IMAGE: browserImage,
+    BINNY_POSTGRES_PASSWORD: password,
+  };
+}
+
+function run(
+  command: string,
+  args: readonly string[],
+  extraEnvironment: Readonly<Record<string, string>> = {},
+): Promise<ProcessResult> {
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(command, [...args], {
+      cwd: repositoryRoot,
+      env: { ...process.env, ...environment(), ...extraEnvironment },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolveResult({ code: code ?? 1, stdout, stderr });
+    });
+  });
+}
+
+function composePrefix(profile = "binny19"): readonly string[] {
+  const prefix = [
+    "compose",
+    "--project-name",
+    projectName,
+    "--file",
+    composeFile,
+  ];
+  for (const value of profile.split(",")) prefix.push("--profile", value);
+  if (overlayFile !== undefined) prefix.push("--file", overlayFile);
+  return prefix;
+}
+
+async function compose(
+  args: readonly string[],
+  profile = "binny19",
+): Promise<ProcessResult> {
+  const result = await run("docker", [...composePrefix(profile), ...args]);
+  assert.equal(
+    result.code,
+    0,
+    `Compose ${args.join(" ")} 失败：\n${(result.stdout + result.stderr).slice(-12_000)}`,
+  );
+  return result;
+}
+
+async function rawCompose(
+  args: readonly string[],
+  profile = "binny19",
+): Promise<ProcessResult> {
+  return await run("docker", [...composePrefix(profile), ...args]);
+}
+
+async function cli(args: readonly string[]): Promise<ProcessResult> {
+  return await compose([
+    "exec",
+    "--no-TTY",
+    "server",
+    "node",
+    "packages/binny/dist/cli.js",
+    ...args,
+  ]);
+}
+
+function cliData<T>(result: ProcessResult, variant: string): T {
+  assert.equal(result.code, 0, result.stderr);
+  const wire = JSON.parse(result.stdout) as CliWire<T>;
+  assert.equal(wire.kind, "data");
+  assert.equal(wire.variant, variant);
+  return wire.data;
+}
+
+function ipv4Number(value: string): number {
+  const octets = value.split(".").map(Number);
+  assert.equal(octets.length, 4);
+  assert.ok(
+    octets.every(
+      (octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255,
+    ),
+  );
+  return (
+    ((octets[0]! << 24) |
+      (octets[1]! << 16) |
+      (octets[2]! << 8) |
+      octets[3]!) >>>
+    0
+  );
+}
+
+function cidrRange(value: string): {
+  readonly first: number;
+  readonly last: number;
+} {
+  const [address, prefixText] = value.split("/");
+  const prefix = Number(prefixText);
+  assert.ok(
+    address !== undefined &&
+      Number.isInteger(prefix) &&
+      prefix >= 0 &&
+      prefix <= 32,
+  );
+  const mask = prefix === 0 ? 0 : (0xffff_ffff << (32 - prefix)) >>> 0;
+  const first = (ipv4Number(address) & mask) >>> 0;
+  return { first, last: (first | (~mask >>> 0)) >>> 0 };
+}
+
+function rangesOverlap(left: string, right: string): boolean {
+  const a = cidrRange(left);
+  const b = cidrRange(right);
+  return a.first <= b.last && b.first <= a.last;
+}
+
+async function dockerNetworkSubnets(): Promise<string[]> {
+  const listed = await run("docker", [
+    "network",
+    "ls",
+    "--quiet",
+    "--no-trunc",
+  ]);
+  assert.equal(listed.code, 0, listed.stderr);
+  const ids = listed.stdout.split(/\s+/u).filter(Boolean);
+  const inspected = await Promise.all(
+    ids.map(async (id) => {
+      const result = await run("docker", ["network", "inspect", id]);
+      assert.equal(result.code, 0, result.stderr);
+      const [network] = JSON.parse(result.stdout) as {
+        readonly IPAM?: {
+          readonly Config?: readonly { readonly Subnet?: string }[];
+        };
+      }[];
+      return (network?.IPAM?.Config ?? [])
+        .map((entry) => entry.Subnet)
+        .filter(
+          (subnet): subnet is string =>
+            subnet !== undefined &&
+            /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/u.test(subnet),
+        );
+    }),
+  );
+  return inspected.flat();
+}
+
+async function freeBrowserSubnet(): Promise<string> {
+  const existing = await dockerNetworkSubnets();
+  const requested = process.env.BINNY19_SUBNET;
+  if (requested !== undefined) {
+    assert.ok(
+      existing.every((subnet) => !rangesOverlap(requested, subnet)),
+      `BINNY19_SUBNET ${requested} 与现有 Docker 网络重叠。`,
+    );
+    return requested;
+  }
+  for (let octet = 168; octet < 184; octet += 1) {
+    const candidate = `10.253.${String(octet)}.0/24`;
+    if (existing.every((subnet) => !rangesOverlap(candidate, subnet)))
+      return candidate;
+  }
+  throw new Error(
+    "10.253.168.0/24 到 10.253.183.0/24 均与现有 Docker 网络冲突。",
+  );
+}
+
+async function createComposeOverlay(): Promise<void> {
+  testDirectory = await mkdtemp(path.join(tmpdir(), "binny19-browser-"));
+  overlayFile = path.join(testDirectory, "compose.network.yaml");
+  const subnet = await freeBrowserSubnet();
+  await writeFile(
+    overlayFile,
+    [
+      "services:",
+      "  server:",
+      "    ports: !override",
+      '      - "3000"',
+      "  browser-session-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "networks:",
+      "  default:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${subnet}`,
+      "",
+    ].join("\n"),
+  );
+}
+
+async function waitForApi(): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  let lastError = "服务尚未就绪。";
+  while (Date.now() < deadline) {
+    const result = await cli(["bin", "list"]);
+    if (result.code === 0) return;
+    lastError = result.stderr;
+    await delay(500);
+  }
+  throw new Error(`等待正式 API、PostgreSQL 和 CLI 就绪超时：\n${lastError}`);
+}
+
+async function runtimeManifest(
+  service: string,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 45_000;
+  let lastError = "运行器还没有发布清单。";
+  while (Date.now() < deadline) {
+    const result = await rawCompose([
+      "exec",
+      "--no-TTY",
+      service,
+      "node",
+      "--input-type=module",
+      "-e",
+      'const response = await fetch("http://127.0.0.1:8080/manifest"); if (!response.ok) process.exit(2); console.log(JSON.stringify(await response.json()));',
+    ]);
+    if (result.code === 0) {
+      const payload = JSON.parse(result.stdout) as {
+        readonly collector?: Record<string, unknown>;
+      };
+      assert.ok(payload.collector !== undefined);
+      return payload.collector;
+    }
+    lastError = result.stderr;
+    await delay(250);
+  }
+  throw new Error(`正式浏览器运行器没有发布清单：${lastError}`);
+}
+
+async function publishedPort(
+  service: string,
+  containerPort: number,
+): Promise<number> {
+  const mapping = (
+    await compose(["port", service, String(containerPort)])
+  ).stdout.trim();
+  const portText = /:(\d+)$/u.exec(mapping)?.[1];
+  const port = Number(portText);
+  assert.ok(
+    portText !== undefined &&
+      Number.isInteger(port) &&
+      port > 0 &&
+      port <= 65_535,
+    `Compose 没有为 ${service}:${String(containerPort)} 返回有效宿主端口：${mapping}`,
+  );
+  return port;
+}
+
+async function startOuterBrowser(): Promise<PlaywrightBrowser> {
+  const launch = await run("docker", [
+    "run",
+    "--detach",
+    "--name",
+    outerBrowserContainer,
+    "--network",
+    "bridge",
+    "--publish",
+    `${publishedHost}::9224`,
+    "--workdir",
+    "/app/binny-runtime",
+    "--entrypoint",
+    "node",
+    browserImage,
+    "--input-type=module",
+    "--eval",
+    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY19_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+  ]);
+  assert.equal(
+    launch.code,
+    0,
+    `启动外层正式镜像浏览器失败：\n${launch.stderr}`,
+  );
+
+  const deadline = Date.now() + 30_000;
+  let logs = "";
+  while (Date.now() < deadline) {
+    const result = await run("docker", ["logs", outerBrowserContainer]);
+    logs = result.stdout + result.stderr;
+    if (logs.includes("BINNY19_OUTER_BROWSER_READY")) break;
+    const inspected = await run("docker", [
+      "inspect",
+      "--format",
+      "{{.State.Status}}",
+      outerBrowserContainer,
+    ]);
+    if (inspected.code === 0 && inspected.stdout.trim() !== "running")
+      throw new Error(`外层正式镜像浏览器未能启动：\n${logs.slice(-8_000)}`);
+    await delay(100);
+  }
+  assert.ok(
+    logs.includes("BINNY19_OUTER_BROWSER_READY"),
+    `等待外层正式镜像浏览器超时：\n${logs.slice(-8_000)}`,
+  );
+
+  const mapping = (
+    await run("docker", ["port", outerBrowserContainer, "9224/tcp"])
+  ).stdout.trim();
+  const portText = /:(\d+)$/u.exec(mapping)?.[1];
+  const port = Number(portText);
+  assert.ok(
+    portText !== undefined &&
+      Number.isInteger(port) &&
+      port > 0 &&
+      port <= 65_535,
+    `外层浏览器没有返回有效宿主端口：${mapping}`,
+  );
+
+  const endpoint = new URL(`ws://localhost:9224${outerBrowserWsPath}`);
+  endpoint.hostname = publishedHost;
+  endpoint.port = String(port);
+  const { chromium } = await import("playwright-core");
+  return await chromium.connect(endpoint.href);
+}
+
+function sourceUrl(pathname: string): string {
+  assert.ok(sitePort !== undefined, "受控信源端口尚未发布。");
+  return `http://${publishedHost}:${String(sitePort)}${pathname}`;
+}
+
+async function sourceMetrics(): Promise<SourceMetrics> {
+  const response = await fetch(sourceUrl("/__control/metrics"), {
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(response.status, 200, "受控信源没有返回运行指标。");
+  return (await response.json()) as SourceMetrics;
+}
+
+async function sourceControl(pathname: string): Promise<void> {
+  const response = await fetch(sourceUrl(pathname), {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(response.status, 204, `受控信源控制请求失败：${pathname}`);
+}
+
+async function waitForSource(): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await sourceMetrics();
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(250);
+    }
+  }
+  throw new Error(`Compose 受控信源宿主入口不可达：${String(lastError)}`);
+}
+
+async function createBin(
+  binId: string,
+  manifest: Record<string, unknown>,
+): Promise<void> {
+  const config = { baseUrl: "http://browser-session-source:8081/" };
+  cliData(
+    await cli([
+      "bin",
+      "create",
+      binId,
+      "--collector",
+      JSON.stringify(manifest),
+      "--identity",
+      `identity-${binId}`,
+      "--config",
+      JSON.stringify(config),
+      "--targets",
+      "[]",
+    ]),
+    "created",
+  );
+}
+
+async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const result = await cli(["bin", "get", binId]);
+    if (result.code === 0) {
+      const bin = cliData<
+        Record<string, unknown> & {
+          execution: {
+            status: string;
+            environment?: {
+              kind?: string;
+              browser?: { profileReuseAfterRestart?: boolean };
+            };
+          };
+        }
+      >(result, "found");
+      if (bin.execution.status === "online") {
+        assert.equal(bin.execution.environment?.kind, "browser");
+        assert.equal(
+          bin.execution.environment?.browser?.profileReuseAfterRestart,
+          true,
+        );
+        return bin;
+      }
+      lastState = JSON.stringify(bin.execution);
+    } else {
+      lastState = result.stderr;
+    }
+    await delay(250);
+  }
+  throw new Error(`等待 ${binId} 浏览器运行器在线超时：${lastState}`);
+}
+
+async function triggerRun(
+  binId: string,
+  action: string,
+  params: Record<string, unknown> = {},
+): Promise<Run> {
+  return cliData(
+    await cli([
+      "run",
+      "trigger",
+      binId,
+      action,
+      "--params",
+      JSON.stringify(params),
+    ]),
+    "triggered",
+  );
+}
+
+async function readRun(binId: string, runId: string): Promise<Run> {
+  return cliData(await cli(["run", "get", binId, runId]), "found");
+}
+
+async function waitForRun(
+  binId: string,
+  runId: string,
+  predicate: (run: Run) => boolean,
+  timeoutMs = 120_000,
+): Promise<Run> {
+  const deadline = Date.now() + timeoutMs;
+  let last: Run | undefined;
+  while (Date.now() < deadline) {
+    last = await readRun(binId, runId);
+    if (predicate(last)) return last;
+    await delay(250);
+  }
+  throw new Error(`运行 ${runId} 等待超时：${JSON.stringify(last)}`);
+}
+
+async function waitForHuman(
+  binId: string,
+  sessionId: string,
+  expected: string,
+  timeoutMs = 90_000,
+): Promise<HumanSessionStatus> {
+  const deadline = Date.now() + timeoutMs;
+  let last: HumanSessionStatus | undefined;
+  while (Date.now() < deadline) {
+    const result = await cli(["human", "get", binId, sessionId]);
+    if (result.code === 0) {
+      last = cliData<HumanSessionStatus>(result, "found");
+      if (last.status === expected) return last;
+      if (last.status === "failed")
+        throw new Error(`浏览器人工会话失败：${JSON.stringify(last)}`);
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `会话 ${sessionId} 等待 ${expected} 超时：${JSON.stringify(last)}`,
+  );
+}
+
+async function waitForHumanTerminal(
+  binId: string,
+  sessionId: string,
+  timeoutMs = 90_000,
+): Promise<HumanSessionStatus> {
+  const deadline = Date.now() + timeoutMs;
+  let last: HumanSessionStatus | undefined;
+  while (Date.now() < deadline) {
+    const result = await cli(["human", "get", binId, sessionId]);
+    if (result.code === 0) {
+      last = cliData<HumanSessionStatus>(result, "found");
+      if (last.status === "closed" || last.status === "failed") return last;
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `会话 ${sessionId} 没有在服务恢复后终结：${JSON.stringify(last)}`,
+  );
+}
+
+async function createGate(gateId: string): Promise<Gate> {
+  const gate: Gate = {
+    started: false,
+    released: false,
+    touches: 0,
+  };
+  await sourceControl(`/__control/gates/${gateId}`);
+  return gate;
+}
+
+async function refreshGate(gateId: string, gate: Gate): Promise<void> {
+  const state = (await sourceMetrics()).gates[gateId];
+  assert.ok(state !== undefined, `受控信源没有登记运行 ${gateId}。`);
+  gate.started = state.started;
+  gate.released = state.released;
+  gate.touches = state.touches;
+  if (state.lastTouchAt === undefined) delete gate.lastTouchAt;
+  else gate.lastTouchAt = state.lastTouchAt;
+  if (state.unloadedAt === undefined) delete gate.unloadedAt;
+  else gate.unloadedAt = state.unloadedAt;
+}
+
+async function waitForGateStarted(gateId: string, gate: Gate): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    await refreshGate(gateId, gate);
+    if (gate.started) return;
+    await delay(100);
+  }
+  throw new Error(`运行 ${gateId} 没有访问受控保护页面。`);
+}
+
+async function releaseGate(gateId: string, gate: Gate): Promise<void> {
+  await sourceControl(`/__control/gates/${gateId}/release`);
+  await refreshGate(gateId, gate);
+}
+
+async function waitForLoginSubmission(
+  index: number,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await sourceMetrics()).loginSubmissions.length > index) return;
+    await delay(100);
+  }
+  throw new Error("外层浏览器通过 noVNC 输入后，受控站点没有收到登录表单。");
+}
+
+async function waitForLoginPage(
+  index: number,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await sourceMetrics()).loginPageViews.length > index) return;
+    await delay(100);
+  }
+  throw new Error("外层浏览器输入的地址没有打开受控登录页。");
+}
+
+async function waitForAuthenticatedVisit(
+  index: number,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await sourceMetrics()).authenticatedProtectedVisits.length > index)
+      return;
+    await delay(100);
+  }
+  throw new Error("受控浏览器提交登录表单后没有读取受保护页面。");
+}
+
+async function openViewer(
+  browser: PlaywrightBrowser,
+  viewerUrl: string,
+): Promise<{
+  readonly page: Page;
+  readonly closed: Promise<void>;
+  readonly frames: ViewerFrameStats;
+}> {
+  const page = await browser.newPage();
+  const frames: ViewerFrameStats = {
+    receivedFrames: 0,
+    receivedBytes: 0,
+    receivedSamples: [],
+    sentFrames: 0,
+    sentBytes: 0,
+    sentSamples: [],
+    sentKeyEvents: [],
+    errors: [],
+  };
+  page.on("pageerror", (error) => {
+    if (frames.errors.length < 10)
+      frames.errors.push(`pageerror: ${error.message}`);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error" && frames.errors.length < 10)
+      frames.errors.push(`console: ${message.text()}`);
+  });
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  page.on("websocket", (socket) => {
+    if (new URL(socket.url()).pathname.endsWith("/ws")) {
+      socket.on("close", resolveClosed);
+      socket.on("framereceived", ({ payload }) => {
+        const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+        frames.receivedFrames += 1;
+        frames.receivedBytes += bytes.length;
+        if (frames.receivedSamples.length < 20)
+          frames.receivedSamples.push(bytes.subarray(0, 24).toString("hex"));
+      });
+      socket.on("framesent", ({ payload }) => {
+        const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+        frames.sentFrames += 1;
+        frames.sentBytes += bytes.length;
+        frames.sentSamples.push(bytes.subarray(0, 24).toString("hex"));
+        if (frames.sentSamples.length > 32) frames.sentSamples.shift();
+        if (bytes[0] === 4 && bytes.length === 8) {
+          frames.sentKeyEvents.push(
+            `${bytes[1] === 1 ? "down" : "up"}:${bytes.readUInt32BE(4).toString(16)}`,
+          );
+          if (frames.sentKeyEvents.length > 64) frames.sentKeyEvents.shift();
+        }
+      });
+    }
+  });
+  await page.goto(viewerUrl);
+  await page
+    .locator("#screen canvas")
+    .waitFor({ state: "visible", timeout: 30_000 });
+  await page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent ===
+      "已连接，可以操作浏览器。",
+    undefined,
+    { timeout: 30_000 },
+  );
+  return { page, closed, frames };
+}
+
+async function enterLoginThroughCanvas(
+  page: Page,
+  maxAgeSeconds: number,
+  expectedSubmissionIndex: number,
+  frames: ViewerFrameStats,
+): Promise<void> {
+  const initialMetrics = await sourceMetrics();
+  const loginPageIndex = initialMetrics.loginPageViews.length;
+  const protectedVisitIndex =
+    initialMetrics.authenticatedProtectedVisits.length;
+  const canvas = page.locator("#screen canvas");
+  const readViewerState = async () => ({
+    title: await page.title(),
+    status: await page.locator("#status").textContent(),
+    canvas: await canvas.evaluate((element) => {
+      const canvasElement = element as HTMLCanvasElement;
+      const context = canvasElement.getContext("2d");
+      const bounds = canvasElement.getBoundingClientRect();
+      return {
+        width: canvasElement.width,
+        height: canvasElement.height,
+        clientWidth: canvasElement.clientWidth,
+        clientHeight: canvasElement.clientHeight,
+        left: bounds.left,
+        top: bounds.top,
+        right: bounds.right,
+        bottom: bounds.bottom,
+        activeElement: document.activeElement?.tagName,
+        pixelSamples:
+          context === null
+            ? []
+            : [
+                [20, 20],
+                [640, 400],
+                [640, 790],
+                [1270, 790],
+              ].map(([x, y]) =>
+                Array.from(context.getImageData(x!, y!, 1, 1).data),
+              ),
+      };
+    }),
+    frames: {
+      receivedFrames: frames.receivedFrames,
+      receivedBytes: frames.receivedBytes,
+      receivedSamples: [...frames.receivedSamples],
+      sentFrames: frames.sentFrames,
+      sentBytes: frames.sentBytes,
+      sentSamples: [...frames.sentSamples],
+      sentKeyEvents: [...frames.sentKeyEvents],
+      errors: [...frames.errors],
+    },
+  });
+  let beforeInputState = await readViewerState();
+  const frameDeadline = Date.now() + 15_000;
+  while (
+    beforeInputState.canvas.pixelSamples.every((pixel) => pixel[3] === 0) &&
+    Date.now() < frameDeadline
+  ) {
+    await delay(50);
+    beforeInputState = await readViewerState();
+  }
+  const beforeInputScreenshot = await page.screenshot();
+  if (beforeInputState.canvas.pixelSamples.every((pixel) => pixel[3] === 0)) {
+    const screenshotPath = path.join(
+      tmpdir(),
+      `binny19-viewer-${suffix}-no-frame.png`,
+    );
+    await writeFile(screenshotPath, beforeInputScreenshot);
+    throw new Error(
+      `noVNC WebSocket 已连接，但 15 秒内没有绘制 RFB 帧：${JSON.stringify(beforeInputState)}；画面截图：${screenshotPath}`,
+    );
+  }
+  const canvasBounds = await canvas.boundingBox();
+  assert.ok(canvasBounds !== null);
+  // 人工维护实际点击浏览器地址栏，再键入站点地址。
+  await canvas.click({
+    position: { x: canvasBounds.width / 2, y: canvasBounds.height * 0.09 },
+  });
+  await page.keyboard.press("Control+a");
+  await page.keyboard.type(
+    `http://browser-session-source:8081/login?lifetime=${String(maxAgeSeconds)}`,
+    { delay: 10 },
+  );
+  await page.keyboard.press("Enter");
+  try {
+    await waitForLoginPage(loginPageIndex);
+  } catch (error) {
+    const afterInputState = await readViewerState();
+    const beforeScreenshotPath = path.join(
+      tmpdir(),
+      `binny19-viewer-${suffix}-before.png`,
+    );
+    const afterScreenshotPath = path.join(
+      tmpdir(),
+      `binny19-viewer-${suffix}-after.png`,
+    );
+    await writeFile(beforeScreenshotPath, beforeInputScreenshot);
+    await page.screenshot({ path: afterScreenshotPath });
+    throw new Error(
+      `外层浏览器输入后没有打开受控登录页：${JSON.stringify({ beforeInputState, afterInputState, loginPageViews: (await sourceMetrics()).loginPageViews.length })}；输入前画面：${beforeScreenshotPath}；输入后画面：${afterScreenshotPath}；${String(error)}`,
+    );
+  }
+  await page.keyboard.type("binny19-user", { delay: 10 });
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("browser-session", { delay: 10 });
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  await waitForLoginSubmission(expectedSubmissionIndex);
+  await waitForAuthenticatedVisit(protectedVisitIndex);
+}
+
+async function startHumanSession(binId: string): Promise<HumanSessionCreated> {
+  return cliData(await cli(["human", "open", binId]), "opened");
+}
+
+async function closeHumanSession(
+  binId: string,
+  sessionId: string,
+): Promise<HumanSessionStatus> {
+  const result = await cli(["human", "close", binId, sessionId.toUpperCase()]);
+  cliData<HumanSessionStatus>(result, "closed");
+  return await waitForHuman(binId, sessionId, "closed");
+}
+
+async function verifyPlaywrightDeploys(service: string): Promise<void> {
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "node",
+    "-e",
+    'const fs = require("node:fs"); const path = require("node:path"); for (const root of ["/app", "/app/binny-runtime"]) console.log(JSON.parse(fs.readFileSync(path.join(root, "node_modules/playwright-core/package.json"), "utf8")).version);',
+  ]);
+  assert.deepEqual(result.stdout.trim().split(/\s+/u), ["1.64.1", "1.64.1"]);
+}
+
+async function browserPortBindings(
+  service: string,
+): Promise<Record<string, unknown>> {
+  const inspected = await compose(["ps", "--all", "--quiet", service]);
+  const containerId = inspected.stdout.trim();
+  assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
+  const result = await run("docker", ["inspect", containerId]);
+  assert.equal(result.code, 0, result.stderr);
+  const [container] = JSON.parse(result.stdout) as {
+    readonly HostConfig?: {
+      readonly PortBindings?: Record<string, unknown> | null;
+    };
+  }[];
+  return container?.HostConfig?.PortBindings ?? {};
+}
+
+async function browserProcesses(service: string): Promise<ProcessResult> {
+  const containers = await compose(["ps", "--all", "--quiet", service]);
+  const containerId = containers.stdout.trim();
+  assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
+  const result = await run("docker", ["top", containerId, "-eo", "pid,args"]);
+  assert.equal(result.code, 0, result.stderr);
+  return result;
+}
+
+async function assertVncLoopbackOnly(): Promise<void> {
+  const processes = await browserProcesses("browser-one");
+  const vncCommand = processes.stdout
+    .split("\n")
+    .find((line) => /\bx11vnc\b/u.test(line));
+  assert.ok(vncCommand !== undefined && vncCommand.includes("-localhost"));
+
+  const listeners = await compose([
+    "exec",
+    "--no-TTY",
+    "browser-one",
+    "node",
+    "-e",
+    'const fs = require("node:fs"); const rows = ["/proc/net/tcp", "/proc/net/tcp6"].flatMap(file => fs.readFileSync(file, "utf8").trim().split("\\n").slice(1)); const entries = rows.map(line => line.trim().split(/\\s+/u)).filter(fields => fields[3] === "0A" && fields[1]?.endsWith(":170C")).map(fields => fields[1].split(":")[0]); console.log(JSON.stringify(entries)); if (entries.length === 0 || entries.some(address => address !== "0100007F" && address !== "00000000000000000000000001000000")) process.exit(2);',
+  ]);
+  const addresses = JSON.parse(listeners.stdout.trim()) as readonly string[];
+  assert.ok(addresses.length > 0);
+
+  const outsideContainer = await compose([
+    "exec",
+    "--no-TTY",
+    "browser-two",
+    "node",
+    "-e",
+    'const socket = require("node:net").connect({ host: "browser-one", port: 5900 }); const timeout = setTimeout(() => process.exit(2), 3000); socket.once("connect", () => { clearTimeout(timeout); process.exit(1); }); socket.once("error", error => { clearTimeout(timeout); process.exit(error.code === "ECONNREFUSED" ? 0 : 3); });',
+  ]);
+  assert.equal(outsideContainer.code, 0, outsideContainer.stderr);
+}
+
+async function assertVncStopped(service: string): Promise<void> {
+  const processes = await browserProcesses(service);
+  assert.equal(
+    processes.stdout.split("\n").some((line) => /\bx11vnc\b/u.test(line)),
+    false,
+    `人工会话关闭后 ${service} 仍有 x11vnc 进程。`,
+  );
+  const listeners = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "node",
+    "-e",
+    'const fs = require("node:fs"); const rows = ["/proc/net/tcp", "/proc/net/tcp6"].flatMap(file => fs.readFileSync(file, "utf8").trim().split("\\n").slice(1)); const entries = rows.map(line => line.trim().split(/\\s+/u)).filter(fields => fields[3] === "0A" && fields[1]?.endsWith(":170C")); if (entries.length > 0) process.exit(2);',
+  ]);
+  assert.equal(listeners.code, 0, listeners.stderr);
+}
+
+async function waitForVncStopped(service: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await assertVncStopped(service);
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(250);
+    }
+  }
+  throw new Error(
+    `${service} 的 VNC 进程未随核心心跳失联退出：${String(lastError)}`,
+  );
+}
+
+async function browserHostProcesses(service: string): Promise<HostProcess[]> {
+  if (!processObserverStarted) {
+    const observer = await run("docker", [
+      "run",
+      "--detach",
+      "--name",
+      processObserver,
+      "--network",
+      "none",
+      "--pid=host",
+      "--user",
+      "0:0",
+      "--read-only",
+      "--mount",
+      "type=bind,source=/proc,target=/host/proc,readonly",
+      "--entrypoint",
+      "node",
+      browserImage,
+      "-e",
+      "setInterval(() => {}, 2147483647)",
+    ]);
+    assert.equal(observer.code, 0, observer.stderr);
+    processObserverStarted = true;
+  }
+  const result = await browserProcesses(service);
+  const processes: HostProcess[] = [];
+  for (const line of result.stdout.split("\n").slice(1)) {
+    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
+    if (match === null || !/(?:chrom(?:e|ium)|x11vnc|Xvfb)/iu.test(match[2]!))
+      continue;
+    const pid = Number(match[1]);
+    const startTime = await daemonProcessIdentity(pid);
+    assert.ok(
+      startTime !== undefined,
+      `无法在 Docker daemon 的 PID namespace 读取进程 ${String(pid)} 身份。`,
+    );
+    processes.push({ pid, startTime });
+  }
+  assert.ok(
+    processes.some(({ pid }) => pid > 0),
+    `没有枚举到 ${service} 的浏览器进程。`,
+  );
+  assert.ok(
+    result.stdout.includes("x11vnc") &&
+      result.stdout.includes("Xvfb") &&
+      /chrom(?:e|ium)/iu.test(result.stdout),
+    `容器进程列表没有同时包含 Chromium、Xvfb 和 x11vnc：\n${result.stdout}`,
+  );
+  return processes;
+}
+
+async function daemonProcessIdentity(pid: number): Promise<string | undefined> {
+  const result = await run("docker", [
+    "exec",
+    processObserver,
+    "node",
+    "-e",
+    'const fs = require("node:fs"); try { const stat = fs.readFileSync(`/host/proc/${process.argv[1]}/stat`, "utf8"); const close = stat.lastIndexOf(")"); console.log(stat.slice(close + 2).trim().split(/\\s+/u)[19]); } catch (error) { if (error.code !== "ENOENT") { console.error(error); process.exitCode = 2; } }',
+    String(pid),
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim() || undefined;
+}
+
+async function waitForHostProcessesGone(
+  processes: readonly HostProcess[],
+): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const stillAlive = await Promise.all(
+      processes.map(
+        async ({ pid, startTime }) =>
+          (await daemonProcessIdentity(pid)) === startTime,
+      ),
+    );
+    if (stillAlive.every((alive) => !alive)) return;
+    await delay(100);
+  }
+  throw new Error(
+    "PID1 被强制终止后，仍发现原 Chromium、Xvfb 或 x11vnc 进程。",
+  );
+}
+
+async function waitForViewerClosed(
+  promise: Promise<void>,
+  timeoutMs = 15_000,
+): Promise<void> {
+  await Promise.race([
+    promise,
+    delay(timeoutMs).then(() => {
+      throw new Error("浏览器运行器退出后，旧 noVNC WebSocket 没有结束。");
+    }),
+  ]);
+}
+
+async function waitForGateUnload(gateId: string, gate: Gate): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await refreshGate(gateId, gate);
+    if (gate.unloadedAt !== undefined) return;
+    await delay(50);
+  }
+  throw new Error("控制器关闭遗留页面后，受控站点没有收到页面卸载确认。");
+}
+
+async function waitForGateQuiet(
+  gateId: string,
+  gate: Gate,
+  run: Promise<Run>,
+): Promise<Run> {
+  let previous = gate.touches;
+  let stableSince = Date.now();
+  let finalRun: Run | undefined;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    await refreshGate(gateId, gate);
+    const current = await run;
+    if (current.status === "completed" || current.status === "failed")
+      finalRun = current;
+    if (gate.touches !== previous) {
+      previous = gate.touches;
+      stableSince = Date.now();
+    }
+    if (finalRun !== undefined && Date.now() - stableSince >= 500)
+      return finalRun;
+    await delay(100);
+  }
+  throw new Error(
+    `运行期间遗留浏览器页面没有停止：${JSON.stringify({ run: finalRun, touches: gate.touches })}`,
+  );
+}
+
+async function diagnostics(): Promise<string> {
+  const [services, logs, browserProcesses] = await Promise.all([
+    rawCompose(["ps", "--all"]).catch((error: unknown) => ({
+      stdout: "",
+      stderr: String(error),
+    })),
+    rawCompose(["logs", "--tail", "160"]).catch((error: unknown) => ({
+      stdout: "",
+      stderr: String(error),
+    })),
+    rawCompose([
+      "exec",
+      "--no-TTY",
+      "browser-one",
+      "node",
+      "--input-type=module",
+      "--eval",
+      'import fs from "node:fs"; const chrome = []; let chromeRenderers = 0; let xvfb; let vnc; for (const pid of fs.readdirSync("/proc")) { if (!/^\\d+$/u.test(pid) || pid === String(process.pid)) continue; try { const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\\0", " ").trim(); const display = fs.readFileSync(`/proc/${pid}/environ`, "utf8").split("\\0").find((entry) => entry.startsWith("DISPLAY=")); if (cmdline.includes("Xvfb ")) xvfb = { pid, display, cmdline }; else if (cmdline.includes("x11vnc")) vnc = { pid, display, cmdline }; else if (/(?:chrom(?:e|ium))/iu.test(cmdline) && !cmdline.includes("chrome_crashpad_handler")) { if (cmdline.includes("--type=renderer")) chromeRenderers += 1; else if (!cmdline.includes("--type=")) chrome.push({ pid, display, headless: /--headless(?:=| )/u.test(cmdline), profile: /--user-data-dir=([^ ]+)/u.exec(cmdline)?.[1], blankPage: cmdline.endsWith("about:blank") }); } } catch {} } console.log(JSON.stringify({ display: process.env.DISPLAY, displaySocket: fs.existsSync("/tmp/.X11-unix/X99"), xvfb, vnc, chrome, chromeRenderers }));',
+    ]).catch((error: unknown) => ({ stdout: "", stderr: String(error) })),
+  ]);
+  return `\nCompose 状态：\n${services.stdout}${services.stderr}\n浏览器显示进程：\n${browserProcesses.stdout}${browserProcesses.stderr}\nCompose 日志：\n${(logs.stdout + logs.stderr).slice(-24_000)}`;
+}
+
+async function main(): Promise<void> {
+  await createComposeOverlay();
+
+  const config = await compose(["config", "--quiet"]);
+  assert.equal(config.code, 0);
+  composeStarted = true;
+  imageBuilt = true;
+  await compose([
+    "up",
+    "--detach",
+    "--build",
+    "server",
+    "browser-session-source",
+    "browser-one",
+    "browser-two",
+  ]);
+  playwrightBrowser = await startOuterBrowser();
+  serverPort = await publishedPort("server", 3000);
+  sitePort = await publishedPort("browser-session-source", 8081);
+  await waitForApi();
+  await waitForSource();
+
+  const manifest = await runtimeManifest("browser-one");
+  await createBin("binny19-one", manifest);
+  await createBin("binny19-two", manifest);
+  await Promise.all([
+    waitForRuntime("binny19-one"),
+    waitForRuntime("binny19-two"),
+  ]);
+  await Promise.all([
+    verifyPlaywrightDeploys("browser-one"),
+    verifyPlaywrightDeploys("browser-two"),
+  ]);
+
+  const oneBindings = await browserPortBindings("browser-one");
+  assert.equal(oneBindings["5900/tcp"], undefined);
+  assert.equal(oneBindings["6000/tcp"], undefined);
+  assert.equal(oneBindings["9222/tcp"], undefined);
+
+  const initialCheck = await triggerRun("binny19-one", "check");
+  const initialResult = await waitForRun(
+    "binny19-one",
+    initialCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(initialResult.status, "completed");
+  assert.equal(initialResult.result?.check?.availability, "unavailable");
+  assert.equal(initialResult.result?.check?.problems[0]?.requiresHuman, true);
+
+  assert.ok(playwrightBrowser !== undefined);
+  const outerBrowser = playwrightBrowser;
+  const loginSession = await startHumanSession("binny19-one");
+  assert.equal(loginSession.status, "pending");
+  const readyLogin = await waitForHuman(
+    "binny19-one",
+    loginSession.sessionId,
+    "ready",
+  );
+  const loginViewerUrl = new URL(loginSession.viewerUrl);
+  loginViewerUrl.hostname = publishedHost;
+  loginViewerUrl.port = String(serverPort);
+  const loginViewer = await openViewer(outerBrowser, loginViewerUrl.href);
+  await enterLoginThroughCanvas(loginViewer.page, 3_600, 0, loginViewer.frames);
+  await closeHumanSession("binny19-one", loginSession.sessionId);
+  await waitForViewerClosed(loginViewer.closed);
+  const loginViewerAfterClose = loginViewer.page.locator("#status");
+  assert.equal(
+    await loginViewerAfterClose.textContent(),
+    "连接已结束，请回到终端查看会话状态。",
+  );
+  await assertVncStopped("browser-one");
+  await loginViewer.page.close();
+  assert.ok(readyLogin.readyAt !== undefined);
+
+  const persistedCheck = await triggerRun("binny19-one", "check");
+  const persistedCheckResult = await waitForRun(
+    "binny19-one",
+    persistedCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(persistedCheckResult.status, "completed");
+  assert.equal(persistedCheckResult.result?.check?.availability, "available");
+
+  const disconnectedSession = await startHumanSession("binny19-one");
+  await waitForHuman("binny19-one", disconnectedSession.sessionId, "ready");
+  const disconnectedViewerUrl = new URL(disconnectedSession.viewerUrl);
+  disconnectedViewerUrl.hostname = publishedHost;
+  disconnectedViewerUrl.port = String(serverPort);
+  const disconnectedViewer = await openViewer(
+    outerBrowser,
+    disconnectedViewerUrl.href,
+  );
+  await compose(["stop", "postgres"]);
+  await waitForViewerClosed(disconnectedViewer.closed, 30_000);
+  await waitForVncStopped("browser-one");
+  await disconnectedViewer.page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent?.includes("连接已结束") ===
+      true,
+    undefined,
+    { timeout: 5_000 },
+  );
+  assert.equal(
+    await disconnectedViewer.page.locator("#status").textContent(),
+    "连接已结束，请回到终端查看会话状态。",
+  );
+  await assertVncStopped("browser-one");
+  await compose(["start", "postgres"]);
+  await waitForApi();
+  const recoveredSession = await waitForHumanTerminal(
+    "binny19-one",
+    disconnectedSession.sessionId,
+  );
+  assert.equal(recoveredSession.status, "closed");
+  await disconnectedViewer.page.close();
+  await waitForRuntime("binny19-one");
+
+  const profileTwoCheck = await triggerRun("binny19-two", "check");
+  const profileTwoCheckResult = await waitForRun(
+    "binny19-two",
+    profileTwoCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(profileTwoCheckResult.status, "completed");
+  assert.equal(
+    profileTwoCheckResult.result?.check?.availability,
+    "unavailable",
+  );
+
+  const gateId = randomUUID();
+  const gate = await createGate(gateId);
+  const gatedRun = await triggerRun("binny19-one", "collect", { gateId });
+  await waitForGateStarted(gateId, gate);
+  await delay(300);
+  await refreshGate(gateId, gate);
+  assert.ok(gate.touches > 0, "受控页面没有保持自动阶段活动状态。");
+
+  const pendingSession = await startHumanSession("binny19-one");
+  assert.equal(pendingSession.status, "pending");
+  const queuedRun = await triggerRun("binny19-one", "check");
+  const queuedRunCurrent = await readRun("binny19-one", queuedRun.runId);
+  assert.equal(queuedRunCurrent.status, "queued");
+  assert.equal(queuedRunCurrent.queueReason, "human_session_active");
+  const cancelledQueued = cliData<Run>(
+    await cli(["run", "cancel", "binny19-one", queuedRun.runId]),
+    "cancellation",
+  );
+  assert.equal(cancelledQueued.status, "cancelled");
+
+  await releaseGate(gateId, gate);
+  const gatedResult = await waitForGateQuiet(
+    gateId,
+    gate,
+    waitForRun(
+      "binny19-one",
+      gatedRun.runId,
+      (run) => run.status === "completed" || run.status === "failed",
+    ),
+  );
+  assert.equal(gatedResult.status, "completed");
+  await waitForGateUnload(gateId, gate);
+  assert.ok((gatedResult.result?.commits.length ?? 0) > 0);
+  assert.ok(gatedResult.stopConfirmedAt !== undefined);
+  assert.ok(
+    gate.unloadedAt !== undefined,
+    "controller 没有关闭自动阶段遗留页面。",
+  );
+  assert.ok(
+    gate.unloadedAt <= new Date(gatedResult.finishedAt ?? "").getTime() + 1_000,
+    "运行结果写入前没有确认自动阶段页面退出。",
+  );
+
+  const pendingReady = await waitForHuman(
+    "binny19-one",
+    pendingSession.sessionId,
+    "ready",
+  );
+  assert.ok(
+    pendingReady.readyAt !== undefined &&
+      new Date(pendingReady.readyAt).getTime() >=
+        new Date(gatedResult.stopConfirmedAt).getTime(),
+    "人工会话在原运行停止确认前进入 ready。",
+  );
+  await closeHumanSession("binny19-one", pendingSession.sessionId);
+  await assertVncStopped("browser-one");
+
+  const beforeRestartSession = await startHumanSession("binny19-one");
+  const readyBeforeRestart = await waitForHuman(
+    "binny19-one",
+    beforeRestartSession.sessionId,
+    "ready",
+  );
+  assert.equal(readyBeforeRestart.status, "ready");
+  const oldViewerUrl = new URL(beforeRestartSession.viewerUrl);
+  oldViewerUrl.hostname = publishedHost;
+  oldViewerUrl.port = String(serverPort);
+  const oldViewer = await openViewer(outerBrowser, oldViewerUrl.href);
+  await assertVncLoopbackOnly();
+  const originalProcesses = await browserHostProcesses("browser-one");
+  const killed = await run("docker", [
+    "kill",
+    "--signal",
+    "KILL",
+    `${projectName}-browser-one-1`,
+  ]);
+  assert.equal(killed.code, 0, killed.stderr);
+  await waitForViewerClosed(oldViewer.closed);
+  await waitForHostProcessesGone(originalProcesses);
+  await oldViewer.page.close();
+
+  await compose(["rm", "--force", "--stop", "browser-one"]);
+  await compose(["up", "--detach", "--no-deps", "browser-one"]);
+  await waitForRuntime("binny19-one");
+  await waitForHuman("binny19-one", beforeRestartSession.sessionId, "closed");
+
+  const rejectedOldViewer = await outerBrowser.newPage();
+  await rejectedOldViewer.goto(oldViewerUrl.href);
+  await rejectedOldViewer.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent ===
+      "连接已结束，请回到终端查看会话状态。",
+    undefined,
+    { timeout: 15_000 },
+  );
+  assert.equal(await rejectedOldViewer.locator("#screen canvas").count(), 0);
+  await rejectedOldViewer.close();
+
+  const afterRestartCollect = await triggerRun("binny19-one", "collect");
+  const afterRestartResult = await waitForRun(
+    "binny19-one",
+    afterRestartCollect.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(afterRestartResult.status, "completed");
+  assert.ok((afterRestartResult.result?.commits.length ?? 0) > 0);
+
+  const contender = await compose(
+    ["up", "--detach", "--no-deps", "browser-one-contender"],
+    "binny19,binny19-lock",
+  );
+  assert.equal(contender.code, 0);
+  const contenderName = `${projectName}-browser-one-contender-1`;
+  const contenderDeadline = Date.now() + 15_000;
+  let contenderState = "running";
+  while (Date.now() < contenderDeadline && contenderState === "running") {
+    const inspected = await run("docker", [
+      "inspect",
+      "--format",
+      "{{.State.Status}} {{.State.ExitCode}}",
+      contenderName,
+    ]);
+    assert.equal(inspected.code, 0, inspected.stderr);
+    contenderState = inspected.stdout.trim();
+    if (contenderState.startsWith("running ")) await delay(100);
+  }
+  assert.ok(
+    contenderState.startsWith("exited "),
+    `同卷第二实例没有退出：${contenderState}`,
+  );
+  assert.ok(
+    contenderState.endsWith(" 1"),
+    `同卷第二实例退出码异常：${contenderState}`,
+  );
+
+  const shortSession = await startHumanSession("binny19-two");
+  await waitForHuman("binny19-two", shortSession.sessionId, "ready");
+  const shortViewerUrl = new URL(shortSession.viewerUrl);
+  shortViewerUrl.hostname = publishedHost;
+  shortViewerUrl.port = String(serverPort);
+  const shortViewer = await openViewer(outerBrowser, shortViewerUrl.href);
+  const shortCookie = (await sourceMetrics()).loginSubmissions.length;
+  await enterLoginThroughCanvas(
+    shortViewer.page,
+    10,
+    shortCookie,
+    shortViewer.frames,
+  );
+  assert.equal((await sourceMetrics()).loginSubmissions.at(-1)?.maxAge, 10);
+  await closeHumanSession("binny19-two", shortSession.sessionId);
+  await waitForViewerClosed(shortViewer.closed);
+  await shortViewer.page.close();
+  await delay(11_000);
+
+  const expiredCheck = await triggerRun("binny19-two", "check");
+  const expiredCheckResult = await waitForRun(
+    "binny19-two",
+    expiredCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(expiredCheckResult.status, "completed");
+  assert.equal(expiredCheckResult.result?.check?.availability, "unavailable");
+  assert.equal(
+    expiredCheckResult.result?.check?.problems[0]?.requiresHuman,
+    true,
+  );
+
+  const expiredCollect = await triggerRun("binny19-two", "collect");
+  const expiredCollectResult = await waitForRun(
+    "binny19-two",
+    expiredCollect.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(expiredCollectResult.status, "failed");
+  assert.equal(expiredCollectResult.result?.error?.code, "login_required");
+  assert.equal(expiredCollectResult.result?.error?.requiresHuman, true);
+}
+
+try {
+  try {
+    await main();
+    process.stdout.write("票19浏览器人工会话正式 Compose 验收通过。\n");
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,
+    );
+  }
+} finally {
+  if (playwrightBrowser !== undefined)
+    await playwrightBrowser.close().catch(() => undefined);
+  await run("docker", ["rm", "--force", outerBrowserContainer]).catch(
+    () => undefined,
+  );
+  if (processObserverStarted)
+    await run("docker", ["rm", "--force", processObserver]).catch(
+      () => undefined,
+    );
+  if (composeStarted)
+    await rawCompose(
+      ["down", "--volumes", "--remove-orphans"],
+      "binny19,binny19-lock",
+    ).catch(() => undefined);
+  if (imageBuilt)
+    await run("docker", [
+      "image",
+      "rm",
+      "--force",
+      serverImage,
+      browserImage,
+    ]).catch(() => undefined);
+  if (testDirectory !== undefined)
+    await rm(testDirectory, { recursive: true, force: true });
+}

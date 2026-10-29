@@ -111,6 +111,35 @@
       "cache": false,
       "tags": ["quality:heavy"]
     },
+    "//#test:browser-human-session": {
+      "passThroughEnv": ["BINNY19_PUBLISHED_HOST", "BINNY19_SUBNET"],
+      "inputs": [
+        "compose.yaml",
+        "Dockerfile",
+        "packages/collector-runtime/Dockerfile.browser",
+        "scripts/test-browser-human-session.ts",
+        "packages/api/src/**",
+        "packages/binny/src/**",
+        "packages/collector-runtime/package.json",
+        "packages/collector-runtime/src/**",
+        "packages/collector-runtime/test/fixtures/browser-session-collector.ts",
+        "packages/collector-sdk/src/**",
+        "packages/contracts/src/**",
+        "packages/core/package.json",
+        "packages/core/src/**",
+        "packages/db/**",
+        "packages/server/package.json",
+        "packages/server/src/**",
+        "packages/tooling-config/**",
+        "scripts/browser-session-source.ts",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
     "//#test:runtime-connections": {
       "dependsOn": ["@binny/binny#build"],
       "passThroughEnv": ["BINNY14_PUBLISHED_HOST", "BINNY14_SUBNET"],

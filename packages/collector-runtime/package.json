@@ -34,11 +34,14 @@
     "@binny/api": "workspace:*",
     "@binny/collector-sdk": "workspace:*",
     "@binny/contracts": "workspace:*",
+    "playwright-core": "1.64.1",
+    "ws": "8.18.3",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
+    "@types/ws": "8.18.1",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",

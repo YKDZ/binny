@@ -41,6 +41,14 @@ const manualRunStatuses = [
 ] as const;
 const manualRunTriggerTypes = ["manual", "schedule"] as const;
 const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
+const humanSessionStatuses = [
+  "pending",
+  "opening",
+  "ready",
+  "closing",
+  "closed",
+  "failed",
+] as const;
 
 // PostgreSQL 内置目录视图只读时区名称；`.existing()` 防止 Kit 为系统对象生成迁移。
 export const postgresTimeZones = pgView("pg_timezone_names", {
@@ -103,6 +111,48 @@ export const runtimeConnections = pgTable(
       "runtime_connections_owner_generation_check",
       gte(table.ownerGeneration, 0n),
     ),
+  ],
+);
+
+export const humanSessions = pgTable(
+  "human_sessions",
+  {
+    sessionId: uuid("session_id").primaryKey(),
+    binId: text("bin_id")
+      .notNull()
+      .references(() => binConfigurations.id, { onDelete: "cascade" }),
+    accessTokenHash: text("access_token_hash").notNull().unique(),
+    status: text("status", { enum: humanSessionStatuses })
+      .notNull()
+      .default("pending"),
+    runtimeId: text("runtime_id"),
+    ownerGeneration: bigint("owner_generation", { mode: "bigint" }),
+    runtimeTokenHash: text("runtime_token_hash"),
+    gatewayClosed: boolean("gateway_closed").notNull().default(false),
+    runtimeClosed: boolean("runtime_closed").notNull().default(false),
+    failure: jsonb("failure"),
+    requestedAt: timestamp("requested_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    readyAt: timestamp("ready_at", { withTimezone: true, mode: "date" }),
+    closedAt: timestamp("closed_at", { withTimezone: true, mode: "date" }),
+  },
+  (table) => [
+    check(
+      "human_sessions_status_check",
+      inArray(table.status, humanSessionStatuses),
+    ),
+    check(
+      "human_sessions_owner_generation_check",
+      or(isNull(table.ownerGeneration), gte(table.ownerGeneration, 1n))!,
+    ),
+    index("human_sessions_bin_status_idx").on(table.binId, table.status),
+    uniqueIndex("human_sessions_one_active_bin_idx")
+      .on(table.binId)
+      .where(inArray(table.status, ["pending", "opening", "ready", "closing"])),
   ],
 );
 

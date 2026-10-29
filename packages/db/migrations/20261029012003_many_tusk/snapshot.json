@@ -1,0 +1,432 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "725b15cf-d254-447f-ab8c-d49858a3670e",
+  "prevIds": ["1f7fd304-d5c8-4b4a-bb11-069fc61af708"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "human_sessions"],
+      "writes": [
+        "s|tbl|public.human_sessions",
+        "n|tbl|public.human_sessions",
+        "e|tbl|public.human_sessions",
+        "n|rel|public.human_sessions",
+        "n|type|public.human_sessions",
+        "n|rel|public.human_sessions_pkey",
+        "n|rel|public.human_sessions_access_token_hash_key"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "human_sessions",
+        "human_sessions_bin_status_idx"
+      ],
+      "writes": [
+        "s|idx|public.human_sessions_bin_status_idx",
+        "n|idx|public.human_sessions_bin_status_idx",
+        "e|idx|public.human_sessions_bin_status_idx",
+        "n|rel|public.human_sessions_bin_status_idx"
+      ],
+      "reads": [
+        "n|tbl|public.human_sessions",
+        "n|sch|public",
+        "n|col|public.human_sessions.bin_id",
+        "n|col|public.human_sessions.status"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "human_sessions",
+        "human_sessions_one_active_bin_idx"
+      ],
+      "writes": [
+        "s|idx|public.human_sessions_one_active_bin_idx",
+        "n|idx|public.human_sessions_one_active_bin_idx",
+        "e|idx|public.human_sessions_one_active_bin_idx",
+        "n|rel|public.human_sessions_one_active_bin_idx"
+      ],
+      "reads": [
+        "n|tbl|public.human_sessions",
+        "n|sch|public",
+        "n|col|public.human_sessions.bin_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "human_sessions"],
+      "writes": [
+        "s|fk|public.human_sessions.human_sessions_bin_id_bin_configurations_id_fkey",
+        "n|fk|public.human_sessions.human_sessions_bin_id_bin_configurations_id_fkey",
+        "e|fk|public.human_sessions.human_sessions_bin_id_bin_configurations_id_fkey",
+        "n|con|public.human_sessions.human_sessions_bin_id_bin_configurations_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.human_sessions",
+        "n|sch|public",
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.human_sessions.bin_id",
+        "n|col|public.bin_configurations.id",
+        "e|uniqueness|public.bin_configurations.id"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "human_sessions",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "session_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "bin_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "access_token_hash",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "status",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'pending'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "runtime_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "owner_generation",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "runtime_token_hash",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "gateway_closed",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "false",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "runtime_closed",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "false",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "failure",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "requested_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "clock_timestamp()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "updated_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "clock_timestamp()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "ready_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "closed_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_bin_status_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "status",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_one_active_bin_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": true,
+        "where": "\"status\" in ('pending', 'opening', 'ready', 'closing')",
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_bin_id_bin_configurations_id_fkey",
+        "nameExplicit": false,
+        "columns": ["bin_id"],
+        "schemaTo": "public",
+        "tableTo": "bin_configurations",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "CASCADE",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_pkey",
+        "columns": ["session_id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_access_token_hash_key",
+        "nameExplicit": false,
+        "columns": ["access_token_hash"],
+        "nullsNotDistinct": false,
+        "entityType": "uniques"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_status_check",
+        "value": "\"status\" in ('pending', 'opening', 'ready', 'closing', 'closed', 'failed')",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "human_sessions_owner_generation_check",
+        "value": "(((\"owner_generation\" is null)) or (\"owner_generation\" >= 1))",
+        "entityType": "checks"
+      }
+    }
+  ]
+}

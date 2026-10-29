@@ -9,6 +9,10 @@ import {
   type CollectorDefinition,
 } from "@binny/collector-sdk";
 import {
+  collectorBrowserConnectionSchema,
+  type CollectorBrowserConnection,
+} from "@binny/collector-sdk";
+import {
   manualRunCheckInputSchema,
   manualRunExecutionSchema,
   type ManualRunCompletion,
@@ -60,6 +64,7 @@ function failureFrom(error: unknown) {
 
 async function executeRun(
   run: ManualRunExecution,
+  browser: CollectorBrowserConnection | undefined,
 ): Promise<ManualRunCompletion> {
   const manifest = collectorManifest(activeCollector);
   const action = activeCollector.actions[run.action];
@@ -114,6 +119,7 @@ async function executeRun(
       config: run.config,
       targets: run.targets,
       signal: actionAbort.signal,
+      ...(browser === undefined ? {} : { browser }),
     };
     if (run.action === "check") {
       const result = await activeCollector.actions.check.execute(
@@ -182,10 +188,23 @@ process.once("message", (value: unknown) => {
     }
     const message =
       typeof decoded === "object" && decoded !== null
-        ? (decoded as { readonly type?: unknown; readonly run?: unknown })
+        ? (decoded as {
+            readonly type?: unknown;
+            readonly run?: unknown;
+            readonly browser?: unknown;
+          })
         : undefined;
     const checked = manualRunExecutionSchema.safeParse(message?.run);
-    if (message?.type !== "execute" || !checked.success) {
+    const checkedBrowser =
+      message?.browser === undefined
+        ? undefined
+        : collectorBrowserConnectionSchema.safeParse(message.browser);
+    if (
+      message?.type !== "execute" ||
+      !checked.success ||
+      (message.browser !== undefined && !checkedBrowser?.success) ||
+      (activeCollector.environment.browser.required && !checkedBrowser?.success)
+    ) {
       await send({
         type: "completion",
         completion: {
@@ -200,7 +219,10 @@ process.once("message", (value: unknown) => {
         },
       });
     } else {
-      const completion = await executeRun(checked.data);
+      const completion = await executeRun(
+        checked.data,
+        checkedBrowser?.success === true ? checkedBrowser.data : undefined,
+      );
       await send({ type: "completion", completion });
     }
     process.disconnect?.();

@@ -27,17 +27,21 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
-    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false && esbuild src/human-viewer.ts --bundle --platform=browser --format=esm --target=es2022 --outfile=dist/human-viewer.js"
   },
   "dependencies": {
     "@binny/api": "workspace:*",
     "@binny/core": "workspace:*",
     "@binny/db": "workspace:*",
-    "@hono/node-server": "^2.1.5"
+    "@hono/node-server": "^2.1.5",
+    "@novnc/novnc": "1.7.0",
+    "ws": "8.18.3"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.25.12",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
