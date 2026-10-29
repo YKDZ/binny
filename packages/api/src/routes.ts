@@ -30,6 +30,7 @@ import * as z from "zod";
 
 // 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
 import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
+import { validationFailure } from "./validation.ts";
 export type {
   ArchiveOperations,
   BinConfigurationOperations,
@@ -47,28 +48,6 @@ export type ApiOperations = {
   readonly archives: ArchiveOperations;
   readonly humanSessions: HumanSessionOperations;
 };
-
-function validationFailure(issues: readonly z.core.$ZodIssue[]) {
-  const firstIssue = issues[0];
-  const path = firstIssue?.path.map((part) =>
-    typeof part === "symbol" ? String(part) : part,
-  );
-  const message =
-    firstIssue?.message.includes("。") === true
-      ? firstIssue.message
-      : firstIssue?.code === "unrecognized_keys"
-        ? "请求包含未支持的字段。"
-        : firstIssue?.code === "invalid_type"
-          ? "必填字段缺失或字段类型无效。"
-          : "字段值不符合要求。";
-  return {
-    error: {
-      code: "invalid_input" as const,
-      message,
-      ...(path === undefined || path.length === 0 ? {} : { path }),
-    },
-  };
-}
 
 function makeApp(operations: ApiOperations) {
   async function withExecution(configuration: BinConfiguration) {

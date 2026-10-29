@@ -528,6 +528,105 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
   assert.deepEqual(failure.path, ["unit"]);
 }
 
+async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
+  const search = cliData<{ readonly unit: string }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "rss-main" },
+        text: { kind: "literal", value: "正文 A" },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(search.unit, "item");
+
+  for (const command of ["search", "aggregate"] as const) {
+    const missingScope = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, ["archive", command, "--query", "{}"]),
+      "invalid_input",
+    );
+    assert.equal(missingScope.message, "必填字段缺失或字段类型无效。");
+    assert.deepEqual(missingScope.path, ["scope"]);
+
+    const validRequest =
+      command === "search"
+        ? { scope: { kind: "current", binId: "rss-main" } }
+        : {
+            scope: { kind: "current", binId: "rss-main" },
+            unit: "item",
+            groupBy: [],
+            metrics: [{ key: "items", op: "count" }],
+          };
+    const invalidScope = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          scope: { kind: "invalid" },
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.equal(invalidScope.message, "字段值不符合要求。");
+    assert.deepEqual(invalidScope.path, ["scope", "kind"]);
+
+    const unknownKey = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({ ...validRequest, "中文。": 1 }),
+      ]),
+      "invalid_input",
+    );
+    assert.equal(unknownKey.message, "请求包含未支持的字段。");
+    assert.equal(unknownKey.path, undefined);
+  }
+
+  const customIssueRequest = JSON.stringify({
+    scope: { kind: "current", binId: "rss-main" },
+    where: {
+      type: "json",
+      field: "properties",
+      path: ["x"],
+      operator: "eq",
+      value: 1,
+    },
+  });
+  for (const command of ["search", "aggregate"] as const) {
+    const customIssue = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, ["archive", command, "--query", customIssueRequest]),
+      "invalid_input",
+    );
+    assert.equal(customIssue.message, "JSON 路径比较必须声明预期 JSON 类型。");
+    assert.deepEqual(customIssue.path, ["where", "valueType"]);
+  }
+}
+
 async function capacityHttpStep(baseUrl: string): Promise<string> {
   const result = await run(
     "pnpm",
@@ -8395,6 +8494,7 @@ async function main(): Promise<void> {
       );
       assert.equal(enabled.status, "active");
       const archive = await archiveHttpStep("submit", baseUrl);
+      await archiveQueryValidationCliStep(baseUrl);
       await archiveAggregationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);

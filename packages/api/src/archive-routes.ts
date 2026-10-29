@@ -25,29 +25,9 @@ import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import * as z from "zod";
 
-export type { ArchiveOperations } from "@binny/contracts";
+import { validationFailure } from "./validation.ts";
 
-function validationFailure(issues: readonly z.core.$ZodIssue[]) {
-  const firstIssue = issues[0];
-  const path = firstIssue?.path.map((part) =>
-    typeof part === "symbol" ? String(part) : part,
-  );
-  const message =
-    firstIssue?.message.includes("。") === true
-      ? firstIssue.message
-      : firstIssue?.code === "unrecognized_keys"
-        ? "请求包含未支持的字段。"
-        : firstIssue?.code === "invalid_type"
-          ? "必填字段缺失或字段类型无效。"
-          : "字段值不符合要求。";
-  return {
-    error: {
-      code: "invalid_input" as const,
-      message,
-      ...(path === undefined || path.length === 0 ? {} : { path }),
-    },
-  };
-}
+export type { ArchiveOperations } from "@binny/contracts";
 
 function makeArchiveRoutes(operations: ArchiveOperations) {
   return new Hono()

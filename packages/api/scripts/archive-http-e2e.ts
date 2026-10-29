@@ -2445,6 +2445,76 @@ async function verifySearchRoute(
 ): Promise<void> {
   const client = createApiClient(baseUrl);
   const searchSchemas = compilePublishedSchemas();
+  for (const validationCase of [
+    {
+      path: "/archives/search",
+      request: {},
+      message: "必填字段缺失或字段类型无效。",
+      issuePath: ["scope"],
+    },
+    {
+      path: "/archives/aggregate",
+      request: {},
+      message: "必填字段缺失或字段类型无效。",
+      issuePath: ["scope"],
+    },
+    {
+      path: "/archives/search",
+      request: {
+        scope: { kind: "invalid" },
+        text: { kind: "literal", value: "x" },
+      },
+      message: "字段值不符合要求。",
+      issuePath: ["scope", "kind"],
+    },
+    {
+      path: "/archives/aggregate",
+      request: {
+        scope: { kind: "invalid" },
+        unit: "item",
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      },
+      message: "字段值不符合要求。",
+      issuePath: ["scope", "kind"],
+    },
+    {
+      path: "/archives/search",
+      request: {
+        scope: { kind: "current", binId: "rss-main" },
+        where: {
+          type: "json",
+          field: "properties",
+          path: ["x"],
+          operator: "eq",
+          value: 1,
+        },
+      },
+      message: "JSON 路径比较必须声明预期 JSON 类型。",
+      issuePath: ["where", "valueType"],
+    },
+    {
+      path: "/archives/search",
+      request: {
+        scope: { kind: "current", binId: "rss-main" },
+        "中文。": 1,
+      },
+      message: "请求包含未支持的字段。",
+      issuePath: undefined,
+    },
+  ] as const) {
+    const invalidRequest = await fetch(new URL(validationCase.path, baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(validationCase.request),
+    });
+    assert.equal(invalidRequest.status, 400);
+    const error = archiveErrorSchema.parse(await invalidRequest.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.equal(error.message, validationCase.message);
+    assert.deepEqual(error.path, validationCase.issuePath);
+  }
+
   const unicodeCommit = await submitArchive(client, {
     requestId: "e2e:archive:search-unicode",
     binId: "rss-main",

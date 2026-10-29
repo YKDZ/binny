@@ -13,7 +13,6 @@ import {
   runtimeProtocolVersion,
   type HumanSession,
   type HumanSessionApiError,
-  type HumanSessionFailure,
   type HumanSessionOperation,
   type HumanSessionOperations,
   type HumanSessionStatus,
@@ -753,39 +752,4 @@ export function createHumanSessionStore(
       });
     },
   };
-}
-
-export async function applyHumanGatewayClosed(
-  transaction: Transaction,
-  sessionId: string,
-): Promise<void> {
-  const [row] = await transaction
-    .select({
-      status: humanSessions.status,
-      runtimeClosed: humanSessions.runtimeClosed,
-    })
-    .from(humanSessions)
-    .where(eq(humanSessions.sessionId, sessionId))
-    .for("update");
-  if (row === undefined || row.status === "closed") return;
-  if (row.status !== "closing" && row.status !== "failed") return;
-  const status = closingStatus(row.status, true, row.runtimeClosed);
-  await transaction
-    .update(humanSessions)
-    .set({
-      status,
-      gatewayClosed: true,
-      runtimeTokenHash: null,
-      updatedAt: sql`clock_timestamp()`,
-      ...(status === "closed" || status === "failed"
-        ? { closedAt: sql`clock_timestamp()` }
-        : {}),
-    })
-    .where(eq(humanSessions.sessionId, sessionId));
-}
-
-export function normalizeHumanSessionFailure(
-  failure: HumanSessionFailure,
-): HumanSessionFailure {
-  return humanSessionFailureSchema.parse(failure);
 }

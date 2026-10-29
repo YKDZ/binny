@@ -20,6 +20,11 @@
       "types": "./dist/client.d.ts",
       "default": "./dist/client.js"
     },
+    "./validation": {
+      "source": "./src/validation.ts",
+      "types": "./dist/validation.d.ts",
+      "default": "./dist/validation.js"
+    },
     "./routes": {
       "source": "./src/routes.ts",
       "types": "./dist/routes.d.ts",
