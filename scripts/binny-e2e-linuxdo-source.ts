@@ -4,12 +4,14 @@ type SourceState = {
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
+  readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
   readonly omittedPostIds: readonly number[];
   readonly unavailableMedia: readonly string[];
+  readonly unavailableMediaStatus: number;
 };
 
 type SourceEvent = {
@@ -23,24 +25,35 @@ const firstReplyId = 240_002;
 const secondReplyId = 240_003;
 const thirdReplyId = 240_004;
 const photoPath = "/uploads/default/original/2X/topic-photo.png";
+const smallPhotoCandidate =
+  "/uploads/default/original/2X/topic-photo-small.webp";
+const largePhotoCandidate =
+  "/uploads/default/original/2X/topic-photo-large.webp";
 const replyPhotoPath = "/uploads/default/original/2X/reply-photo.png";
 const attachmentPath = "/uploads/default/original/2X/topic-notes.pdf";
+const jsonAttachmentPath = "/uploads/default/original/2X/topic-metadata.json";
+const challengeMediaPath = "/uploads/default/original/2X/login-challenge.html";
 const photoBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9S8AAAAASUVORK5CYII=",
   "base64",
 );
 const attachmentBytes = Buffer.from("%PDF-1.4\n% Linux.do fixture\n%%EOF\n");
+const jsonAttachmentBytes = Buffer.from(
+  JSON.stringify({ topic: "linuxdo-fixture" }),
+);
 
 let activeState: SourceState = {
   challengePage: false,
   challengeTopic: false,
   challengePosts: false,
+  challengeMedia: false,
   topicVisible: true,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
   omittedPostIds: [],
   unavailableMedia: [],
+  unavailableMediaStatus: 503,
 };
 const events: SourceEvent[] = [];
 
@@ -111,7 +124,7 @@ function posts(): readonly Record<string, unknown>[] {
     post(
       rootPostId,
       1,
-      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}"><img src="${photoPath}" alt="主题封面"></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p>`,
+      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}"><picture><source type="image/webp" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x"><img src="${photoPath}" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x" alt="主题封面"></picture></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p><p><a class="attachment" href="${jsonAttachmentPath}">主题元数据.json</a></p>${activeState.challengeMedia ? `<p><a class="attachment" href="${challengeMediaPath}">登录挑战.html</a></p>` : ""}`,
       `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
     ),
     post(
@@ -161,6 +174,7 @@ function updateState(value: unknown): boolean {
     "challengePage",
     "challengeTopic",
     "challengePosts",
+    "challengeMedia",
     "topicVisible",
     "addedReply",
   ] as const) {
@@ -177,6 +191,14 @@ function updateState(value: unknown): boolean {
     ) {
       return false;
     }
+  }
+  if (
+    "unavailableMediaStatus" in updates &&
+    (!Number.isSafeInteger(updates.unavailableMediaStatus) ||
+      Number(updates.unavailableMediaStatus) < 400 ||
+      Number(updates.unavailableMediaStatus) > 599)
+  ) {
+    return false;
   }
   activeState = {
     ...activeState,
@@ -348,17 +370,33 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
+      if (pathname === challengeMediaPath && activeState.challengeMedia) {
+        response.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+        });
+        response.end("<!doctype html><html><title>登录挑战</title></html>");
+        return;
+      }
       if (activeState.unavailableMedia.includes(pathname)) {
-        response.writeHead(503, {
+        response.writeHead(activeState.unavailableMediaStatus, {
           "content-type": "text/plain; charset=utf-8",
         });
         response.end("受控媒体暂时不可用。");
         return;
       }
-      const bytes = pathname === attachmentPath ? attachmentBytes : photoBytes;
+      const bytes =
+        pathname === attachmentPath
+          ? attachmentBytes
+          : pathname === jsonAttachmentPath
+            ? jsonAttachmentBytes
+            : photoBytes;
       response.writeHead(200, {
         "content-type":
-          pathname === attachmentPath ? "application/pdf" : "image/png",
+          pathname === attachmentPath
+            ? "application/pdf"
+            : pathname === jsonAttachmentPath
+              ? "application/json; charset=utf-8"
+              : "image/png",
       });
       response.end(bytes);
       return;

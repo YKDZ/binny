@@ -734,6 +734,12 @@ async function rewriteCookedBody(
         if (reference !== undefined) {
           if (element instanceof HTMLImageElement) {
             element.setAttribute("src", reference);
+            // 移除源站自适应候选，避免浏览器绕过已归档的 src 再次取图。
+            element.removeAttribute("srcset");
+            element
+              .closest("picture")
+              ?.querySelectorAll("source[srcset]")
+              .forEach((source) => source.removeAttribute("srcset"));
           } else if (element instanceof HTMLAnchorElement) {
             element.setAttribute("href", reference);
             if (element.hasAttribute("data-download-href")) {
@@ -755,6 +761,7 @@ async function rewriteCookedBody(
 async function downloadMedia(
   page: Page,
   request: APIRequestContext,
+  kind: MediaCandidate["kind"],
   url: string,
   siteOrigin: URL,
   context: CollectorContext,
@@ -804,18 +811,23 @@ async function downloadMedia(
     };
   }
 
-  mediaType = (mediaType ?? "application/octet-stream")
-    .split(";", 1)[0]
-    ?.trim()
-    .toLowerCase();
+  mediaType =
+    (mediaType ?? "application/octet-stream")
+      .split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() ?? "application/octet-stream";
   if (
-    mediaType === undefined ||
-    mediaType.startsWith("text/") ||
-    mediaType === "application/json" ||
+    mediaType === "text/html" ||
     mediaType === "application/xhtml+xml" ||
-    mediaType.endsWith("+json")
+    (kind === "image" &&
+      (mediaType.startsWith("text/") ||
+        mediaType === "application/json" ||
+        mediaType.endsWith("+json")))
   ) {
-    return { ok: false, reason: "媒体端点返回了页面或 JSON，未取得媒体字节。" };
+    return {
+      ok: false,
+      reason: "媒体端点返回了页面或结构化内容，未取得媒体字节。",
+    };
   }
   if (body.byteLength === 0) {
     return { ok: false, reason: "媒体端点返回了空文件。" };
@@ -879,6 +891,12 @@ async function archivePost(
   const references = new Map<number, string>();
   const resources: ArchiveResourceMetadata[] = [];
   const missing: { path: string; reason: string }[] = [];
+  const itemDiagnostics: {
+    readonly code: string;
+    readonly message: string;
+    readonly details?: Record<string, unknown>;
+    readonly suggestion?: string;
+  }[] = post.post_number === 1 ? [...diagnostics] : [];
 
   for (const candidate of prepared.media) {
     let mediaUrl = candidate.url;
@@ -892,6 +910,7 @@ async function archivePost(
       downloaded = await downloadMedia(
         page,
         request,
+        candidate.kind,
         mediaUrl,
         siteOrigin,
         context,
@@ -903,7 +922,22 @@ async function archivePost(
       references.set(candidate.index, mediaPart.reference);
       resources.push(downloaded.resource);
     } else {
-      missing.push({ path: candidate.path, reason: downloaded.reason });
+      // 缺失原因属于版本状态；具体响应差异只记在本次观察诊断中。
+      missing.push({
+        path: candidate.path,
+        reason: "媒体资源未能归档。",
+      });
+      itemDiagnostics.push({
+        code: "linuxdo_media_unavailable",
+        message: `帖子 ${String(post.id)} 的媒体未能归档：${downloaded.reason}`,
+        details: {
+          topicId: topic.id,
+          postId: post.id,
+          path: candidate.path,
+          reason: downloaded.reason,
+        },
+        suggestion: "检查媒体端点响应后重新运行 collect。",
+      });
     }
   }
 
@@ -955,9 +989,7 @@ async function archivePost(
         missing.length === 0 ? ("complete" as const) : ("partial" as const),
       missing,
     },
-    ...(post.post_number === 1 && diagnostics.length > 0
-      ? { diagnostics }
-      : {}),
+    ...(itemDiagnostics.length > 0 ? { diagnostics: itemDiagnostics } : {}),
   };
   return { state, complete: missing.length === 0 };
 }

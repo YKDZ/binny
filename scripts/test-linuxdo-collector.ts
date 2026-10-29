@@ -49,12 +49,14 @@ type FixtureState = {
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
+  readonly challengeMedia: boolean;
   readonly topicVisible: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
   readonly omittedPostIds: readonly number[];
   readonly unavailableMedia: readonly string[];
+  readonly unavailableMediaStatus: number;
 };
 
 type ArchiveItemState = {
@@ -79,7 +81,11 @@ type ArchiveItem = {
   readonly views: readonly {
     readonly binId: string;
     readonly state: ArchiveItemState;
-    readonly diagnostics?: readonly { readonly code: string }[];
+    readonly diagnostics?: readonly {
+      readonly code: string;
+      readonly message: string;
+      readonly details?: Record<string, unknown>;
+    }[];
   }[];
   readonly revisions: readonly { readonly revisionId: string }[];
   readonly observations: readonly unknown[];
@@ -615,16 +621,23 @@ async function readOutgoingRelations(itemId: string): Promise<
   return page.relations;
 }
 
-async function assertStoredResource(resourceId: string): Promise<string> {
+async function assertStoredResource(resourceId: string): Promise<{
+  readonly contentType: string;
+  readonly bytes: Uint8Array;
+}> {
   const response = await fetch(`${apiUrl()}/resources/${resourceId}`, {
     signal: AbortSignal.timeout(10_000),
   });
   assert.equal(response.status, 200);
   const contentType = response.headers.get("content-type")?.split(";", 1)[0];
-  assert.ok(contentType === "image/png" || contentType === "application/pdf");
+  assert.ok(
+    contentType === "image/png" ||
+      contentType === "application/pdf" ||
+      contentType === "application/json",
+  );
   const bytes = new Uint8Array(await response.arrayBuffer());
   assert.ok(bytes.byteLength > 0);
-  return contentType;
+  return { contentType, bytes };
 }
 
 async function waitForSourceEvent(
@@ -830,14 +843,6 @@ async function collectTopic(): Promise<ManualRun> {
 
 async function verifyTopicArchive(): Promise<void> {
   const firstCollection = await collectTopic();
-  assert.ok(firstCollection.result?.completedScopes?.includes("topic:2401"));
-  assert.deepEqual(firstCollection.result?.completedScopes, [
-    "post:240001",
-    "post:240002",
-    "post:240003",
-    "topic:2401",
-  ]);
-
   const root = await searchArchiveItem("主题正文版本 1");
   const firstReply = await searchArchiveItem("回复正文版本 1");
   const unchangedReply = await searchArchiveItem("保持不变的另一条回复");
@@ -854,13 +859,18 @@ async function verifyTopicArchive(): Promise<void> {
     "object",
   );
   assert.ok(rootState.body?.html?.includes("binny://resource/"));
-  assert.equal(rootState.resources?.length, 2);
-  const resourceTypes = await Promise.all(
+  assert.equal(rootState.resources?.length, 3);
+  const storedResources = await Promise.all(
     (rootState.resources ?? []).map(({ resourceId }) =>
       assertStoredResource(resourceId),
     ),
   );
-  assert.deepEqual(resourceTypes.toSorted(), ["application/pdf", "image/png"]);
+  const resourceTypes = storedResources.map(({ contentType }) => contentType);
+  assert.deepEqual(resourceTypes.toSorted(), [
+    "application/json",
+    "application/pdf",
+    "image/png",
+  ]);
   const pdfResourceIndex = resourceTypes.indexOf("application/pdf");
   assert.ok(pdfResourceIndex >= 0);
   const pdfResource = rootState.resources?.[pdfResourceIndex];
@@ -871,6 +881,45 @@ async function verifyTopicArchive(): Promise<void> {
     ),
     rootState.body?.html,
   );
+  const jsonResourceIndex = resourceTypes.indexOf("application/json");
+  assert.ok(jsonResourceIndex >= 0);
+  const jsonResource = rootState.resources?.[jsonResourceIndex];
+  assert.ok(jsonResource !== undefined);
+  const storedJson = storedResources[jsonResourceIndex];
+  assert.ok(storedJson !== undefined);
+  assert.deepEqual(
+    JSON.parse(new TextDecoder().decode(storedJson.bytes)) as unknown,
+    { topic: "linuxdo-fixture" },
+  );
+  assert.ok(
+    rootState.body?.html?.includes(
+      `href="binny://resource/${jsonResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  const imageResourceIndex = resourceTypes.indexOf("image/png");
+  assert.ok(imageResourceIndex >= 0);
+  const imageResource = rootState.resources?.[imageResourceIndex];
+  assert.ok(imageResource !== undefined);
+  assert.ok(
+    rootState.body?.html?.includes(
+      `src="binny://resource/${imageResource.resourceId}"`,
+    ),
+    rootState.body?.html,
+  );
+  assert.ok(!rootState.body?.html?.includes("srcset="), rootState.body?.html);
+  assert.ok(
+    !rootState.body?.html?.includes("topic-photo-small.webp") &&
+      !rootState.body?.html?.includes("topic-photo-large.webp"),
+    rootState.body?.html,
+  );
+  assert.ok(firstCollection.result?.completedScopes?.includes("topic:2401"));
+  assert.deepEqual(firstCollection.result?.completedScopes, [
+    "post:240001",
+    "post:240002",
+    "post:240003",
+    "topic:2401",
+  ]);
 
   const firstReplyState = binState(firstReply);
   assert.equal(firstReplyState.capture.scope.postNumber, 2);
@@ -978,6 +1027,7 @@ async function verifyTopicArchive(): Promise<void> {
   await updateFixtureState({
     omittedPostIds: [],
     unavailableMedia: ["/uploads/default/original/2X/topic-photo.png"],
+    unavailableMediaStatus: 503,
   });
   const mediaPartialRun = await collectTopic();
   assert.equal(
@@ -987,17 +1037,99 @@ async function verifyTopicArchive(): Promise<void> {
   const partialRoot = await readArchiveItem(root.itemId);
   const partialRootState = binState(partialRoot);
   assert.equal(partialRootState.capture.completeness, "partial");
+  const missingPhoto = partialRootState.capture.missing.find(
+    ({ path }) => path === "body.images[0]",
+  );
+  assert.ok(missingPhoto !== undefined);
+  assert.equal(missingPhoto.reason, "媒体资源未能归档。");
+  assert.equal(partialRootState.resources?.length, 2);
+  const partialRootView = partialRoot.views.find(
+    ({ binId }) => binId === "binny24-topic",
+  );
   assert.ok(
-    partialRootState.capture.missing.some(
+    partialRootView?.diagnostics?.some(
+      ({ code, message }) =>
+        code === "linuxdo_media_unavailable" && message.includes("HTTP 503"),
+    ),
+  );
+  const missingState = partialRootState;
+  const missingRevisionCount = partialRoot.revisions.length;
+  const missingObservationCount = partialRoot.observations.length;
+
+  await updateFixtureState({ unavailableMediaStatus: 502 });
+  await collectTopic();
+  const retriedMissingRoot = await readArchiveItem(root.itemId);
+  assert.deepEqual(binState(retriedMissingRoot), missingState);
+  assert.equal(retriedMissingRoot.revisions.length, missingRevisionCount);
+  assert.equal(
+    retriedMissingRoot.observations.length,
+    missingObservationCount + 1,
+  );
+  const retriedMissingView = retriedMissingRoot.views.find(
+    ({ binId }) => binId === "binny24-topic",
+  );
+  assert.ok(
+    retriedMissingView?.diagnostics?.some(
+      ({ code, message }) =>
+        code === "linuxdo_media_unavailable" && message.includes("HTTP 502"),
+    ),
+  );
+
+  await updateFixtureState({ challengeMedia: true });
+  const challengedMediaRun = await collectTopic();
+  assert.equal(
+    challengedMediaRun.result?.completedScopes?.includes("topic:2401"),
+    false,
+  );
+  const challengedRoot = await readArchiveItem(root.itemId);
+  const challengedRootState = binState(challengedRoot);
+  assert.ok(
+    challengedRootState.capture.missing.some(
+      ({ path }) => path === "body.attachments[2]",
+    ),
+  );
+  assert.equal(challengedRootState.resources?.length, 2);
+  const challengedRootView = challengedRoot.views.find(
+    ({ binId }) => binId === "binny24-topic",
+  );
+  assert.ok(
+    challengedRootView?.diagnostics?.some(
+      ({ code, message, details }) =>
+        code === "linuxdo_media_unavailable" &&
+        message.includes("页面") &&
+        details?.path === "body.attachments[2]",
+    ),
+  );
+  assert.ok(
+    challengedRootState.body?.html?.includes(
+      'src="/uploads/default/original/2X/topic-photo.png"',
+    ),
+    challengedRootState.body?.html,
+  );
+  const challengedRevisionCount = challengedRoot.revisions.length;
+  await updateFixtureState({ unavailableMedia: [] });
+  await collectTopic();
+  const backfilledRoot = await readArchiveItem(root.itemId);
+  const backfilledRootState = binState(backfilledRoot);
+  assert.equal(backfilledRoot.revisions.length, challengedRevisionCount + 1);
+  assert.equal(backfilledRootState.capture.completeness, "partial");
+  assert.ok(
+    backfilledRootState.capture.missing.some(
+      ({ path }) => path === "body.attachments[2]",
+    ),
+  );
+  assert.ok(
+    !backfilledRootState.capture.missing.some(
       ({ path }) => path === "body.images[0]",
     ),
   );
-  assert.equal(partialRootState.resources?.length, 1);
+  assert.equal(backfilledRootState.resources?.length, 3);
+  assert.ok(backfilledRootState.body?.html?.includes('src="binny://resource/'));
   assert.ok(
-    partialRootState.body?.html?.includes(
+    !backfilledRootState.body?.html?.includes(
       'src="/uploads/default/original/2X/topic-photo.png"',
     ),
-    partialRootState.body?.html,
+    backfilledRootState.body?.html,
   );
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
 }
