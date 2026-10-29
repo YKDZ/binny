@@ -617,3 +617,33 @@ async function checkPublicArchiveContract(): Promise<void> {
 }
 
 void checkPublicArchiveContract;
+
+async function checkPublicArchiveAggregationContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const input = {
+    scope: { kind: "current" as const },
+    unit: "item" as const,
+    groupBy: [],
+    metrics: [{ key: "items", op: "count" as const }],
+  };
+  const response = await client.archives.aggregate.$post({ json: input });
+  if (response.status === 200) {
+    const result = await response.json();
+    const unit: "item" | "revision" | "observation" | "relation" = result.unit;
+    const metric: string | null | undefined =
+      result.groups[0]?.metrics[0]?.value;
+    void unit;
+    void metric;
+    // @ts-expect-error 聚合响应只包含契约声明的字段。
+    void result.queryHash;
+  } else if (response.status === 400 || response.status === 422) {
+    const failure = await response.json();
+    const code: string = failure.error.code;
+    void code;
+  }
+
+  // @ts-expect-error 聚合请求必须符合公开契约，不能附加未声明字段。
+  void client.archives.aggregate.$post({ json: { ...input, invented: true } });
+}
+
+void checkPublicArchiveAggregationContract;

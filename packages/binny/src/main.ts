@@ -6,6 +6,8 @@ import { pipeline } from "node:stream/promises";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveAggregationInputSchema,
+  archiveAggregationResultSchema,
   archiveCommitSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
@@ -100,6 +102,9 @@ const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
   jsonTextSchema.pipe(jsonObjectSchema),
 );
 const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
+  z.object({ query: postgresTextSchema.min(1) }).strict(),
+);
+const cliArchiveAggregationInputSchema = withArchiveJsonSchemaProjection(
   z.object({ query: postgresTextSchema.min(1) }).strict(),
 );
 const collectorTextSchema = withPostgresJsonSchemaProjection(
@@ -239,6 +244,69 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 422)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档搜索状态。");
+        },
+      }),
+      ...command("archiveAggregate")({
+        kind: "command",
+        parent: "archive",
+        name: "aggregate",
+        description: "在完整匹配集合上计算分组与指标。",
+        fields: {
+          query: {
+            kind: "valueOption",
+            longOption: "--query",
+            description: "聚合请求 JSON（与 HTTP API 使用相同契约）",
+          },
+        },
+        input: cliArchiveAggregationInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            aggregated: {
+              description: "归档聚合结果页",
+              exitCode: 0,
+              schema: archiveAggregationResultSchema,
+              text: (result) => outputText("归档聚合结果", result),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          let request: unknown;
+          try {
+            request = JSON.parse(input.query) as unknown;
+          } catch {
+            const error = {
+              code: "invalid_input",
+              message: "聚合请求必须是有效 JSON。",
+              path: ["query"],
+            } as const;
+            return outcome.failure.apiError(error);
+          }
+          const checked = archiveAggregationInputSchema.safeParse(request);
+          if (!checked.success) {
+            const issue = checked.error.issues[0];
+            const error = {
+              code: "invalid_input",
+              message: issue?.message ?? "归档聚合请求格式无效。",
+              ...(issue === undefined
+                ? {}
+                : {
+                    path: issue.path.map((part) =>
+                      typeof part === "symbol" ? String(part) : part,
+                    ),
+                  }),
+            } as const;
+            return outcome.failure.apiError(error);
+          }
+          const response = await dependencies
+            .createClient()
+            .archives.aggregate.$post({ json: checked.data });
+          if (response.status === 200)
+            return outcome.data.aggregated(await response.json());
+          if (response.status === 400 || response.status === 422)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的归档聚合状态。");
         },
       }),
       ...command("binList")({

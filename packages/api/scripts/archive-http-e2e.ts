@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveAggregationInputSchema,
+  archiveAggregationResultSchema,
   archiveSearchFilterSchema,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
@@ -3194,6 +3196,880 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.equal(
     oldPartialSnapshotPage.results[0]?.matches[0]?.revisionId,
     complete.items[0]?.revisionId,
+  );
+}
+
+async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const runId = randomUUID();
+  const aggregate = async (request: unknown) => {
+    const response = await client.archives.aggregate.$post({
+      json: archiveAggregationInputSchema.parse(request),
+    });
+    if (response.status !== 200) {
+      throw new Error("归档聚合失败：" + (await response.text()));
+    }
+    return archiveAggregationResultSchema.parse(await response.json());
+  };
+  const sharedState = {
+    sourceKey: { namespace: "e2e", key: "aggregation-shared-p" },
+    body: { searchText: "聚合完整候选集合" },
+    properties: { price: 10, category: "x" },
+    capture: {
+      scope: { case: "aggregation" },
+      completeness: "complete" as const,
+      missing: [],
+    },
+  };
+  const [primary, secondary] = await Promise.all([
+    submitArchive(client, {
+      requestId: "e2e:archive:aggregation-shared-p:main",
+      binId: "rss-main",
+      runId: "aggregation-primary",
+      items: [sharedState],
+    }),
+    submitArchive(client, {
+      requestId: "e2e:archive:aggregation-shared-p:secondary",
+      binId: "rss-secondary",
+      runId: "aggregation-secondary",
+      items: [sharedState],
+    }),
+  ]);
+  assert.equal(primary.items[0]?.itemId, secondary.items[0]?.itemId);
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-distinct-q",
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "aggregation-distinct-q" },
+        body: { searchText: "聚合完整候选集合" },
+        properties: { price: 10, category: "x" },
+        capture: {
+          scope: { case: "aggregation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  const thirdKey = "aggregation-third-" + runId;
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-third:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: thirdKey },
+        body: { searchText: "聚合完整候选集合" },
+        properties: { price: 2, category: "y" },
+        capture: {
+          scope: { case: "aggregation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  const where = {
+    type: "and" as const,
+    conditions: [
+      {
+        type: "field" as const,
+        field: "sourceKey.namespace" as const,
+        operator: "eq" as const,
+        value: "e2e",
+      },
+      {
+        type: "field" as const,
+        field: "sourceKey.key" as const,
+        operator: "in" as const,
+        values: [
+          "aggregation-shared-p",
+          "aggregation-distinct-q",
+          thirdKey,
+          "aggregation-late-" + runId,
+        ],
+      },
+      {
+        type: "json" as const,
+        field: "properties" as const,
+        path: ["category"],
+        operator: "in" as const,
+        valueType: "string" as const,
+        values: ["x", "y", "z"],
+      },
+    ],
+  };
+  const groupedInput = {
+    scope: { kind: "current" },
+    unit: "item",
+    text: { kind: "literal", value: "聚合完整候选集合" },
+    where,
+    groupBy: [
+      {
+        key: "category",
+        type: "json",
+        field: "properties",
+        path: ["category"],
+      },
+      {
+        key: "namespace",
+        type: "field",
+        field: "sourceKey.namespace",
+      },
+    ],
+    metrics: [
+      { key: "items", op: "count" },
+      {
+        key: "priceSum",
+        op: "sum",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      {
+        key: "priceAverage",
+        op: "avg",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      {
+        key: "priceMinimum",
+        op: "min",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      {
+        key: "priceMaximum",
+        op: "max",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      {
+        key: "distinctPrices",
+        op: "distinct",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+    ],
+    orderBy: [{ key: "priceSum", direction: "desc" }],
+    limit: 1,
+  };
+  const firstPage = await aggregate(groupedInput);
+  const result = firstPage;
+  assert.equal(result.unit, "item");
+  assert.equal(result.scope.kind, "current");
+  assert.equal(result.groups.length, 1);
+  assert.deepEqual(result.groups[0]?.keys, [
+    { key: "category", result: { status: "value", value: "x" } },
+    { key: "namespace", result: { status: "value", value: "e2e" } },
+  ]);
+  assert.deepEqual(result.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "2" },
+    { key: "priceSum", op: "sum", value: "20" },
+    { key: "priceAverage", op: "avg", value: "10" },
+    { key: "priceMinimum", op: "min", value: "10" },
+    { key: "priceMaximum", op: "max", value: "10" },
+    { key: "distinctPrices", op: "distinct", value: "1" },
+  ]);
+  assert.ok(firstPage.nextCursor);
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-late:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "aggregation-late-" + runId },
+        body: { searchText: "聚合完整候选集合" },
+        properties: { price: 100, category: "z" },
+        capture: {
+          scope: { case: "aggregation" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const secondPage = await aggregate({
+    ...groupedInput,
+    cursor: firstPage.nextCursor,
+  });
+  assert.deepEqual(secondPage.groups[0]?.keys, [
+    { key: "category", result: { status: "value", value: "y" } },
+    { key: "namespace", result: { status: "value", value: "e2e" } },
+  ]);
+  assert.deepEqual(secondPage.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "1" },
+    { key: "priceSum", op: "sum", value: "2" },
+    { key: "priceAverage", op: "avg", value: "2" },
+    { key: "priceMinimum", op: "min", value: "2" },
+    { key: "priceMaximum", op: "max", value: "2" },
+    { key: "distinctPrices", op: "distinct", value: "1" },
+  ]);
+  assert.equal(secondPage.nextCursor, undefined);
+
+  const havingPage = await aggregate({
+    ...groupedInput,
+    having: { type: "metric", metric: "priceSum", operator: "gt", value: "10" },
+    limit: 10,
+  });
+  assert.deepEqual(
+    havingPage.groups.map(({ keys }) => keys[0]?.result),
+    [
+      { status: "value", value: "z" },
+      { status: "value", value: "x" },
+    ],
+  );
+  const mismatchedCursor = await client.archives.aggregate.$post({
+    json: archiveAggregationInputSchema.parse({
+      ...groupedInput,
+      having: {
+        type: "metric",
+        metric: "priceSum",
+        operator: "gt",
+        value: "10",
+      },
+      cursor: firstPage.nextCursor,
+    }),
+  });
+  assert.equal(mismatchedCursor.status, 400);
+
+  const decimalKeys = [
+    "aggregation-decimal-a-" + runId,
+    "aggregation-decimal-b-" + runId,
+  ];
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-decimals:" + runId,
+    binId: "rss-main",
+    items: decimalKeys.map((key, index) => ({
+      sourceKey: { namespace: "e2e", key },
+      properties: { price: index === 0 ? 0.1 : 0.2 },
+      capture: {
+        scope: { case: "aggregation-decimal" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+  });
+  const exactDecimal = await aggregate({
+    scope: { kind: "current", binId: "rss-main" },
+    unit: "item",
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: decimalKeys,
+    },
+    groupBy: [],
+    metrics: [
+      { key: "items", op: "count" },
+      {
+        key: "priceDistinct",
+        op: "distinct",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      ...(["sum", "avg", "min", "max"] as const).map((op) => ({
+        key: "price" + op,
+        op,
+        value: {
+          type: "json" as const,
+          field: "properties" as const,
+          path: ["price"],
+          valueType: "number" as const,
+        },
+      })),
+    ],
+  });
+  assert.deepEqual(exactDecimal.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "2" },
+    { key: "priceDistinct", op: "distinct", value: "2" },
+    { key: "pricesum", op: "sum", value: "0.3" },
+    { key: "priceavg", op: "avg", value: "0.15" },
+    { key: "pricemin", op: "min", value: "0.1" },
+    { key: "pricemax", op: "max", value: "0.2" },
+  ]);
+
+  const emptyWhere = {
+    type: "field" as const,
+    field: "sourceKey.key" as const,
+    operator: "eq" as const,
+    value: "aggregation-empty-" + runId,
+  };
+  const emptyGlobal = await aggregate({
+    scope: { kind: "current" },
+    unit: "item",
+    where: emptyWhere,
+    groupBy: [],
+    metrics: [
+      { key: "items", op: "count" },
+      {
+        key: "distinctPrices",
+        op: "distinct",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+      {
+        key: "priceSum",
+        op: "sum",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+    ],
+  });
+  assert.deepEqual(emptyGlobal.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "0" },
+    { key: "distinctPrices", op: "distinct", value: "0" },
+    { key: "priceSum", op: "sum", value: null },
+  ]);
+  const emptyGrouped = await aggregate({
+    scope: { kind: "current" },
+    unit: "item",
+    where: emptyWhere,
+    groupBy: [
+      {
+        key: "category",
+        type: "json",
+        field: "properties",
+        path: ["category"],
+      },
+    ],
+    metrics: [{ key: "items", op: "count" }],
+  });
+  assert.deepEqual(emptyGrouped.groups, []);
+
+  const nullKey = "aggregation-null-" + runId;
+  const missingKey = "aggregation-missing-" + runId;
+  const valueKey = "aggregation-value-" + runId;
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-null-missing:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: nullKey },
+        properties: { marker: null, price: 9 },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: missingKey },
+        properties: { price: 4 },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: valueKey },
+        properties: { marker: "blue", price: 2 },
+      },
+    ].map((item) => ({
+      ...item,
+      capture: {
+        scope: { case: "aggregation-null-missing" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+  });
+  const nullMissing = await aggregate({
+    scope: { kind: "current", binId: "rss-main" },
+    unit: "item",
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "in",
+      values: [nullKey, missingKey, valueKey],
+    },
+    groupBy: [
+      {
+        key: "marker",
+        type: "json",
+        field: "properties",
+        path: ["marker"],
+      },
+    ],
+    metrics: [
+      { key: "items", op: "count" },
+      {
+        key: "distinctMarkers",
+        op: "distinct",
+        value: { type: "json", field: "properties", path: ["marker"] },
+      },
+      {
+        key: "priceSum",
+        op: "sum",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+    ],
+  });
+  const nullMissingRows = nullMissing.groups.map((group) => ({
+    key: group.keys[0]?.result,
+    metrics: group.metrics,
+  }));
+  assert.deepEqual(nullMissingRows, [
+    {
+      key: { status: "missing" },
+      metrics: [
+        { key: "items", op: "count", value: "1" },
+        { key: "distinctMarkers", op: "distinct", value: "0" },
+        { key: "priceSum", op: "sum", value: "4" },
+      ],
+    },
+    {
+      key: { status: "value", value: null },
+      metrics: [
+        { key: "items", op: "count", value: "1" },
+        { key: "distinctMarkers", op: "distinct", value: "0" },
+        { key: "priceSum", op: "sum", value: "9" },
+      ],
+    },
+    {
+      key: { status: "value", value: "blue" },
+      metrics: [
+        { key: "items", op: "count", value: "1" },
+        { key: "distinctMarkers", op: "distinct", value: "1" },
+        { key: "priceSum", op: "sum", value: "2" },
+      ],
+    },
+  ]);
+
+  const relationRoot = {
+    namespace: "e2e",
+    key: "aggregation-relation-root-" + runId,
+  };
+  const relationTarget = {
+    namespace: "e2e",
+    key: "aggregation-relation-target-" + runId,
+  };
+  for (const [binId, weight] of [
+    ["rss-main", 10],
+    ["rss-secondary", 20],
+  ] as const) {
+    await submitArchive(client, {
+      requestId: "e2e:archive:aggregation-relation:" + runId + ":" + binId,
+      binId,
+      items: [relationRoot, relationTarget].map((sourceKey) => ({
+        sourceKey,
+        body: { searchText: "聚合关系视图" },
+        capture: {
+          scope: { case: "aggregation-relation" },
+          completeness: "complete" as const,
+          missing: [],
+        },
+      })),
+      relations: [
+        {
+          relationId: "e2e:aggregation-relation:" + runId,
+          value: {
+            from: relationRoot,
+            to: { sourceKey: relationTarget },
+            name: "aggregation-link",
+            properties: { bucket: "keep", weight },
+            cascade: false,
+          },
+        },
+      ],
+    });
+  }
+  const relationGroups = await aggregate({
+    scope: { kind: "current" },
+    unit: "relation",
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: relationRoot.key,
+    },
+    relations: { direction: "outgoing", name: "aggregation-link" },
+    groupBy: [
+      {
+        key: "bucket",
+        type: "json",
+        field: "properties",
+        path: ["bucket"],
+      },
+    ],
+    metrics: [
+      { key: "relations", op: "count" },
+      {
+        key: "weightSum",
+        op: "sum",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["weight"],
+          valueType: "number",
+        },
+      },
+    ],
+  });
+  assert.deepEqual(relationGroups.groups[0]?.keys, [
+    { key: "bucket", result: { status: "value", value: "keep" } },
+  ]);
+  assert.deepEqual(relationGroups.groups[0]?.metrics, [
+    { key: "relations", op: "count", value: "1" },
+    { key: "weightSum", op: "sum", value: "10" },
+  ]);
+
+  const cycleKey = "aggregation-aba-" + runId;
+  const cycleRevisions: string[] = [];
+  for (const [index, cycle] of ["A", "B", "A"].entries()) {
+    const commit = await submitArchive(client, {
+      requestId: "e2e:archive:aggregation-aba:" + runId + ":" + index,
+      binId: "rss-main",
+      runId: "aggregation-aba-" + runId + "-" + index,
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: cycleKey },
+          body: { searchText: "聚合历史状态 " + cycle },
+          properties: { cycle },
+          capture: {
+            scope: { case: "aggregation-aba" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    });
+    const revisionId = commit.items[0]?.revisionId;
+    assert.ok(revisionId);
+    cycleRevisions.push(revisionId);
+  }
+  assert.equal(cycleRevisions[0], cycleRevisions[2]);
+  assert.notEqual(cycleRevisions[0], cycleRevisions[1]);
+
+  const abaWhere = {
+    type: "field" as const,
+    field: "sourceKey.key" as const,
+    operator: "eq" as const,
+    value: cycleKey,
+  };
+  const revisionHistory = await aggregate({
+    scope: { kind: "revisions", binId: "rss-main" },
+    unit: "revision",
+    where: abaWhere,
+    groupBy: [],
+    metrics: [{ key: "units", op: "count" }],
+  });
+  assert.equal(revisionHistory.groups[0]?.metrics[0]?.value, "2");
+  const observationHistory = await aggregate({
+    scope: { kind: "observations", binId: "rss-main" },
+    unit: "observation",
+    where: abaWhere,
+    groupBy: [],
+    metrics: [{ key: "units", op: "count" }],
+  });
+  assert.equal(observationHistory.groups[0]?.metrics[0]?.value, "3");
+
+  const timeKey = "aggregation-time-" + runId;
+  const submitAt = async (suffix: string, observedAt: string) =>
+    submitArchive(client, {
+      requestId: "e2e:archive:aggregation-time:" + runId + ":" + suffix,
+      binId: "rss-main",
+      runId: "aggregation-time-" + runId + "-" + suffix,
+      observedAt,
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: timeKey },
+          properties: { observation: suffix },
+          capture: {
+            scope: { case: "aggregation-time" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    });
+  const tokyoFirstObservation = await submitAt(
+    "tokyo-before",
+    "2026-01-01T15:59:59.000Z",
+  );
+  await submitAt("tokyo-after", "2026-01-01T16:00:00.000Z");
+  const tokyoBuckets = await aggregate({
+    scope: { kind: "observations", binId: "rss-main" },
+    unit: "observation",
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: timeKey,
+    },
+    groupBy: [
+      {
+        key: "day",
+        type: "timeBucket",
+        field: "observedAt",
+        grain: "day",
+        timeZone: "Asia/Shanghai",
+      },
+    ],
+    metrics: [{ key: "observations", op: "count" }],
+  });
+  assert.deepEqual(
+    tokyoBuckets.groups.map(({ keys }) => keys[0]?.result),
+    [
+      {
+        status: "bucket",
+        start: "2025-12-31T16:00:00.000Z",
+        end: "2026-01-01T16:00:00.000Z",
+      },
+      {
+        status: "bucket",
+        start: "2026-01-01T16:00:00.000Z",
+        end: "2026-01-02T16:00:00.000Z",
+      },
+    ],
+  );
+  const historicalBucket = await aggregate({
+    scope: {
+      kind: "asOf",
+      binId: "rss-main",
+      asOf: tokyoFirstObservation.archiveSeq,
+    },
+    unit: "item",
+    where: {
+      type: "field",
+      field: "sourceKey.key",
+      operator: "eq",
+      value: timeKey,
+    },
+    groupBy: [
+      {
+        key: "day",
+        type: "timeBucket",
+        field: "observedAt",
+        grain: "day",
+        timeZone: "Asia/Shanghai",
+      },
+    ],
+    metrics: [{ key: "items", op: "count" }],
+  });
+  assert.deepEqual(historicalBucket.groups[0]?.keys[0]?.result, {
+    status: "bucket",
+    start: "2025-12-31T16:00:00.000Z",
+    end: "2026-01-01T16:00:00.000Z",
+  });
+  assert.deepEqual(historicalBucket.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "1" },
+  ]);
+
+  const dstKey = "aggregation-dst-" + runId;
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-dst:" + runId,
+    binId: "rss-main",
+    runId: "aggregation-dst-" + runId,
+    observedAt: "2026-03-08T12:00:00.000Z",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: dstKey },
+        body: { searchText: "聚合时区边界" },
+        capture: {
+          scope: { case: "aggregation-dst" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const dstBucket = async (grain: "day" | "week" | "month") =>
+    aggregate({
+      scope: { kind: "observations", binId: "rss-main" },
+      unit: "observation",
+      where: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: dstKey,
+      },
+      groupBy: [
+        {
+          key: grain,
+          type: "timeBucket",
+          field: "observedAt",
+          grain,
+          timeZone: "America/New_York",
+        },
+      ],
+      metrics: [{ key: "observations", op: "count" }],
+    });
+  const [dstDay, dstWeek, dstMonth] = await Promise.all([
+    dstBucket("day"),
+    dstBucket("week"),
+    dstBucket("month"),
+  ]);
+  assert.deepEqual(dstDay.groups[0]?.keys[0]?.result, {
+    status: "bucket",
+    start: "2026-03-08T05:00:00.000Z",
+    end: "2026-03-09T04:00:00.000Z",
+  });
+  assert.deepEqual(dstWeek.groups[0]?.keys[0]?.result, {
+    status: "bucket",
+    start: "2026-03-02T05:00:00.000Z",
+    end: "2026-03-09T04:00:00.000Z",
+  });
+  assert.deepEqual(dstMonth.groups[0]?.keys[0]?.result, {
+    status: "bucket",
+    start: "2026-03-01T05:00:00.000Z",
+    end: "2026-04-01T04:00:00.000Z",
+  });
+  const invalidTimeZone = await client.archives.aggregate.$post({
+    json: archiveAggregationInputSchema.parse({
+      scope: { kind: "observations", binId: "rss-main" },
+      unit: "observation",
+      where: {
+        type: "field",
+        field: "sourceKey.key",
+        operator: "eq",
+        value: dstKey,
+      },
+      groupBy: [
+        {
+          key: "day",
+          type: "timeBucket",
+          field: "observedAt",
+          grain: "day",
+          timeZone: "Mars/Olympus",
+        },
+      ],
+      metrics: [{ key: "observations", op: "count" }],
+    }),
+  });
+  assert.equal(invalidTimeZone.status, 400);
+  if (invalidTimeZone.status === 400) {
+    assert.deepEqual(
+      archiveErrorSchema.parse(await invalidTimeZone.json()).error.path,
+      ["groupBy", 0, "timeZone"],
+    );
+  }
+
+  const relationCountFilter = await aggregate({
+    scope: { kind: "current", binId: "rss-main" },
+    unit: "item",
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: relationRoot.key,
+        },
+        {
+          type: "relation",
+          direction: "outgoing",
+          name: "aggregation-link",
+          operator: "count",
+          count: { operator: "eq", value: 1 },
+        },
+      ],
+    },
+    groupBy: [],
+    metrics: [{ key: "items", op: "count" }],
+  });
+  assert.equal(relationCountFilter.groups[0]?.metrics[0]?.value, "1");
+
+  const pathRoot = { namespace: "e2e", key: "aggregation-path-root-" + runId };
+  const pathMiddle = {
+    namespace: "e2e",
+    key: "aggregation-path-middle-" + runId,
+  };
+  const pathEnd = { namespace: "e2e", key: "aggregation-path-end-" + runId };
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-path:" + runId,
+    binId: "rss-main",
+    items: (
+      [
+        [pathRoot, "有限路径根"],
+        [pathMiddle, "有限路径中间对象"],
+        [pathEnd, "有限路径终点"],
+      ] as const
+    ).map(([sourceKey, searchText]) => ({
+      sourceKey,
+      body: { searchText },
+      capture: {
+        scope: { case: "aggregation-path" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    relations: [
+      {
+        relationId: "e2e:aggregation-path-first:" + runId,
+        value: {
+          from: pathRoot,
+          to: { sourceKey: pathMiddle },
+          name: "aggregation-path-first",
+          cascade: false,
+        },
+      },
+      {
+        relationId: "e2e:aggregation-path-second:" + runId,
+        value: {
+          from: pathMiddle,
+          to: { sourceKey: pathEnd },
+          name: "aggregation-path-second",
+          cascade: false,
+        },
+      },
+    ],
+  });
+  const finitePathFilter = await aggregate({
+    scope: { kind: "current", binId: "rss-main" },
+    unit: "item",
+    text: { kind: "literal", value: "有限路径根" },
+    where: {
+      type: "path",
+      steps: [
+        { direction: "outgoing", name: "aggregation-path-first" },
+        { direction: "outgoing", name: "aggregation-path-second" },
+      ],
+      operator: "exists",
+    },
+    groupBy: [],
+    metrics: [{ key: "items", op: "count" }],
+  });
+  assert.equal(finitePathFilter.groups[0]?.metrics[0]?.value, "1");
+
+  const invalid = await fetch(new URL("/archives/aggregate", baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...groupedInput, unit: "unknown" }),
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(
+    archiveErrorSchema.parse(await invalid.json()).error.code,
+    "invalid_input",
   );
 }
 
@@ -7436,6 +8312,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   await verifySearchJsonPathFilter(baseUrl);
   await verifyRelationSearch(baseUrl);
   await verifySearchSourceViews(baseUrl);
+  await verifyAggregationFirstSlice(baseUrl);
   await verifySearchPagination(baseUrl);
   await verifyConcurrentArchiveIdentity(client);
   await verifyArchiveReadErrors(client, aba.itemId);

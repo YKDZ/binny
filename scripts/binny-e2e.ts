@@ -386,6 +386,81 @@ async function archiveHttpStep(
   return result.stdout.trim();
 }
 
+async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
+  const request = {
+    scope: { kind: "current" },
+    unit: "item",
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.namespace",
+          operator: "eq",
+          value: "e2e",
+        },
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["aggregation-shared-p", "aggregation-distinct-q"],
+        },
+      ],
+    },
+    groupBy: [],
+    metrics: [
+      { key: "items", op: "count" },
+      {
+        key: "priceSum",
+        op: "sum",
+        value: {
+          type: "json",
+          field: "properties",
+          path: ["price"],
+          valueType: "number",
+        },
+      },
+    ],
+  };
+  const result = cliData<{
+    readonly unit: string;
+    readonly groups: readonly {
+      readonly metrics: readonly {
+        readonly key: string;
+        readonly value: string | null;
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify(request),
+    ]),
+    "aggregated",
+  );
+  assert.equal(result.unit, "item");
+  assert.deepEqual(result.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "2" },
+    { key: "priceSum", op: "sum", value: "20" },
+  ]);
+
+  const invalidRequest = { ...request, unit: "unknown" };
+  const failure = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify(invalidRequest),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(failure.path, ["unit"]);
+}
+
 async function sdkResourceStep(baseUrl: string): Promise<string> {
   const result = await run("pnpm", [
     "--silent",
@@ -4928,6 +5003,7 @@ async function main(): Promise<void> {
     );
     assert.equal(enabled.status, "active");
     const archive = await archiveHttpStep("submit", baseUrl);
+    await archiveAggregationCliStep(baseUrl);
     const sdkResource = await sdkResourceStep(baseUrl);
     baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
     baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
