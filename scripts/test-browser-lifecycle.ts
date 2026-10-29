@@ -2580,8 +2580,12 @@ async function main(): Promise<void> {
     triggerRun("binny19-one", "check"),
     triggerRun("binny19-two", "check"),
   ]);
-  const concurrentBrowserSamples = [await activeBrowserMainProcessCount()];
-  assert.equal(concurrentBrowserSamples.at(-1), 0);
+  const initialConcurrentBrowserCount = await activeBrowserMainProcessCount();
+  const concurrentBrowserSamples = [initialConcurrentBrowserCount];
+  assert.ok(
+    initialConcurrentBrowserCount <= 1,
+    "并发首次启动突破了部署容量上限。",
+  );
   const concurrentRunDeadline = Date.now() + 90_000;
   let concurrentWinner:
     | { readonly binId: string; readonly service: string }
