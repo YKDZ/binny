@@ -1,8 +1,9 @@
 import {
-  collectorManifestSchema,
+  collectorManifestStoredSchema,
   jsonObjectSchema,
   runtimeDisconnectInputSchema,
   runtimeEnvironmentSchema,
+  runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
   type BinError,
@@ -35,6 +36,7 @@ const runtimeSelection = {
   binId: binConfigurations.id,
   configuredCollector: binConfigurations.collector,
   config: binConfigurations.config,
+  browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
   runtimeCollector: runtimeConnections.collector,
   environment: runtimeConnections.environment,
@@ -112,7 +114,7 @@ function compatibilityError(
   environment: RuntimeEnvironment,
 ): RuntimeCompatibilityError | undefined {
   const checkedRuntimeManifest =
-    collectorManifestSchema.safeParse(runtimeCollector);
+    collectorManifestStoredSchema.safeParse(runtimeCollector);
   if (!checkedRuntimeManifest.success) {
     const issue = checkedRuntimeManifest.error.issues[0];
     return {
@@ -177,7 +179,10 @@ function compatibilityError(
 }
 
 function offline(
-  reason: "runtime_not_connected" | "heartbeat_expired",
+  reason:
+    | "runtime_not_connected"
+    | "heartbeat_expired"
+    | "runtime_protocol_outdated",
   row?: RuntimeConnectionRow,
 ): RuntimeExecution {
   return {
@@ -202,11 +207,29 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     return offline("runtime_not_connected", row);
   }
 
+  const configuredCollector = collectorManifestStoredSchema.parse(
+    row.configuredCollector,
+  );
+  const runtimeCollector = collectorManifestStoredSchema.parse(
+    row.runtimeCollector,
+  );
+  const config = jsonObjectSchema.parse(row.config);
+  const storedEnvironment = runtimeEnvironmentStoredSchema.parse(
+    row.environment,
+  );
+
+  if (storedEnvironment.browser.power === undefined) {
+    if (row.disconnected === true) return offline("runtime_not_connected", row);
+    // 旧协议快照没有报告浏览器电源状态，不能据此推断已停止或就绪。
+    return offline("runtime_protocol_outdated", row);
+  }
+
+  const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
   const error = compatibilityError(
-    collectorManifestSchema.parse(row.configuredCollector),
-    jsonObjectSchema.parse(row.config),
-    collectorManifestSchema.parse(row.runtimeCollector),
-    runtimeEnvironmentSchema.parse(row.environment),
+    configuredCollector,
+    config,
+    runtimeCollector,
+    environment,
   );
   if (error !== undefined) {
     return {
@@ -223,7 +246,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   return {
     status: "online",
     runtimeId: row.runtimeId,
-    environment: runtimeEnvironmentSchema.parse(row.environment),
+    environment,
     lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
   };
 }
@@ -427,6 +450,7 @@ export function createRuntimeConnectionStore(
               ok: true,
               value: {
                 ...execution,
+                browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
                 ...(humanSession === undefined ? {} : { humanSession }),
               } satisfies RuntimeHeartbeatResult,
             };

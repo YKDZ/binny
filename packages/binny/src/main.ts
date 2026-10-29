@@ -25,6 +25,7 @@ import {
   binCreateInputSchema,
   binErrorSchema,
   binIdSchema,
+  browserIdleTimeoutSecondsSchema,
   collectorActionNameSchema,
   collectorManifestSchema,
   identityIdSchema,
@@ -119,6 +120,36 @@ const cliArchiveAggregationInputSchema = withArchiveJsonSchemaProjection(
 const collectorTextSchema = withPostgresJsonSchemaProjection(
   jsonTextSchema.pipe(collectorManifestSchema),
 );
+const browserIdleTimeoutOptionSchema = z.string();
+
+function parseBrowserIdleTimeoutOption(
+  value: string,
+):
+  | { readonly value: number | null }
+  | { readonly error: z.infer<typeof errorOutputSchema> } {
+  if (value === "disabled") return { value: null };
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    return {
+      error: {
+        code: "invalid_input",
+        message:
+          "浏览器空闲关闭时长必须是 0 到 2147483 之间的整数秒，或 disabled。",
+        path: ["browserIdleTimeoutSeconds"],
+      },
+    };
+  }
+  const parsed = browserIdleTimeoutSecondsSchema.safeParse(Number(value));
+  return parsed.success
+    ? { value: parsed.data }
+    : {
+        error: {
+          code: "invalid_input",
+          message:
+            parsed.error.issues[0]?.message ?? "浏览器空闲关闭时长无效。",
+          path: ["browserIdleTimeoutSeconds"],
+        },
+      };
+}
 const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
 const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
   binConfigurationSchema,
@@ -419,6 +450,12 @@ function createCliContract(identity: CliCommandIdentity) {
             longOption: "--targets",
             description: "采集目标列表 JSON",
           },
+          browserIdleTimeoutSeconds: {
+            kind: "valueOption",
+            longOption: "--browser-idle-timeout-seconds",
+            description:
+              "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
+          },
         },
         input: withPostgresJsonSchemaProjection(
           binCreateInputSchema
@@ -428,6 +465,7 @@ function createCliContract(identity: CliCommandIdentity) {
               identityId: true,
               config: true,
               targets: true,
+              browserIdleTimeoutSeconds: true,
             })
             .extend({
               id: binIdSchema,
@@ -435,6 +473,8 @@ function createCliContract(identity: CliCommandIdentity) {
               identityId: identityIdSchema,
               config: jsonObjectTextSchema,
               targets: targetsTextSchema,
+              browserIdleTimeoutSeconds:
+                browserIdleTimeoutOptionSchema.optional(),
             }),
         ),
         success: {
@@ -450,9 +490,23 @@ function createCliContract(identity: CliCommandIdentity) {
         },
         failures,
         async handler({ input, dependencies, outcome }) {
+          const { browserIdleTimeoutSeconds, ...createInput } = input;
+          const idleTimeout =
+            browserIdleTimeoutSeconds === undefined
+              ? undefined
+              : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
+          if (idleTimeout !== undefined && "error" in idleTimeout)
+            return outcome.failure.apiError(idleTimeout.error);
+          const json =
+            idleTimeout === undefined
+              ? createInput
+              : {
+                  ...createInput,
+                  browserIdleTimeoutSeconds: idleTimeout.value,
+                };
           const response = await dependencies
             .createClient()
-            .bins.$post({ json: input });
+            .bins.$post({ json });
           if (response.status === 201) {
             return outcome.data.created(await response.json());
           }
@@ -532,7 +586,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "update",
-        description: "修改访问身份、采集器版本、配置或目标。",
+        description: "修改访问身份、采集器版本、配置、目标或浏览器空闲策略。",
         fields: {
           id: { kind: "positional", description: "bin 标识" },
           collector: {
@@ -555,6 +609,12 @@ function createCliContract(identity: CliCommandIdentity) {
             longOption: "--targets",
             description: "采集目标列表 JSON",
           },
+          browserIdleTimeoutSeconds: {
+            kind: "valueOption",
+            longOption: "--browser-idle-timeout-seconds",
+            description:
+              "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
+          },
         },
         input: withPostgresJsonSchemaProjection(
           z
@@ -564,13 +624,22 @@ function createCliContract(identity: CliCommandIdentity) {
               identityId: identityIdSchema.optional(),
               config: jsonObjectTextSchema.optional(),
               targets: targetsTextSchema.optional(),
+              browserIdleTimeoutSeconds:
+                browserIdleTimeoutOptionSchema.optional(),
             })
             .refine(
-              ({ collector, identityId, config, targets }) =>
+              ({
+                collector,
+                identityId,
+                config,
+                targets,
+                browserIdleTimeoutSeconds,
+              }) =>
                 collector !== undefined ||
                 identityId !== undefined ||
                 config !== undefined ||
-                targets !== undefined,
+                targets !== undefined ||
+                browserIdleTimeoutSeconds !== undefined,
               { message: "至少提供一个需要修改的字段。" },
             ),
         ),
@@ -587,7 +656,20 @@ function createCliContract(identity: CliCommandIdentity) {
         },
         failures,
         async handler({ input, dependencies, outcome }) {
-          const { id, ...patch } = input;
+          const { id, browserIdleTimeoutSeconds, ...fields } = input;
+          const idleTimeout =
+            browserIdleTimeoutSeconds === undefined
+              ? undefined
+              : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
+          if (idleTimeout !== undefined && "error" in idleTimeout)
+            return outcome.failure.apiError(idleTimeout.error);
+          const patch =
+            idleTimeout === undefined
+              ? fields
+              : {
+                  ...fields,
+                  browserIdleTimeoutSeconds: idleTimeout.value,
+                };
           const response = await dependencies
             .createClient()
             .bins[":binId"].$patch({

@@ -35,7 +35,15 @@ type HumanSessionCreated = HumanSessionStatus & {
 
 type Run = {
   readonly runId: string;
+  readonly action: string;
   readonly status: string;
+  readonly trigger:
+    | { readonly kind: "manual" }
+    | {
+        readonly kind: "schedule";
+        readonly scheduleId: string;
+        readonly scheduledFor: string;
+      };
   readonly queueReason?: string;
   readonly startedAt?: string;
   readonly finishedAt?: string;
@@ -49,6 +57,25 @@ type Run = {
     readonly error?: {
       readonly code: string;
       readonly requiresHuman: boolean;
+    };
+  };
+};
+
+type BrowserPower = {
+  readonly status: string;
+  readonly error?: { readonly code: string; readonly message: string };
+};
+
+type Bin = {
+  readonly browserIdleTimeoutSeconds: number | null;
+  readonly execution: {
+    readonly status: string;
+    readonly environment?: {
+      readonly kind?: string;
+      readonly browser?: {
+        readonly profileReuseAfterRestart?: boolean;
+        readonly power?: BrowserPower;
+      };
     };
   };
 };
@@ -101,6 +128,7 @@ const password = `binny19${randomUUID().replaceAll("-", "")}`;
 const publishedHost = process.env.BINNY19_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort: number | undefined;
 let sitePort: number | undefined;
+let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
 let playwrightBrowser: PlaywrightBrowser | undefined;
@@ -178,7 +206,7 @@ async function rawCompose(
 }
 
 async function cli(args: readonly string[]): Promise<ProcessResult> {
-  return await compose([
+  return await rawCompose([
     "exec",
     "--no-TTY",
     "server",
@@ -194,6 +222,47 @@ function cliData<T>(result: ProcessResult, variant: string): T {
   assert.equal(wire.kind, "data");
   assert.equal(wire.variant, variant);
   return wire.data;
+}
+
+function cliFailure<T extends { readonly code: string }>(
+  result: ProcessResult,
+  code: string,
+): T {
+  assert.equal(result.code, 1, result.stdout);
+  const wire = JSON.parse(result.stderr) as {
+    readonly kind: string;
+    readonly variant: string;
+    readonly data: T;
+  };
+  assert.equal(wire.kind, "failure");
+  assert.equal(wire.variant, "apiError");
+  assert.equal(wire.data.code, code);
+  return wire.data;
+}
+
+function cliInputFailure(
+  result: ProcessResult,
+  path: readonly (string | number)[],
+): void {
+  assert.equal(result.code, 2, result.stdout);
+  const wire = JSON.parse(result.stderr) as {
+    readonly kind: string;
+    readonly issues: readonly {
+      readonly evidence: readonly {
+        readonly path: readonly (string | number)[];
+      }[];
+    }[];
+  };
+  assert.equal(wire.kind, "usageFailure");
+  assert.ok(
+    wire.issues.some((issue) =>
+      issue.evidence.some(
+        (evidence) =>
+          evidence.path.length === path.length &&
+          evidence.path.every((part, index) => part === path[index]),
+      ),
+    ),
+  );
 }
 
 function ipv4Number(value: string): number {
@@ -300,6 +369,20 @@ async function createComposeOverlay(): Promise<void> {
       "  browser-session-source:",
       "    ports: !override",
       '      - "8081"',
+      "  browser-one:",
+      "    environment:",
+      "      BINNY_API_URL: http://browser-idle-heartbeat-proxy:8082",
+      "    depends_on:",
+      "      browser-idle-heartbeat-proxy:",
+      "        condition: service_started",
+      "  browser-idle-heartbeat-proxy:",
+      `    image: ${serverImage}`,
+      "    profiles: [binny19]",
+      "    command:",
+      "      - node",
+      "      - scripts/binny-e2e-heartbeat-proxy.ts",
+      "    ports:",
+      '      - "8083"',
       "networks:",
       "  default:",
       "    ipam:",
@@ -308,6 +391,99 @@ async function createComposeOverlay(): Promise<void> {
       "",
     ].join("\n"),
   );
+}
+
+async function armIdleHeartbeatGate(binId: string): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/arm`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ binId, idleHeartbeat: true }),
+      signal: AbortSignal.timeout(3_000),
+    },
+  );
+  assert.equal(response.status, 200, await response.text());
+}
+
+async function waitForHeartbeatForwardedAfter(
+  after: number,
+  browserIdleTimeoutSeconds: number,
+): Promise<number> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly forwardedAt?: number;
+      readonly forwardedRuntimeId?: string;
+      readonly forwardedBrowserIdleTimeoutSeconds?: number | null;
+    };
+    if (
+      typeof state.forwardedAt === "number" &&
+      state.forwardedAt > after &&
+      state.forwardedRuntimeId !== undefined &&
+      state.forwardedBrowserIdleTimeoutSeconds === browserIdleTimeoutSeconds
+    )
+      return state.forwardedAt;
+    await delay(50);
+  }
+  throw new Error("更新空闲策略后没有观察到运行器完成的真实心跳。");
+}
+
+async function waitForIdleHeartbeatGate(binId: string): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${controlUrl}/control/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const state = (await response.json()) as {
+      readonly held: boolean;
+      readonly armedForBinId?: string;
+      readonly heldAt?: number;
+    };
+    if (state.held && typeof state.heldAt === "number") return;
+    assert.equal(
+      state.armedForBinId,
+      binId,
+      "代理没有等待指定 bin 的空闲心跳。",
+    );
+    await delay(100);
+  }
+  throw new Error(`运行器没有发出 ${binId} 的空闲探测心跳。`);
+}
+
+async function holdIdleProbeAtDeadline(
+  binId: string,
+  timeoutSeconds: number,
+): Promise<void> {
+  const updateStartedAt = Date.now();
+  await updateBin(binId, timeoutSeconds);
+  const acceptedAt = await waitForHeartbeatForwardedAfter(
+    updateStartedAt,
+    timeoutSeconds,
+  );
+  const remainingMs = timeoutSeconds * 1_000 - (Date.now() - acceptedAt) - 750;
+  if (remainingMs > 0) await delay(remainingMs);
+  await armIdleHeartbeatGate(binId);
+  await waitForIdleHeartbeatGate(binId);
+}
+
+async function releaseIdleHeartbeatGate(): Promise<void> {
+  assert.ok(heartbeatProxyControlPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/release`,
+    { method: "POST", signal: AbortSignal.timeout(30_000) },
+  );
+  assert.equal(response.status, 200, await response.text());
 }
 
 async function waitForApi(): Promise<void> {
@@ -448,6 +624,40 @@ async function sourceMetrics(): Promise<SourceMetrics> {
   return (await response.json()) as SourceMetrics;
 }
 
+async function browserFixtureRunIds(
+  binId: string,
+): Promise<ReadonlySet<string>> {
+  const query = {
+    scope: { kind: "current", binId },
+    where: {
+      type: "field",
+      field: "sourceKey.namespace",
+      operator: "eq",
+      value: "binny19.browser-session-fixture",
+    },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 100,
+  };
+  const page = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly namespace: string; readonly key: string };
+    }[];
+  }>(
+    await cli(["archive", "search", "--query", JSON.stringify(query)]),
+    "found",
+  );
+  return new Set(
+    page.results.flatMap(({ sourceKey }) => {
+      const prefix = `${binId}:`;
+      return sourceKey?.namespace === "binny19.browser-session-fixture" &&
+        sourceKey.key.startsWith(prefix)
+        ? [sourceKey.key.slice(prefix.length)]
+        : [];
+    }),
+  );
+}
+
 async function sourceControl(pathname: string): Promise<void> {
   const response = await fetch(sourceUrl(pathname), {
     method: "POST",
@@ -474,24 +684,45 @@ async function waitForSource(): Promise<void> {
 async function createBin(
   binId: string,
   manifest: Record<string, unknown>,
+  idleTimeout: number | "disabled" = 300,
 ): Promise<void> {
   const config = { baseUrl: "http://browser-session-source:8081/" };
-  cliData(
+  const args = [
+    "bin",
+    "create",
+    binId,
+    "--collector",
+    JSON.stringify(manifest),
+    "--identity",
+    `identity-${binId}`,
+    "--config",
+    JSON.stringify(config),
+    "--targets",
+    "[]",
+    "--browser-idle-timeout-seconds",
+    String(idleTimeout),
+  ];
+  cliData(await cli(args), "created");
+}
+
+async function updateBin(
+  binId: string,
+  idleTimeout: number | "disabled",
+): Promise<Bin> {
+  return cliData(
     await cli([
       "bin",
-      "create",
+      "update",
       binId,
-      "--collector",
-      JSON.stringify(manifest),
-      "--identity",
-      `identity-${binId}`,
-      "--config",
-      JSON.stringify(config),
-      "--targets",
-      "[]",
+      "--browser-idle-timeout-seconds",
+      String(idleTimeout),
     ]),
-    "created",
+    "updated",
   );
+}
+
+async function readBin(binId: string): Promise<Bin> {
+  return cliData(await cli(["bin", "get", binId]), "found");
 }
 
 async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
@@ -506,7 +737,10 @@ async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
             status: string;
             environment?: {
               kind?: string;
-              browser?: { profileReuseAfterRestart?: boolean };
+              browser?: {
+                profileReuseAfterRestart?: boolean;
+                power?: BrowserPower;
+              };
             };
           };
         }
@@ -526,6 +760,78 @@ async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
     await delay(250);
   }
   throw new Error(`等待 ${binId} 浏览器运行器在线超时：${lastState}`);
+}
+
+async function waitForBrowserPower(
+  binId: string,
+  expected: string,
+  timeoutMs = 30_000,
+): Promise<Bin> {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const bin = await readBin(binId);
+    lastState = JSON.stringify(bin.execution);
+    if (
+      bin.execution.status === "online" &&
+      bin.execution.environment?.browser?.power?.status === expected
+    )
+      return bin;
+    await delay(150);
+  }
+  throw new Error(`等待 ${binId} 浏览器状态 ${expected} 超时：${lastState}`);
+}
+
+function dockerMemoryBytes(value: string): number {
+  const match = /^\s*([\d.]+)\s*(B|kB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*\//u.exec(
+    value,
+  );
+  assert.ok(match !== null, `Docker 没有返回可识别的内存用量：${value}`);
+  const scale = match[2]!.startsWith("Ki")
+    ? 1024
+    : match[2]!.startsWith("Mi")
+      ? 1024 ** 2
+      : match[2]!.startsWith("Gi")
+        ? 1024 ** 3
+        : match[2]!.startsWith("Ti")
+          ? 1024 ** 4
+          : match[2] === "B"
+            ? 1
+            : 1000 ** (["kB", "MB", "GB", "TB"].indexOf(match[2]!) + 1);
+  return Number(match[1]) * scale;
+}
+
+async function browserContainerMemoryBytes(service: string): Promise<number> {
+  const samples: number[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const result = await compose([
+      "stats",
+      "--no-stream",
+      "--format",
+      "{{.MemUsage}}",
+      service,
+    ]);
+    samples.push(dockerMemoryBytes(result.stdout.trim()));
+    if (index < 2) await delay(250);
+  }
+  return samples.toSorted((left, right) => left - right)[1]!;
+}
+
+async function waitForBrowserProcessesStopped(service: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  let lastProcesses = "";
+  while (Date.now() < deadline) {
+    const result = await browserProcesses(service);
+    lastProcesses = result.stdout;
+    if (
+      !result.stdout
+        .split("\n")
+        .some((line) => /(?:chrom(?:e|ium)|x11vnc|Xvfb)/iu.test(line))
+    )
+      return;
+    await delay(150);
+  }
+  throw new Error(`${service} 的浏览器与显示进程仍未退出：\n${lastProcesses}`);
 }
 
 async function triggerRun(
@@ -914,6 +1220,54 @@ async function browserProcesses(service: string): Promise<ProcessResult> {
   return result;
 }
 
+async function ensureProcessObserver(): Promise<void> {
+  if (processObserverStarted) return;
+  const observer = await run("docker", [
+    "run",
+    "--detach",
+    "--name",
+    processObserver,
+    "--network",
+    "none",
+    "--pid=host",
+    "--user",
+    "0:0",
+    "--read-only",
+    "--mount",
+    "type=bind,source=/proc,target=/host/proc,readonly",
+    "--entrypoint",
+    "node",
+    browserImage,
+    "-e",
+    "setInterval(() => {}, 2147483647)",
+  ]);
+  assert.equal(observer.code, 0, observer.stderr);
+  processObserverStarted = true;
+}
+
+async function browserMainProcess(service: string): Promise<HostProcess> {
+  await ensureProcessObserver();
+  const result = await browserProcesses(service);
+  const lines = result.stdout
+    .split("\n")
+    .filter(
+      (candidate) =>
+        /(?:chrom(?:e|ium))/iu.test(candidate) &&
+        !candidate.includes("--type=") &&
+        !candidate.includes("chrome_crashpad_handler"),
+    );
+  assert.equal(lines.length, 1, `${service} 应恰有一个 Chromium 主进程。`);
+  const line = lines[0]!;
+  const pid = Number(/^\s*(\d+)\s/u.exec(line)?.[1]);
+  assert.ok(Number.isInteger(pid) && pid > 0, `无效的 Chromium PID：${line}`);
+  const startTime = await daemonProcessIdentity(pid);
+  assert.ok(
+    startTime !== undefined,
+    `无法在 Docker daemon 的 PID namespace 读取 Chromium 进程 ${String(pid)} 身份。`,
+  );
+  return { pid, startTime };
+}
+
 async function assertVncLoopbackOnly(): Promise<void> {
   const processes = await browserProcesses("browser-one");
   const vncCommand = processes.stdout
@@ -979,29 +1333,7 @@ async function waitForVncStopped(service: string): Promise<void> {
 }
 
 async function browserHostProcesses(service: string): Promise<HostProcess[]> {
-  if (!processObserverStarted) {
-    const observer = await run("docker", [
-      "run",
-      "--detach",
-      "--name",
-      processObserver,
-      "--network",
-      "none",
-      "--pid=host",
-      "--user",
-      "0:0",
-      "--read-only",
-      "--mount",
-      "type=bind,source=/proc,target=/host/proc,readonly",
-      "--entrypoint",
-      "node",
-      browserImage,
-      "-e",
-      "setInterval(() => {}, 2147483647)",
-    ]);
-    assert.equal(observer.code, 0, observer.stderr);
-    processObserverStarted = true;
-  }
+  await ensureProcessObserver();
   const result = await browserProcesses(service);
   const processes: HostProcess[] = [];
   for (const line of result.stdout.split("\n").slice(1)) {
@@ -1040,6 +1372,24 @@ async function daemonProcessIdentity(pid: number): Promise<string | undefined> {
   ]);
   assert.equal(result.code, 0, result.stderr);
   return result.stdout.trim() || undefined;
+}
+
+async function browserContainerProcessId(
+  process: HostProcess,
+): Promise<number> {
+  await ensureProcessObserver();
+  const result = await run("docker", [
+    "exec",
+    processObserver,
+    "node",
+    "-e",
+    'const fs = require("node:fs"); const status = fs.readFileSync(`/host/proc/${process.argv[1]}/status`, "utf8"); const line = /^NSpid:\\s+(.+)$/mu.exec(status)?.[1]; if (line === undefined) process.exitCode = 1; else console.log(line.trim().split(/\\s+/u).at(-1));',
+    String(process.pid),
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  const pid = Number(result.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 0, "无法映射浏览器容器进程 PID。");
+  return pid;
 }
 
 async function waitForHostProcessesGone(
@@ -1146,22 +1496,125 @@ async function main(): Promise<void> {
     "--build",
     "server",
     "browser-session-source",
+    "browser-idle-heartbeat-proxy",
     "browser-one",
     "browser-two",
   ]);
   playwrightBrowser = await startOuterBrowser();
   serverPort = await publishedPort("server", 3000);
   sitePort = await publishedPort("browser-session-source", 8081);
+  heartbeatProxyControlPort = await publishedPort(
+    "browser-idle-heartbeat-proxy",
+    8083,
+  );
   await waitForApi();
   await waitForSource();
 
   const manifest = await runtimeManifest("browser-one");
-  await createBin("binny19-one", manifest);
-  await createBin("binny19-two", manifest);
+  await createBin("binny19-one", manifest, 4);
+  await createBin("binny19-two", manifest, "disabled");
+
+  const unsupported = structuredClone(manifest);
+  const unsupportedEnvironment = unsupported.environment as {
+    browser: Record<string, unknown>;
+  };
+  unsupportedEnvironment.browser = {
+    ...unsupportedEnvironment.browser,
+    profileReuseAfterRestart: false,
+    profileReuseUnavailableReason: "此采集器依赖无法跨重启保存的会话状态。",
+  };
+  const createWithoutReason = structuredClone(unsupported);
+  delete (
+    createWithoutReason.environment as {
+      browser: Record<string, unknown>;
+    }
+  ).browser.profileReuseUnavailableReason;
+  cliInputFailure(
+    await cli([
+      "bin",
+      "create",
+      "binny20-no-reason",
+      "--collector",
+      JSON.stringify(createWithoutReason),
+      "--identity",
+      "identity-binny20-no-reason",
+      "--config",
+      JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
+      "--targets",
+      "[]",
+    ]),
+    ["collector", "environment", "browser", "profileReuseUnavailableReason"],
+  );
+  const incompatiblePolicy = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli([
+      "bin",
+      "create",
+      "binny20-incompatible",
+      "--collector",
+      JSON.stringify(unsupported),
+      "--identity",
+      "identity-binny20-incompatible",
+      "--config",
+      JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
+      "--targets",
+      "[]",
+      "--browser-idle-timeout-seconds",
+      "4",
+    ]),
+    "invalid_configuration",
+  );
+  assert.deepEqual(incompatiblePolicy.path, ["browserIdleTimeoutSeconds"]);
+
+  assert.equal(
+    (await updateBin("binny19-one", "disabled")).browserIdleTimeoutSeconds,
+    null,
+  );
+  assert.equal(
+    (await updateBin("binny19-one", 0)).browserIdleTimeoutSeconds,
+    0,
+  );
+  assert.equal(
+    (await updateBin("binny19-one", 4)).browserIdleTimeoutSeconds,
+    4,
+  );
+  assert.equal(
+    (await updateBin("binny19-two", 0)).browserIdleTimeoutSeconds,
+    0,
+  );
+  assert.equal(
+    (await updateBin("binny19-two", "disabled")).browserIdleTimeoutSeconds,
+    null,
+  );
+  const incompatibleUpdate = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli([
+      "bin",
+      "update",
+      "binny19-one",
+      "--collector",
+      JSON.stringify(unsupported),
+    ]),
+    "invalid_configuration",
+  );
+  assert.deepEqual(incompatibleUpdate.path, ["browserIdleTimeoutSeconds"]);
+
   await Promise.all([
     waitForRuntime("binny19-one"),
     waitForRuntime("binny19-two"),
   ]);
+  assert.equal((await readBin("binny19-one")).browserIdleTimeoutSeconds, 4);
+  assert.equal((await readBin("binny19-two")).browserIdleTimeoutSeconds, null);
+  await updateBin("binny19-one", 30);
+  await delay(2_500);
+  assert.equal(
+    (await waitForBrowserPower("binny19-one", "stopped")).execution.status,
+    "online",
+  );
   await Promise.all([
     verifyPlaywrightDeploys("browser-one"),
     verifyPlaywrightDeploys("browser-two"),
@@ -1182,6 +1635,37 @@ async function main(): Promise<void> {
   assert.equal(initialResult.result?.check?.availability, "unavailable");
   assert.equal(initialResult.result?.check?.problems[0]?.requiresHuman, true);
 
+  await waitForBrowserPower("binny19-one", "ready");
+  const awakeMemory = await browserContainerMemoryBytes("browser-one");
+  const initialBrowserProcess = await browserMainProcess("browser-one");
+  await holdIdleProbeAtDeadline("binny19-one", 4);
+  await updateBin("binny19-one", "disabled");
+  await releaseIdleHeartbeatGate();
+  await delay(4_500);
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "关闭尚未开始时禁用空闲关闭，探测完成后仍关闭了浏览器。",
+  );
+  await updateBin("binny19-one", 4);
+  const stoppedBin = await waitForBrowserPower("binny19-one", "stopped");
+  assert.equal(stoppedBin.execution.status, "online");
+  await waitForBrowserProcessesStopped("browser-one");
+  const stoppedMemory = await browserContainerMemoryBytes("browser-one");
+  assert.ok(
+    stoppedMemory < awakeMemory,
+    `浏览器真实退出后容器内存没有下降：ready=${String(awakeMemory)} stopped=${String(stoppedMemory)}`,
+  );
+  process.stdout.write(
+    `票20空闲资源实测：${JSON.stringify({
+      browserHostPid: initialBrowserProcess.pid,
+      browserStartTime: initialBrowserProcess.startTime,
+      readyMemoryBytes: awakeMemory,
+      stoppedMemoryBytes: stoppedMemory,
+    })}\n`,
+  );
+
   assert.ok(playwrightBrowser !== undefined);
   const outerBrowser = playwrightBrowser;
   const loginSession = await startHumanSession("binny19-one");
@@ -1191,11 +1675,24 @@ async function main(): Promise<void> {
     loginSession.sessionId,
     "ready",
   );
+  const humanWakeProcess = await browserMainProcess("browser-one");
+  assert.notEqual(
+    humanWakeProcess.startTime,
+    initialBrowserProcess.startTime,
+    "人工访问没有从已停止状态启动新的浏览器进程。",
+  );
   const loginViewerUrl = new URL(loginSession.viewerUrl);
   loginViewerUrl.hostname = publishedHost;
   loginViewerUrl.port = String(serverPort);
   const loginViewer = await openViewer(outerBrowser, loginViewerUrl.href);
   await enterLoginThroughCanvas(loginViewer.page, 3_600, 0, loginViewer.frames);
+  await delay(4_500);
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "人工操作期间空闲计时关闭了浏览器。",
+  );
   await closeHumanSession("binny19-one", loginSession.sessionId);
   await waitForViewerClosed(loginViewer.closed);
   const loginViewerAfterClose = loginViewer.page.locator("#status");
@@ -1206,6 +1703,8 @@ async function main(): Promise<void> {
   await assertVncStopped("browser-one");
   await loginViewer.page.close();
   assert.ok(readyLogin.readyAt !== undefined);
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
 
   const persistedCheck = await triggerRun("binny19-one", "check");
   const persistedCheckResult = await waitForRun(
@@ -1215,6 +1714,190 @@ async function main(): Promise<void> {
   );
   assert.equal(persistedCheckResult.status, "completed");
   assert.equal(persistedCheckResult.result?.check?.availability, "available");
+  assert.equal(persistedCheckResult.result?.commits.length, 0);
+  const checkWakeProcess = await browserMainProcess("browser-one");
+  assert.notEqual(
+    checkWakeProcess.startTime,
+    humanWakeProcess.startTime,
+    "check 没有从已停止状态重新启动浏览器。",
+  );
+
+  const adjacentCollect = await triggerRun("binny19-one", "collect");
+  const adjacentCollectResult = await waitForRun(
+    "binny19-one",
+    adjacentCollect.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(adjacentCollectResult.status, "completed");
+  assert.ok((adjacentCollectResult.result?.commits.length ?? 0) > 0);
+  assert.deepEqual(await browserMainProcess("browser-one"), checkWakeProcess);
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
+
+  await updateBin("binny19-one", 30);
+  await delay(2_500);
+  const collectWake = await triggerRun("binny19-one", "collect");
+  const collectWakeResult = await waitForRun(
+    "binny19-one",
+    collectWake.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(collectWakeResult.status, "completed");
+  assert.ok((collectWakeResult.result?.commits.length ?? 0) > 0);
+  const collectWakeProcess = await browserMainProcess("browser-one");
+  assert.notEqual(
+    collectWakeProcess.startTime,
+    checkWakeProcess.startTime,
+    "collect 没有从已停止状态重新启动浏览器。",
+  );
+
+  await holdIdleProbeAtDeadline("binny19-one", 4);
+  await updateBin("binny19-one", 30);
+  await releaseIdleHeartbeatGate();
+  await delay(5_000);
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "关闭尚未开始时延长空闲时限，旧截止时间仍关闭了浏览器。",
+  );
+  await updateBin("binny19-one", 4);
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
+  const browserFixtureRunsBeforeSchedule =
+    await browserFixtureRunIds("binny19-one");
+  const scheduleGateId = randomUUID();
+  const scheduleGate = await createGate(scheduleGateId);
+  const scheduledWake = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+  }>(
+    await cli([
+      "schedule",
+      "create",
+      "binny19-one",
+      "--expression",
+      "*/10 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({ gateId: scheduleGateId }),
+    ]),
+    "created",
+  );
+  const scheduledFor = scheduledWake.nextDueAt;
+  assert.ok(Date.parse(scheduledFor) > Date.now() - 2_000);
+  assert.ok(Date.parse(scheduledFor) - Date.now() <= 10_000);
+  await waitForGateStarted(scheduleGateId, scheduleGate);
+  await waitForBrowserPower("binny19-one", "ready");
+  const scheduleWakeProcess = await browserMainProcess("browser-one");
+  assert.notEqual(
+    scheduleWakeProcess.startTime,
+    collectWakeProcess.startTime,
+    "已停止的浏览器没有被真实采集计划唤醒。",
+  );
+  const scheduleAfterDue = cliData<{ readonly nextDueAt: string }>(
+    await cli(["schedule", "get", "binny19-one", scheduledWake.scheduleId]),
+    "found",
+  );
+  assert.ok(Date.parse(scheduleAfterDue.nextDueAt) > Date.parse(scheduledFor));
+  assert.equal(
+    cliData<{ readonly enabled: boolean }>(
+      await cli([
+        "schedule",
+        "disable",
+        "binny19-one",
+        scheduledWake.scheduleId,
+      ]),
+      "disabled",
+    ).enabled,
+    false,
+  );
+  await updateBin("binny19-one", 30);
+  await delay(2_500);
+  await releaseGate(scheduleGateId, scheduleGate);
+  const scheduledRunDeadline = Date.now() + 120_000;
+  let scheduledSourceRunId: string | undefined;
+  while (Date.now() < scheduledRunDeadline) {
+    const current = await browserFixtureRunIds("binny19-one");
+    scheduledSourceRunId = [...current].find(
+      (runId) => !browserFixtureRunsBeforeSchedule.has(runId),
+    );
+    if (scheduledSourceRunId !== undefined) break;
+    await delay(250);
+  }
+  assert.ok(scheduledSourceRunId !== undefined, "计划采集没有提交受控资料。");
+  const scheduledRun = await waitForRun(
+    "binny19-one",
+    scheduledSourceRunId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(scheduledRun.status, "completed");
+  assert.equal(scheduledRun.action, "collect");
+  assert.equal(scheduledRun.trigger.kind, "schedule");
+  if (scheduledRun.trigger.kind === "schedule") {
+    assert.equal(scheduledRun.trigger.scheduleId, scheduledWake.scheduleId);
+    assert.equal(scheduledRun.trigger.scheduledFor, scheduledFor);
+  }
+  assert.ok((scheduledRun.result?.commits.length ?? 0) > 0);
+  await waitForGateUnload(scheduleGateId, scheduleGate);
+
+  const stoppingProcess = await browserMainProcess("browser-one");
+  const stoppingContainerPid = await browserContainerProcessId(stoppingProcess);
+  const signalBrowser = async (signal: "SIGSTOP" | "SIGCONT") => {
+    assert.deepEqual(await browserMainProcess("browser-one"), stoppingProcess);
+    await compose([
+      "exec",
+      "--no-TTY",
+      "browser-one",
+      "node",
+      "-e",
+      `process.kill(${String(stoppingContainerPid)}, ${JSON.stringify(signal)});`,
+    ]);
+  };
+  await signalBrowser("SIGSTOP");
+  let pendingWake: Run | undefined;
+  try {
+    await updateBin("binny19-one", 0);
+    await waitForBrowserPower("binny19-one", "stopping");
+    pendingWake = await triggerRun("binny19-one", "collect");
+    const waitingWake = await waitForRun(
+      "binny19-one",
+      pendingWake.runId,
+      (run) => run.status === "executing" || run.status === "failed",
+    );
+    assert.equal(waitingWake.status, "executing");
+    assert.equal(
+      (await readBin("binny19-one")).execution.environment?.browser?.power
+        ?.status,
+      "stopping",
+    );
+    assert.deepEqual(
+      await browserMainProcess("browser-one"),
+      stoppingProcess,
+      "旧浏览器退出前运行器启动了第二个 profile 使用者。",
+    );
+    await updateBin("binny19-one", 30);
+    await delay(2_500);
+  } finally {
+    await signalBrowser("SIGCONT");
+  }
+  assert.ok(pendingWake !== undefined);
+  const wakeAfterStop = await waitForRun(
+    "binny19-one",
+    pendingWake.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(wakeAfterStop.status, "completed");
+  await waitForBrowserPower("binny19-one", "ready");
+  assert.notDeepEqual(
+    await browserMainProcess("browser-one"),
+    stoppingProcess,
+    "关闭中的需求没有等旧 profile 退出后重新启动浏览器。",
+  );
+  await updateBin("binny19-one", 4);
 
   const disconnectedSession = await startHumanSession("binny19-one");
   await waitForHuman("binny19-one", disconnectedSession.sessionId, "ready");
@@ -1268,7 +1951,15 @@ async function main(): Promise<void> {
   await waitForGateStarted(gateId, gate);
   await delay(300);
   await refreshGate(gateId, gate);
+  await delay(4_500);
+  await refreshGate(gateId, gate);
   assert.ok(gate.touches > 0, "受控页面没有保持自动阶段活动状态。");
+  assert.equal(
+    (await readBin("binny19-one")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "自动运行期间空闲计时关闭了浏览器。",
+  );
 
   const pendingSession = await startHumanSession("binny19-one");
   assert.equal(pendingSession.status, "pending");
@@ -1415,6 +2106,14 @@ async function main(): Promise<void> {
   await waitForViewerClosed(shortViewer.closed);
   await shortViewer.page.close();
   await delay(11_000);
+  const disabledIdleBin = await readBin("binny19-two");
+  assert.equal(disabledIdleBin.browserIdleTimeoutSeconds, null);
+  assert.equal(disabledIdleBin.execution.status, "online");
+  assert.equal(
+    disabledIdleBin.execution.environment?.browser?.power?.status,
+    "ready",
+    "禁用空闲关闭后浏览器仍被自动停掉。",
+  );
 
   const expiredCheck = await triggerRun("binny19-two", "check");
   const expiredCheckResult = await waitForRun(
@@ -1443,7 +2142,7 @@ async function main(): Promise<void> {
 try {
   try {
     await main();
-    process.stdout.write("票19浏览器人工会话正式 Compose 验收通过。\n");
+    process.stdout.write("票19与票20浏览器生命周期正式 Compose 验收通过。\n");
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,

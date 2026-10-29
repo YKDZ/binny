@@ -98,7 +98,7 @@ try {
     throw new Error(`${String(error)}\n${logs}`);
   }
   assert.deepStrictEqual(manifest, {
-    protocolVersion: 3,
+    protocolVersion: 4,
     collector: {
       id: "binny14.protocol-fixture",
       version: "1.0.0",
