@@ -117,8 +117,8 @@ let composeStarted = false;
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY25_BIN_ID: "binny25-topic",
-    BINNY25_RUNTIME_IMAGE: browserImage,
+    BINNY24_BIN_ID: "binny25-topic",
+    BINNY24_RUNTIME_IMAGE: browserImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
