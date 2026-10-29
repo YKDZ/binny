@@ -1,5 +1,10 @@
 import * as z from "zod";
 
+import type {
+  ArchiveAggregationOperation,
+  ArchiveAggregationRequest,
+  ArchiveAggregationResult,
+} from "./archive-aggregation.ts";
 import type { ArchiveHistoryOperations } from "./archive-history.ts";
 import type { ArchiveRelationsOperations } from "./archive-relations.ts";
 import { binIdSchema } from "./bin-configuration.ts";
@@ -40,7 +45,7 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-type ArchiveJsonValue =
+export type ArchiveJsonValue =
   | null
   | boolean
   | number
@@ -163,7 +168,7 @@ const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
 const archiveJsonValueBaseSchema = z.custom<unknown>(isJsonValue, {
   message: "字段值必须是 JSON 数据。",
 });
-const archiveJsonValueSchema = archiveJsonValueBaseSchema.superRefine(
+export const archiveJsonValueSchema = archiveJsonValueBaseSchema.superRefine(
   (value, context) => {
     if (!isJsonValue(value)) {
       context.addIssue({
@@ -748,7 +753,7 @@ export const archiveSearchTextSchema = z.discriminatedUnion("kind", [
 export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
 const archiveSearchJsonFieldSchema = z.enum(["metadata", "properties"]);
-const archiveSearchJsonPathSchema = z
+export const archiveSearchJsonPathSchema = z
   .array(
     z.union([postgresTextSchema, z.number().int().min(0).max(2_147_483_647)]),
   )
@@ -756,7 +761,7 @@ const archiveSearchJsonPathSchema = z
   .describe(
     "JSON 路径使用对象键字符串或数组下标数字；空路径表示整个自定义字段。",
   );
-const archiveSearchJsonValueTypeSchema = z.enum([
+export const archiveSearchJsonValueTypeSchema = z.enum([
   "string",
   "number",
   "boolean",
@@ -1338,7 +1343,7 @@ const archiveSearchRelationPropertiesFilterSchema =
     }
   });
 
-const archiveSearchPathStepSchema: z.ZodType<
+export const archiveSearchPathStepSchema: z.ZodType<
   ArchiveSearchPathStep,
   ArchiveSearchPathStep
 > = z
@@ -1651,38 +1656,42 @@ function countArchiveSearchFilterNodes(filter: ArchiveSearchFilter): number {
  * 不借用其他 bin 补资料。游标固定首屏 snapshot 并绑定查询；budgetMs 限制每条
  * PostgreSQL 搜索语句，超时返回 422 且不返回部分结果。无 text 与 where 的空查询无效。
  */
+export const archiveSearchScopeSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("current"),
+      binId: binIdSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("asOf"),
+      binId: binIdSchema.optional(),
+      asOf: archiveSnapshotSequenceSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("revisions"),
+      binId: binIdSchema.optional(),
+      asOf: archiveSnapshotSequenceSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("observations"),
+      binId: binIdSchema.optional(),
+      asOf: archiveSnapshotSequenceSchema.optional(),
+    })
+    .strict(),
+]);
+
+export type ArchiveSearchScope = z.infer<typeof archiveSearchScopeSchema>;
+
 export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
   z
     .object({
-      scope: z.discriminatedUnion("kind", [
-        z
-          .object({
-            kind: z.literal("current"),
-            binId: binIdSchema.optional(),
-          })
-          .strict(),
-        z
-          .object({
-            kind: z.literal("asOf"),
-            binId: binIdSchema.optional(),
-            asOf: archiveSnapshotSequenceSchema,
-          })
-          .strict(),
-        z
-          .object({
-            kind: z.literal("revisions"),
-            binId: binIdSchema.optional(),
-            asOf: archiveSnapshotSequenceSchema.optional(),
-          })
-          .strict(),
-        z
-          .object({
-            kind: z.literal("observations"),
-            binId: binIdSchema.optional(),
-            asOf: archiveSnapshotSequenceSchema.optional(),
-          })
-          .strict(),
-      ]),
+      scope: archiveSearchScopeSchema,
       text: archiveSearchTextSchema.optional(),
       where: archiveSearchFilterSchema.optional(),
       expand: archiveSearchExpansionInputSchema
@@ -1995,5 +2004,8 @@ export type ArchiveOperations = {
   searchArchive(
     input: ArchiveSearchRequest,
   ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;
+  aggregateArchive(
+    input: ArchiveAggregationRequest,
+  ): Promise<ArchiveAggregationOperation<ArchiveAggregationResult>>;
 } & ArchiveHistoryOperations &
   ArchiveRelationsOperations;

@@ -42,6 +42,7 @@ import {
   sql,
 } from "drizzle-orm";
 
+import { createArchiveAggregationOperation } from "./archive-aggregation.ts";
 import { canonicalJson, failure, validationFailure } from "./archive-common.ts";
 import {
   advanceArchiveSequence,
@@ -412,6 +413,7 @@ export function createArchiveStore(
   });
   const readOperations = createArchiveReadOperations(database);
   const searchOperations = createArchiveSearchOperation(database);
+  const aggregationOperations = createArchiveAggregationOperation(database);
   return {
     initializeResourceStorage: () => resourceStorage.initialize(),
     close: () => resourceStorage.close(),
@@ -917,6 +919,7 @@ export function createArchiveStore(
     },
 
     ...searchOperations,
+    ...aggregationOperations,
 
     ...readOperations,
   };

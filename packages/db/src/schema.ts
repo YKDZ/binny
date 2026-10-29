@@ -19,6 +19,7 @@ import {
   integer,
   jsonb,
   pgTable,
+  pgView,
   primaryKey,
   smallint,
   text,
@@ -48,6 +49,11 @@ const humanSessionStatuses = [
   "closed",
   "failed",
 ] as const;
+
+// PostgreSQL 内置目录视图只读时区名称；`.existing()` 防止 Kit 为系统对象生成迁移。
+export const postgresTimeZones = pgView("pg_timezone_names", {
+  name: text("name").notNull(),
+}).existing();
 
 export const binConfigurations = pgTable(
   "bin_configurations",
