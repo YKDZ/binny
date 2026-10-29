@@ -1,0 +1,415 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "1f7fd304-d5c8-4b4a-bb11-069fc61af708",
+  "prevIds": ["20c0fb4f-3c1c-4161-b6e0-c870bccd8399"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "schedules"],
+      "writes": [
+        "s|tbl|public.schedules",
+        "n|tbl|public.schedules",
+        "e|tbl|public.schedules",
+        "n|rel|public.schedules",
+        "n|type|public.schedules",
+        "n|rel|public.schedules_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "trigger_type"],
+      "writes": [
+        "s|col|public.manual_runs.trigger_type",
+        "n|col|public.manual_runs.trigger_type",
+        "e|col|public.manual_runs.trigger_type"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "schedule_id"],
+      "writes": [
+        "s|col|public.manual_runs.schedule_id",
+        "n|col|public.manual_runs.schedule_id",
+        "e|col|public.manual_runs.schedule_id"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "scheduled_for"],
+      "writes": [
+        "s|col|public.manual_runs.scheduled_for",
+        "n|col|public.manual_runs.scheduled_for",
+        "e|col|public.manual_runs.scheduled_for"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": ["index", "public", "schedules", "schedules_due_idx"],
+      "writes": [
+        "s|idx|public.schedules_due_idx",
+        "n|idx|public.schedules_due_idx",
+        "e|idx|public.schedules_due_idx",
+        "n|rel|public.schedules_due_idx"
+      ],
+      "reads": [
+        "n|tbl|public.schedules",
+        "n|sch|public",
+        "n|col|public.schedules.next_due_at",
+        "n|col|public.schedules.bin_id",
+        "n|col|public.schedules.schedule_id"
+      ]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "schedules"],
+      "writes": [
+        "s|fk|public.schedules.schedules_bin_id_bin_configurations_id_fkey",
+        "n|fk|public.schedules.schedules_bin_id_bin_configurations_id_fkey",
+        "e|fk|public.schedules.schedules_bin_id_bin_configurations_id_fkey",
+        "n|con|public.schedules.schedules_bin_id_bin_configurations_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.schedules",
+        "n|sch|public",
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.schedules.bin_id",
+        "n|col|public.bin_configurations.id",
+        "e|uniqueness|public.bin_configurations.id"
+      ]
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "manual_runs"],
+      "writes": [
+        "s|ck|public.manual_runs.manual_runs_trigger_source_check",
+        "n|ck|public.manual_runs.manual_runs_trigger_source_check",
+        "e|ck|public.manual_runs.manual_runs_trigger_source_check",
+        "n|con|public.manual_runs.manual_runs_trigger_source_check"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.trigger_type",
+        "n|col|public.manual_runs.schedule_id",
+        "n|col|public.manual_runs.scheduled_for"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "schedules",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "trigger_type",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'manual'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "schedule_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "scheduled_for",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedule_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "bin_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "expression",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "time_zone",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "action",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "params",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "enabled",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "true",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "next_due_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "last_error",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "clock_timestamp()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "updated_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "clock_timestamp()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedules_due_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "next_due_at",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "schedule_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": "\"enabled\" = true",
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedules_bin_id_bin_configurations_id_fkey",
+        "nameExplicit": false,
+        "columns": ["bin_id"],
+        "schemaTo": "public",
+        "tableTo": "bin_configurations",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "CASCADE",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedules_pkey",
+        "columns": ["schedule_id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "manual_runs_trigger_source_check",
+        "value": "((((\"trigger_type\" = 'manual') and ((\"schedule_id\" is null)) and ((\"scheduled_for\" is null)))) or (((\"trigger_type\" = 'schedule') and ((\"schedule_id\" is not null)) and ((\"scheduled_for\" is not null)))))",
+        "entityType": "checks"
+      }
+    }
+  ]
+}

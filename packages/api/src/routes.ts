@@ -7,6 +7,9 @@ import {
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
   manualRunApiSchemas as contractManualRunApiSchemas,
+  scheduleApiSchemas as contractScheduleApiSchemas,
+  scheduleCreateInputSchema,
+  scheduleUpdateInputSchema,
   manualRunTriggerInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
@@ -15,6 +18,7 @@ import {
   type BinConfigurationOperations,
   type ManualRunOperations,
   type RuntimeConnectionOperations,
+  type ScheduleOperations,
   toInputJsonSchema,
   toPostgresJsonSchema,
 } from "@binny/contracts";
@@ -30,12 +34,14 @@ export type {
   BinConfigurationOperations,
   ManualRunOperations,
   RuntimeConnectionOperations,
+  ScheduleOperations,
 } from "@binny/contracts";
 
 export type ApiOperations = {
   readonly bins: BinConfigurationOperations;
   readonly runtime: RuntimeConnectionOperations;
   readonly runs: ManualRunOperations;
+  readonly schedules: ScheduleOperations;
   readonly archives: ArchiveOperations;
 };
 
@@ -204,6 +210,153 @@ function makeApp(operations: ApiOperations) {
       async (c) => {
         const { binId, runId } = c.req.valid("param");
         const result = await operations.runs.cancelRun(binId, runId);
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
+      "/bins/:binId/schedules",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.schedules.listSchedules(
+          c.req.valid("param").binId,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json({ schedules: result.value }, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/schedules",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", scheduleCreateInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.schedules.createSchedule(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 201);
+      },
+    )
+    .get(
+      "/bins/:binId/schedules/:scheduleId",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.schedules.getSchedule(
+          c.req.valid("param").binId,
+          c.req.valid("param").scheduleId,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .patch(
+      "/bins/:binId/schedules/:scheduleId",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("json", scheduleUpdateInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const { binId, scheduleId } = c.req.valid("param");
+        const result = await operations.schedules.updateSchedule(
+          binId,
+          scheduleId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/schedules/:scheduleId/disable",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, scheduleId } = c.req.valid("param");
+        const result = await operations.schedules.setScheduleEnabled(
+          binId,
+          scheduleId,
+          false,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/schedules/:scheduleId/enable",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const { binId, scheduleId } = c.req.valid("param");
+        const result = await operations.schedules.setScheduleEnabled(
+          binId,
+          scheduleId,
+          true,
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .delete(
+      "/bins/:binId/schedules/:scheduleId",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      async (c) => {
+        const result = await operations.schedules.deleteSchedule(
+          c.req.valid("param").binId,
+          c.req.valid("param").scheduleId,
+        );
         if (!result.ok) return c.json({ error: result.error }, result.status);
         return c.json(result.value, 200);
       },
@@ -392,6 +545,8 @@ export const binApiSchemas = {
 };
 
 export const manualRunApiSchemas = contractManualRunApiSchemas;
+
+export const scheduleApiSchemas = contractScheduleApiSchemas;
 
 export { archiveApiSchemas };
 

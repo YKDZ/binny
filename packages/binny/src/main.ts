@@ -30,6 +30,11 @@ import {
   manualRunErrorSchema,
   manualRunSchema,
   postgresTextSchema,
+  scheduleCreateInputSchema,
+  scheduleDeleteResultSchema,
+  scheduleErrorSchema,
+  scheduleSchema,
+  scheduleUpdateInputSchema,
   withArchiveJsonSchemaProjection,
   withPostgresJsonSchemaProjection,
 } from "@binny/contracts";
@@ -112,10 +117,46 @@ const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
 const cliBinListSchema = withPostgresJsonSchemaProjection(
   z.object({ bins: z.array(cliBinConfigurationSchema) }),
 );
+const cliScheduleListSchema = withPostgresJsonSchemaProjection(
+  z.object({ schedules: z.array(scheduleSchema).readonly() }),
+);
+const cliScheduleCreateInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      binId: binIdSchema,
+      expression: postgresTextSchema.min(1).max(256),
+      timeZone: postgresTextSchema.min(1).max(128),
+      action: collectorActionNameSchema,
+      params: jsonObjectTextSchema.optional(),
+      disabled: z.boolean().optional(),
+    })
+    .strict(),
+);
+const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      binId: binIdSchema,
+      scheduleId: z.string().uuid(),
+      expression: postgresTextSchema.min(1).max(256).optional(),
+      timeZone: postgresTextSchema.min(1).max(128).optional(),
+      action: collectorActionNameSchema.optional(),
+      params: jsonObjectTextSchema.optional(),
+    })
+    .strict()
+    .refine(
+      ({ expression, timeZone, action, params }) =>
+        expression !== undefined ||
+        timeZone !== undefined ||
+        action !== undefined ||
+        params !== undefined,
+      { message: "至少提供一个需要修改的字段。" },
+    ),
+);
 const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
   archiveErrorSchema.shape.error,
   manualRunErrorSchema.shape.error,
+  scheduleErrorSchema.shape.error,
 ]);
 
 function createCliContract(identity: CliCommandIdentity) {
@@ -177,6 +218,12 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "run",
         description: "触发采集动作并查询运行结果。",
+      },
+      schedule: {
+        kind: "commandGroup",
+        parent: "cli",
+        name: "schedule",
+        description: "管理定时采集计划。",
       },
       ...command("archiveSearch")({
         kind: "command",
@@ -698,6 +745,310 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的运行取消状态。");
+        },
+      }),
+      ...command("scheduleCreate")({
+        kind: "command",
+        parent: "schedule",
+        name: "create",
+        description: "声明一个使用 IANA 时区的采集计划。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          expression: {
+            kind: "valueOption",
+            longOption: "--expression",
+            description: "六字段 cron 表达式",
+          },
+          timeZone: {
+            kind: "valueOption",
+            longOption: "--time-zone",
+            description: "IANA 时区名称，例如 Europe/London",
+          },
+          action: {
+            kind: "valueOption",
+            longOption: "--action",
+            description: "已声明的采集器动作",
+          },
+          params: {
+            kind: "valueOption",
+            longOption: "--params",
+            description: "动作参数 JSON",
+          },
+          disabled: {
+            kind: "flag",
+            longOption: "--disabled",
+            description: "先停用计划",
+          },
+        },
+        input: cliScheduleCreateInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            created: {
+              description: "已声明的采集计划",
+              exitCode: 0,
+              schema: scheduleSchema,
+              text: (schedule) => outputText("已创建采集计划", schedule),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const json = scheduleCreateInputSchema.parse({
+            expression: input.expression,
+            timeZone: input.timeZone,
+            action: input.action,
+            params: input.params ?? {},
+            enabled: !(input.disabled ?? false),
+          });
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules.$post({
+              param: { binId: input.binId },
+              json,
+            });
+          if (response.status === 201)
+            return outcome.data.created(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划创建状态。");
+        },
+      }),
+      ...command("scheduleList")({
+        kind: "command",
+        parent: "schedule",
+        name: "list",
+        description: "列出一个 bin 的采集计划。",
+        fields: { binId: { kind: "positional", description: "bin 标识" } },
+        input: z.object({ binId: binIdSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            listed: {
+              description: "采集计划列表",
+              exitCode: 0,
+              schema: cliScheduleListSchema,
+              text: (result) => outputText("采集计划", result),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules.$get({ param: { binId: input.binId } });
+          if (response.status === 200)
+            return outcome.data.listed(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划列表状态。");
+        },
+      }),
+      ...command("scheduleGet")({
+        kind: "command",
+        parent: "schedule",
+        name: "get",
+        description: "读取一个采集计划。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          scheduleId: { kind: "positional", description: "计划标识" },
+        },
+        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            found: {
+              description: "采集计划详情",
+              exitCode: 0,
+              schema: scheduleSchema,
+              text: (schedule) => outputText("采集计划", schedule),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules[":scheduleId"].$get({
+              param: input,
+            });
+          if (response.status === 200)
+            return outcome.data.found(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划读取状态。");
+        },
+      }),
+      ...command("scheduleUpdate")({
+        kind: "command",
+        parent: "schedule",
+        name: "update",
+        description: "修改计划表达式、时区、动作或参数。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          scheduleId: { kind: "positional", description: "计划标识" },
+          expression: {
+            kind: "valueOption",
+            longOption: "--expression",
+            description: "六字段 cron 表达式",
+          },
+          timeZone: {
+            kind: "valueOption",
+            longOption: "--time-zone",
+            description: "IANA 时区名称",
+          },
+          action: {
+            kind: "valueOption",
+            longOption: "--action",
+            description: "已声明的采集器动作",
+          },
+          params: {
+            kind: "valueOption",
+            longOption: "--params",
+            description: "动作参数 JSON",
+          },
+        },
+        input: cliScheduleUpdateInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            updated: {
+              description: "已修改的采集计划",
+              exitCode: 0,
+              schema: scheduleSchema,
+              text: (schedule) => outputText("已修改采集计划", schedule),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const { binId, scheduleId, ...patch } = input;
+          const json = scheduleUpdateInputSchema.parse(patch);
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules[":scheduleId"].$patch({
+              param: { binId, scheduleId },
+              json,
+            });
+          if (response.status === 200)
+            return outcome.data.updated(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 404 ||
+            response.status === 409
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划修改状态。");
+        },
+      }),
+      ...command("scheduleDisable")({
+        kind: "command",
+        parent: "schedule",
+        name: "disable",
+        description: "停用计划并跳过停用期间的到期触发。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          scheduleId: { kind: "positional", description: "计划标识" },
+        },
+        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            disabled: {
+              description: "已停用的采集计划",
+              exitCode: 0,
+              schema: scheduleSchema,
+              text: (schedule) => outputText("已停用采集计划", schedule),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules[":scheduleId"].disable.$post({
+              param: input,
+            });
+          if (response.status === 200)
+            return outcome.data.disabled(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划停用状态。");
+        },
+      }),
+      ...command("scheduleEnable")({
+        kind: "command",
+        parent: "schedule",
+        name: "enable",
+        description: "重新启用计划，从下一个未来时间点开始触发。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          scheduleId: { kind: "positional", description: "计划标识" },
+        },
+        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            enabled: {
+              description: "已启用的采集计划",
+              exitCode: 0,
+              schema: scheduleSchema,
+              text: (schedule) => outputText("已启用采集计划", schedule),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules[":scheduleId"].enable.$post({
+              param: input,
+            });
+          if (response.status === 200)
+            return outcome.data.enabled(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划启用状态。");
+        },
+      }),
+      ...command("scheduleRemove")({
+        kind: "command",
+        parent: "schedule",
+        name: "remove",
+        description: "移除计划并保留它已创建的运行来源。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          scheduleId: { kind: "positional", description: "计划标识" },
+        },
+        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
+        success: {
+          kind: "data",
+          variants: {
+            removed: {
+              description: "已移除的采集计划",
+              exitCode: 0,
+              schema: scheduleDeleteResultSchema,
+              text: ({ scheduleId }) =>
+                text.line("已移除采集计划：" + scheduleId),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].schedules[":scheduleId"].$delete({
+              param: input,
+            });
+          if (response.status === 200)
+            return outcome.data.removed(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的采集计划移除状态。");
         },
       }),
       ...command("archiveItem")({
