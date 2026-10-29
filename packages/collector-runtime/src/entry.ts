@@ -781,29 +781,39 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         worker.outcome,
         delay(250).then(() => undefined),
       ]);
+      // 容器停机时 worker 可能先回传动作错误；该结果不能覆盖运行器中断语义。
       if (outcome?.type === "completion") {
         await stopWorker();
         const current = await readRun(run);
         if (current?.status === "executing")
-          await finishRun(run, outcome.completion);
+          await finishRun(
+            run,
+            stopping === undefined ? outcome.completion : interruptFailure(),
+          );
         await acknowledgeStoppedRun(run.runId);
         return;
       }
       if (outcome?.type === "exit") {
         await stopWorker();
         const current = await readRun(run);
-        if (current?.status === "executing")
-          await finishRun(run, {
-            status: "failed",
-            completedScopes: [],
-            error: {
-              code: "collector_process_interrupted",
-              message: "采集器执行进程意外退出。",
-              impact: "本次运行未恢复执行；之前提交的资料仍然保留。",
-              suggestion: "检查采集器后重新触发新的运行。",
-              requiresHuman: false,
-            },
-          });
+        if (current?.status === "executing") {
+          await finishRun(
+            run,
+            stopping === undefined
+              ? {
+                  status: "failed",
+                  completedScopes: [],
+                  error: {
+                    code: "collector_process_interrupted",
+                    message: "采集器执行进程意外退出。",
+                    impact: "本次运行未恢复执行；之前提交的资料仍然保留。",
+                    suggestion: "检查采集器后重新触发新的运行。",
+                    requiresHuman: false,
+                  },
+                }
+              : interruptFailure(),
+          );
+        }
         await acknowledgeStoppedRun(run.runId);
         return;
       }

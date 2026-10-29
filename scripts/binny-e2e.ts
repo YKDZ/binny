@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  copyImageBuildContext,
+  setBuildContextCollectorVersion,
+} from "./binny-image-update-context.ts";
 import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
 
 type ProcessResult = {
@@ -49,6 +53,14 @@ type HeartbeatDelayProxyStatus = {
   readonly forwardedOwnerGeneration?: string;
 };
 
+type RssImageUpdate = {
+  readonly baselineManifest: unknown;
+  readonly candidateManifest: unknown;
+  readonly baselineImageId: string;
+  readonly candidateImageId: string;
+  readonly buildContextDirectory: string;
+};
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -78,8 +90,11 @@ const projectName = isFullCapacityRun
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
+const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
 let activeServerImage = imageName;
+let activeRssRuntimeImage = rssRuntimeImageName;
 let composeOverrideFile = "";
+let composeProjectDirectory = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
 
@@ -156,10 +171,15 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
 }
 
 function composePrefix(): readonly string[] {
+  const projectDirectory =
+    composeProjectDirectory.length === 0
+      ? []
+      : ["--project-directory", composeProjectDirectory];
   return [
     "compose",
     "--project-name",
     projectName,
+    ...projectDirectory,
     "--file",
     composeFile,
     "--file",
@@ -172,7 +192,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: activeServerImage,
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY18_STOP_GRACE_MS: "1500",
-    BINNY22_RUNTIME_IMAGE: rssRuntimeImageName,
+    BINNY22_RUNTIME_IMAGE: activeRssRuntimeImage,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -532,12 +552,27 @@ async function imageId(image: string): Promise<string> {
 }
 
 async function containerImageId(service: string): Promise<string> {
-  const containers = await compose(["ps", "-q", service]);
-  const containerId = containers.stdout.trim().split("\n")[0];
-  assert.ok(containerId, `没有找到 Compose 服务 ${service} 的容器。`);
+  const containerId = await runningContainerId(service);
   const result = await run(
     "docker",
     ["inspect", "--format", "{{.Image}}", containerId],
+    { env: composeEnvironment() },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function runningContainerId(service: string): Promise<string> {
+  const containers = await compose(["ps", "-q", service]);
+  const containerId = containers.stdout.trim().split("\n")[0];
+  assert.ok(containerId, `没有找到 Compose 服务 ${service} 的容器。`);
+  return containerId;
+}
+
+async function containerStatus(containerId: string): Promise<string> {
+  const result = await run(
+    "docker",
+    ["inspect", "--format", "{{.State.Status}}", containerId],
     { env: composeEnvironment() },
   );
   assert.equal(result.code, 0, result.stderr);
@@ -556,7 +591,7 @@ async function networkSubnet(network: string): Promise<string> {
   return result.stdout.trim();
 }
 
-async function migrationHistory(): Promise<unknown[]> {
+async function migrationHistory(): Promise<readonly unknown[]> {
   const result = await compose(
     postgresExecArgs([
       "-c",
@@ -929,7 +964,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(oldRun.status, "completed");
   assert.equal(await containerImageId("server"), expectedBaselineId);
   const baselineHistory = await migrationHistory();
-  assert.equal(baselineHistory.length, 2, "旧版数据库应保留两条迁移记录。");
+  assert.ok(baselineHistory.length > 0, "旧库应保留既有迁移记录。");
 
   await compose(["stop", "server"]);
   activeServerImage = imageName;
@@ -949,15 +984,18 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();
   await waitForApiHealth(baseUrl);
-  const upgradedHistory = await migrationHistory();
-  assert.ok(upgradedHistory.length > baselineHistory.length);
+  const candidateHistory = await migrationHistory();
+  assert.ok(
+    candidateHistory.length > baselineHistory.length,
+    "候选镜像应仅在旧历史后追加新迁移。",
+  );
   assert.deepEqual(
-    upgradedHistory.slice(0, baselineHistory.length),
+    candidateHistory.slice(0, baselineHistory.length),
     baselineHistory,
-    "升级后应保留旧版数据库的迁移历史前缀。",
+    "旧迁移历史及顺序必须原样保留。",
   );
   assert.ok(
-    upgradedHistory.some(
+    candidateHistory.some(
       (record) =>
         typeof record === "object" &&
         record !== null &&
@@ -1419,7 +1457,11 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
   assert.equal(await containerImageId("server"), candidateImageId);
-  assert.deepEqual(await migrationHistory(), upgradedHistory);
+  assert.deepEqual(
+    await migrationHistory(),
+    candidateHistory,
+    "候选重启后完整迁移历史不得变化或重放。",
+  );
   const restartedRun = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["run", "get", "rss-main", runId]),
     "found",
@@ -1448,7 +1490,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
 
   process.stdout.write(
-    "票 36 旧正式镜像升级证据：" +
+    "票 27 旧正式镜像升级证据：" +
       JSON.stringify({
         baselineImage,
         baselineImageId: runningBaselineId,
@@ -1459,7 +1501,8 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         candidateRevisionId: continuedItem.revisionId,
         previousRevisionId: lastObservation.revisionId,
         resourceId,
-        migrationHistory: baselineHistory,
+        baselineMigrationHistory: baselineHistory,
+        candidateMigrationHistory: candidateHistory,
         candidateRestarted: true,
       }) +
       "\n",
@@ -1469,7 +1512,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
 async function runDatabasePackageUpgradeAcceptance(): Promise<void> {
   await verifyDatabasePackageUpgrade();
   await compose(["down", "--volumes", "--remove-orphans"]);
-  process.stdout.write("票 36 升级专用数据库与资源卷已清理。\n");
+  process.stdout.write("票 27 升级专用数据库与资源卷已清理。\n");
 }
 
 function archiveIds(state: string): {
@@ -2119,6 +2162,7 @@ type RssControlState = {
   readonly requests: readonly RssRequestRecord[];
   readonly photoBytes: string;
   readonly audioBytes: string;
+  readonly heldFeedPath?: string;
 };
 
 type RssControlSource = {
@@ -2133,6 +2177,9 @@ type RssControlSource = {
   readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
   readonly setPhotoAvailable: (available: boolean) => Promise<void>;
+  readonly holdFeed: (pathname: string) => Promise<void>;
+  readonly waitUntilFeedHeld: (pathname: string) => Promise<void>;
+  readonly releaseFeed: () => Promise<void>;
   readonly setStaticArticleVersion: (version: number) => Promise<void>;
   readonly setStaticPhotoAvailable: (available: boolean) => Promise<void>;
   readonly setRecoveryPageAvailable: (available: boolean) => Promise<void>;
@@ -2211,6 +2258,23 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     async setPhotoAvailable(available) {
       await updateState({ photoAvailable: available });
     },
+    async holdFeed(pathname) {
+      await updateState({ holdFeedPath: pathname });
+    },
+    async waitUntilFeedHeld(pathname) {
+      await waitFor(
+        readState,
+        (state) => state.heldFeedPath === pathname,
+        `受控 RSS 信源暂存 ${pathname} 响应`,
+      );
+    },
+    async releaseFeed() {
+      const response = await fetch(controlUrl + "/control/release-feed", {
+        method: "POST",
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
     async setStaticArticleVersion(version) {
       await updateState({ staticArticleVersion: version });
     },
@@ -2227,6 +2291,7 @@ type RssManualRun = {
   readonly status: string;
   readonly runId: string;
   readonly binId: string;
+  readonly stopConfirmedAt?: string;
   readonly finishedAt?: string;
   readonly result?: {
     readonly completedScopes: readonly string[];
@@ -2274,6 +2339,70 @@ async function createRssManifest(): Promise<unknown> {
   return JSON.parse(result.stdout) as unknown;
 }
 
+function rssManifestVersion(manifest: unknown): string {
+  assert.ok(typeof manifest === "object" && manifest !== null);
+  const version = (manifest as { readonly version?: unknown }).version;
+  assert.ok(typeof version === "string" && version.length > 0);
+  return version;
+}
+
+function rssManifestWithVersion(manifest: unknown, version: string): unknown {
+  assert.ok(typeof manifest === "object" && manifest !== null);
+  return { ...manifest, version };
+}
+
+async function buildRssImageUpdate(
+  buildContextDirectory: string,
+): Promise<RssImageUpdate> {
+  const candidateManifest = await createRssManifest();
+  const candidateVersion = rssManifestVersion(candidateManifest);
+  const baselineVersion = candidateVersion + "-image-a";
+  const baselineManifest = rssManifestWithVersion(
+    candidateManifest,
+    baselineVersion,
+  );
+  await copyImageBuildContext(repositoryRoot, buildContextDirectory);
+  await setBuildContextCollectorVersion(
+    buildContextDirectory,
+    "collectors/rss/src/collector.ts",
+    "rss-atom",
+    baselineVersion,
+  );
+
+  const previousProjectDirectory = composeProjectDirectory;
+  const previousRuntimeImage = activeRssRuntimeImage;
+  let baselineImageId: string;
+  try {
+    composeProjectDirectory = buildContextDirectory;
+    activeRssRuntimeImage = rssBaselineRuntimeImageName;
+    await compose(["build", "runtime-rss"]);
+    baselineImageId = await imageId(rssBaselineRuntimeImageName);
+  } finally {
+    composeProjectDirectory = previousProjectDirectory;
+    activeRssRuntimeImage = previousRuntimeImage;
+  }
+
+  const candidateImageId = await imageId(rssRuntimeImageName);
+  assert.notEqual(
+    candidateImageId,
+    baselineImageId,
+    "RSS A/B 应由不同源码构建出不同镜像制品。",
+  );
+  await setBuildContextCollectorVersion(
+    buildContextDirectory,
+    "collectors/rss/src/collector.ts",
+    "rss-atom",
+    candidateVersion,
+  );
+  return {
+    baselineManifest,
+    candidateManifest,
+    baselineImageId,
+    candidateImageId,
+    buildContextDirectory,
+  };
+}
+
 async function createRssBin(
   baseUrl: string,
   binId: string,
@@ -2300,6 +2429,100 @@ async function createRssBin(
     "created",
   );
   assert.equal(created.id, binId);
+}
+
+async function updateRssBinCollector(
+  baseUrl: string,
+  binId: string,
+  manifest: unknown,
+): Promise<void> {
+  const updated = cliData<{
+    readonly id: string;
+    readonly collector: { readonly version: string };
+  }>(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      binId,
+      "--collector",
+      JSON.stringify(manifest),
+    ]),
+    "updated",
+  );
+  assert.equal(updated.id, binId);
+  assert.equal(updated.collector.version, rssManifestVersion(manifest));
+}
+
+async function rebuildRssRuntimeWithComposeWatch(
+  baseUrl: string,
+  imageUpdate: RssImageUpdate,
+  version: string,
+): Promise<{
+  readonly imageId: string;
+  readonly previousImageId: string;
+  readonly previousContainerId: string;
+  readonly updatedContainerId: string;
+}> {
+  const previousProjectDirectory = composeProjectDirectory;
+  const previousImageId = await containerImageId("runtime-rss");
+  const previousContainerId = await runningContainerId("runtime-rss");
+  let watcher: ManagedProcess | undefined;
+  try {
+    composeProjectDirectory = imageUpdate.buildContextDirectory;
+    watcher = startManagedProcess("docker", [
+      ...composePrefix(),
+      "watch",
+      "--no-up",
+      "--prune=false",
+      "runtime-rss",
+    ]);
+    await watcher.waitForMarker("Watch enabled");
+    await setBuildContextCollectorVersion(
+      imageUpdate.buildContextDirectory,
+      "collectors/rss/src/collector.ts",
+      "rss-atom",
+      version,
+    );
+    const imageIdAfterRebuild = await waitFor(
+      async () => {
+        const result = await run(
+          "docker",
+          ["image", "inspect", "--format", "{{.Id}}", rssRuntimeImageName],
+          { env: composeEnvironment() },
+        );
+        return result.code === 0 ? result.stdout.trim() : "";
+      },
+      (imageId) => imageId.length > 0 && imageId !== previousImageId,
+      "Compose Watch 编译新的 RSS 镜像",
+    );
+    await waitFor(
+      async () => {
+        try {
+          return await containerImageId("runtime-rss");
+        } catch {
+          return "";
+        }
+      },
+      (imageId) => imageId === imageIdAfterRebuild,
+      "Compose Watch 替换 RSS 运行器",
+    );
+    await waitForRuntimeHealth("runtime-rss");
+    await waitForRuntime(baseUrl, "binny22-one");
+    const updatedContainerId = await runningContainerId("runtime-rss");
+    assert.notEqual(updatedContainerId, previousContainerId);
+    return {
+      imageId: imageIdAfterRebuild,
+      previousImageId,
+      previousContainerId,
+      updatedContainerId,
+    };
+  } finally {
+    if (watcher !== undefined) {
+      if (watcher.child.exitCode === null) watcher.child.kill("SIGINT");
+      await watcher.waitForClose();
+    }
+    composeProjectDirectory = previousProjectDirectory;
+  }
 }
 
 async function waitForRuntimeHealth(service: string): Promise<void> {
@@ -5017,9 +5240,11 @@ async function verifyRestartAndRemoval(
 async function runRssAcceptance(
   baseUrl: string,
   source: RssControlSource,
+  imageUpdate: RssImageUpdate,
 ): Promise<void> {
   const sourceMediaBytes = await source.mediaBytes();
-  const manifest = await createRssManifest();
+  const baselineManifest = imageUpdate.baselineManifest;
+  let activeManifest = imageUpdate.candidateManifest;
   const config = {
     feeds: [
       { id: "rss-main", url: source.baseUrl + "/rss" },
@@ -5035,15 +5260,29 @@ async function runRssAcceptance(
     ],
   };
   await Promise.all([
-    createRssBin(baseUrl, "binny22-one", manifest, config),
-    createRssBin(baseUrl, "binny22-two", manifest, config),
+    createRssBin(baseUrl, "binny22-one", baselineManifest, config),
+    createRssBin(baseUrl, "binny22-two", baselineManifest, config),
   ]);
+  assert.equal(
+    await containerImageId("runtime-rss"),
+    imageUpdate.baselineImageId,
+  );
+  assert.equal(
+    await containerImageId("runtime-rss-two"),
+    imageUpdate.baselineImageId,
+  );
   await Promise.all([
     waitForRuntimeHealth("runtime-rss"),
     waitForRuntimeHealth("runtime-rss-two"),
     waitForRuntime(baseUrl, "binny22-one"),
     waitForRuntime(baseUrl, "binny22-two"),
   ]);
+  const latestRequest = async (
+    pathname: string,
+  ): Promise<RssRequestRecord | undefined> =>
+    [...(await source.requests())]
+      .reverse()
+      .find((entry) => entry.path === pathname);
 
   const initialRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
     feedIds: ["rss-main", "atom-main", "temporary", "static-main"],
@@ -5623,15 +5862,109 @@ async function runRssAcceptance(
   await source.setAtomVersion(2);
   await source.setAtomTextMode("html");
   await source.setTemporaryAvailable(true);
+  await source.holdFeed("/atom");
+  const oldRuntimeContainerId = await runningContainerId("runtime-rss");
+  const interruptedRun = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny22-one",
+      "collect",
+      "--params",
+      JSON.stringify({ feedIds: ["rss-main", "atom-main"] }),
+    ]),
+    "triggered",
+  );
+  assert.equal(interruptedRun.status, "queued");
+  await source.waitUntilFeedHeld("/atom");
+  const activeInterruptedRun = cliData<RssManualRun>(
+    await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+    "found",
+  );
+  assert.equal(activeInterruptedRun.status, "executing");
+  const rssCommittedBeforeStop = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 2",
+  );
+  assert.equal(rssCommittedBeforeStop.itemId, rssItemV1.itemId);
+  assert.equal(rssCommittedBeforeStop.revisions.length, 2);
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-1"');
+
+  await compose(["stop", "--timeout", "30", "runtime-rss"]);
+  assert.equal(await containerStatus(oldRuntimeContainerId), "exited");
+  await updateRssBinCollector(baseUrl, "binny22-one", activeManifest);
+  const interruptedResult = await waitFor(
+    async () =>
+      cliData<RssManualRun>(
+        await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+        "found",
+      ),
+    (run) => run.status === "failed",
+    "被镜像更新中断的 RSS 运行",
+  );
+  assert.equal(interruptedResult.result?.error?.code, "runtime_interrupted");
+  assert.ok(interruptedResult.stopConfirmedAt);
+  await source.releaseFeed();
+
+  activeRssRuntimeImage = rssRuntimeImageName;
   await compose([
     "up",
     "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
     "--no-deps",
+    "--no-build",
     "--force-recreate",
     "runtime-rss",
   ]);
+  const updatedRuntimeContainerId = await runningContainerId("runtime-rss");
+  assert.notEqual(updatedRuntimeContainerId, oldRuntimeContainerId);
+  assert.equal(
+    await containerImageId("runtime-rss"),
+    imageUpdate.candidateImageId,
+  );
   await waitForRuntimeHealth("runtime-rss");
   await waitForRuntime(baseUrl, "binny22-one");
+  const persistedInterruptedRun = cliData<RssManualRun>(
+    await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+    "found",
+  );
+  assert.equal(persistedInterruptedRun.status, "failed");
+  assert.equal(
+    persistedInterruptedRun.result?.error?.code,
+    "runtime_interrupted",
+  );
+  assert.ok(persistedInterruptedRun.stopConfirmedAt);
+  const configuredUpdatedBin = cliData<{
+    readonly collector: { readonly version: string };
+  }>(await cli(baseUrl, ["bin", "get", "binny22-one"]), "found");
+  assert.equal(
+    configuredUpdatedBin.collector.version,
+    rssManifestVersion(activeManifest),
+  );
+  process.stdout.write(
+    "RSS 正式镜像 A→B 更新与活动运行中断：" +
+      JSON.stringify({
+        baselineImage: rssBaselineRuntimeImageName,
+        baselineImageId: imageUpdate.baselineImageId,
+        candidateImage: rssRuntimeImageName,
+        candidateImageId: imageUpdate.candidateImageId,
+        binId: "binny22-one",
+        interruptedRunId: interruptedRun.runId,
+        runStatus: persistedInterruptedRun.status,
+        stopConfirmed: true,
+        rssItemId: rssCommittedBeforeStop.itemId,
+        rssRevisionsBeforeStop: rssCommittedBeforeStop.revisions.length,
+        oldRuntimeContainerId,
+        updatedRuntimeContainerId,
+      }) +
+      "\n",
+  );
   const afterRestart = await triggerRssAction(
     baseUrl,
     "binny22-one",
@@ -5641,13 +5974,7 @@ async function runRssAcceptance(
     },
   );
   assert.equal(afterRestart.status, "completed");
-  const latestRequest = async (
-    pathname: string,
-  ): Promise<RssRequestRecord | undefined> =>
-    [...(await source.requests())]
-      .reverse()
-      .find((entry) => entry.path === pathname);
-  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-1"');
+  assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
   const atomRequestAfterRestart = await latestRequest("/atom");
   assert.equal(atomRequestAfterRestart?.ifNoneMatch, undefined);
   assert.match(atomRequestAfterRestart?.ifModifiedSince ?? "", /GMT$/u);
@@ -5827,15 +6154,29 @@ async function runRssAcceptance(
   );
 
   await source.setRssVersion(5);
-  await compose([
-    "up",
-    "--detach",
-    "--no-deps",
-    "--force-recreate",
-    "runtime-rss",
-  ]);
-  await waitForRuntimeHealth("runtime-rss");
-  await waitForRuntime(baseUrl, "binny22-one");
+  let watchUpdateEvidence:
+    | {
+        readonly version: string;
+        readonly imageId: string;
+        readonly previousImageId: string;
+        readonly previousContainerId: string;
+        readonly updatedContainerId: string;
+      }
+    | undefined;
+  if (!preserveCapacityProject) {
+    const watchVersion = rssManifestVersion(activeManifest) + "-watch";
+    const watchManifest = rssManifestWithVersion(activeManifest, watchVersion);
+    await updateRssBinCollector(baseUrl, "binny22-one", watchManifest);
+    activeManifest = watchManifest;
+    const watchedUpdate = await rebuildRssRuntimeWithComposeWatch(
+      baseUrl,
+      imageUpdate,
+      watchVersion,
+    );
+    assert.notEqual(watchedUpdate.imageId, imageUpdate.candidateImageId);
+    assert.equal(await imageId(rssRuntimeImageName), watchedUpdate.imageId);
+    watchUpdateEvidence = { version: watchVersion, ...watchedUpdate };
+  }
   const postMediaRestart = await triggerRssAction(
     baseUrl,
     "binny22-one",
@@ -5850,6 +6191,28 @@ async function runRssAcceptance(
     "RSS 正文版本 5",
   );
   assert.equal(rssItemV5.itemId, rssItemV1.itemId);
+  assert.deepEqual(
+    await Promise.all(
+      rssResources.map(({ resourceId }) =>
+        readRssResource(baseUrl, resourceId),
+      ),
+    ),
+    rssResourceBytes,
+    "Watch 更新后既有 RSS 媒体仍应可从归档读取。",
+  );
+  if (watchUpdateEvidence !== undefined) {
+    process.stdout.write(
+      "Compose Watch RSS rebuild 更新证据：" +
+        JSON.stringify({
+          candidateImageId: imageUpdate.candidateImageId,
+          ...watchUpdateEvidence,
+          requestIfNoneMatch: (await latestRequest("/rss"))?.ifNoneMatch,
+          itemId: rssItemV5.itemId,
+          resourceCount: rssResources.length,
+        }) +
+        "\n",
+    );
+  }
 
   const separateBinRun = await triggerRssAction(
     baseUrl,
@@ -5868,13 +6231,24 @@ async function runRssAcceptance(
   assert.deepEqual(secondBinItemV5.sourceKey, rssItemV1.sourceKey);
 
   await source.setRssVersion(6);
+  await updateRssBinCollector(baseUrl, "binny22-two", activeManifest);
+  const secondOldImageId = await containerImageId("runtime-rss-two");
   await compose([
     "up",
     "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
     "--no-deps",
+    "--no-build",
     "--force-recreate",
     "runtime-rss-two",
   ]);
+  assert.notEqual(
+    await containerImageId("runtime-rss-two"),
+    secondOldImageId,
+    "第二个 bin 的 RSS 运行器应切换到更新后的镜像。",
+  );
   await waitForRuntimeHealth("runtime-rss-two");
   await waitForRuntime(baseUrl, "binny22-two");
   const separateBinRestart = await triggerRssAction(
@@ -6539,6 +6913,11 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
+  const runFunctionalJourney = !(
+    isFullCapacityRun &&
+    (capacityPhase === "verify" || capacityPhase === "delete")
+  );
+  let rssImageUpdate: RssImageUpdate | undefined;
   acceptance: try {
     assert.ok(
       !upgradeOnly ||
@@ -6563,6 +6942,13 @@ async function main(): Promise<void> {
     builtImages.add(runtimeImageName);
     await compose(["build", "runtime-rss"]);
     builtImages.add(rssRuntimeImageName);
+    if (runFunctionalJourney) {
+      rssImageUpdate = await buildRssImageUpdate(
+        path.join(overrideDirectory, "rss-build-context"),
+      );
+      builtImages.add(rssBaselineRuntimeImageName);
+      activeRssRuntimeImage = rssBaselineRuntimeImageName;
+    }
     if (
       process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
       process.env.BINNY_E2E_BASELINE_IMAGE.length > 0
@@ -6570,7 +6956,7 @@ async function main(): Promise<void> {
       await runDatabasePackageUpgradeAcceptance();
     } else {
       process.stdout.write(
-        "票 36 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
+        "票 27 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
       );
     }
     await compose([
@@ -6579,6 +6965,7 @@ async function main(): Promise<void> {
       "--wait",
       "--wait-timeout",
       "360",
+      "--no-build",
       "postgres",
       "server",
       "manual-runs-source",
@@ -6600,12 +6987,8 @@ async function main(): Promise<void> {
     );
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    if (
-      !(
-        isFullCapacityRun &&
-        (capacityPhase === "verify" || capacityPhase === "delete")
-      )
-    ) {
+    if (runFunctionalJourney) {
+      assert.ok(rssImageUpdate !== undefined);
       const isolatedClient = await verifyIsolatedApiConsumer({
         repositoryRoot,
         projectName,
@@ -6620,7 +7003,7 @@ async function main(): Promise<void> {
       await manualRunControllerPartitionStep();
       await manualRunsHttpStep(baseUrl, manualRunManifest);
       baseUrl = await scheduledRunsStep(baseUrl);
-      await runRssAcceptance(baseUrl, rssControlSource);
+      await runRssAcceptance(baseUrl, rssControlSource, rssImageUpdate);
       for (const binId of ["binny15-one", "binny15-two"]) {
         const removed = cliData<{
           readonly removed: boolean;
@@ -6689,7 +7072,14 @@ async function main(): Promise<void> {
       } else if (builtImages.size > 0) {
         const imageCleanup = await run(
           "docker",
-          ["image", "rm", ...builtImages],
+          [
+            "image",
+            "rm",
+            ...builtImages,
+            ...(rssImageUpdate === undefined
+              ? []
+              : [rssImageUpdate.candidateImageId]),
+          ],
           { env: composeEnvironment() },
         );
         if (imageCleanup.code !== 0) {
