@@ -42,6 +42,9 @@ export const manualRunQueueReasonSchema = z.enum([
   "earlier_run_queued",
   "previous_execution_unconfirmed",
   "human_session_active",
+  "browser_capacity_exhausted",
+  "bin_busy",
+  "runtime_protocol_outdated",
 ]);
 
 export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(
@@ -204,6 +207,7 @@ export const manualRunExecutionSchema = withPostgresJsonSchemaProjection(
       params: jsonObjectSchema,
       config: jsonObjectSchema,
       targets: z.array(z.unknown()),
+      browserReservationId: z.string().uuid().optional(),
     })
     .strict(),
 );

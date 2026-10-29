@@ -149,7 +149,7 @@
       "tags": ["quality:heavy"]
     },
     "//#test:browser-lifecycle": {
-      "passThroughEnv": ["BINNY19_PUBLISHED_HOST", "BINNY19_SUBNET"],
+      "passThroughEnv": ["BINNY19_PUBLISHED_HOST", "BINNY21_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",

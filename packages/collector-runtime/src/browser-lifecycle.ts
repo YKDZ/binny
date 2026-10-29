@@ -16,8 +16,22 @@ type BrowserOptions = {
   readonly ownerGeneration: string;
   readonly profileDirectory: string;
   readonly display?: string;
-  readonly onPowerChange: (power: BrowserPower) => void;
+  readonly onPowerChange: (
+    power: BrowserPower,
+    reservationId: string | undefined,
+    event?: BrowserPowerEvent,
+  ) => Promise<BrowserPowerChangeResult>;
 };
+
+export type BrowserPowerEvent =
+  | "starting"
+  | "ready"
+  | "stopping"
+  | "stopped"
+  | "unknown"
+  | "not_started";
+
+export type BrowserPowerChangeResult = "accepted" | "rejected" | "unavailable";
 
 type HumanSessionEnd = {
   readonly failure?: { readonly code: string; readonly message: string };
@@ -139,6 +153,8 @@ export class BrowserLifecycle {
   private opening: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
   private power: BrowserPower = { status: "stopped" };
+  private reservationId: string | undefined;
+  private startedReservationId: string | undefined;
   private readonly options: BrowserOptions;
 
   constructor(options: BrowserOptions) {
@@ -151,11 +167,12 @@ export class BrowserLifecycle {
     return this.power;
   }
 
-  async ensureReady(): Promise<void> {
+  async ensureReady(reservationId: string): Promise<void> {
+    this.adoptReservation(reservationId);
     if (this.opening !== undefined) return this.opening;
     if (this.stopping !== undefined) {
       const stopped = this.stopping;
-      const opening = stopped.then(() => this.startReady());
+      const opening = stopped.then(() => this.startReady(reservationId));
       this.opening = opening;
       try {
         await opening;
@@ -165,10 +182,13 @@ export class BrowserLifecycle {
       return;
     }
     if (this.context !== undefined && this.browser?.isConnected()) {
-      if (this.power.status !== "ready") this.setPower({ status: "ready" });
+      if (this.power.status !== "ready") {
+        await this.setPower({ status: "ready" });
+        await this.reportPower("ready", reservationId);
+      }
       return;
     }
-    const opening = this.startReady();
+    const opening = this.startReady(reservationId);
     this.opening = opening;
     try {
       await opening;
@@ -186,18 +206,28 @@ export class BrowserLifecycle {
       throw new Error("人工操作仍持有浏览器，暂时不能进入空闲关闭。");
 
     const stopping = (async () => {
-      this.setPower({ status: "stopping" });
+      const reservationId = this.reservationId;
+      const stoppingAck =
+        reservationId === undefined
+          ? Promise.resolve<BrowserPowerChangeResult>("accepted")
+          : this.reportPower("stopping", reservationId);
+      await this.setPower({ status: "stopping" });
       try {
         await this.closeBrowserLoad();
-        this.setPower({ status: "stopped" });
+        await this.setPower({ status: "stopped" });
+        await stoppingAck;
+        if (reservationId !== undefined)
+          await this.reportPower("stopped", reservationId);
       } catch (error) {
-        this.setPower({
+        await this.setPower({
           status: "unknown",
           error: {
             code: "browser_stop_failed",
             message: "浏览器或显示进程没有确认退出，当前状态未知。",
           },
         });
+        if (reservationId !== undefined)
+          await this.reportPower("unknown", reservationId);
         throw error;
       }
     })();
@@ -209,8 +239,11 @@ export class BrowserLifecycle {
     }
   }
 
-  async bindWorkerEndpoint(runId: string): Promise<CollectorBrowserConnection> {
-    await this.ensureReady();
+  async bindWorkerEndpoint(
+    runId: string,
+    reservationId: string,
+  ): Promise<CollectorBrowserConnection> {
+    await this.ensureReady(reservationId);
     if (this.browser === undefined) throw new Error("浏览器尚未就绪。");
     if (this.workerEndpoint !== undefined)
       throw new Error("浏览器仍绑定着上一次的自动控制入口。");
@@ -261,12 +294,13 @@ export class BrowserLifecycle {
   async openHumanSession(
     sessionId: string,
     tunnelToken: string,
+    reservationId: string,
   ): Promise<{ readonly ended: Promise<HumanSessionEnd> }> {
-    await this.ensureReady();
+    await this.ensureReady(reservationId);
     if (this.human !== undefined)
       throw new Error("另一个浏览器人工通道仍在清理。");
     await this.cleanAutomaticPages();
-    await this.ensureReady();
+    await this.ensureReady(reservationId);
     const context = this.context;
     if (context === undefined) throw new Error("浏览器尚未就绪。");
     const page = await context.newPage();
@@ -397,34 +431,117 @@ export class BrowserLifecycle {
       this.browser === undefined &&
       this.displayProcess === undefined
     ) {
-      if (this.power.status !== "unknown") this.setPower({ status: "stopped" });
+      if (this.power.status === "unknown") return;
+      await this.setPower({ status: "stopped" });
+      if (this.reservationId !== undefined) {
+        if (this.startedReservationId === this.reservationId)
+          await this.confirmStopped(this.reservationId);
+        else await this.confirmNotStarted(this.reservationId);
+      }
       return;
     }
-    this.setPower({ status: "stopping" });
+    const reservationId = this.reservationId;
+    const stoppingAck =
+      reservationId === undefined
+        ? Promise.resolve<BrowserPowerChangeResult>("accepted")
+        : this.reportPower("stopping", reservationId);
+    await this.setPower({ status: "stopping" });
     try {
       await this.closeBrowserLoad();
-      this.setPower({ status: "stopped" });
+      await this.setPower({ status: "stopped" });
+      await stoppingAck.catch(() => "unavailable" as const);
+      if (reservationId !== undefined) await this.confirmStopped(reservationId);
     } catch (error) {
-      this.setPower({
+      await this.setPower({
         status: "unknown",
         error: {
           code: "browser_stop_failed",
           message: "浏览器或显示进程没有确认退出，当前状态未知。",
         },
       });
+      if (reservationId !== undefined)
+        await this.reportPower("unknown", reservationId);
       throw error;
     }
   }
 
-  private setPower(power: BrowserPower): void {
-    this.power = power;
-    this.options.onPowerChange(power);
+  async confirmNotStarted(
+    reservationId: string,
+  ): Promise<BrowserPowerChangeResult> {
+    if (this.startedReservationId === reservationId) {
+      if (
+        this.power.status === "stopped" &&
+        this.context === undefined &&
+        this.browser === undefined &&
+        this.displayProcess === undefined
+      )
+        return await this.confirmStopped(reservationId);
+      return "accepted";
+    }
+    const result = await this.options.onPowerChange(
+      { status: "stopped" },
+      reservationId,
+      "not_started",
+    );
+    if (result === "accepted" && this.reservationId === reservationId)
+      this.reservationId = undefined;
+    return result;
   }
 
-  private async startReady(): Promise<void> {
+  private async setPower(
+    power: BrowserPower,
+    event?: BrowserPowerEvent,
+    reservationId = this.reservationId,
+  ): Promise<BrowserPowerChangeResult> {
+    this.power = power;
+    return await this.options.onPowerChange(power, reservationId, event);
+  }
+
+  private async reportPower(
+    event: BrowserPowerEvent,
+    reservationId: string,
+  ): Promise<BrowserPowerChangeResult> {
+    return await this.options.onPowerChange(this.power, reservationId, event);
+  }
+
+  private async confirmStopped(
+    reservationId: string,
+  ): Promise<BrowserPowerChangeResult> {
+    const stopping = await this.reportPower("stopping", reservationId);
+    if (stopping !== "accepted") return stopping;
+    const stopped = await this.reportPower("stopped", reservationId);
+    if (stopped === "accepted" && this.startedReservationId === reservationId)
+      this.startedReservationId = undefined;
+    return stopped;
+  }
+
+  private adoptReservation(reservationId: string): void {
+    if (this.reservationId === reservationId) return;
+    if (
+      this.reservationId !== undefined &&
+      this.context === undefined &&
+      this.browser === undefined &&
+      this.displayProcess === undefined &&
+      this.power.status === "stopped"
+    ) {
+      this.reservationId = reservationId;
+      this.startedReservationId = undefined;
+      return;
+    }
+    if (this.reservationId === undefined) {
+      this.reservationId = reservationId;
+      return;
+    }
+    throw new Error("当前浏览器仍绑定着其他容量预约，拒绝跨尝试复用。");
+  }
+
+  private async startReady(reservationId: string): Promise<void> {
     if (this.stopping !== undefined) await this.stopping;
     if (this.context !== undefined && this.browser?.isConnected()) {
-      if (this.power.status !== "ready") this.setPower({ status: "ready" });
+      if (this.power.status !== "ready") {
+        await this.setPower({ status: "ready" });
+        await this.reportPower("ready", reservationId);
+      }
       return;
     }
     if (
@@ -437,22 +554,38 @@ export class BrowserLifecycle {
       );
     }
 
-    this.setPower({ status: "starting" });
+    const starting = await this.options.onPowerChange(
+      this.power,
+      reservationId,
+      "starting",
+    );
+    if (starting !== "accepted") {
+      await this.options.onPowerChange(
+        { status: "stopped" },
+        reservationId,
+        "not_started",
+      );
+      throw new Error("核心没有确认浏览器预约；拒绝发出启动动作。");
+    }
+    this.startedReservationId = reservationId;
+    await this.setPower({ status: "starting" });
     try {
       if (this.context !== undefined || this.browser !== undefined)
         await this.closeContext();
       await this.launch();
       if (this.browser?.isConnected() !== true)
         throw new Error("持久浏览器在启动确认前已经断开连接。");
-      this.setPower({ status: "ready" });
+      await this.setPower({ status: "ready" });
+      await this.reportPower("ready", reservationId);
     } catch (error) {
-      this.setPower({
+      await this.setPower({
         status: "unknown",
         error: {
           code: "browser_start_failed",
           message: "浏览器或显示进程没有确认启动，当前状态未知。",
         },
       });
+      await this.reportPower("unknown", reservationId);
       throw error;
     }
   }
@@ -516,12 +649,16 @@ export class BrowserLifecycle {
       this.browser = browser;
       browser.once("disconnected", () => {
         if (this.context !== context || this.power.status !== "ready") return;
-        this.setPower({
+        void this.setPower({
           status: "unknown",
           error: {
             code: "browser_interrupted",
             message: "浏览器连接意外中断，当前进程状态未知。",
           },
+        }).catch((error: unknown) => {
+          process.stderr.write(
+            `浏览器中断状态没有回报：${error instanceof Error ? error.message : String(error)}\n`,
+          );
         });
       });
     } catch (error) {

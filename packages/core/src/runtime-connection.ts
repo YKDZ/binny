@@ -6,6 +6,8 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
+  legacyRuntimeProtocolVersion,
+  runtimeProtocolVersion,
   type BinError,
   type BinOperation,
   type CollectorManifest,
@@ -25,6 +27,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateCollectorConfiguration } from "./bin-configuration.ts";
+import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { applyRuntimeHumanSessionHeartbeat } from "./human-session.ts";
 import {
   confirmManualRunOwnerStopped,
@@ -286,6 +289,7 @@ export async function readRuntimeExecution(
 
 export function createRuntimeConnectionStore(
   database: Database,
+  browserCapacity: BrowserCapacityCoordinator,
 ): RuntimeConnectionOperations {
   return {
     async getExecution(binId) {
@@ -321,6 +325,7 @@ export function createRuntimeConnectionStore(
             runtimeId: runtimeConnections.runtimeId,
             ownerState: runtimeConnections.ownerState,
             ownerGeneration: runtimeConnections.ownerGeneration,
+            environment: runtimeConnections.environment,
           })
           .from(runtimeConnections)
           .where(eq(runtimeConnections.binId, binId));
@@ -387,6 +392,15 @@ export function createRuntimeConnectionStore(
               path: ["activeRunId"],
             });
           }
+          if (current.ownerGeneration !== undefined) {
+            // 更高代际只有在取得同卷 flock 后才能首个心跳；正式镜像以此进程作为 PID1，
+            // 旧容器进程树已退出，故可回收旧 owner 的浏览器容量占位。
+            await browserCapacity.releaseReplacedOwner(transaction, {
+              binId,
+              runtimeId: current.runtimeId,
+              ownerGeneration: current.ownerGeneration,
+            });
+          }
           await interruptReplacedManualRuns(
             transaction,
             binId,
@@ -410,6 +424,7 @@ export function createRuntimeConnectionStore(
             runtimeId: checked.data.runtimeId,
             collector: checked.data.collector,
             environment: checked.data.environment,
+            protocolVersion: checked.data.protocolVersion,
             disconnected: false,
             ownerState,
             ownerGeneration: incomingGeneration,
@@ -420,6 +435,7 @@ export function createRuntimeConnectionStore(
               runtimeId: checked.data.runtimeId,
               collector: checked.data.collector,
               environment: checked.data.environment,
+              protocolVersion: checked.data.protocolVersion,
               // 保持 PostgreSQL 服务端时钟语义。
               lastHeartbeatAt: sql`clock_timestamp()`,
               disconnected: false,
@@ -431,19 +447,78 @@ export function createRuntimeConnectionStore(
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
-        const humanSession = await applyRuntimeHumanSessionHeartbeat(
-          transaction,
-          {
-            binId,
-            runtimeId: checked.data.runtimeId,
-            ownerGeneration: checked.data.ownerGeneration,
-            ownerConfirmed:
-              ownerState === "confirmed" && execution.status === "online",
-            ...(checked.data.humanSessionEvent === undefined
-              ? {}
-              : { event: checked.data.humanSessionEvent }),
-          },
-        );
+        if (execution.status === "online") {
+          if (checked.data.protocolVersion === legacyRuntimeProtocolVersion) {
+            const previousEnvironment =
+              runtimeEnvironmentStoredSchema.safeParse(current?.environment);
+            const status = checked.data.environment.browser.power.status;
+            if (status !== "unavailable") {
+              await browserCapacity.reportLegacyPower(
+                transaction,
+                {
+                  binId,
+                  runtimeId: checked.data.runtimeId,
+                  ownerGeneration: checked.data.ownerGeneration,
+                },
+                status,
+                previousEnvironment.success
+                  ? previousEnvironment.data.browser.power?.status
+                  : undefined,
+              );
+            }
+          } else if (
+            "browserPowerEvent" in checked.data &&
+            checked.data.browserPowerEvent !== undefined
+          ) {
+            const owner = {
+              binId,
+              runtimeId: checked.data.runtimeId,
+              ownerGeneration: checked.data.ownerGeneration,
+            };
+            const event = checked.data.browserPowerEvent;
+            const accepted =
+              event.event === "not_started"
+                ? await browserCapacity.confirmNotStarted(
+                    transaction,
+                    owner,
+                    event.reservationId,
+                  )
+                : await browserCapacity.reportPower(
+                    transaction,
+                    owner,
+                    event.reservationId,
+                    event.event,
+                  );
+            if (!accepted) {
+              return failure(409, {
+                code: "browser_reservation_mismatch",
+                message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
+                path: ["browserPowerEvent"],
+              });
+            }
+          }
+        }
+        const humanSession =
+          checked.data.protocolVersion === runtimeProtocolVersion &&
+          "browserPowerEvent" in checked.data &&
+          checked.data.browserPowerEvent !== undefined
+            ? undefined
+            : await applyRuntimeHumanSessionHeartbeat(
+                transaction,
+                {
+                  binId,
+                  runtimeId: checked.data.runtimeId,
+                  ownerGeneration: checked.data.ownerGeneration,
+                  ownerConfirmed:
+                    ownerState === "confirmed" && execution.status === "online",
+                  supportsReservationId:
+                    checked.data.protocolVersion >= runtimeProtocolVersion,
+                  ...(checked.data.humanSessionEvent === undefined
+                    ? {}
+                    : { event: checked.data.humanSessionEvent }),
+                },
+                browserCapacity,
+              );
         return execution.status === "incompatible"
           ? { ok: false, status: 409, error: execution.error }
           : {

@@ -10,6 +10,7 @@ import {
 import {
   createArchiveStore,
   createBinConfigurationStore,
+  createBrowserCapacityCoordinator,
   createHumanSessionStore,
   createManualRunStore,
   createRuntimeConnectionStore,
@@ -46,11 +47,24 @@ function environmentMilliseconds(
   return parsed;
 }
 
+function environmentPositiveInteger(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} 必须是正整数。`);
+  }
+  return parsed;
+}
+
 export async function createServerRuntime(options: {
   readonly databaseUrl: string;
 }): Promise<ServerRuntime> {
   const connection = connectDatabase(options.databaseUrl);
   const { database } = connection;
+  const browserCapacity = createBrowserCapacityCoordinator(
+    environmentPositiveInteger("BINNY_BROWSER_CAPACITY_LIMIT", 2),
+  );
   const archives = createArchiveStore(database, {
     resourceDirectory:
       process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
@@ -65,10 +79,10 @@ export async function createServerRuntime(options: {
       100,
     ),
   });
-  const runtime = createRuntimeConnectionStore(database);
-  const runs = createManualRunStore(database);
+  const runtime = createRuntimeConnectionStore(database, browserCapacity);
+  const runs = createManualRunStore(database, browserCapacity);
   const schedules = createScheduleStore(database);
-  const humanSessions = createHumanSessionStore(database);
+  const humanSessions = createHumanSessionStore(database, browserCapacity);
   const viewerWaitMs = environmentMilliseconds(
     "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
     60_000,
@@ -86,6 +100,7 @@ export async function createServerRuntime(options: {
   let pendingTimeout: NodeJS.Timeout | undefined;
   try {
     await migrateDatabase(database);
+    await browserCapacity.initialize(database);
     await archives.initializeResourceStorage();
     await humanSessions.reconcileHumanSessionsAfterGatewayRestart();
     pendingTimeout = setInterval(
@@ -163,7 +178,7 @@ export async function createServerRuntime(options: {
     },
   };
   const app = createApiRoutes({
-    bins: createBinConfigurationStore(database),
+    bins: createBinConfigurationStore(database, browserCapacity),
     runtime: runtimeOperations,
     runs,
     schedules,

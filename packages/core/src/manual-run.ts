@@ -14,6 +14,7 @@ import {
   manualRunTriggerInputSchema,
   manualRunTriggerSchema,
   runtimeHeartbeatTimeoutMs,
+  runtimeProtocolVersion,
   type ManualRunCommitLocator,
   type ManualRun,
   type ManualRunCompletion,
@@ -39,6 +40,7 @@ import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { validateCollectorActionParameters } from "./bin-configuration.ts";
+import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { hasActiveHumanSession } from "./human-session.ts";
 import {
   interruptExpiredManualRuns,
@@ -153,10 +155,12 @@ async function readRun(
   database: Database | Transaction,
   binId: string,
   runId: string,
+  browserCapacity: BrowserCapacityCoordinator,
 ) {
   const [row] = await database
     .select({
       ...runSelection,
+      collectorSnapshot: manualRuns.collectorSnapshot,
       runtimeOnline: exists(
         database
           .select({ binId: runtimeConnections.binId })
@@ -234,7 +238,7 @@ async function readRun(
     .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)));
   if (row === undefined) return undefined;
 
-  const queueReason =
+  let queueReason =
     row.status !== "queued"
       ? null
       : row.previousExecutionUnconfirmed
@@ -248,6 +252,32 @@ async function readRun(
               : row.earlierRunQueued
                 ? "earlier_run_queued"
                 : null;
+  if (
+    queueReason === null &&
+    collectorManifestStoredSchema.parse(row.collectorSnapshot).environment
+      .browser.required
+  ) {
+    const [owner] = await database
+      .select({
+        runtimeId: runtimeConnections.runtimeId,
+        ownerGeneration: runtimeConnections.ownerGeneration,
+        protocolVersion: runtimeConnections.protocolVersion,
+      })
+      .from(runtimeConnections)
+      .where(eq(runtimeConnections.binId, binId));
+    if (owner !== undefined) {
+      queueReason =
+        (await browserCapacity.queueReason(
+          database,
+          {
+            binId,
+            runtimeId: owner.runtimeId,
+            ownerGeneration: owner.ownerGeneration,
+          },
+          owner.protocolVersion >= runtimeProtocolVersion,
+        )) ?? null;
+    }
+  }
   return { ...row, queueReason };
 }
 
@@ -433,7 +463,10 @@ export async function createQueuedRunInTransaction(
   };
 }
 
-export function createManualRunStore(database: Database): ManualRunOperations {
+export function createManualRunStore(
+  database: Database,
+  browserCapacity: BrowserCapacityCoordinator,
+): ManualRunOperations {
   return {
     async triggerRun(binId, input) {
       const checked = manualRunTriggerInputSchema.safeParse(input);
@@ -464,19 +497,34 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
 
         await interruptExpiredManualRuns(transaction, binId);
-        return await createQueuedRunInTransaction(
+        const created = await createQueuedRunInTransaction(
           transaction,
           bin,
           checked.data,
           { kind: "manual" },
         );
+        if (!created.ok) return created;
+        if (
+          !collectorManifestStoredSchema.parse(bin.collector).environment
+            .browser.required
+        )
+          return created;
+        const row = await readRun(
+          transaction,
+          binId,
+          created.value.runId,
+          browserCapacity,
+        );
+        if (row === undefined)
+          throw new Error("新建运行后没有找到其排队状态。");
+        return { ok: true, value: await rowToRun(transaction, row) };
       });
     },
 
     async getRun(binId, runId) {
       return await database.transaction(async (transaction) => {
         await interruptExpiredManualRuns(transaction, binId);
-        const row = await readRun(transaction, binId, runId);
+        const row = await readRun(transaction, binId, runId, browserCapacity);
         return row === undefined
           ? failure(404, "run_not_found", "没有找到这个运行。", ["runId"])
           : { ok: true, value: await rowToRun(transaction, row) };
@@ -536,7 +584,7 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           );
         }
 
-        const row = await readRun(transaction, binId, runId);
+        const row = await readRun(transaction, binId, runId, browserCapacity);
         if (row === undefined) throw new Error("取消运行后记录意外消失。");
         return { ok: true, value: await rowToRun(transaction, row) };
       });
@@ -644,6 +692,8 @@ export function createManualRunStore(database: Database): ManualRunOperations {
         const [runtimeConnection] = await transaction
           .select({
             runtimeId: runtimeConnections.runtimeId,
+            ownerGeneration: runtimeConnections.ownerGeneration,
+            protocolVersion: runtimeConnections.protocolVersion,
             ownerState: runtimeConnections.ownerState,
             matches: eq(runtimeConnections.collector, runCollector),
           })
@@ -656,6 +706,21 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           runtimeConnection.matches !== true
         ) {
           return { ok: true, value: null };
+        }
+
+        let browserReservationId: string | undefined;
+        if (runCollector.environment.browser.required) {
+          const reservation = await browserCapacity.reserve(
+            transaction,
+            {
+              binId,
+              runtimeId: runtimeConnection.runtimeId,
+              ownerGeneration: runtimeConnection.ownerGeneration,
+            },
+            runtimeConnection.protocolVersion >= runtimeProtocolVersion,
+          );
+          if (reservation.kind !== "reserved") return { ok: true, value: null };
+          browserReservationId = reservation.reservationId;
         }
 
         const [updated] = await transaction
@@ -685,6 +750,10 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           params: run.params,
           config: run.configSnapshot,
           targets: run.targetsSnapshot,
+          ...(browserReservationId === undefined ||
+          runtimeConnection.protocolVersion < runtimeProtocolVersion
+            ? {}
+            : { browserReservationId }),
         });
         return { ok: true, value };
       });
@@ -800,7 +869,12 @@ export function createManualRunStore(database: Database): ManualRunOperations {
         return { ok: true as const, value: runId };
       });
       if (!completionResult.ok) return completionResult;
-      const row = await readRun(database, binId, completionResult.value);
+      const row = await readRun(
+        database,
+        binId,
+        completionResult.value,
+        browserCapacity,
+      );
       if (row === undefined) throw new Error("运行结果提交后记录意外消失。");
       return { ok: true, value: await rowToRun(database, row) };
     },
