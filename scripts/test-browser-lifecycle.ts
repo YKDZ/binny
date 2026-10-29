@@ -24,6 +24,7 @@ type CliWire<T> = {
 type HumanSessionStatus = {
   readonly sessionId: string;
   readonly status: string;
+  readonly queueReason?: string;
   readonly readyAt?: string;
   readonly closedAt?: string;
   readonly failure?: { readonly code: string; readonly message: string };
@@ -141,6 +142,7 @@ function environment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: serverImage,
     BINNY19_RUNTIME_IMAGE: browserImage,
     BINNY_POSTGRES_PASSWORD: password,
+    BINNY_BROWSER_CAPACITY_LIMIT: "1",
   };
 }
 
@@ -337,22 +339,12 @@ async function dockerNetworkSubnets(): Promise<string[]> {
 
 async function freeBrowserSubnet(): Promise<string> {
   const existing = await dockerNetworkSubnets();
-  const requested = process.env.BINNY19_SUBNET;
-  if (requested !== undefined) {
-    assert.ok(
-      existing.every((subnet) => !rangesOverlap(requested, subnet)),
-      `BINNY19_SUBNET ${requested} 与现有 Docker 网络重叠。`,
-    );
-    return requested;
-  }
-  for (let octet = 168; octet < 184; octet += 1) {
-    const candidate = `10.253.${String(octet)}.0/24`;
-    if (existing.every((subnet) => !rangesOverlap(candidate, subnet)))
-      return candidate;
-  }
-  throw new Error(
-    "10.253.168.0/24 到 10.253.183.0/24 均与现有 Docker 网络冲突。",
+  const requested = process.env.BINNY21_SUBNET ?? "10.253.21.0/24";
+  assert.ok(
+    existing.every((subnet) => !rangesOverlap(requested, subnet)),
+    `BINNY21_SUBNET ${requested} 与现有 Docker 网络重叠。`,
   );
+  return requested;
 }
 
 async function createComposeOverlay(): Promise<void> {
@@ -1220,6 +1212,27 @@ async function browserProcesses(service: string): Promise<ProcessResult> {
   return result;
 }
 
+async function activeBrowserMainProcessCount(): Promise<number> {
+  const processes = await Promise.all(
+    ["browser-one", "browser-two"].map(
+      async (service) => await browserProcesses(service),
+    ),
+  );
+  return processes.reduce(
+    (count, result) =>
+      count +
+      result.stdout
+        .split("\n")
+        .filter(
+          (line) =>
+            /(?:chrom(?:e|ium))/iu.test(line) &&
+            !line.includes("--type=") &&
+            !line.includes("chrome_crashpad_handler"),
+        ).length,
+    0,
+  );
+}
+
 async function ensureProcessObserver(): Promise<void> {
   if (processObserverStarted) return;
   const observer = await run("docker", [
@@ -1863,12 +1876,18 @@ async function main(): Promise<void> {
     await updateBin("binny19-one", 0);
     await waitForBrowserPower("binny19-one", "stopping");
     pendingWake = await triggerRun("binny19-one", "collect");
-    const waitingWake = await waitForRun(
-      "binny19-one",
-      pendingWake.runId,
-      (run) => run.status === "executing" || run.status === "failed",
+    assert.equal(pendingWake.status, "queued");
+    assert.equal(pendingWake.queueReason, "bin_busy");
+    const crossBinWake = await triggerRun("binny19-two", "check");
+    assert.equal(crossBinWake.status, "queued");
+    assert.equal(crossBinWake.queueReason, "browser_capacity_exhausted");
+    const cancelledCrossBinWake = cliData<Run>(
+      await cli(["run", "cancel", "binny19-two", crossBinWake.runId]),
+      "cancellation",
     );
-    assert.equal(waitingWake.status, "executing");
+    assert.equal(cancelledCrossBinWake.status, "cancelled");
+    const waitingWake = await readRun("binny19-one", pendingWake.runId);
+    assert.equal(waitingWake.queueReason, "bin_busy");
     assert.equal(
       (await readBin("binny19-one")).execution.environment?.browser?.power
         ?.status,
@@ -1944,6 +1963,9 @@ async function main(): Promise<void> {
     profileTwoCheckResult.result?.check?.availability,
     "unavailable",
   );
+  await updateBin("binny19-two", 0);
+  await waitForBrowserPower("binny19-two", "stopped");
+  await waitForBrowserProcessesStopped("browser-two");
 
   const gateId = randomUUID();
   const gate = await createGate(gateId);
@@ -2059,6 +2081,7 @@ async function main(): Promise<void> {
   );
   assert.equal(afterRestartResult.status, "completed");
   assert.ok((afterRestartResult.result?.commits.length ?? 0) > 0);
+  await updateBin("binny19-two", "disabled");
 
   const contender = await compose(
     ["up", "--detach", "--no-deps", "browser-one-contender"],
@@ -2137,12 +2160,133 @@ async function main(): Promise<void> {
   assert.equal(expiredCollectResult.status, "failed");
   assert.equal(expiredCollectResult.result?.error?.code, "login_required");
   assert.equal(expiredCollectResult.result?.error?.requiresHuman, true);
+
+  await updateBin("binny19-one", 0);
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
+  await updateBin("binny19-one", 30);
+  await waitForBrowserPower("binny19-two", "ready");
+  const browserCapacitySamples: number[] = [
+    await activeBrowserMainProcessCount(),
+  ];
+  assert.equal(browserCapacitySamples.at(-1), 1);
+
+  const capacityCheck = await triggerRun("binny19-one", "check");
+  assert.equal(capacityCheck.status, "queued");
+  assert.equal(capacityCheck.queueReason, "browser_capacity_exhausted");
+  const cancelledCapacityCheck = cliData<Run>(
+    await cli(["run", "cancel", "binny19-one", capacityCheck.runId]),
+    "cancellation",
+  );
+  assert.equal(cancelledCapacityCheck.status, "cancelled");
+
+  const waitingCollect = await triggerRun("binny19-one", "collect");
+  assert.equal(waitingCollect.status, "queued");
+  assert.equal(waitingCollect.queueReason, "browser_capacity_exhausted");
+  const waitingHuman = await startHumanSession("binny19-one");
+  assert.equal(waitingHuman.status, "pending");
+  assert.equal(waitingHuman.queueReason, "browser_capacity_exhausted");
+
+  const activeRemove = cliFailure<{
+    readonly code: string;
+    readonly message: string;
+  }>(await cli(["bin", "remove", "binny19-two"]), "browser_capacity_active");
+  assert.match(activeRemove.message, /浏览器尚未确认退出/u);
+
+  const heldBrowser = await browserMainProcess("browser-two");
+  const heldBrowserPid = await browserContainerProcessId(heldBrowser);
+  await compose([
+    "exec",
+    "--no-TTY",
+    "browser-two",
+    "node",
+    "-e",
+    `process.kill(${String(heldBrowserPid)}, "SIGSTOP");`,
+  ]);
+  try {
+    await updateBin("binny19-two", 0);
+    await waitForBrowserPower("binny19-two", "stopping");
+    browserCapacitySamples.push(await activeBrowserMainProcessCount());
+    assert.equal(browserCapacitySamples.at(-1), 1);
+    assert.equal(
+      (await readRun("binny19-one", waitingCollect.runId)).queueReason,
+      "human_session_active",
+    );
+    assert.equal(
+      cliData<HumanSessionStatus>(
+        await cli(["human", "get", "binny19-one", waitingHuman.sessionId]),
+        "found",
+      ).queueReason,
+      "browser_capacity_exhausted",
+    );
+    const stoppingRemove = cliFailure<{ readonly code: string }>(
+      await cli(["bin", "remove", "binny19-two"]),
+      "browser_capacity_active",
+    );
+    assert.equal(stoppingRemove.code, "browser_capacity_active");
+  } finally {
+    await compose([
+      "exec",
+      "--no-TTY",
+      "browser-two",
+      "node",
+      "-e",
+      `process.kill(${String(heldBrowserPid)}, "SIGCONT");`,
+    ]);
+  }
+  await waitForBrowserPower("binny19-two", "stopped");
+  await waitForBrowserProcessesStopped("browser-two");
+  browserCapacitySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserCapacitySamples.at(-1), 0);
+
+  await waitForHuman("binny19-one", waitingHuman.sessionId, "ready");
+  browserCapacitySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserCapacitySamples.at(-1), 1);
+  const collectDuringHuman = await readRun("binny19-one", waitingCollect.runId);
+  assert.equal(collectDuringHuman.status, "queued");
+  assert.equal(collectDuringHuman.queueReason, "human_session_active");
+  await closeHumanSession("binny19-one", waitingHuman.sessionId);
+  const capacityCollectResult = await waitForRun(
+    "binny19-one",
+    waitingCollect.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(capacityCollectResult.status, "completed");
+  assert.ok((capacityCollectResult.result?.commits.length ?? 0) > 0);
+  browserCapacitySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserCapacitySamples.at(-1), 1);
+  await updateBin("binny19-one", 0);
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
+  browserCapacitySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserCapacitySamples.at(-1), 0);
+  assert.ok(Math.max(...browserCapacitySamples) <= 1);
+  process.stdout.write(
+    `票21跨 bin 容量实测：${JSON.stringify({
+      limit: 1,
+      observedBrowserProcessCounts: browserCapacitySamples,
+      heldReservationQueueReasons: [
+        "browser_capacity_exhausted",
+        "browser_capacity_exhausted",
+      ],
+      stopUnconfirmedRetained: true,
+      activeRemovalRejected: true,
+      stoppedRemovalAccepted: true,
+    })}\n`,
+  );
+
+  cliData<{ readonly removed: true; readonly id: string }>(
+    await cli(["bin", "remove", "binny19-two"]),
+    "removed",
+  );
 }
 
 try {
   try {
     await main();
-    process.stdout.write("票19与票20浏览器生命周期正式 Compose 验收通过。\n");
+    process.stdout.write(
+      "票19、票20与票21浏览器生命周期正式 Compose 验收通过。\n",
+    );
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,

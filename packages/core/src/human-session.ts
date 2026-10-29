@@ -9,6 +9,8 @@ import {
   collectorManifestStoredSchema,
   humanSessionFailureSchema,
   humanSessionSchema,
+  runtimeHeartbeatTimeoutMs,
+  runtimeProtocolVersion,
   type HumanSession,
   type HumanSessionApiError,
   type HumanSessionFailure,
@@ -22,10 +24,23 @@ import {
   binConfigurations,
   humanSessions,
   manualRuns,
+  runtimeConnections,
   type Database,
   type Transaction,
 } from "@binny/db";
-import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+  sql,
+} from "drizzle-orm";
+
+import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 
 const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
 
@@ -67,15 +82,80 @@ function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function rowToSession(row: SessionRow): HumanSession {
+async function rowToSession(
+  database: Database | Transaction,
+  row: SessionRow,
+  browserCapacity: BrowserCapacityCoordinator,
+): Promise<HumanSession> {
   const failure =
     row.failure === null
       ? undefined
       : humanSessionFailureSchema.parse(row.failure);
+  let queueReason: HumanSession["queueReason"];
+  if (row.status === "pending") {
+    const [activeRun] = await database
+      .select({ runId: manualRuns.runId })
+      .from(manualRuns)
+      .where(
+        and(
+          eq(manualRuns.binId, row.binId),
+          or(
+            inArray(manualRuns.status, ["executing", "cancelling"]),
+            and(
+              isNotNull(manualRuns.startedAt),
+              isNull(manualRuns.stopConfirmedAt),
+            ),
+          ),
+        ),
+      )
+      .limit(1);
+    if (activeRun !== undefined) {
+      queueReason = "bin_busy";
+    } else {
+      const [owner] = await database
+        .select({
+          runtimeId: runtimeConnections.runtimeId,
+          ownerGeneration: runtimeConnections.ownerGeneration,
+          protocolVersion: runtimeConnections.protocolVersion,
+          online: exists(
+            database
+              .select({ binId: runtimeConnections.binId })
+              .from(runtimeConnections)
+              .where(
+                and(
+                  eq(runtimeConnections.binId, row.binId),
+                  eq(runtimeConnections.disconnected, false),
+                  eq(runtimeConnections.ownerState, "confirmed"),
+                  gt(
+                    runtimeConnections.lastHeartbeatAt,
+                    sql`now() - ${runtimeHeartbeatTimeoutMs} * interval '1 millisecond'`,
+                  ),
+                ),
+              ),
+          ),
+        })
+        .from(runtimeConnections)
+        .where(eq(runtimeConnections.binId, row.binId));
+      if (owner === undefined || !owner.online) {
+        queueReason = "runtime_offline";
+      } else {
+        queueReason = await browserCapacity.queueReason(
+          database,
+          {
+            binId: row.binId,
+            runtimeId: owner.runtimeId,
+            ownerGeneration: owner.ownerGeneration,
+          },
+          owner.protocolVersion >= runtimeProtocolVersion,
+        );
+      }
+    }
+  }
   return humanSessionSchema.parse({
     sessionId: row.sessionId,
     binId: row.binId,
     status: row.status,
+    ...(queueReason === undefined ? {} : { queueReason }),
     requestedAt: row.requestedAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     ...(row.readyAt === null ? {} : { readyAt: row.readyAt.toISOString() }),
@@ -124,8 +204,10 @@ export async function applyRuntimeHumanSessionHeartbeat(
     readonly runtimeId: string;
     readonly ownerGeneration: string;
     readonly ownerConfirmed: boolean;
+    readonly supportsReservationId: boolean;
     readonly event?: RuntimeHumanSessionEvent;
   },
+  browserCapacity: BrowserCapacityCoordinator,
 ): Promise<RuntimeHumanSessionControl | undefined> {
   let session = await readActiveSession(transaction, options.binId);
   if (session === undefined) return undefined;
@@ -261,24 +343,47 @@ export async function applyRuntimeHumanSessionHeartbeat(
       )
       .limit(1);
     if (activeRun === undefined) {
-      await transaction
-        .update(humanSessions)
-        .set({
-          status: "opening",
+      const reservation = await browserCapacity.reserve(
+        transaction,
+        {
+          binId: options.binId,
           runtimeId: options.runtimeId,
           ownerGeneration: generation,
-          gatewayClosed: false,
-          runtimeClosed: false,
-          failure: null,
-          updatedAt: sql`clock_timestamp()`,
-        })
-        .where(eq(humanSessions.sessionId, session.sessionId));
-      session =
-        (await readActiveSession(transaction, options.binId)) ?? session;
+        },
+        options.supportsReservationId,
+      );
+      if (reservation.kind === "reserved") {
+        await transaction
+          .update(humanSessions)
+          .set({
+            status: "opening",
+            runtimeId: options.runtimeId,
+            ownerGeneration: generation,
+            gatewayClosed: false,
+            runtimeClosed: false,
+            failure: null,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(humanSessions.sessionId, session.sessionId));
+        session =
+          (await readActiveSession(transaction, options.binId)) ?? session;
+      }
     }
   }
 
   if (session.status === "opening" && options.ownerConfirmed) {
+    const reservation = await browserCapacity.reservation(transaction, {
+      binId: options.binId,
+      runtimeId: options.runtimeId,
+      ownerGeneration: generation,
+    });
+    if (
+      reservation === undefined ||
+      reservation.status === "stopping" ||
+      reservation.status === "unknown" ||
+      (reservation.requiresReservationId && !options.supportsReservationId)
+    )
+      return undefined;
     const tunnelToken = randomBytes(32).toString("base64url");
     await transaction
       .update(humanSessions)
@@ -291,6 +396,9 @@ export async function applyRuntimeHumanSessionHeartbeat(
       sessionId: session.sessionId,
       action: "open",
       tunnelToken,
+      ...(options.supportsReservationId
+        ? { browserReservationId: reservation.reservationId }
+        : {}),
     };
   }
   if (session.status === "closing") {
@@ -302,7 +410,10 @@ export async function applyRuntimeHumanSessionHeartbeat(
   return undefined;
 }
 
-export function createHumanSessionStore(database: Database): HumanSessionStore {
+export function createHumanSessionStore(
+  database: Database,
+  browserCapacity: BrowserCapacityCoordinator,
+): HumanSessionStore {
   return {
     async requestHumanSession(binId) {
       return await database.transaction(async (transaction) => {
@@ -349,7 +460,7 @@ export function createHumanSessionStore(database: Database): HumanSessionStore {
         return {
           ok: true,
           value: {
-            ...rowToSession(row),
+            ...(await rowToSession(transaction, row, browserCapacity)),
             viewerPath:
               "/human-sessions/" +
               sessionId +
@@ -377,7 +488,10 @@ export function createHumanSessionStore(database: Database): HumanSessionStore {
             "没有找到这个浏览器人工会话。",
             ["sessionId"],
           )
-        : { ok: true, value: rowToSession(row) };
+        : {
+            ok: true,
+            value: await rowToSession(database, row, browserCapacity),
+          };
     },
 
     async closeHumanSession(binId, sessionId) {
@@ -421,7 +535,10 @@ export function createHumanSessionStore(database: Database): HumanSessionStore {
             .returning();
           if (closed === undefined)
             throw new Error("待处理的浏览器人工会话没有关闭记录。");
-          return { ok: true, value: rowToSession(closed) };
+          return {
+            ok: true,
+            value: await rowToSession(transaction, closed, browserCapacity),
+          };
         }
         const [updated] = await transaction
           .update(humanSessions)
@@ -437,7 +554,10 @@ export function createHumanSessionStore(database: Database): HumanSessionStore {
           .returning();
         if (updated === undefined)
           throw new Error("浏览器人工会话关闭请求没有返回记录。");
-        return { ok: true, value: rowToSession(updated) };
+        return {
+          ok: true,
+          value: await rowToSession(transaction, updated, browserCapacity),
+        };
       });
     },
 
