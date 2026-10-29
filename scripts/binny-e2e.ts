@@ -6536,9 +6536,10 @@ async function main(): Promise<void> {
   let cleanupError: Error | undefined;
   let acceptanceFailed = false;
   let acceptanceError: unknown;
+  const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  try {
+  acceptance: try {
     assert.ok(
       !upgradeOnly ||
         (process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
@@ -6552,13 +6553,16 @@ async function main(): Promise<void> {
       "容量项目不能与会清空其数据库和资源卷的拆包升级路径并行运行。",
     );
     await compose(["build", "server"]);
+    builtImages.add(imageName);
     if (upgradeOnly) {
       // 复用正式 E2E 的冻结升级步骤，定向复验时不启动其余重型旅程。
       await runDatabasePackageUpgradeAcceptance();
-      return;
+      break acceptance;
     }
     await compose(["build", "runtime-fifteen-one"]);
+    builtImages.add(runtimeImageName);
     await compose(["build", "runtime-rss"]);
+    builtImages.add(rssRuntimeImageName);
     if (
       process.env.BINNY_E2E_BASELINE_IMAGE !== undefined &&
       process.env.BINNY_E2E_BASELINE_IMAGE.length > 0
@@ -6682,10 +6686,10 @@ async function main(): Promise<void> {
         cleanupError = new Error(
           "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
         );
-      } else {
+      } else if (builtImages.size > 0) {
         const imageCleanup = await run(
           "docker",
-          ["image", "rm", imageName, runtimeImageName, rssRuntimeImageName],
+          ["image", "rm", ...builtImages],
           { env: composeEnvironment() },
         );
         if (imageCleanup.code !== 0) {
