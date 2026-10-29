@@ -5,6 +5,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { createApiClient } from "@binny/api/client";
+import { validationFailure } from "@binny/api/validation";
 import {
   archiveAggregationInputSchema,
   archiveAggregationResultSchema,
@@ -311,19 +312,9 @@ function createCliContract(identity: CliCommandIdentity) {
           }
           const checked = archiveSearchInputSchema.safeParse(request);
           if (!checked.success) {
-            const issue = checked.error.issues[0];
-            const error = {
-              code: "invalid_input",
-              message: issue?.message ?? "归档搜索请求格式无效。",
-              ...(issue === undefined
-                ? {}
-                : {
-                    path: issue.path.map((part) =>
-                      typeof part === "symbol" ? String(part) : part,
-                    ),
-                  }),
-            } as const;
-            return outcome.failure.apiError(error);
+            return outcome.failure.apiError(
+              validationFailure(checked.error.issues).error,
+            );
           }
           const response = await dependencies
             .createClient()
@@ -374,19 +365,9 @@ function createCliContract(identity: CliCommandIdentity) {
           }
           const checked = archiveAggregationInputSchema.safeParse(request);
           if (!checked.success) {
-            const issue = checked.error.issues[0];
-            const error = {
-              code: "invalid_input",
-              message: issue?.message ?? "归档聚合请求格式无效。",
-              ...(issue === undefined
-                ? {}
-                : {
-                    path: issue.path.map((part) =>
-                      typeof part === "symbol" ? String(part) : part,
-                    ),
-                  }),
-            } as const;
-            return outcome.failure.apiError(error);
+            return outcome.failure.apiError(
+              validationFailure(checked.error.issues).error,
+            );
           }
           const response = await dependencies
             .createClient()

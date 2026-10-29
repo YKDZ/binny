@@ -26,7 +26,7 @@ async function run(command: string, args: readonly string[]): Promise<string> {
   assert.equal(
     code,
     0,
-    `${command} ${args.join(" ")} failed${signal === null ? "" : ` (${signal})`}: ${error}`,
+    `${command} ${args.join(" ")} 执行失败${signal === null ? "" : `（信号 ${signal}）`}：${error}`,
   );
   return `${output}${error}`;
 }
@@ -42,15 +42,13 @@ async function waitForManifest(baseUrl: string): Promise<unknown> {
       if (response.ok) {
         return await response.json();
       }
-      lastError = new Error(`runtime returned HTTP ${response.status}`);
+      lastError = new Error(`运行器返回 HTTP ${response.status}`);
     } catch (error) {
       lastError = error;
     }
     await delay(250);
   }
-  throw new Error(
-    `lightweight runtime did not publish its manifest: ${String(lastError)}`,
-  );
+  throw new Error(`轻量运行器未发布清单：${String(lastError)}`);
 }
 
 try {
