@@ -3755,6 +3755,77 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     { key: "weightSum", op: "sum", value: "10" },
   ]);
 
+  const relationTargetTextFilter = await aggregate({
+    scope: { kind: "current" },
+    unit: "relation",
+    relations: {
+      direction: "outgoing",
+      target: {
+        type: "text",
+        text: { kind: "regex", pattern: "聚合关系视图" },
+      },
+    },
+    groupBy: [],
+    metrics: [{ key: "edges", op: "count" }],
+  });
+  assert.equal(relationTargetTextFilter.groups[0]?.metrics[0]?.value, "1");
+
+  const invalidRelationTargetRegex = await client.archives.aggregate.$post({
+    json: archiveAggregationInputSchema.parse({
+      scope: { kind: "current" },
+      unit: "relation",
+      relations: {
+        direction: "outgoing",
+        target: { type: "text", text: { kind: "regex", pattern: "[" } },
+      },
+      groupBy: [],
+      metrics: [{ key: "edges", op: "count" }],
+    }),
+  });
+  const invalidRelationTargetRegexText =
+    await invalidRelationTargetRegex.text();
+  const combinedInvalidRelationTargetRegex =
+    await client.archives.aggregate.$post({
+      json: archiveAggregationInputSchema.parse({
+        scope: { kind: "current" },
+        unit: "relation",
+        text: { kind: "regex", pattern: ".*" },
+        relations: {
+          direction: "outgoing",
+          target: { type: "text", text: { kind: "regex", pattern: "[" } },
+        },
+        groupBy: [],
+        metrics: [{ key: "edges", op: "count" }],
+      }),
+    });
+  const combinedInvalidRelationTargetRegexText =
+    await combinedInvalidRelationTargetRegex.text();
+  assert.equal(invalidRelationTargetRegex.status, 400);
+  const invalidRelationTargetRegexError = archiveErrorSchema.parse(
+    JSON.parse(invalidRelationTargetRegexText),
+  );
+  assert.equal(invalidRelationTargetRegexError.error.code, "invalid_input");
+  assert.deepEqual(invalidRelationTargetRegexError.error.path, [
+    "relations",
+    "target",
+    "text",
+    "pattern",
+  ]);
+  assert.equal(combinedInvalidRelationTargetRegex.status, 400);
+  const combinedInvalidRelationTargetRegexError = archiveErrorSchema.parse(
+    JSON.parse(combinedInvalidRelationTargetRegexText),
+  );
+  assert.equal(
+    combinedInvalidRelationTargetRegexError.error.code,
+    "invalid_input",
+  );
+  assert.deepEqual(combinedInvalidRelationTargetRegexError.error.path, [
+    "relations",
+    "target",
+    "text",
+    "pattern",
+  ]);
+
   const cycleKey = "aggregation-aba-" + runId;
   const cycleRevisions: string[] = [];
   for (const [index, cycle] of ["A", "B", "A"].entries()) {

@@ -1453,6 +1453,9 @@ export function createArchiveAggregationOperation(
       const regexPatterns = searchRegexPatterns({
         ...(input.text === undefined ? {} : { text: input.text }),
         ...(input.where === undefined ? {} : { where: input.where }),
+        ...(input.relations === undefined
+          ? {}
+          : { relations: input.relations }),
       });
       try {
         return await database.transaction(

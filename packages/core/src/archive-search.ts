@@ -158,6 +158,7 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
 export function searchRegexPatterns(input: {
   readonly text?: ArchiveSearchText | undefined;
   readonly where?: ArchiveSearchFilter | undefined;
+  readonly relations?: ArchiveSearchPathStep | undefined;
   readonly expandPaths?:
     | readonly { readonly steps: readonly ArchiveSearchPathStep[] }[]
     | undefined;
@@ -225,6 +226,9 @@ export function searchRegexPatterns(input: {
     }
   };
   if (input.where !== undefined) visit(input.where, ["where"]);
+  if (input.relations?.target !== undefined) {
+    visitTarget(input.relations.target, ["relations", "target"]);
+  }
   for (const [index, expansion] of (input.expandPaths ?? []).entries()) {
     for (const [stepIndex, step] of expansion.steps.entries()) {
       if (step.target !== undefined) {
