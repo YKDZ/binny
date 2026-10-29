@@ -279,6 +279,41 @@ services:
       - browser-one-owner:/var/lib/binny/runtime
     restart: "no"
 
+  runtime-linuxdo:
+    image: ${BINNY24_RUNTIME_IMAGE:-binny24-linuxdo:local}
+    profiles: [binny24]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-linuxdo"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: ${BINNY24_BIN_ID:-linuxdo}
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - linuxdo-runtime-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  linuxdo-e2e-source:
+    <<: *binny-image
+    profiles: [linuxdo-e2e]
+    command:
+      - node
+      - --conditions=source
+      - scripts/binny-e2e-linuxdo-source.ts
+    environment:
+      BINNY24_SOURCE_PORT: 8081
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   bins:
@@ -293,3 +328,4 @@ volumes:
   rss-two-collector-state:
   browser-one-owner:
   browser-two-owner:
+  linuxdo-runtime-owner:
