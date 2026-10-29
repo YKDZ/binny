@@ -1608,9 +1608,14 @@ function failureWithProgress(
   completedScopes: readonly string[],
 ) {
   if (isCollectorActionError(error)) {
+    const errorScopes = Array.isArray(error.completedScopes)
+      ? error.completedScopes.filter(
+          (scope): scope is string => typeof scope === "string",
+        )
+      : [];
     return collectorActionError(error.failure, [
       ...completedScopes,
-      ...error.completedScopes,
+      ...errorScopes,
     ]);
   }
   if (context.signal.aborted) {
