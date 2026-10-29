@@ -54,7 +54,27 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny12-revision-diff-" + process.pid.toString(10);
+const capacityProfile = process.env.BINNY_E2E_CAPACITY_PROFILE ?? "smoke";
+assert.ok(
+  capacityProfile === "full" || capacityProfile === "smoke",
+  "BINNY_E2E_CAPACITY_PROFILE 必须为 smoke 或 full。",
+);
+const capacityPhase =
+  process.env.BINNY_E2E_CAPACITY_PHASE ??
+  (capacityProfile === "full" ? "seed" : "all");
+assert.ok(
+  capacityPhase === "all" ||
+    capacityPhase === "seed" ||
+    capacityPhase === "verify" ||
+    capacityPhase === "delete",
+  "BINNY_E2E_CAPACITY_PHASE 必须为 all、seed、verify 或 delete。",
+);
+const isFullCapacityRun = capacityProfile === "full";
+const preserveCapacityProject =
+  isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
+const projectName = isFullCapacityRun
+  ? "binny26-capacity"
+  : "binny12-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
@@ -461,6 +481,31 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
   assert.deepEqual(failure.path, ["unit"]);
 }
 
+async function capacityHttpStep(baseUrl: string): Promise<string> {
+  const result = await run(
+    "pnpm",
+    [
+      "--silent",
+      "--filter",
+      "@binny/api",
+      "exec",
+      "node",
+      "--conditions=source",
+      "scripts/archive-http-e2e.ts",
+      "capacity",
+      baseUrl,
+    ],
+    {
+      env: {
+        BINNY_E2E_CAPACITY_PROFILE: capacityProfile,
+        BINNY_E2E_CAPACITY_PHASE: capacityPhase,
+      },
+    },
+  );
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  return result.stdout.trim();
+}
+
 async function sdkResourceStep(baseUrl: string): Promise<string> {
   const result = await run("pnpm", [
     "--silent",
@@ -495,6 +540,18 @@ async function containerImageId(service: string): Promise<string> {
     ["inspect", "--format", "{{.Image}}", containerId],
     { env: composeEnvironment() },
   );
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function networkSubnet(network: string): Promise<string> {
+  const result = await run("docker", [
+    "network",
+    "inspect",
+    "--format",
+    "{{(index .IPAM.Config 0).Subnet}}",
+    network,
+  ]);
   assert.equal(result.code, 0, result.stderr);
   return result.stdout.trim();
 }
@@ -5416,6 +5473,481 @@ async function runRssAcceptance(
   }
 }
 
+type PostgresPerformanceStats = {
+  readonly sequentialScans: number;
+  readonly sequentialTuplesRead: number;
+  readonly indexScans: number;
+  readonly indexTuplesFetched: number;
+  readonly temporaryFiles: number;
+  readonly temporaryBytes: number;
+  readonly databaseBytes: number;
+};
+
+type ContainerLimit = {
+  readonly service: string;
+  readonly nanoCpus: number;
+  readonly cpuQuota: number;
+  readonly cpuPeriod: number;
+  readonly cpuCores: number;
+  readonly memoryBytes: number;
+};
+
+type ContainerUsage = {
+  readonly cpuPercent: number;
+  readonly memoryBytes: number;
+  readonly blockIo: string;
+  readonly processes: number;
+};
+
+type CapacitySampler = {
+  samples: number;
+  peakCombinedCpuPercent: number;
+  peakCombinedMemoryBytes: number;
+  readonly server: {
+    peakCpuPercent: number;
+    peakMemoryBytes: number;
+    blockIo: string;
+    processes: number;
+  };
+  readonly postgres: {
+    peakCpuPercent: number;
+    peakMemoryBytes: number;
+    blockIo: string;
+    processes: number;
+  };
+};
+
+function parseDockerBytes(value: string): number {
+  const matched = /^([\d.]+)\s*(B|kB|KiB|MB|MiB|GB|GiB|TB|TiB)$/u.exec(
+    value.trim(),
+  );
+  assert.ok(matched, "无法解析 Docker 内存字节值：" + value);
+  const scale: Readonly<Record<string, number>> = {
+    B: 1,
+    kB: 1_000,
+    KiB: 1_024,
+    MB: 1_000_000,
+    MiB: 1_048_576,
+    GB: 1_000_000_000,
+    GiB: 1_073_741_824,
+    TB: 1_000_000_000_000,
+    TiB: 1_099_511_627_776,
+  };
+  return Number(matched[1]) * scale[matched[2]!]!;
+}
+
+async function readPostgresPerformanceStats(): Promise<PostgresPerformanceStats> {
+  const query = [
+    "WITH table_stats AS (",
+    "      SELECT",
+    "        COALESCE(sum(seq_scan), 0) AS sequential_scans,",
+    "        COALESCE(sum(seq_tup_read), 0) AS sequential_tuples_read,",
+    "        COALESCE(sum(idx_scan), 0) AS index_scans,",
+    "        COALESCE(sum(idx_tup_fetch), 0) AS index_tuples_fetched",
+    "      FROM pg_stat_user_tables",
+    "    ), database_stats AS (",
+    "      SELECT temp_files AS temporary_files, temp_bytes AS temporary_bytes",
+    "      FROM pg_stat_database WHERE datname = current_database()",
+    "    )",
+    "    SELECT json_build_object(",
+    "      'sequentialScans', table_stats.sequential_scans,",
+    "      'sequentialTuplesRead', table_stats.sequential_tuples_read,",
+    "      'indexScans', table_stats.index_scans,",
+    "      'indexTuplesFetched', table_stats.index_tuples_fetched,",
+    "      'temporaryFiles', database_stats.temporary_files,",
+    "      'temporaryBytes', database_stats.temporary_bytes,",
+    "      'databaseBytes', pg_database_size(current_database())",
+    "    )::text",
+    "    FROM table_stats CROSS JOIN database_stats;",
+  ].join("\n");
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    "postgres",
+    "psql",
+    "-A",
+    "-t",
+    "-q",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    query,
+  ]);
+  return JSON.parse(result.stdout.trim()) as PostgresPerformanceStats;
+}
+
+async function inspectContainerLimit(service: string): Promise<ContainerLimit> {
+  const id = (await compose(["ps", "-q", service])).stdout.trim();
+  assert.ok(id, "没有找到容量验收服务容器：" + service);
+  const result = await run("docker", [
+    "inspect",
+    "--format",
+    "{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuQuota}}|{{.HostConfig.CpuPeriod}}|{{.HostConfig.Memory}}",
+    id,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  const [nanoText, quotaText, periodText, memoryText] = result.stdout
+    .trim()
+    .split("|");
+  const nanoCpus = Number(nanoText);
+  const cpuQuota = Number(quotaText);
+  const cpuPeriod = Number(periodText);
+  const memoryBytes = Number(memoryText);
+  const cpuCores =
+    nanoCpus > 0 ? nanoCpus / 1_000_000_000 : cpuQuota / cpuPeriod;
+  return { service, nanoCpus, cpuQuota, cpuPeriod, cpuCores, memoryBytes };
+}
+
+async function readContainerUsage(
+  serverId: string,
+  postgresId: string,
+): Promise<{
+  readonly server: ContainerUsage;
+  readonly postgres: ContainerUsage;
+}> {
+  const result = await run("docker", [
+    "stats",
+    "--no-stream",
+    "--format",
+    "{{.ID}}|{{.CPUPerc}}|{{.MemUsage}}|{{.BlockIO}}|{{.PIDs}}",
+    serverId,
+    postgresId,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  const byId = new Map<string, ContainerUsage>();
+  for (const line of result.stdout.trim().split("\n")) {
+    const [id, cpuText, memoryText, blockIo, processText] = line.split("|");
+    assert.ok(id && cpuText && memoryText && blockIo && processText);
+    const usedMemory = memoryText.split("/")[0];
+    assert.ok(usedMemory);
+    byId.set(id, {
+      cpuPercent: Number(cpuText.replace("%", "")),
+      memoryBytes: parseDockerBytes(usedMemory),
+      blockIo,
+      processes: Number(processText),
+    });
+  }
+  const findUsage = (containerId: string): ContainerUsage | undefined =>
+    [...byId].find(([id]) => containerId.startsWith(id))?.[1];
+  const server = findUsage(serverId);
+  const postgres = findUsage(postgresId);
+  assert.ok(server, "Docker stats 没有返回 core 容器采样。");
+  assert.ok(postgres, "Docker stats 没有返回 PostgreSQL 容器采样。");
+  return { server, postgres };
+}
+
+function updateCapacitySampler(
+  sampler: CapacitySampler,
+  usage: { readonly server: ContainerUsage; readonly postgres: ContainerUsage },
+): void {
+  sampler.samples += 1;
+  sampler.server.peakCpuPercent = Math.max(
+    sampler.server.peakCpuPercent,
+    usage.server.cpuPercent,
+  );
+  sampler.server.peakMemoryBytes = Math.max(
+    sampler.server.peakMemoryBytes,
+    usage.server.memoryBytes,
+  );
+  sampler.server.blockIo = usage.server.blockIo;
+  sampler.server.processes = usage.server.processes;
+  sampler.postgres.peakCpuPercent = Math.max(
+    sampler.postgres.peakCpuPercent,
+    usage.postgres.cpuPercent,
+  );
+  sampler.postgres.peakMemoryBytes = Math.max(
+    sampler.postgres.peakMemoryBytes,
+    usage.postgres.memoryBytes,
+  );
+  sampler.postgres.blockIo = usage.postgres.blockIo;
+  sampler.postgres.processes = usage.postgres.processes;
+  sampler.peakCombinedCpuPercent = Math.max(
+    sampler.peakCombinedCpuPercent,
+    usage.server.cpuPercent + usage.postgres.cpuPercent,
+  );
+  sampler.peakCombinedMemoryBytes = Math.max(
+    sampler.peakCombinedMemoryBytes,
+    usage.server.memoryBytes + usage.postgres.memoryBytes,
+  );
+}
+
+async function readVolumeUsage(
+  service: "server" | "postgres",
+  directory: string,
+): Promise<{
+  readonly allocatedBytes: number;
+  readonly apparentBytes?: number;
+  readonly fileCount?: number;
+  readonly availableBytes: number;
+}> {
+  const allocationArguments =
+    service === "server" ? ["-sB1", directory] : ["-sk", directory];
+  const allocationScale = service === "server" ? 1 : 1_024;
+  const allocated = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "du",
+    ...allocationArguments,
+  ]);
+  const df = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "df",
+    "-B1",
+    "-P",
+    directory,
+  ]);
+  const allocation =
+    Number(allocated.stdout.trim().split(/\s+/u)[0]) * allocationScale;
+  const dfColumns = df.stdout.trim().split("\n").at(-1)?.trim().split(/\s+/u);
+  assert.ok(Number.isSafeInteger(allocation) && allocation >= 0);
+  assert.ok(
+    dfColumns !== undefined && Number.isSafeInteger(Number(dfColumns[3])),
+  );
+
+  let apparentBytes: number | undefined;
+  let fileCount: number | undefined;
+  if (service === "server") {
+    const fileSizes = await compose([
+      "exec",
+      "--no-TTY",
+      "server",
+      "find",
+      directory,
+      "-type",
+      "f",
+      "-printf",
+      "%s\n",
+    ]);
+    const sizes = fileSizes.stdout
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map(Number);
+    apparentBytes = sizes.reduce((total, size) => total + size, 0);
+    fileCount = sizes.length;
+  }
+  return {
+    allocatedBytes: allocation,
+    ...(apparentBytes === undefined ? {} : { apparentBytes }),
+    ...(fileCount === undefined ? {} : { fileCount }),
+    availableBytes: Number(dfColumns[3]),
+  };
+}
+
+async function runCapacityAcceptance(baseUrl: string): Promise<void> {
+  const dockerInfo = await run("docker", [
+    "info",
+    "--format",
+    "{{.NCPU}}|{{.MemTotal}}|{{.DockerRootDir}}",
+  ]);
+  assert.equal(dockerInfo.code, 0, dockerInfo.stderr);
+  const [hostCpuText, hostMemoryText, dockerRoot] = dockerInfo.stdout
+    .trim()
+    .split("|");
+  const host = {
+    cpuCount: Number(hostCpuText),
+    memoryBytes: Number(hostMemoryText),
+    dockerRoot,
+  };
+  const networkSubnets = {
+    api: await networkSubnet(projectName + "_default"),
+    runtime: await networkSubnet(projectName + "_runtime"),
+  };
+  assert.equal(
+    networkSubnets.api,
+    process.env.BINNY_E2E_SUBNET ?? "10.253.23.0/24",
+  );
+  assert.equal(
+    networkSubnets.runtime,
+    process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.150.0/24",
+  );
+  const serverId = (await compose(["ps", "-q", "server"])).stdout.trim();
+  const postgresId = (await compose(["ps", "-q", "postgres"])).stdout.trim();
+  assert.ok(serverId && postgresId);
+  const limits = await Promise.all([
+    inspectContainerLimit("server"),
+    inspectContainerLimit("postgres"),
+  ]);
+  for (const limit of limits) {
+    assert.ok(
+      Math.abs(limit.cpuCores - 1) < 0.001,
+      limit.service + " 应限制为 1 vCPU。",
+    );
+    assert.equal(limit.memoryBytes, 2 * 1024 * 1024 * 1024);
+  }
+
+  const resourceVolumeBefore = await readVolumeUsage(
+    "server",
+    "/var/lib/binny/resources",
+  );
+  const postgresVolumeBefore = await readVolumeUsage(
+    "postgres",
+    "/var/lib/postgresql/data",
+  );
+  if (preserveCapacityProject && capacityPhase === "seed") {
+    assert.ok(
+      resourceVolumeBefore.availableBytes >= 102_000_000_000,
+      "百 GB 媒体负载前可用卷空间不足；没有开始上传。",
+    );
+  }
+  const before = await readPostgresPerformanceStats();
+  const sampler: CapacitySampler = {
+    samples: 0,
+    peakCombinedCpuPercent: 0,
+    peakCombinedMemoryBytes: 0,
+    server: {
+      peakCpuPercent: 0,
+      peakMemoryBytes: 0,
+      blockIo: "",
+      processes: 0,
+    },
+    postgres: {
+      peakCpuPercent: 0,
+      peakMemoryBytes: 0,
+      blockIo: "",
+      processes: 0,
+    },
+  };
+  const stageStartedAt = Date.now();
+  let sampling = true;
+  let samplingError: unknown;
+  const sample = async (): Promise<void> => {
+    updateCapacitySampler(
+      sampler,
+      await readContainerUsage(serverId, postgresId),
+    );
+    if (sampler.samples % 12 === 0) {
+      process.stdout.write(
+        "容量负载采样：已运行 " +
+          String(Math.floor((Date.now() - stageStartedAt) / 1000)) +
+          " 秒，core+PostgreSQL 峰值内存 " +
+          String(sampler.peakCombinedMemoryBytes) +
+          " B。\n",
+      );
+    }
+  };
+  const samplerTask = (async (): Promise<void> => {
+    while (sampling) {
+      await sample();
+      if (sampling) await wait(5_000);
+    }
+  })().catch((error: unknown) => {
+    samplingError = error;
+  });
+
+  let apiReport = "";
+  try {
+    apiReport = await capacityHttpStep(baseUrl);
+  } finally {
+    sampling = false;
+    await samplerTask;
+  }
+  if (samplingError !== undefined) throw samplingError;
+
+  const after = await readPostgresPerformanceStats();
+  const resourceVolume = await readVolumeUsage(
+    "server",
+    "/var/lib/binny/resources",
+  );
+  const postgresVolume = await readVolumeUsage(
+    "postgres",
+    "/var/lib/postgresql/data",
+  );
+  const resourceVolumeDelta = {
+    allocatedBytes:
+      resourceVolume.allocatedBytes - resourceVolumeBefore.allocatedBytes,
+    apparentBytes:
+      resourceVolume.apparentBytes! - resourceVolumeBefore.apparentBytes!,
+    fileCount: resourceVolume.fileCount! - resourceVolumeBefore.fileCount!,
+    availableBytes:
+      resourceVolume.availableBytes - resourceVolumeBefore.availableBytes,
+  };
+  const postgresVolumeDelta = {
+    allocatedBytes:
+      postgresVolume.allocatedBytes - postgresVolumeBefore.allocatedBytes,
+    availableBytes:
+      postgresVolume.availableBytes - postgresVolumeBefore.availableBytes,
+  };
+  const capacityReport = JSON.parse(apiReport) as {
+    readonly uniqueReferencedResourceCount: number;
+    readonly expectedReferencedUniqueMediaBytes: number;
+  };
+  if (capacityPhase === "seed" || capacityPhase === "all") {
+    assert.equal(
+      resourceVolumeDelta.fileCount,
+      capacityReport.uniqueReferencedResourceCount,
+      "磁盘新增资源文件数应与正式上传的唯一资源数相符。",
+    );
+    assert.equal(
+      resourceVolumeDelta.apparentBytes,
+      capacityReport.expectedReferencedUniqueMediaBytes,
+      "磁盘新增资源正文总字节数应与 HTTP 上传的唯一媒体字节相符。",
+    );
+  } else if (capacityPhase === "delete") {
+    assert.equal(resourceVolumeDelta.fileCount, 0);
+    assert.equal(resourceVolumeDelta.apparentBytes, 0);
+  }
+  const commit = await run("git", ["rev-parse", "HEAD"]);
+  assert.equal(commit.code, 0, commit.stderr);
+  const serverImageId = await containerImageId("server");
+  const serverBuildImageId = await imageId(activeServerImage);
+  const postgresImageId = await containerImageId("postgres");
+  const tree = await run("git", ["rev-parse", "HEAD^{tree}"]);
+  assert.equal(tree.code, 0, tree.stderr);
+  const delta = {
+    sequentialScans: after.sequentialScans - before.sequentialScans,
+    sequentialTuplesRead:
+      after.sequentialTuplesRead - before.sequentialTuplesRead,
+    indexScans: after.indexScans - before.indexScans,
+    indexTuplesFetched: after.indexTuplesFetched - before.indexTuplesFetched,
+    temporaryFiles: after.temporaryFiles - before.temporaryFiles,
+    temporaryBytes: after.temporaryBytes - before.temporaryBytes,
+  };
+  process.stdout.write(
+    "归档容量验收实测：" +
+      JSON.stringify(
+        {
+          project: projectName,
+          phase: capacityPhase,
+          commit: commit.stdout.trim(),
+          tree: tree.stdout.trim(),
+          serverImageId,
+          serverBuildImageId,
+          postgresImageId,
+          node: process.version,
+          host,
+          networkSubnets,
+          coreAndPostgresLimits: limits,
+          resourcesVolumeBefore: resourceVolumeBefore,
+          resourcesVolumeDelta: resourceVolumeDelta,
+          sampleCount: sampler.samples,
+          elapsedMilliseconds: Date.now() - stageStartedAt,
+          peakCombinedCpuPercent: sampler.peakCombinedCpuPercent,
+          peakCombinedMemoryBytes: sampler.peakCombinedMemoryBytes,
+          containerPeaks: {
+            server: sampler.server,
+            postgres: sampler.postgres,
+          },
+          resourcesVolume: resourceVolume,
+          postgresVolumeBefore,
+          postgresVolume,
+          postgresVolumeDelta,
+          postgresPerformance: { before, after, delta },
+          capacity: capacityReport,
+          preservedForNextPhase: preserveCapacityProject,
+        },
+        null,
+        2,
+      ) +
+      "\n",
+  );
+}
+
 async function main(): Promise<void> {
   const overrideDirectory = await mkdtemp(
     path.join(tmpdir(), "binny12-revision-diff-compose-"),
@@ -5428,7 +5960,12 @@ async function main(): Promise<void> {
     composeOverrideFile,
     [
       "services:",
+      "  postgres:",
+      '    cpus: "1.0"',
+      '    mem_limit: "2g"',
       "  server:",
+      '    cpus: "1.0"',
+      '    mem_limit: "2g"',
       "    ports: !override",
       '      - "3000"',
       "  manual-runs-source:",
@@ -5485,6 +6022,12 @@ async function main(): Promise<void> {
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
   try {
+    assert.ok(
+      !isFullCapacityRun ||
+        process.env.BINNY_E2E_BASELINE_IMAGE === undefined ||
+        process.env.BINNY_E2E_BASELINE_IMAGE.length === 0,
+      "容量项目不能与会清空其数据库和资源卷的拆包升级路径并行运行。",
+    );
     await compose(["build", "server"]);
     await compose(["build", "runtime-fifteen-one"]);
     await compose(["build", "runtime-rss"]);
@@ -5527,41 +6070,49 @@ async function main(): Promise<void> {
     );
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    const isolatedClient = await verifyIsolatedApiConsumer({
-      repositoryRoot,
-      projectName,
-    });
-    assert.deepEqual(isolatedClient, {
-      health: "ok",
-      binIds: [],
-    });
-    await verifyConfigurationJourney(baseUrl);
-    const manualRunManifest = await createRuntimeFixtureManifest();
-    await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
-    await manualRunControllerPartitionStep();
-    await manualRunsHttpStep(baseUrl, manualRunManifest);
-    baseUrl = await scheduledRunsStep(baseUrl);
-    await runRssAcceptance(baseUrl, rssControlSource);
-    for (const binId of ["binny15-one", "binny15-two"]) {
-      const removed = cliData<{
-        readonly removed: boolean;
-        readonly id: string;
-      }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
-      assert.deepEqual(removed, { removed: true, id: binId });
+    if (
+      !(
+        isFullCapacityRun &&
+        (capacityPhase === "verify" || capacityPhase === "delete")
+      )
+    ) {
+      const isolatedClient = await verifyIsolatedApiConsumer({
+        repositoryRoot,
+        projectName,
+      });
+      assert.deepEqual(isolatedClient, {
+        health: "ok",
+        binIds: [],
+      });
+      await verifyConfigurationJourney(baseUrl);
+      const manualRunManifest = await createRuntimeFixtureManifest();
+      await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
+      await manualRunControllerPartitionStep();
+      await manualRunsHttpStep(baseUrl, manualRunManifest);
+      baseUrl = await scheduledRunsStep(baseUrl);
+      await runRssAcceptance(baseUrl, rssControlSource);
+      for (const binId of ["binny15-one", "binny15-two"]) {
+        const removed = cliData<{
+          readonly removed: boolean;
+          readonly id: string;
+        }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
+        assert.deepEqual(removed, { removed: true, id: binId });
+      }
+      const enabled = cliData<{ readonly status: string }>(
+        await cli(baseUrl, ["bin", "enable", "rss-main"]),
+        "enabled",
+      );
+      assert.equal(enabled.status, "active");
+      const archive = await archiveHttpStep("submit", baseUrl);
+      await archiveAggregationCliStep(baseUrl);
+      const sdkResource = await sdkResourceStep(baseUrl);
+      baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
+      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
+      process.stdout.write(
+        "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+      );
     }
-    const enabled = cliData<{ readonly status: string }>(
-      await cli(baseUrl, ["bin", "enable", "rss-main"]),
-      "enabled",
-    );
-    assert.equal(enabled.status, "active");
-    const archive = await archiveHttpStep("submit", baseUrl);
-    await archiveAggregationCliStep(baseUrl);
-    const sdkResource = await sdkResourceStep(baseUrl);
-    baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-    baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
-    process.stdout.write(
-      "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
-    );
+    await runCapacityAcceptance(baseUrl);
   } catch (error) {
     acceptanceFailed = true;
     acceptanceError = error;
@@ -5582,36 +6133,42 @@ async function main(): Promise<void> {
           error instanceof Error ? error : new Error(String(error));
       }
     }
-    const cleanup = await run(
-      "docker",
-      [
-        ...composePrefix(),
-        "--profile",
-        "binny15",
-        "--profile",
-        "binny22",
-        "down",
-        "--volumes",
-        "--remove-orphans",
-      ],
-      { env: composeEnvironment() },
-    );
-    if (cleanup.code !== 0) {
-      cleanupError = new Error(
-        "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
+    if (preserveCapacityProject || acceptanceFailed) {
+      process.stdout.write(
+        "保留本票 Compose 项目与持久卷供最终聚合验收：" + projectName + "。\n",
       );
     } else {
-      const imageCleanup = await run(
+      const cleanup = await run(
         "docker",
-        ["image", "rm", imageName, runtimeImageName, rssRuntimeImageName],
+        [
+          ...composePrefix(),
+          "--profile",
+          "binny15",
+          "--profile",
+          "binny22",
+          "down",
+          "--volumes",
+          "--remove-orphans",
+        ],
         { env: composeEnvironment() },
       );
-      if (imageCleanup.code !== 0) {
+      if (cleanup.code !== 0) {
         cleanupError = new Error(
-          "清理本次 Compose 构建镜像失败：\n" +
-            imageCleanup.stdout +
-            imageCleanup.stderr,
+          "清理 Compose 资源失败：\n" + cleanup.stdout + cleanup.stderr,
         );
+      } else {
+        const imageCleanup = await run(
+          "docker",
+          ["image", "rm", imageName, runtimeImageName, rssRuntimeImageName],
+          { env: composeEnvironment() },
+        );
+        if (imageCleanup.code !== 0) {
+          cleanupError = new Error(
+            "清理本次 Compose 构建镜像失败：\n" +
+              imageCleanup.stdout +
+              imageCleanup.stderr,
+          );
+        }
       }
     }
     await rm(overrideDirectory, { recursive: true, force: true });
