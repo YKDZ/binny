@@ -523,7 +523,7 @@ async function seedUpgradeRun(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      protocolVersion: 3,
+      protocolVersion: 4,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true,
@@ -532,7 +532,11 @@ async function seedUpgradeRun(
       collector: manifest,
       environment: {
         kind: "lightweight",
-        browser: { available: false, profileReuseAfterRestart: false },
+        browser: {
+          available: false,
+          profileReuseAfterRestart: false,
+          power: { status: "unavailable" },
+        },
       },
     }),
   });

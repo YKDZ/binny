@@ -31,6 +31,7 @@ const binSelection = {
   identityId: binConfigurations.identityId,
   config: binConfigurations.config,
   targets: binConfigurations.targets,
+  browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   status: binConfigurations.status,
   createdAt: binConfigurations.createdAt,
   updatedAt: binConfigurations.updatedAt,
@@ -203,6 +204,29 @@ export function validateCollectorConfiguration(
   };
 }
 
+function validateBrowserIdlePolicy(
+  collector: CollectorManifest,
+  browserIdleTimeoutSeconds: number | null,
+): BinError | undefined {
+  const browser = collector.environment.browser;
+  if (
+    browserIdleTimeoutSeconds === null ||
+    !browser.required ||
+    browser.profileReuseAfterRestart
+  )
+    return undefined;
+
+  const reason = browser.profileReuseUnavailableReason;
+  return {
+    code: "invalid_configuration",
+    message:
+      reason === undefined
+        ? "采集器不支持关闭浏览器后复用持久配置文件。"
+        : `采集器不支持关闭浏览器后复用持久配置文件：${reason}`,
+    path: ["browserIdleTimeoutSeconds"],
+  };
+}
+
 export type CollectorActionValidation =
   | { readonly ok: true }
   | {
@@ -283,6 +307,7 @@ function rowToConfiguration(row: BinRow): BinConfiguration {
     identityId: row.identityId,
     config: row.config,
     targets: row.targets,
+    browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
     status: row.status,
     execution: {
       status: "offline",
@@ -333,6 +358,16 @@ export function createBinConfigurationStore(
       );
       if (invalid !== undefined)
         return { ok: false, status: 400, error: invalid };
+      const browserIdleTimeoutSeconds =
+        checked.data.browserIdleTimeoutSeconds === undefined
+          ? 300
+          : checked.data.browserIdleTimeoutSeconds;
+      const invalidIdlePolicy = validateBrowserIdlePolicy(
+        checked.data.collector,
+        browserIdleTimeoutSeconds,
+      );
+      if (invalidIdlePolicy !== undefined)
+        return { ok: false, status: 400, error: invalidIdlePolicy };
 
       try {
         const [row] = await database
@@ -343,6 +378,7 @@ export function createBinConfigurationStore(
             identityId: checked.data.identityId,
             config: checked.data.config,
             targets: checked.data.targets,
+            browserIdleTimeoutSeconds,
             status: "active",
           })
           .returning(binSelection);
@@ -387,9 +423,23 @@ export function createBinConfigurationStore(
         const collector = checked.data.collector ?? existing.collector;
         const config = checked.data.config ?? existing.config;
         const targets = checked.data.targets ?? existing.targets;
+        const browserIdleTimeoutSeconds =
+          checked.data.browserIdleTimeoutSeconds === undefined
+            ? previous.browserIdleTimeoutSeconds
+            : checked.data.browserIdleTimeoutSeconds;
         const invalid = validateCollectorConfiguration(collector, config);
         if (invalid !== undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
+        const invalidIdlePolicy = validateBrowserIdlePolicy(
+          collector,
+          browserIdleTimeoutSeconds,
+        );
+        if (invalidIdlePolicy !== undefined)
+          return {
+            ok: false as const,
+            status: 400 as const,
+            error: invalidIdlePolicy,
+          };
 
         // Drizzle 没有用于 UPDATE 的事务时间 helper；保留原来的 PostgreSQL now() 语义。
         const [updated] = await transaction
@@ -399,6 +449,7 @@ export function createBinConfigurationStore(
             identityId: checked.data.identityId ?? existing.identityId,
             config,
             targets,
+            browserIdleTimeoutSeconds,
             updatedAt: sql`now()`,
           })
           .where(eq(binConfigurations.id, id))

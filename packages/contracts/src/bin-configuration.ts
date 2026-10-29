@@ -86,22 +86,109 @@ const collectorActionsSchema = z
   .record(collectorActionNameSchema, collectorActionSchema)
   .and(z.object({ check: collectorActionSchema }));
 
-export const collectorManifestSchema = withPostgresJsonSchemaProjection(
-  z.object({
-    id: collectorIdSchema,
-    version: postgresTextSchema.min(1, "采集器版本不能为空。"),
-    description: postgresTextSchema.optional(),
-    configSchema: jsonSchemaDocumentSchema,
-    actions: collectorActionsSchema,
-    environment: z.object({
-      browser: z.object({
-        required: z.boolean(),
-        profileReuseAfterRestart: z.boolean(),
-        profileReuseUnavailableReason: postgresTextSchema.optional(),
-      }),
+const collectorManifestFieldsSchema = z.object({
+  id: collectorIdSchema,
+  version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+  description: postgresTextSchema.optional(),
+  configSchema: jsonSchemaDocumentSchema,
+  actions: collectorActionsSchema,
+  environment: z.object({
+    browser: z.object({
+      required: z.boolean(),
+      profileReuseAfterRestart: z.boolean(),
+      profileReuseUnavailableReason: postgresTextSchema
+        .min(1, "不支持原因不能为空。")
+        .optional(),
     }),
   }),
+});
+
+const collectorManifestCheckedSchema =
+  collectorManifestFieldsSchema.superRefine((collector, context) => {
+    if (
+      collector.environment.browser.required &&
+      !collector.environment.browser.profileReuseAfterRestart &&
+      collector.environment.browser.profileReuseUnavailableReason === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["environment", "browser", "profileReuseUnavailableReason"],
+        message: "不支持关闭后复用浏览器配置文件时必须说明原因。",
+      });
+    }
+  });
+
+registerPostgresJsonSchemaProjection(
+  collectorManifestFieldsSchema,
+  collectorManifestCheckedSchema,
+  collectorManifestFieldsSchema,
 );
+
+export const collectorManifestSchema = withPostgresJsonSchemaProjection(
+  collectorManifestCheckedSchema,
+);
+
+export const browserIdleTimeoutSecondsSchema = z
+  .number()
+  .int("浏览器空闲关闭时长必须是整数秒。")
+  .min(0, "浏览器空闲关闭时长不能为负数。")
+  .max(2_147_483, "浏览器空闲关闭时长不能超过 2147483 秒。");
+
+export const browserPowerStatusSchema = z.enum([
+  "unavailable",
+  "stopped",
+  "starting",
+  "ready",
+  "stopping",
+  "unknown",
+]);
+
+const browserPowerFieldsSchema = z
+  .object({
+    status: browserPowerStatusSchema,
+    error: z
+      .object({
+        code: z.enum([
+          "browser_start_failed",
+          "browser_stop_failed",
+          "browser_interrupted",
+        ]),
+        message: postgresTextSchema.min(1),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const browserPowerCheckedSchema = browserPowerFieldsSchema.superRefine(
+  (power, context) => {
+    if (power.status === "unknown" && power.error === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["error"],
+        message: "浏览器状态未知时必须说明原因。",
+      });
+    } else if (power.status !== "unknown" && power.error !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["error"],
+        message: "只有浏览器状态未知时才能附带生命周期错误。",
+      });
+    }
+  },
+);
+
+registerPostgresJsonSchemaProjection(
+  browserPowerFieldsSchema,
+  browserPowerCheckedSchema,
+  browserPowerFieldsSchema,
+);
+
+export const browserPowerSchema = withPostgresJsonSchemaProjection(
+  browserPowerCheckedSchema,
+);
+
+export type BrowserPower = z.infer<typeof browserPowerSchema>;
 
 export const binCreateInputSchema = withPostgresJsonSchemaProjection(
   z.object({
@@ -110,6 +197,9 @@ export const binCreateInputSchema = withPostgresJsonSchemaProjection(
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,
+    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
+      .nullable()
+      .optional(),
   }),
 );
 
@@ -120,6 +210,9 @@ export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
       targets: targetsSchema.optional(),
+      browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
+        .nullable()
+        .optional(),
     })
     .strict()
     .refine((value) => Object.keys(value).length > 0, {
@@ -131,7 +224,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 3;
+export const runtimeProtocolVersion = 4;
 export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
 export type RuntimeEnvironmentKind = z.infer<
   typeof runtimeEnvironmentKindSchema
@@ -142,6 +235,7 @@ export const runtimeEnvironmentSchema = z.object({
   browser: z.object({
     available: z.boolean(),
     profileReuseAfterRestart: z.boolean(),
+    power: browserPowerSchema,
   }),
 });
 
@@ -213,6 +307,7 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,
+    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
     status: binStatusSchema,
     execution: runtimeExecutionSchema,
     createdAt: z.iso.datetime(),
@@ -286,7 +381,10 @@ export type RuntimeConnectionOperations = {
 };
 
 export const runtimeHeartbeatResultSchema = runtimeExecutionSchema.and(
-  z.object({ humanSession: runtimeHumanSessionControlSchema.optional() }),
+  z.object({
+    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
+    humanSession: runtimeHumanSessionControlSchema.optional(),
+  }),
 );
 
 export type RuntimeHeartbeatResult = z.infer<

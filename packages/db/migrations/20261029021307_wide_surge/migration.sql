@@ -1,0 +1,2 @@
+ALTER TABLE "bin_configurations" ADD COLUMN "browser_idle_timeout_seconds" integer DEFAULT 300;--> statement-breakpoint
+ALTER TABLE "bin_configurations" ADD CONSTRAINT "bin_configurations_browser_idle_timeout_seconds_check" CHECK ("browser_idle_timeout_seconds" between 0 and 2147483);

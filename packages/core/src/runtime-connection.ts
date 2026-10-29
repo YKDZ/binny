@@ -35,6 +35,7 @@ const runtimeSelection = {
   binId: binConfigurations.id,
   configuredCollector: binConfigurations.collector,
   config: binConfigurations.config,
+  browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
   runtimeCollector: runtimeConnections.collector,
   environment: runtimeConnections.environment,
@@ -427,6 +428,7 @@ export function createRuntimeConnectionStore(
               ok: true,
               value: {
                 ...execution,
+                browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
                 ...(humanSession === undefined ? {} : { humanSession }),
               } satisfies RuntimeHeartbeatResult,
             };
