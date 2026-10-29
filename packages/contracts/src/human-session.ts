@@ -14,6 +14,13 @@ export const humanSessionStatusSchema = z.enum([
   "failed",
 ]);
 
+export const humanSessionQueueReasonSchema = z.enum([
+  "runtime_offline",
+  "bin_busy",
+  "browser_capacity_exhausted",
+  "runtime_protocol_outdated",
+]);
+
 export const humanSessionFailureSchema = z
   .object({
     code: postgresTextSchema.min(1).max(128),
@@ -26,6 +33,7 @@ export const humanSessionSchema = z
     sessionId: sessionIdSchema,
     binId: binIdSchema,
     status: humanSessionStatusSchema,
+    queueReason: humanSessionQueueReasonSchema.optional(),
     requestedAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     readyAt: z.iso.datetime().optional(),

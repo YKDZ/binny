@@ -41,6 +41,13 @@ const manualRunStatuses = [
 ] as const;
 const manualRunTriggerTypes = ["manual", "schedule"] as const;
 const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
+const browserCapacityReservationStates = [
+  "reserved",
+  "starting",
+  "ready",
+  "stopping",
+  "unknown",
+] as const;
 const humanSessionStatuses = [
   "pending",
   "opening",
@@ -102,6 +109,7 @@ export const runtimeConnections = pgTable(
       .notNull()
       .defaultNow(),
     disconnected: boolean("disconnected").notNull().default(false),
+    protocolVersion: smallint("protocol_version").notNull().default(0),
     ownerState: text("owner_state", { enum: runtimeOwnerStates })
       .notNull()
       .default("confirmed"),
@@ -118,6 +126,45 @@ export const runtimeConnections = pgTable(
       "runtime_connections_owner_generation_check",
       gte(table.ownerGeneration, 0n),
     ),
+  ],
+);
+
+export const browserCapacityCoordinator = pgTable(
+  "browser_capacity_coordinator",
+  {
+    coordinatorId: smallint("coordinator_id").primaryKey(),
+  },
+  (table) => [
+    check("browser_capacity_coordinator_id_check", eq(table.coordinatorId, 1)),
+  ],
+);
+
+export const browserCapacityReservations = pgTable(
+  "browser_capacity_reservation",
+  {
+    reservationId: uuid("reservation_id").primaryKey(),
+    // 不引用 bin 配置：活动浏览器的容量占位不能随配置级联删除。
+    binId: text("bin_id").notNull(),
+    runtimeId: text("runtime_id").notNull(),
+    ownerGeneration: bigint("owner_generation", { mode: "bigint" }).notNull(),
+    // 迁移前创建的旧 controller 不认识尝试 ID；新预约始终要求精确确认。
+    requiresReservationId: boolean("requires_reservation_id")
+      .notNull()
+      .default(true),
+    status: text("status", {
+      enum: browserCapacityReservationStates,
+    }).notNull(),
+  },
+  (table) => [
+    check(
+      "browser_capacity_reservation_owner_generation_check",
+      gt(table.ownerGeneration, 0n),
+    ),
+    check(
+      "browser_capacity_reservation_status_check",
+      inArray(table.status, browserCapacityReservationStates),
+    ),
+    uniqueIndex("browser_capacity_reservation_bin_id_key").on(table.binId),
   ],
 );
 

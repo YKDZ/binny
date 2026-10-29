@@ -22,12 +22,14 @@ export const runtimeHumanSessionControlSchema = z.discriminatedUnion("action", [
       sessionId: z.string().uuid(),
       action: z.literal("open"),
       tunnelToken: postgresTextSchema.min(1),
+      browserReservationId: z.string().uuid().optional(),
     })
     .strict(),
   z
     .object({
       sessionId: z.string().uuid(),
       action: z.literal("close"),
+      browserReservationId: z.string().uuid().optional(),
     })
     .strict(),
 ]);

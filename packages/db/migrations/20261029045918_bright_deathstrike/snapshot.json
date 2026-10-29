@@ -1,0 +1,294 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "83bfd479-fa6e-4180-927c-69695347fbdc",
+  "prevIds": ["4bbb25ad-7603-46b6-8724-ff984005402e"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "browser_capacity_coordinator"],
+      "writes": [
+        "s|tbl|public.browser_capacity_coordinator",
+        "n|tbl|public.browser_capacity_coordinator",
+        "e|tbl|public.browser_capacity_coordinator",
+        "n|rel|public.browser_capacity_coordinator",
+        "n|type|public.browser_capacity_coordinator",
+        "n|rel|public.browser_capacity_coordinator_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "browser_capacity_reservation"],
+      "writes": [
+        "s|tbl|public.browser_capacity_reservation",
+        "n|tbl|public.browser_capacity_reservation",
+        "e|tbl|public.browser_capacity_reservation",
+        "n|rel|public.browser_capacity_reservation",
+        "n|type|public.browser_capacity_reservation",
+        "n|rel|public.browser_capacity_reservation_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "protocol_version"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.protocol_version",
+        "n|col|public.runtime_connections.protocol_version",
+        "e|col|public.runtime_connections.protocol_version"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "browser_capacity_reservation",
+        "browser_capacity_reservation_bin_id_key"
+      ],
+      "writes": [
+        "s|idx|public.browser_capacity_reservation_bin_id_key",
+        "n|idx|public.browser_capacity_reservation_bin_id_key",
+        "e|idx|public.browser_capacity_reservation_bin_id_key",
+        "n|rel|public.browser_capacity_reservation_bin_id_key"
+      ],
+      "reads": [
+        "n|tbl|public.browser_capacity_reservation",
+        "n|sch|public",
+        "n|col|public.browser_capacity_reservation.bin_id"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "browser_capacity_coordinator",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "browser_capacity_reservation",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_coordinator",
+        "name": "coordinator_id",
+        "type": "smallint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "reservation_id",
+        "type": "uuid",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "bin_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "runtime_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "owner_generation",
+        "type": "bigint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "requires_reservation_id",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "true",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "status",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "protocol_version",
+        "type": "smallint",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "0",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "browser_capacity_reservation_bin_id_key",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": true,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_coordinator",
+        "name": "browser_capacity_coordinator_pkey",
+        "columns": ["coordinator_id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "browser_capacity_reservation_pkey",
+        "columns": ["reservation_id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_coordinator",
+        "name": "browser_capacity_coordinator_id_check",
+        "value": "\"coordinator_id\" = 1",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "browser_capacity_reservation_owner_generation_check",
+        "value": "\"owner_generation\" > 0",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "browser_capacity_reservation",
+        "name": "browser_capacity_reservation_status_check",
+        "value": "\"status\" in ('reserved', 'starting', 'ready', 'stopping', 'unknown')",
+        "entityType": "checks"
+      }
+    }
+  ]
+}

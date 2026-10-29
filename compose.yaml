@@ -73,6 +73,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://binny:${BINNY_POSTGRES_PASSWORD:-binny}@postgres:5432/binny
+      BINNY_BROWSER_CAPACITY_LIMIT: ${BINNY_BROWSER_CAPACITY_LIMIT:-2}
       BINNY_API_URL: http://127.0.0.1:3000
       BINNY_RESOURCE_DIRECTORY: /var/lib/binny/resources
       BINNY_RESOURCE_UNREFERENCED_AGE_MS: ${BINNY_RESOURCE_UNREFERENCED_AGE_MS:-86400000}

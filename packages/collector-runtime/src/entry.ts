@@ -33,7 +33,11 @@ import {
   type RuntimeEnvironment,
 } from "@binny/contracts";
 
-import { BrowserLifecycle } from "./browser-lifecycle.ts";
+import {
+  BrowserLifecycle,
+  type BrowserPowerChangeResult,
+  type BrowserPowerEvent,
+} from "./browser-lifecycle.ts";
 import { createRuntimeServer } from "./runtime-server.ts";
 
 const collectorPath = process.env.BINNY_COLLECTOR_ENTRY ?? "/app/dist/index.js";
@@ -204,6 +208,12 @@ let browserIdleSince: number | undefined;
 let browserIdleTimer: NodeJS.Timeout | undefined;
 let browserIdleProbeInFlight = false;
 let browserIdleCloseInFlight: Promise<void> | undefined;
+const pendingBrowserPowerEvents: {
+  readonly reservationId: string;
+  readonly event: BrowserPowerEvent;
+  readonly power: BrowserPower;
+}[] = [];
+let browserPowerEventsInFlight: Promise<BrowserPowerChangeResult> | undefined;
 const runtimeId = randomUUID();
 const browserLifecycle =
   environmentKind === "browser"
@@ -215,10 +225,13 @@ const browserLifecycle =
         profileDirectory:
           process.env.BINNY_BROWSER_PROFILE_DIRECTORY ??
           "/var/lib/binny/runtime/browser-profile",
-        onPowerChange(power) {
+        async onPowerChange(power, reservationId, event) {
           browserPower = power;
           refreshBrowserIdle();
+          if (event !== undefined && reservationId !== undefined)
+            return await reportBrowserPowerEvent(reservationId, event, power);
           startHeartbeat();
+          return "accepted";
         },
       })
     : undefined;
@@ -256,6 +269,165 @@ let pendingHumanSessionEvent: RuntimeHumanSessionEvent | undefined;
 let claimInFlight = false;
 let stopping: Promise<void> | undefined;
 let lastStatus: string | undefined;
+
+async function sendBrowserPowerEventNow(
+  event: (typeof pendingBrowserPowerEvents)[number],
+): Promise<BrowserPowerChangeResult> {
+  try {
+    const environment = runtimeEnvironment();
+    const response = await client.bins[":binId"].runtime.heartbeat.$post({
+      param: { binId: runtimeBinId },
+      json: {
+        protocolVersion: runtimeProtocolVersion,
+        runtimeId,
+        ownerGeneration,
+        ownerLockAcquired: true,
+        activeRunId,
+        claimInFlight,
+        collector: manifest,
+        environment:
+          event.event === "not_started"
+            ? {
+                ...environment,
+                browser: {
+                  ...environment.browser,
+                  power: event.power,
+                },
+              }
+            : environment,
+        browserPowerEvent: {
+          reservationId: event.reservationId,
+          event: event.event,
+        },
+      },
+    });
+    if (response.status === 200) {
+      const result = await response.json();
+      acceptBrowserIdleTimeout(result.browserIdleTimeoutSeconds);
+      logStatus(result.status);
+      return "accepted";
+    }
+    if (response.status >= 500) return "unavailable";
+    await response.json();
+    return "rejected";
+  } catch {
+    return "unavailable";
+  }
+}
+
+function removeBrowserPowerEvents(
+  reservationId: string,
+  events: readonly BrowserPowerEvent[],
+): void {
+  for (let index = pendingBrowserPowerEvents.length - 1; index >= 0; index--) {
+    const pending = pendingBrowserPowerEvents[index]!;
+    if (
+      pending.reservationId === reservationId &&
+      events.includes(pending.event)
+    )
+      pendingBrowserPowerEvents.splice(index, 1);
+  }
+}
+
+async function flushBrowserPowerEvents(): Promise<BrowserPowerChangeResult> {
+  if (browserPowerEventsInFlight !== undefined)
+    return await browserPowerEventsInFlight;
+  const work = (async () => {
+    while (pendingBrowserPowerEvents.length > 0) {
+      const event = pendingBrowserPowerEvents[0]!;
+      const result = await sendBrowserPowerEventNow(event);
+      if (result === "accepted") {
+        if (pendingBrowserPowerEvents[0] === event)
+          pendingBrowserPowerEvents.shift();
+        if (
+          event.event === "stopping" &&
+          browserPower.status === "stopped" &&
+          !pendingBrowserPowerEvents.some(
+            (pending) =>
+              pending.reservationId === event.reservationId &&
+              pending.event === "stopped",
+          )
+        )
+          pendingBrowserPowerEvents.push({
+            reservationId: event.reservationId,
+            event: "stopped",
+            power: { status: "stopped" },
+          });
+        continue;
+      }
+      if (result === "unavailable") return result;
+
+      const hasRestart = pendingBrowserPowerEvents.some(
+        (pending) =>
+          pending.reservationId === event.reservationId &&
+          (pending.event === "starting" || pending.event === "ready"),
+      );
+      if (
+        hasRestart &&
+        (event.event === "stopping" || event.event === "stopped")
+      ) {
+        removeBrowserPowerEvents(event.reservationId, ["stopping", "stopped"]);
+        continue;
+      }
+      if (
+        event.event === "starting" ||
+        event.event === "ready" ||
+        event.event === "unknown" ||
+        event.event === "not_started"
+      )
+        removeBrowserPowerEvents(event.reservationId, [event.event]);
+      return result;
+    }
+    return "accepted";
+  })();
+  browserPowerEventsInFlight = work;
+  try {
+    return await work;
+  } finally {
+    if (browserPowerEventsInFlight === work)
+      browserPowerEventsInFlight = undefined;
+  }
+}
+
+async function reportBrowserPowerEvent(
+  reservationId: string,
+  event: BrowserPowerEvent,
+  power: BrowserPower,
+): Promise<BrowserPowerChangeResult> {
+  if (event === "not_started")
+    removeBrowserPowerEvents(reservationId, [
+      "starting",
+      "ready",
+      "stopping",
+      "stopped",
+      "unknown",
+    ]);
+  if (
+    event === "stopped" &&
+    !pendingBrowserPowerEvents.some(
+      (pending) =>
+        pending.reservationId === reservationId && pending.event === "stopping",
+    )
+  )
+    pendingBrowserPowerEvents.push({
+      reservationId,
+      event: "stopping",
+      power,
+    });
+  if (
+    !pendingBrowserPowerEvents.some(
+      (pending) =>
+        pending.reservationId === reservationId && pending.event === event,
+    )
+  )
+    pendingBrowserPowerEvents.push({ reservationId, event, power });
+
+  const result = await flushBrowserPowerEvents();
+  if (event === "starting" && result !== "accepted")
+    removeBrowserPowerEvents(reservationId, ["starting"]);
+  if (pendingBrowserPowerEvents.length > 0) startHeartbeat();
+  return result;
+}
 
 type WorkerOutcome =
   | { readonly type: "completion"; readonly completion: ManualRunCompletion }
@@ -500,17 +672,28 @@ async function awaitExecutionPermission(
 
 async function executeRun(run: ManualRunExecution): Promise<void> {
   const permission = await awaitExecutionPermission(run);
-  if (permission === "terminal") return;
+  const browserReservationId = run.browserReservationId;
+  async function confirmNotStarted(): Promise<void> {
+    if (browserReservationId !== undefined)
+      await browserLifecycle?.confirmNotStarted(browserReservationId);
+  }
+  if (permission === "terminal") {
+    await confirmNotStarted();
+    return;
+  }
   if (permission === "cancel") {
+    await confirmNotStarted();
     await acknowledgeStoppedRun(run.runId);
     return;
   }
   if (permission === "shutdown") {
     const current = await readRun(run);
     if (current?.status === "cancelling") {
+      await confirmNotStarted();
       await acknowledgeStoppedRun(run.runId);
     } else if (current?.status === "executing") {
       await finishRun(run, interruptFailure());
+      await confirmNotStarted();
     }
     return;
   }
@@ -537,8 +720,13 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
     if (activeCollector.environment.browser.required) {
       if (browserLifecycle === undefined)
         throw new Error("本次采集器需要浏览器，但运行镜像没有浏览器控制器。");
-      await browserLifecycle.ensureReady();
-      browserConnection = await browserLifecycle.bindWorkerEndpoint(run.runId);
+      if (browserReservationId === undefined)
+        throw new Error("运行器没有收到浏览器容量预约，拒绝启动浏览器。");
+      await browserLifecycle.ensureReady(browserReservationId);
+      browserConnection = await browserLifecycle.bindWorkerEndpoint(
+        run.runId,
+        browserReservationId,
+      );
       browserBound = true;
     }
     worker = startActionWorker();
@@ -573,7 +761,17 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
 
     await sendWorkerMessage(worker, {
       type: "execute",
-      run,
+      run: {
+        runId: run.runId,
+        binId: run.binId,
+        identityId: run.identityId,
+        collectorId: run.collectorId,
+        collectorVersion: run.collectorVersion,
+        action: run.action,
+        params: run.params,
+        config: run.config,
+        targets: run.targets,
+      },
       ...(browserConnection === undefined
         ? {}
         : { browser: browserConnection }),
@@ -665,6 +863,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         `运行器无法启动采集器执行进程：run=${run.runId} ${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
+    if (worker === undefined) await confirmNotStarted();
     if (worker === undefined || workerStopped)
       await acknowledgeStoppedRun(run.runId);
   } finally {
@@ -884,6 +1083,11 @@ async function heartbeat(
     );
     await closeHumanSessionAfterHeartbeatFailure();
   } finally {
+    if (
+      pendingBrowserPowerEvents.length > 0 &&
+      browserPowerEventsInFlight === undefined
+    )
+      void flushBrowserPowerEvents();
     if (stopping === undefined) {
       heartbeatTimer = setTimeout(
         () => {
@@ -932,6 +1136,17 @@ async function applyHumanSessionControl(
 ): Promise<void> {
   if (control.action === "open") {
     if (activeHumanSessionId === control.sessionId) return;
+    if (control.browserReservationId === undefined) {
+      pendingHumanSessionEvent = {
+        sessionId: control.sessionId,
+        event: "failed",
+        failure: {
+          code: "browser_reservation_missing",
+          message: "核心没有提供浏览器容量预约。",
+        },
+      };
+      return;
+    }
     if (browserLifecycle === undefined) {
       pendingHumanSessionEvent = {
         sessionId: control.sessionId,
@@ -950,6 +1165,7 @@ async function applyHumanSessionControl(
       const { ended } = await browserLifecycle.openHumanSession(
         control.sessionId,
         control.tunnelToken,
+        control.browserReservationId,
       );
       activeHumanSessionId = control.sessionId;
       openingHumanSessionId = undefined;
@@ -990,6 +1206,8 @@ async function applyHumanSessionControl(
 
   if (browserLifecycle === undefined) return;
   try {
+    if (control.browserReservationId !== undefined)
+      await browserLifecycle.confirmNotStarted(control.browserReservationId);
     await browserLifecycle.closeHumanSession(control.sessionId);
     if (activeHumanSessionId === control.sessionId)
       activeHumanSessionId = undefined;

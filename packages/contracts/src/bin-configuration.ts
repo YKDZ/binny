@@ -256,7 +256,8 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 4;
+export const legacyRuntimeProtocolVersion = 4;
+export const runtimeProtocolVersion = 5;
 export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
 export type RuntimeEnvironmentKind = z.infer<
   typeof runtimeEnvironmentKindSchema
@@ -282,6 +283,20 @@ export const runtimeEnvironmentSchema = z.object({
   }),
 });
 
+export const runtimeBrowserPowerEventSchema = z
+  .object({
+    reservationId: z.string().uuid(),
+    event: z.enum([
+      "starting",
+      "ready",
+      "stopping",
+      "stopped",
+      "unknown",
+      "not_started",
+    ]),
+  })
+  .strict();
+
 const runtimeOwnerGenerationSchema = postgresTextSchema
   .regex(/^[1-9][0-9]*$/u, "运行器所有权代际必须是正十进制整数。")
   .refine(
@@ -291,19 +306,46 @@ const runtimeOwnerGenerationSchema = postgresTextSchema
     "运行器所有权代际超出 PostgreSQL bigint 范围。",
   );
 
-export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
-  z.object({
+const runtimeHeartbeatFieldsSchema = z.object({
+  runtimeId: postgresTextSchema.min(1),
+  ownerGeneration: runtimeOwnerGenerationSchema,
+  ownerLockAcquired: z.literal(true),
+  activeRunId: z.string().uuid().nullable(),
+  claimInFlight: z.boolean(),
+  stoppedRunId: z.string().uuid().optional(),
+  humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
+  collector: collectorManifestStoredSchema,
+  environment: runtimeEnvironmentSchema,
+});
+
+const legacyRuntimeHeartbeatSchema = runtimeHeartbeatFieldsSchema.extend({
+  protocolVersion: z.literal(legacyRuntimeProtocolVersion),
+});
+
+const runtimeHeartbeatV5Schema = runtimeHeartbeatFieldsSchema
+  .extend({
     protocolVersion: z.literal(runtimeProtocolVersion),
-    runtimeId: postgresTextSchema.min(1),
-    ownerGeneration: runtimeOwnerGenerationSchema,
-    ownerLockAcquired: z.literal(true),
-    activeRunId: z.string().uuid().nullable(),
-    claimInFlight: z.boolean(),
-    stoppedRunId: z.string().uuid().optional(),
-    humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
-    collector: collectorManifestStoredSchema,
-    environment: runtimeEnvironmentSchema,
-  }),
+    browserPowerEvent: runtimeBrowserPowerEventSchema.optional(),
+  })
+  .superRefine((input, context) => {
+    const event = input.browserPowerEvent;
+    if (
+      event?.event === "not_started" &&
+      input.environment.browser.power.status !== "stopped"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["environment", "browser", "power", "status"],
+        message: "未启动确认只能伴随已停止的真实电源状态。",
+      });
+    }
+  });
+
+export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
+  z.discriminatedUnion("protocolVersion", [
+    legacyRuntimeHeartbeatSchema,
+    runtimeHeartbeatV5Schema,
+  ]),
 );
 
 export const runtimeDisconnectInputSchema = z.object({
@@ -374,6 +416,8 @@ export const binErrorSchema = z.object({
       "runtime_configuration_incompatible",
       "runtime_environment_incompatible",
       "runtime_owner_mismatch",
+      "browser_capacity_active",
+      "browser_reservation_mismatch",
     ]),
     message: postgresTextSchema,
     path: z.array(z.union([z.string(), z.number()])).optional(),

@@ -543,7 +543,7 @@ function makeApp(operations: ApiOperations) {
         const result = await operations.bins.removeBin(
           c.req.valid("param").binId,
         );
-        if (!result.ok) return c.json({ error: result.error }, 404);
+        if (!result.ok) return c.json({ error: result.error }, result.status);
         return c.json({ removed: true as const, ...result.value }, 200);
       },
     )
