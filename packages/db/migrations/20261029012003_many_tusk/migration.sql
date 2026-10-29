@@ -5,6 +5,7 @@ CREATE TABLE "human_sessions" (
 	"status" text DEFAULT 'pending' NOT NULL,
 	"runtime_id" text,
 	"owner_generation" bigint,
+	"runtime_token_hash" text,
 	"gateway_closed" boolean DEFAULT false NOT NULL,
 	"runtime_closed" boolean DEFAULT false NOT NULL,
 	"failure" jsonb,

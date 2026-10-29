@@ -13,6 +13,7 @@ import {
   createHumanSessionStore,
   createManualRunStore,
   createRuntimeConnectionStore,
+  createScheduleStore,
 } from "@binny/core";
 import { connectDatabase, migrateDatabase } from "@binny/db";
 // 核心与 HTTP 的组装、配置及服务启动。
@@ -28,6 +29,8 @@ export type ServerRuntime = {
   readonly attachUpgradeHandler: (server: ServerType) => () => void;
   readonly close: () => Promise<void>;
 };
+
+const schedulePollIntervalMs = 1_000;
 
 function environmentMilliseconds(
   name: string,
@@ -64,6 +67,7 @@ export async function createServerRuntime(options: {
   });
   const runtime = createRuntimeConnectionStore(database);
   const runs = createManualRunStore(database);
+  const schedules = createScheduleStore(database);
   const humanSessions = createHumanSessionStore(database);
   const viewerWaitMs = environmentMilliseconds(
     "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
@@ -105,6 +109,23 @@ export async function createServerRuntime(options: {
     }
     throw error;
   }
+  let schedulePoll: ReturnType<typeof setInterval> | undefined;
+  let scheduleWork: Promise<void> | undefined;
+  let scheduleClosing = false;
+  const pollSchedules = (): void => {
+    if (scheduleClosing || scheduleWork !== undefined) return;
+    scheduleWork = schedules
+      .processDueSchedules()
+      .catch((error: unknown) => {
+        console.error("采集计划处理失败：", error);
+      })
+      .finally(() => {
+        scheduleWork = undefined;
+      });
+  };
+  schedulePoll = setInterval(pollSchedules, schedulePollIntervalMs);
+  schedulePoll.unref();
+  pollSchedules();
   const humanOperations: HumanSessionOperations = {
     requestHumanSession: (binId) => humanSessions.requestHumanSession(binId),
     getHumanSession: (binId, sessionId) =>
@@ -145,6 +166,7 @@ export async function createServerRuntime(options: {
     bins: createBinConfigurationStore(database),
     runtime: runtimeOperations,
     runs,
+    schedules,
     archives,
     humanSessions: humanOperations,
   });
@@ -188,6 +210,10 @@ export async function createServerRuntime(options: {
     attachUpgradeHandler: (server) =>
       gateway.attach(server as import("node:http").Server),
     close: async () => {
+      scheduleClosing = true;
+      if (schedulePoll !== undefined) clearInterval(schedulePoll);
+      schedulePoll = undefined;
+      await scheduleWork;
       if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
       await humanSessions.beginHumanGatewayShutdown();
       try {

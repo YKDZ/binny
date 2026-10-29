@@ -2,8 +2,8 @@
   "type": "diff",
   "version": "9",
   "dialect": "postgres",
-  "id": "2b5c0b60-c667-4f6c-b15c-50f87c9f1f3a",
-  "prevIds": ["20c0fb4f-3c1c-4161-b6e0-c870bccd8399"],
+  "id": "725b15cf-d254-447f-ab8c-d49858a3670e",
+  "prevIds": ["1f7fd304-d5c8-4b4a-bb11-069fc61af708"],
   "footprints": [
     {
       "statementType": "create_table",
@@ -177,6 +177,22 @@
         "table": "human_sessions",
         "name": "owner_generation",
         "type": "bigint",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "runtime_token_hash",
+        "type": "text",
         "typeSchema": null,
         "notNull": false,
         "dimensions": 0,

@@ -6,6 +6,7 @@ import {
   archiveRelationEntrySchema,
   archiveRelationPageSchema,
   archiveRelationStateSchema,
+  archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
   archiveSnapshotSequenceSchema,
   archiveTimelineCursorSchema,
@@ -14,6 +15,7 @@ import {
   type ArchiveCommit,
   type ArchiveItemRead,
   type ArchiveOperation,
+  type ArchiveRevisionRead,
   type ArchiveOperations,
   type ArchiveRelationEntry,
   type ArchiveRelationOptions,
@@ -50,6 +52,7 @@ import {
 import { alias, unionAll } from "drizzle-orm/pg-core";
 
 import {
+  canonicalJson,
   failure,
   isoTimestamp,
   optionalText,
@@ -146,6 +149,81 @@ function optionalDiagnostics(value: unknown): {
   readonly diagnostics?: unknown;
 } {
   return value === null ? {} : { diagnostics: value };
+}
+
+function revisionFieldSnapshot(value: unknown) {
+  return value === undefined
+    ? { present: false as const }
+    : { present: true as const, value };
+}
+
+function revisionFieldDiff(before: unknown, after: unknown) {
+  if (before === undefined && after === undefined) {
+    return { status: "unchanged" as const };
+  }
+  if (
+    before !== undefined &&
+    after !== undefined &&
+    canonicalJson(before) === canonicalJson(after)
+  ) {
+    return { status: "unchanged" as const };
+  }
+  return {
+    status: "changed" as const,
+    before: revisionFieldSnapshot(before),
+    after: revisionFieldSnapshot(after),
+  };
+}
+
+function revisionResourceDiff(
+  before: ArchiveRevisionRead["state"]["resources"],
+  after: ArchiveRevisionRead["state"]["resources"],
+) {
+  const beforeIds = new Set((before ?? []).map(({ resourceId }) => resourceId));
+  const afterIds = new Set((after ?? []).map(({ resourceId }) => resourceId));
+  return {
+    added: [...afterIds]
+      .filter((resourceId) => !beforeIds.has(resourceId))
+      .sort(),
+    removed: [...beforeIds]
+      .filter((resourceId) => !afterIds.has(resourceId))
+      .sort(),
+  };
+}
+
+function archiveRevisionDiff(
+  first: ArchiveRevisionRead,
+  second: ArchiveRevisionRead,
+) {
+  const fields = {
+    sourceRef: revisionFieldDiff(first.state.sourceRef, second.state.sourceRef),
+    sourceModifiedAt: revisionFieldDiff(
+      first.state.sourceModifiedAt,
+      second.state.sourceModifiedAt,
+    ),
+    metadata: revisionFieldDiff(first.state.metadata, second.state.metadata),
+    properties: revisionFieldDiff(
+      first.state.properties,
+      second.state.properties,
+    ),
+    body: revisionFieldDiff(first.state.body, second.state.body),
+    capture: revisionFieldDiff(first.state.capture, second.state.capture),
+  };
+  const resources = revisionResourceDiff(
+    first.state.resources,
+    second.state.resources,
+  );
+  return archiveRevisionDiffSchema.parse({
+    itemId: first.itemId,
+    firstRevisionId: first.revisionId,
+    secondRevisionId: second.revisionId,
+    fields,
+    resources,
+    hasChanges:
+      Object.values(fields).some(({ status }) => status === "changed") ||
+      resources.added.length > 0 ||
+      resources.removed.length > 0,
+  });
 }
 
 function nullableColumn<TColumn extends AnyColumn>(
@@ -1379,6 +1457,7 @@ export function createArchiveReadOperations(
   | "getArchiveItem"
   | "getArchiveRelations"
   | "getArchiveRevision"
+  | "compareArchiveRevisions"
   | "getArchiveTimeline"
   | "getArchiveCommit"
 > {
@@ -1548,6 +1627,95 @@ export function createArchiveReadOperations(
             stateHash: row.stateHash,
             state: row.stateData,
           }),
+        };
+      });
+    },
+
+    async compareArchiveRevisions(firstRevisionId, secondRevisionId) {
+      const checkedFirstId = archiveIdentifierSchema.safeParse(firstRevisionId);
+      if (!checkedFirstId.success) {
+        return validationFailure(
+          checkedFirstId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["firstRevisionId", ...issue.path],
+          })),
+        );
+      }
+      const checkedSecondId =
+        archiveIdentifierSchema.safeParse(secondRevisionId);
+      if (!checkedSecondId.success) {
+        return validationFailure(
+          checkedSecondId.error.issues.map((issue) => ({
+            message: issue.message,
+            path: ["secondRevisionId", ...issue.path],
+          })),
+        );
+      }
+      // UUID 输入大小写等价；PostgreSQL 返回的小写规范形式用于内存键查询。
+      const normalizedFirstId = checkedFirstId.data.toLowerCase();
+      const normalizedSecondId = checkedSecondId.data.toLowerCase();
+      return await withArchiveReadTransaction(database, async (transaction) => {
+        const rows = await transaction
+          .select({
+            revisionId: archiveRevisions.revisionId,
+            stateHash: archiveRevisions.stateHash,
+            stateData: archiveRevisions.stateData,
+            itemId: archiveItems.itemId,
+            namespace: archiveItems.namespace,
+            sourceKey: archiveItems.sourceKey,
+          })
+          .from(archiveRevisions)
+          .innerJoin(
+            archiveItems,
+            eq(archiveItems.itemId, archiveRevisions.itemId),
+          )
+          .where(
+            inArray(archiveRevisions.revisionId, [
+              normalizedFirstId,
+              normalizedSecondId,
+            ]),
+          );
+        const revisionsById = new Map(
+          rows.map((row) => [
+            row.revisionId,
+            archiveRevisionReadSchema.parse({
+              revisionId: row.revisionId,
+              itemId: row.itemId,
+              sourceKey: { namespace: row.namespace, key: row.sourceKey },
+              stateHash: row.stateHash,
+              state: row.stateData,
+            }),
+          ]),
+        );
+        const first = revisionsById.get(normalizedFirstId);
+        if (first === undefined) {
+          return failure(
+            404,
+            "revision_not_found",
+            "没有找到第一个内容版本。",
+            ["firstRevisionId"],
+          );
+        }
+        const second = revisionsById.get(normalizedSecondId);
+        if (second === undefined) {
+          return failure(
+            404,
+            "revision_not_found",
+            "没有找到第二个内容版本。",
+            ["secondRevisionId"],
+          );
+        }
+        if (first.itemId !== second.itemId) {
+          return failure(
+            409,
+            "revision_item_mismatch",
+            "只能比较同一归档条目的内容版本。",
+            ["secondRevisionId"],
+          );
+        }
+        return {
+          ok: true,
+          value: archiveRevisionDiff(first, second),
         };
       });
     },

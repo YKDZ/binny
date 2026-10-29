@@ -210,8 +210,129 @@ void checkPublicManualRunCancellationContract;
 
 void checkPublicManualRunContract;
 
+async function checkPublicScheduleContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "rss-main";
+  const scheduleId = "650e8400-e29b-41d4-a716-446655440000";
+  const createInput = {
+    expression: "0 */15 * * * *",
+    timeZone: "Europe/London",
+    action: "collect",
+    params: { feedIds: ["rss-main"] },
+  };
+
+  const created = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: createInput,
+  });
+  if (created.status === 201) {
+    const schedule = await created.json();
+    const timezone: string = schedule.timeZone;
+    const nextDueAt: string = schedule.nextDueAt;
+    void timezone;
+    void nextDueAt;
+    // @ts-expect-error schedule output has no undeclared action alias.
+    void schedule.operation;
+  } else if (
+    created.status === 400 ||
+    created.status === 404 ||
+    created.status === 409
+  ) {
+    const error = await created.json();
+    void error.error.code;
+    // @ts-expect-error schedule errors do not expose a created schedule.
+    void error.scheduleId;
+  }
+
+  void client.bins[":binId"].schedules.$post({
+    param: { binId },
+    // @ts-expect-error schedule parameters must be a JSON object.
+    json: { ...createInput, params: ["invalid"] },
+  });
+
+  const listed = await client.bins[":binId"].schedules.$get({
+    param: { binId },
+  });
+  if (listed.status === 200) {
+    void (await listed.json()).schedules;
+  } else if (listed.status === 404) {
+    void (await listed.json()).error.code;
+  }
+
+  const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
+    param: { binId, scheduleId },
+    json: { expression: "0 30 2 * * *", timeZone: "Europe/London" },
+  });
+  if (updated.status === 200) {
+    void (await updated.json()).nextDueAt;
+  } else if (
+    updated.status === 400 ||
+    updated.status === 404 ||
+    updated.status === 409
+  ) {
+    void (await updated.json()).error.message;
+  }
+
+  const disabled = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].disable.$post({
+    param: { binId, scheduleId },
+  });
+  if (disabled.status === 200) void (await disabled.json()).enabled;
+  else if (disabled.status === 404) void (await disabled.json()).error.code;
+
+  const removed = await client.bins[":binId"].schedules[":scheduleId"].$delete({
+    param: { binId, scheduleId },
+  });
+  if (removed.status === 200) void (await removed.json()).scheduleId;
+  else if (removed.status === 404) void (await removed.json()).error.code;
+}
+
+void checkPublicScheduleContract;
+
 async function checkPublicArchiveContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
+
+  const revisionDiffResponse = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: "650e8400-e29b-41d4-a716-446655440000",
+      secondRevisionId: "750e8400-e29b-41d4-a716-446655440000",
+    },
+  });
+  if (revisionDiffResponse.status === 200) {
+    const revisionDiff = await revisionDiffResponse.json();
+    void (revisionDiff.fields.body.status satisfies "unchanged" | "changed");
+    void (revisionDiff.fields.properties.status satisfies
+      | "unchanged"
+      | "changed");
+    void (revisionDiff.resources.added satisfies readonly string[]);
+    void (revisionDiff.hasChanges satisfies boolean);
+    // @ts-expect-error hasChanges 不能当作文本输出。
+    void (revisionDiff.hasChanges satisfies string);
+    // @ts-expect-error 差异响应不暴露任意 JSON Patch 操作。
+    void revisionDiff.operations;
+  } else if (
+    revisionDiffResponse.status === 400 ||
+    revisionDiffResponse.status === 404 ||
+    revisionDiffResponse.status === 409
+  ) {
+    const revisionDiffError = await revisionDiffResponse.json();
+    void (revisionDiffError.error.code satisfies string);
+    // @ts-expect-error 错误代码不是任意类型或数字。
+    void (revisionDiffError.error.code satisfies number);
+    // @ts-expect-error 归档差异错误不包含成功响应的字段集合。
+    void revisionDiffError.fields;
+  }
+
+  void client.archives.revisions[":firstRevisionId"].diff[
+    ":secondRevisionId"
+  ].$get({
+    // @ts-expect-error 两个版本标识都是必填路径参数。
+    param: { firstRevisionId: "650e8400-e29b-41d4-a716-446655440000" },
+  });
+
   const submission = await client.archives.$post({
     json: {
       requestId: "rss:request-7",
@@ -414,6 +535,94 @@ async function checkPublicArchiveContract(): Promise<void> {
   } else if (relatedSearch.status === 400 || relatedSearch.status === 422) {
     void (await relatedSearch.json()).error.code;
   }
+
+  const relatedPathSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [
+          {
+            direction: "outgoing",
+            name: "reply",
+            target: {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "entry/8",
+            },
+          },
+          {
+            direction: "incoming",
+            name: "mentions",
+            target: {
+              type: "text",
+              text: { kind: "literal", value: "归档正文" },
+            },
+          },
+        ],
+        operator: "count",
+        count: { operator: "gte", value: 1 },
+      },
+      expandPaths: [
+        {
+          key: "replies-and-mentions",
+          steps: [
+            { direction: "outgoing", name: "reply" },
+            { direction: "either", name: "mentions" },
+          ],
+          limit: 2,
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  if (relatedPathSearch.status === 200) {
+    const pathPage = await relatedPathSearch.json();
+    const pathExpansion = pathPage.results[0]?.matches[0]?.pathExpansions?.[0];
+    if (pathExpansion !== undefined) {
+      void pathExpansion.hasMore;
+      const firstPath = pathExpansion.paths[0];
+      if (firstPath !== undefined) {
+        void firstPath.steps[0]?.observation.archiveSeq;
+        void firstPath.steps[0]?.state.name;
+        void firstPath.steps[1]?.direction;
+      }
+    }
+  } else if (
+    relatedPathSearch.status === 400 ||
+    relatedPathSearch.status === 422
+  ) {
+    void (await relatedPathSearch.json()).error.code;
+  }
+
+  const invalidPathFilter = {
+    type: "path",
+    steps: [{ direction: "outgoing" }],
+    operator: "count",
+    // @ts-expect-error count 路径必须声明最终目标数量比较。
+  } satisfies NonNullable<
+    Parameters<typeof client.archives.search.$post>[0]["json"]["where"]
+  >;
+  void invalidPathFilter;
+
+  void client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [{ direction: "outgoing" }],
+        operator: "exists",
+        // @ts-expect-error exists 路径不能声明 count 比较。
+        count: { operator: "eq", value: 0 },
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
 
   const relationOnly = await client.archives.$post({
     json: {

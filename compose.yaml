@@ -16,7 +16,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U binny -d binny
+        - pg_isready -h 127.0.0.1 -U binny -d binny
       interval: 2s
       timeout: 3s
       retries: 30

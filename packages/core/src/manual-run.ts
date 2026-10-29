@@ -12,6 +12,7 @@ import {
   manualRunExecutionSchema,
   manualRunSchema,
   manualRunTriggerInputSchema,
+  manualRunTriggerSchema,
   runtimeHeartbeatTimeoutMs,
   type ManualRunCommitLocator,
   type ManualRun,
@@ -21,6 +22,8 @@ import {
   type ManualRunOperation,
   type ManualRunOperations,
   type ManualRunResult,
+  type ManualRunTrigger,
+  type ManualRunTriggerInput,
 } from "@binny/contracts";
 import {
   archiveCommits,
@@ -50,6 +53,9 @@ const runSelection = {
   collectorVersion: manualRuns.collectorVersion,
   action: manualRuns.action,
   status: manualRuns.status,
+  triggerType: manualRuns.triggerType,
+  scheduleId: manualRuns.scheduleId,
+  scheduledFor: manualRuns.scheduledFor,
   cancelRequestedAt: manualRuns.cancelRequestedAt,
   stopConfirmedAt: manualRuns.stopConfirmedAt,
   createdAt: manualRuns.createdAt,
@@ -250,6 +256,18 @@ type RunOutputRow = Pick<RunRow, keyof typeof runSelection> & {
   readonly queueReason: RunRow["queueReason"];
 };
 
+function runTrigger(row: RunOutputRow): ManualRunTrigger {
+  if (row.triggerType === "manual") return { kind: "manual" };
+  if (row.scheduleId === null || row.scheduledFor === null) {
+    throw new Error("计划触发的运行缺少不可变来源信息。");
+  }
+  return {
+    kind: "schedule",
+    scheduleId: row.scheduleId,
+    scheduledFor: row.scheduledFor.toISOString(),
+  };
+}
+
 async function rowToRun(
   database: Database | Transaction,
   row: RunOutputRow,
@@ -286,6 +304,7 @@ async function rowToRun(
     runId: row.runId,
     binId: row.binId,
     action: row.action,
+    trigger: runTrigger(row),
     collectorId: row.collectorId,
     collectorVersion: row.collectorVersion,
     status: row.status,
@@ -317,6 +336,103 @@ async function rowToRun(
   });
 }
 
+type RunBinSnapshot = {
+  readonly id: string;
+  readonly collector: unknown;
+  readonly identityId: string;
+  readonly config: unknown;
+  readonly targets: unknown;
+  readonly status: "active" | "disabled";
+};
+
+/** 手动与计划触发共用同一套动作校验、快照和排队记录。 */
+export async function createQueuedRunInTransaction(
+  transaction: Transaction,
+  bin: RunBinSnapshot,
+  input: ManualRunTriggerInput,
+  trigger: ManualRunTrigger,
+): Promise<ManualRunOperation<ManualRun>> {
+  const checkedInput = manualRunTriggerInputSchema.safeParse(input);
+  if (!checkedInput.success) {
+    const issue = checkedInput.error.issues[0];
+    return failure(
+      400,
+      "invalid_input",
+      issue?.message ?? "运行请求格式无效。",
+      issue === undefined ? undefined : pathParts(issue.path),
+    );
+  }
+  const checkedTrigger = manualRunTriggerSchema.safeParse(trigger);
+  if (!checkedTrigger.success) {
+    const issue = checkedTrigger.error.issues[0];
+    return failure(
+      400,
+      "invalid_input",
+      issue?.message ?? "运行触发来源无效。",
+      issue === undefined ? undefined : pathParts(issue.path),
+    );
+  }
+  if (bin.status === "disabled") {
+    return failure(409, "bin_disabled", "这个 bin 已停用，不能触发新的运行。", [
+      "binId",
+    ]);
+  }
+
+  const configuredBin = binCreateInputSchema.parse({
+    id: bin.id,
+    collector: bin.collector,
+    identityId: bin.identityId,
+    config: bin.config,
+    targets: bin.targets,
+  });
+  const action = validateCollectorActionParameters(
+    configuredBin.collector,
+    checkedInput.data.action,
+    checkedInput.data.params,
+  );
+  if (!action.ok) {
+    const apiError = manualRunErrorSchema.shape.error.safeParse({
+      code: action.code,
+      message: action.message,
+      ...(action.path === undefined ? {} : { path: action.path }),
+    });
+    if (apiError.success) {
+      return { ok: false, status: 400, error: apiError.data };
+    }
+    return failure(400, "invalid_input", action.message, action.path);
+  }
+
+  const triggerSource = checkedTrigger.data;
+  const [row] = await transaction
+    .insert(manualRuns)
+    .values({
+      runId: randomUUID(),
+      binId: bin.id,
+      identityId: configuredBin.identityId,
+      collectorSnapshot: configuredBin.collector,
+      collectorId: configuredBin.collector.id,
+      collectorVersion: configuredBin.collector.version,
+      action: checkedInput.data.action,
+      params: checkedInput.data.params,
+      configSnapshot: configuredBin.config,
+      targetsSnapshot: configuredBin.targets,
+      triggerType: triggerSource.kind,
+      scheduleId:
+        triggerSource.kind === "schedule" ? triggerSource.scheduleId : null,
+      scheduledFor:
+        triggerSource.kind === "schedule"
+          ? new Date(triggerSource.scheduledFor)
+          : null,
+      status: "queued",
+    })
+    .returning(runSelection);
+  if (row === undefined) throw new Error("运行创建后没有返回记录。");
+  return {
+    ok: true,
+    value: await rowToRun(transaction, { ...row, queueReason: null }),
+  };
+}
+
 export function createManualRunStore(database: Database): ManualRunOperations {
   return {
     async triggerRun(binId, input) {
@@ -346,63 +462,14 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           .for("update");
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
-        if (bin.status === "disabled")
-          return failure(
-            409,
-            "bin_disabled",
-            "这个 bin 已停用，不能触发新的运行。",
-            ["binId"],
-          );
 
         await interruptExpiredManualRuns(transaction, binId);
-
-        const configuredBin = binCreateInputSchema.parse({
-          id: bin.id,
-          collector: bin.collector,
-          identityId: bin.identityId,
-          config: bin.config,
-          targets: bin.targets,
-        });
-        const action = validateCollectorActionParameters(
-          configuredBin.collector,
-          checked.data.action,
-          checked.data.params,
+        return await createQueuedRunInTransaction(
+          transaction,
+          bin,
+          checked.data,
+          { kind: "manual" },
         );
-        if (!action.ok) {
-          const apiError = manualRunErrorSchema.shape.error.safeParse({
-            code: action.code,
-            message: action.message,
-            ...(action.path === undefined ? {} : { path: action.path }),
-          });
-          if (apiError.success) {
-            const status = action.code === "action_not_found" ? 400 : 400;
-            return { ok: false as const, status, error: apiError.data };
-          }
-          return failure(400, "invalid_input", action.message, action.path);
-        }
-
-        const runId = randomUUID();
-        const [row] = await transaction
-          .insert(manualRuns)
-          .values({
-            runId,
-            binId,
-            identityId: configuredBin.identityId,
-            collectorSnapshot: configuredBin.collector,
-            collectorId: configuredBin.collector.id,
-            collectorVersion: configuredBin.collector.version,
-            action: checked.data.action,
-            params: checked.data.params,
-            configSnapshot: configuredBin.config,
-            targetsSnapshot: configuredBin.targets,
-            status: "queued",
-          })
-          .returning(runSelection);
-        if (row === undefined) throw new Error("运行创建后没有返回记录。");
-        return {
-          ok: true,
-          value: await rowToRun(transaction, { ...row, queueReason: null }),
-        };
       });
     },
 

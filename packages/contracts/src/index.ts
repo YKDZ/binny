@@ -7,3 +7,4 @@ export * from "./human-session.ts";
 export * from "./manual-run.ts";
 export * from "./postgres-text.ts";
 export * from "./runtime-human-session.ts";
+export * from "./schedule.ts";
