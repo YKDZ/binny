@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  copyImageBuildContext,
+  setBuildContextCollectorVersion,
+} from "./binny-image-update-context.ts";
 import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
 
 type ProcessResult = {
@@ -2347,55 +2351,6 @@ function rssManifestWithVersion(manifest: unknown, version: string): unknown {
   return { ...manifest, version };
 }
 
-async function setRssBuildContextVersion(
-  buildContextDirectory: string,
-  version: string,
-): Promise<void> {
-  const sourcePath = path.join(
-    buildContextDirectory,
-    "collectors/rss/src/collector.ts",
-  );
-  const source = await readFile(sourcePath, "utf8");
-  const versionPattern = /(id: "rss-atom",\n  version: ")[^"]+("[,])/u;
-  assert.match(source, versionPattern, "RSS 构建上下文应包含采集器版本。");
-  const updated = source.replace(versionPattern, `$1${version}$2`);
-  assert.notEqual(updated, source, "RSS 采集器版本应发生变化。");
-  await writeFile(sourcePath, updated);
-}
-
-async function createRssBuildContext(
-  buildContextDirectory: string,
-): Promise<void> {
-  const excludedDirectories = new Set([
-    ".agents",
-    ".changeset",
-    ".codex",
-    ".git",
-    ".github",
-    ".scratch",
-    ".turbo",
-    ".vscode",
-    "coverage",
-    "dist",
-    "docs",
-    "fixture-dist",
-    "node_modules",
-  ]);
-  await cp(repositoryRoot, buildContextDirectory, {
-    recursive: true,
-    filter(sourcePath) {
-      const relative = path.relative(repositoryRoot, sourcePath);
-      const segments = relative.split(path.sep);
-      return !segments.some(
-        (segment) =>
-          excludedDirectories.has(segment) ||
-          segment === ".env" ||
-          segment.startsWith(".env."),
-      );
-    },
-  });
-}
-
 async function buildRssImageUpdate(
   buildContextDirectory: string,
 ): Promise<RssImageUpdate> {
@@ -2406,8 +2361,13 @@ async function buildRssImageUpdate(
     candidateManifest,
     baselineVersion,
   );
-  await createRssBuildContext(buildContextDirectory);
-  await setRssBuildContextVersion(buildContextDirectory, baselineVersion);
+  await copyImageBuildContext(repositoryRoot, buildContextDirectory);
+  await setBuildContextCollectorVersion(
+    buildContextDirectory,
+    "collectors/rss/src/collector.ts",
+    "rss-atom",
+    baselineVersion,
+  );
 
   const previousProjectDirectory = composeProjectDirectory;
   const previousRuntimeImage = activeRssRuntimeImage;
@@ -2428,7 +2388,12 @@ async function buildRssImageUpdate(
     baselineImageId,
     "RSS A/B 应由不同源码构建出不同镜像制品。",
   );
-  await setRssBuildContextVersion(buildContextDirectory, candidateVersion);
+  await setBuildContextCollectorVersion(
+    buildContextDirectory,
+    "collectors/rss/src/collector.ts",
+    "rss-atom",
+    candidateVersion,
+  );
   return {
     baselineManifest,
     candidateManifest,
@@ -2512,7 +2477,12 @@ async function rebuildRssRuntimeWithComposeWatch(
       "runtime-rss",
     ]);
     await watcher.waitForMarker("Watch enabled");
-    await setRssBuildContextVersion(imageUpdate.buildContextDirectory, version);
+    await setBuildContextCollectorVersion(
+      imageUpdate.buildContextDirectory,
+      "collectors/rss/src/collector.ts",
+      "rss-atom",
+      version,
+    );
     const imageIdAfterRebuild = await waitFor(
       async () => {
         const result = await run(
