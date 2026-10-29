@@ -613,6 +613,7 @@ async function browserRuntimeContainerInfo(
 async function replaceBrowserRuntimeImage(
   image: string,
   expectedImageId: string,
+  afterOldImageStops?: () => Promise<void>,
 ): Promise<{
   readonly previous: BrowserRuntimeContainer;
   readonly stopped: BrowserRuntimeContainer;
@@ -624,6 +625,7 @@ async function replaceBrowserRuntimeImage(
   const stopped = await browserRuntimeContainerInfo("browser-one");
   assert.equal(stopped.id, previous.id);
   assert.equal(stopped.status, "exited", "旧浏览器运行器必须先退出。");
+  await afterOldImageStops?.();
 
   activeBrowserImage = image;
   await compose([
@@ -1940,19 +1942,25 @@ async function main(): Promise<void> {
 
   const archivedBeforeImageUpdate = await browserFixtureRunIds("binny19-one");
   assert.ok(archivedBeforeImageUpdate.size > 0);
-  const updatedBrowserBin = await updateCollectorManifest(
-    "binny19-one",
-    browserImageUpdate.candidateManifest,
-  );
-  assert.equal(updatedBrowserBin.id, "binny19-one");
-  assert.equal(
-    updatedBrowserBin.version,
-    collectorVersion(browserImageUpdate.candidateManifest),
-  );
+  let updatedBrowserBin:
+    | { readonly id: string; readonly version: string }
+    | undefined;
   const browserImageB = await replaceBrowserRuntimeImage(
     browserImage,
     browserImageUpdate.candidateImageId,
+    async () => {
+      updatedBrowserBin = await updateCollectorManifest(
+        "binny19-one",
+        browserImageUpdate.candidateManifest,
+      );
+      assert.equal(updatedBrowserBin.id, "binny19-one");
+      assert.equal(
+        updatedBrowserBin.version,
+        collectorVersion(browserImageUpdate.candidateManifest),
+      );
+    },
   );
+  assert.ok(updatedBrowserBin !== undefined);
   assert.equal(
     browserImageB.previous.imageId,
     browserImageUpdate.baselineImageId,
