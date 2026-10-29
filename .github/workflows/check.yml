@@ -39,3 +39,5 @@ jobs:
       - name: Run Heavy Check
         id: run-heavy-check
         run: node --conditions=source scripts/task-gates.ts check:heavy
+        env:
+          BINNY_E2E_CAPACITY_PROFILE: smoke

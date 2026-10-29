@@ -29,6 +29,11 @@ import {
   binApiSchemas,
   manualRunApiSchemas,
 } from "../src/routes.ts";
+import {
+  runArchiveCapacityE2E,
+  type CapacityPhase,
+  type CapacityProfile,
+} from "./archive-capacity-e2e.ts";
 
 const require = createRequire(import.meta.url);
 const Ajv2020 =
@@ -8770,6 +8775,23 @@ async function main(): Promise<void> {
       sdkResource,
     );
     process.stdout.write(JSON.stringify(persisted));
+    return;
+  }
+  if (stage === "capacity") {
+    const profile = process.env.BINNY_E2E_CAPACITY_PROFILE;
+    const phase = process.env.BINNY_E2E_CAPACITY_PHASE;
+    if (profile !== "full" && profile !== "smoke") {
+      throw new Error("容量验收需要 smoke 或 full 配置。");
+    }
+    if (phase !== "all" && phase !== "seed" && phase !== "verify") {
+      throw new Error("容量验收阶段必须为 all、seed 或 verify。");
+    }
+    const report = await runArchiveCapacityE2E(
+      baseUrl,
+      profile as CapacityProfile,
+      phase as CapacityPhase,
+    );
+    process.stdout.write(JSON.stringify(report));
     return;
   }
   throw new Error("未知归档 HTTP 验收阶段。");
