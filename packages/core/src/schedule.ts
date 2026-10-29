@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  binCreateInputSchema,
+  binConfigurationSettingsSchema,
   jsonObjectSchema,
   scheduleCreateInputSchema,
   scheduleLastErrorSchema,
@@ -140,7 +140,7 @@ function scheduleActionError(
   action: string,
   params: unknown,
 ): ScheduleApiError | undefined {
-  const configuredBin = binCreateInputSchema.parse(bin);
+  const configuredBin = binConfigurationSettingsSchema.parse(bin);
   const checkedParams = jsonObjectSchema.safeParse(params);
   if (!checkedParams.success) {
     return {

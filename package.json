@@ -18,7 +18,7 @@
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",
     "publication:publish": "changeset publish --from-pack-dir .changeset/packed",
     "test:lightweight-image": "node --conditions=source scripts/test-lightweight-image.ts",
-    "test:browser-human-session": "node --conditions=source scripts/test-browser-human-session.ts",
+    "test:browser-lifecycle": "node --conditions=source scripts/test-browser-lifecycle.ts",
     "test:runtime-connections": "node --conditions=source scripts/test-runtime-connections.ts"
   },
   "devDependencies": {

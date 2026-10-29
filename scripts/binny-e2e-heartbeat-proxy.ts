@@ -4,6 +4,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { connect as createConnection } from "node:net";
 
 const runtimePort = readPort("BINNY_E2E_PROXY_PORT", 8082);
 const controlPort = readPort("BINNY_E2E_PROXY_CONTROL_PORT", 8083);
@@ -13,11 +14,15 @@ let heldAt: number | undefined;
 let clientClosedAt: number | undefined;
 let heldForward: (() => Promise<void>) | undefined;
 let armedForStoppedRunId: string | undefined;
+let armedForBinId = "binny15-one";
+let armedForIdleHeartbeat = false;
 let heldRuntimeId: string | undefined;
 let heldOwnerGeneration: string | undefined;
 let heldStoppedRunId: string | undefined;
 let forwardedRuntimeId: string | undefined;
 let forwardedOwnerGeneration: string | undefined;
+let forwardedAt: number | undefined;
+let forwardedBrowserIdleTimeoutSeconds: number | null | undefined;
 
 function readPort(name: string, fallback: number): number {
   const port = Number(process.env[name] ?? String(fallback));
@@ -53,8 +58,9 @@ function forward(
   request: IncomingMessage,
   response: ServerResponse,
   body: Buffer,
-): Promise<void> {
+): Promise<Buffer> {
   return new Promise((resolve) => {
+    const responseChunks: Buffer[] = [];
     const upstream = createRequest(
       {
         hostname: "server",
@@ -74,20 +80,21 @@ function forward(
         });
         upstreamResponse.once("end", () => {
           if (!response.destroyed) response.end();
-          resolve();
+          resolve(Buffer.concat(responseChunks));
         });
         upstreamResponse.once("error", (error: unknown) => {
           sendFailure(response, error);
-          resolve();
+          resolve(Buffer.concat(responseChunks));
         });
         upstreamResponse.on("data", (chunk: Buffer) => {
+          responseChunks.push(chunk);
           if (!response.destroyed) response.write(chunk);
         });
       },
     );
     upstream.once("error", (error: unknown) => {
       sendFailure(response, error);
-      resolve();
+      resolve(Buffer.concat(responseChunks));
     });
     upstream.end(body);
   });
@@ -99,10 +106,10 @@ async function handleRuntimeRequest(
 ): Promise<void> {
   const body = await readBody(request);
   let decoded: unknown;
-  if (
-    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
-    body.length > 0
-  ) {
+  const requestBinId = /^\/bins\/([^/]+)\/runtime\/heartbeat(?:\?|$)/u.exec(
+    request.url ?? "",
+  )?.[1];
+  if (requestBinId !== undefined && body.length > 0) {
     try {
       decoded = JSON.parse(body.toString("utf8")) as unknown;
     } catch {
@@ -119,11 +126,12 @@ async function handleRuntimeRequest(
   const matchesStoppedRun =
     typeof decoded === "object" &&
     decoded !== null &&
-    (!("stoppedRunId" in decoded) ||
+    (armedForIdleHeartbeat ||
+      !("stoppedRunId" in decoded) ||
       decoded.stoppedRunId === armedForStoppedRunId);
   if (
     armed &&
-    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
+    requestBinId === armedForBinId &&
     isIdleHeartbeat &&
     matchesStoppedRun
   ) {
@@ -157,11 +165,13 @@ async function handleRuntimeRequest(
     response.once("close", () => {
       if (!response.writableEnded) clientClosedAt = Date.now();
     });
-    heldForward = async () => await forward(request, response, body);
+    heldForward = async () => {
+      await forward(request, response, body);
+    };
     return;
   }
   if (
-    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
+    requestBinId !== undefined &&
     typeof decoded === "object" &&
     decoded !== null &&
     "runtimeId" in decoded &&
@@ -170,7 +180,7 @@ async function handleRuntimeRequest(
     forwardedRuntimeId = decoded.runtimeId;
   }
   if (
-    request.url?.startsWith("/bins/binny15-one/runtime/heartbeat") &&
+    requestBinId !== undefined &&
     typeof decoded === "object" &&
     decoded !== null &&
     "ownerGeneration" in decoded &&
@@ -178,13 +188,54 @@ async function handleRuntimeRequest(
   ) {
     forwardedOwnerGeneration = decoded.ownerGeneration;
   }
-  await forward(request, response, body);
+  const forwardedBody = await forward(request, response, body);
+  if (requestBinId !== undefined && decoded !== undefined) {
+    try {
+      const forwarded = JSON.parse(forwardedBody.toString("utf8")) as unknown;
+      if (
+        typeof forwarded === "object" &&
+        forwarded !== null &&
+        "browserIdleTimeoutSeconds" in forwarded &&
+        (typeof forwarded.browserIdleTimeoutSeconds === "number" ||
+          forwarded.browserIdleTimeoutSeconds === null)
+      ) {
+        forwardedBrowserIdleTimeoutSeconds =
+          forwarded.browserIdleTimeoutSeconds;
+        forwardedAt = Date.now();
+      }
+    } catch {}
+  }
 }
 
 const runtimeProxy = createServer((request, response) => {
   void handleRuntimeRequest(request, response).catch((error: unknown) =>
     sendFailure(response, error),
   );
+});
+
+runtimeProxy.on("upgrade", (request, client, head) => {
+  const upstream = createConnection(3000, "server");
+  upstream.once("connect", () => {
+    const headers = [...request.rawHeaders];
+    let hasHost = false;
+    for (let index = 0; index < headers.length; index += 2) {
+      if (headers[index]?.toLowerCase() !== "host") continue;
+      headers[index + 1] = "server:3000";
+      hasHost = true;
+    }
+    if (!hasHost) headers.push("Host", "server:3000");
+    const headerLines: string[] = [];
+    for (let index = 0; index < headers.length; index += 2) {
+      headerLines.push(`${headers[index]}: ${headers[index + 1]}`);
+    }
+    upstream.write(
+      `${request.method ?? "GET"} ${request.url ?? "/"} HTTP/${request.httpVersion}\r\n${headerLines.join("\r\n")}\r\n\r\n`,
+    );
+    if (head.length > 0) upstream.write(head);
+    client.pipe(upstream).pipe(client);
+  });
+  upstream.once("error", () => client.destroy());
+  client.once("close", () => upstream.destroy());
 });
 
 const control = createServer((request, response) => {
@@ -199,10 +250,15 @@ const control = createServer((request, response) => {
         ...(heldRuntimeId === undefined ? {} : { heldRuntimeId }),
         ...(heldOwnerGeneration === undefined ? {} : { heldOwnerGeneration }),
         ...(heldStoppedRunId === undefined ? {} : { heldStoppedRunId }),
+        ...(armed ? { armedForBinId } : {}),
         ...(forwardedRuntimeId === undefined ? {} : { forwardedRuntimeId }),
         ...(forwardedOwnerGeneration === undefined
           ? {}
           : { forwardedOwnerGeneration }),
+        ...(forwardedAt === undefined ? {} : { forwardedAt }),
+        ...(forwardedBrowserIdleTimeoutSeconds === undefined
+          ? {}
+          : { forwardedBrowserIdleTimeoutSeconds }),
       });
       return;
     }
@@ -214,13 +270,32 @@ const control = createServer((request, response) => {
       } catch {
         value = undefined;
       }
+      const idleHeartbeat =
+        typeof value === "object" &&
+        value !== null &&
+        "idleHeartbeat" in value &&
+        value.idleHeartbeat === true;
+      const binId =
+        typeof value === "object" &&
+        value !== null &&
+        "binId" in value &&
+        typeof value.binId === "string"
+          ? value.binId
+          : "binny15-one";
+      const stoppedRunId =
+        typeof value === "object" &&
+        value !== null &&
+        "stoppedRunId" in value &&
+        typeof value.stoppedRunId === "string"
+          ? value.stoppedRunId
+          : undefined;
       if (
-        typeof value !== "object" ||
-        value === null ||
-        !("stoppedRunId" in value) ||
-        typeof value.stoppedRunId !== "string"
+        binId.length === 0 ||
+        (!idleHeartbeat && stoppedRunId === undefined)
       ) {
-        sendJson(response, 400, { error: "必须指定要延迟确认的 run。" });
+        sendJson(response, 400, {
+          error: "必须指定 bin 以及 idle heartbeat 或待确认的 run。",
+        });
         return;
       }
       if (armed || heldForward !== undefined) {
@@ -228,7 +303,9 @@ const control = createServer((request, response) => {
         return;
       }
       armed = true;
-      armedForStoppedRunId = value.stoppedRunId;
+      armedForBinId = binId;
+      armedForIdleHeartbeat = idleHeartbeat;
+      armedForStoppedRunId = stoppedRunId;
       heldAt = undefined;
       clientClosedAt = undefined;
       heldRuntimeId = undefined;
