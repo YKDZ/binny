@@ -7,6 +7,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  linuxdoUserJourney,
+  startLinuxdoViewerBrowser,
+  triggerLinuxdoRun,
+  type LinuxdoViewerBrowser,
+  type LinuxdoUserJourney,
+} from "./binny-e2e-linuxdo-journey.ts";
+import {
   copyImageBuildContext,
   setBuildContextCollectorVersion,
 } from "./binny-image-update-context.ts";
@@ -61,6 +68,17 @@ type RssImageUpdate = {
   readonly buildContextDirectory: string;
 };
 
+type RssAcceptanceResult = {
+  readonly binIds: readonly ["binny22-one", "binny22-two"];
+  readonly itemId: string;
+  readonly initialRevisionId: string;
+  readonly initialRunId: string;
+  readonly commitId: string;
+  readonly resourceIds: readonly string[];
+  readonly latestPartialRevisionId: string;
+  readonly latestPartialResourceIds: readonly string[];
+};
+
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -90,6 +108,7 @@ const projectName = isFullCapacityRun
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
+const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
 let activeServerImage = imageName;
 let activeRssRuntimeImage = rssRuntimeImageName;
@@ -97,6 +116,8 @@ let composeOverrideFile = "";
 let composeProjectDirectory = "";
 let composePort = 0;
 let manualRunSourcePort = 0;
+let linuxdoSourcePort = 0;
+let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
 
 function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
   const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
@@ -193,6 +214,8 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY18_STOP_GRACE_MS: "1500",
     BINNY22_RUNTIME_IMAGE: activeRssRuntimeImage,
+    BINNY24_BIN_ID: "binny28-linuxdo",
+    BINNY24_RUNTIME_IMAGE: linuxdoRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -2296,6 +2319,7 @@ type RssManualRun = {
   readonly result?: {
     readonly completedScopes: readonly string[];
     readonly commits: readonly {
+      readonly commitId: string;
       readonly items: readonly { readonly itemId: string }[];
     }[];
     readonly stopReason: { readonly code: string };
@@ -2337,6 +2361,659 @@ async function createRssManifest(): Promise<unknown> {
   ]);
   assert.equal(result.code, 0, result.stderr + result.stdout);
   return JSON.parse(result.stdout) as unknown;
+}
+
+async function linuxdoRuntimeManifest(): Promise<unknown> {
+  await waitForLinuxdoRuntimeHealth();
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    "runtime-linuxdo",
+    "node",
+    "--input-type=module",
+    "-e",
+    'const response=await fetch("http://127.0.0.1:8080/manifest"); if(!response.ok)process.exit(1); const payload=await response.json(); if(!payload.collector)process.exit(1); console.log(JSON.stringify(payload.collector));',
+  ]);
+  return JSON.parse(result.stdout) as unknown;
+}
+
+async function waitForLinuxdoRuntimeHealth(): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  let latest = "Linux.do 浏览器运行器尚未就绪。";
+  while (Date.now() < deadline) {
+    const result = await run(
+      "docker",
+      [
+        ...composePrefix(),
+        "exec",
+        "--no-TTY",
+        "runtime-linuxdo",
+        "node",
+        "--input-type=module",
+        "-e",
+        'const response=await fetch("http://127.0.0.1:8080/health"); if(!response.ok)process.exit(1);',
+      ],
+      { env: composeEnvironment() },
+    );
+    if (result.code === 0) return;
+    latest = result.stderr + result.stdout;
+    await wait(250);
+  }
+  throw new Error(`Linux.do 正式浏览器运行器没有就绪：\n${latest}`);
+}
+
+async function createLinuxdoBin(baseUrl: string): Promise<void> {
+  const created = cliData<{ readonly id: string }>(
+    await cli(baseUrl, [
+      "bin",
+      "create",
+      "binny28-linuxdo",
+      "--collector",
+      JSON.stringify(await linuxdoRuntimeManifest()),
+      "--identity",
+      "binny28-profile",
+      "--config",
+      JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
+      "--targets",
+      "[]",
+    ]),
+    "created",
+  );
+  assert.equal(created.id, "binny28-linuxdo");
+  await waitForRuntime(baseUrl, "binny28-linuxdo");
+}
+
+async function verifyLinuxdoArchiveJourney(
+  baseUrl: string,
+  sourceControlUrl: string,
+  journey: LinuxdoUserJourney,
+  rss: RssAcceptanceResult,
+): Promise<void> {
+  const binId = "binny28-linuxdo";
+  const namespace = "linuxdo:linuxdo-e2e-source:8081";
+  const cliForLinuxdo = (args: readonly string[]) => cli(baseUrl, args);
+  assert.equal(journey.firstCollection.status, "completed");
+  assert.ok(
+    journey.firstCollection.result?.completedScopes?.includes("topic:2401"),
+  );
+
+  const searchTopic = async (text: string) =>
+    cliData<{
+      readonly results: readonly {
+        readonly itemId: string;
+        readonly sourceKey: {
+          readonly namespace: string;
+          readonly key: string;
+        };
+      }[];
+    }>(
+      await cliForLinuxdo([
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          scope: { kind: "current", binId },
+          text: { kind: "literal", value: text },
+          select: ["sourceKey", "capture.completeness"],
+          limit: 10,
+        }),
+      ]),
+      "found",
+    );
+
+  const rssItem = cliData<{
+    readonly itemId: string;
+    readonly views: readonly {
+      readonly binId: string;
+      readonly revisionId: string;
+      readonly state: {
+        readonly capture: { readonly completeness: string };
+      };
+    }[];
+  }>(await cli(baseUrl, ["archive", "item", rss.itemId]), "found");
+  assert.equal(rssItem.itemId, rss.itemId);
+  const rssBinIds = new Set<string>(rss.binIds);
+  assert.deepEqual(
+    rssItem.views
+      .filter(({ binId: viewBinId }) => rssBinIds.has(viewBinId))
+      .map(({ binId: viewBinId }) => viewBinId)
+      .toSorted(),
+    [...rss.binIds].toSorted(),
+  );
+  assert.equal(
+    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny22-one")
+      ?.state.capture.completeness,
+    "partial",
+  );
+  assert.equal(
+    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny22-two")
+      ?.state.capture.completeness,
+    "complete",
+  );
+  const initialRssRevision = cliData<{
+    readonly revisionId: string;
+    readonly itemId: string;
+  }>(
+    await cli(baseUrl, ["archive", "revision", rss.initialRevisionId]),
+    "found",
+  );
+  assert.equal(initialRssRevision.itemId, rss.itemId);
+  const latestRssPartial = cliData<{
+    readonly revisionId: string;
+    readonly itemId: string;
+    readonly state: {
+      readonly capture: { readonly completeness: string };
+    };
+  }>(
+    await cli(baseUrl, ["archive", "revision", rss.latestPartialRevisionId]),
+    "found",
+  );
+  assert.equal(latestRssPartial.itemId, rss.itemId);
+  assert.equal(latestRssPartial.state.capture.completeness, "partial");
+  const rssCommit = cliData<{
+    readonly commitId: string;
+    readonly binId: string;
+    readonly runId: string;
+    readonly items: readonly { readonly itemId: string }[];
+  }>(await cli(baseUrl, ["archive", "commit", rss.commitId]), "found");
+  assert.equal(rssCommit.binId, "binny22-one");
+  assert.equal(rssCommit.runId, rss.initialRunId);
+  assert.ok(rssCommit.items.some(({ itemId }) => itemId === rss.itemId));
+  const rssDiff = cliData<{
+    readonly hasChanges: boolean;
+    readonly firstRevisionId: string;
+    readonly secondRevisionId: string;
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "diff",
+      rss.initialRevisionId,
+      rss.latestPartialRevisionId,
+    ]),
+    "found",
+  );
+  assert.equal(rssDiff.hasChanges, true);
+  assert.equal(rssDiff.firstRevisionId, rss.initialRevisionId);
+  assert.equal(rssDiff.secondRevisionId, rss.latestPartialRevisionId);
+  for (const resourceId of rss.resourceIds) {
+    const response = await fetch(`${baseUrl}/resources/${resourceId}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(response.status, 200);
+    assert.ok((await response.arrayBuffer()).byteLength > 0);
+  }
+  for (const resourceId of rss.latestPartialResourceIds) {
+    const response = await fetch(`${baseUrl}/resources/${resourceId}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(response.status, 200);
+    assert.ok((await response.arrayBuffer()).byteLength > 0);
+  }
+
+  const initialSearch = await searchTopic("主题正文版本 1");
+  assert.equal(initialSearch.results.length, 1);
+  const rootItemId = initialSearch.results[0]?.itemId;
+  assert.ok(rootItemId !== undefined);
+  assert.ok(journey.itemIds.includes(rootItemId));
+  const rootItem = cliData<{
+    readonly itemId: string;
+    readonly sourceKey: { readonly namespace: string; readonly key: string };
+    readonly views: readonly {
+      readonly binId: string;
+      readonly revisionId: string;
+      readonly state: {
+        readonly body?: { readonly html?: string };
+        readonly resources?: readonly { readonly resourceId: string }[];
+        readonly capture: {
+          readonly completeness: "complete" | "partial";
+          readonly missing: readonly { readonly path: string }[];
+        };
+      };
+    }[];
+    readonly revisions: readonly { readonly revisionId: string }[];
+  }>(
+    await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
+    "found",
+  );
+  assert.equal(rootItem.sourceKey.namespace, namespace);
+  assert.equal(rootItem.sourceKey.key, "post:240001");
+  const originalRootView = rootItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(originalRootView !== undefined);
+  assert.equal(originalRootView.state.capture.completeness, "complete");
+  const firstRunCommitLocator = journey.firstCollection.result?.commits?.find(
+    ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
+  );
+  assert.ok(firstRunCommitLocator !== undefined);
+  const firstCommit = cliData<{
+    readonly commitId: string;
+    readonly archiveSeq: string;
+    readonly binId: string;
+    readonly runId: string;
+    readonly collectorVersion: string;
+    readonly items: readonly {
+      readonly itemId: string;
+      readonly revisionId: string;
+      readonly sourceKey: { readonly key: string };
+    }[];
+  }>(
+    await cliForLinuxdo(["archive", "commit", firstRunCommitLocator.commitId]),
+    "found",
+  );
+  assert.equal(firstCommit.binId, binId);
+  assert.equal(firstCommit.runId, journey.firstCollection.runId);
+  assert.ok(firstCommit.collectorVersion.length > 0);
+  assert.ok(firstCommit.items.some(({ itemId }) => itemId === rootItemId));
+  const firstCommitItem = firstCommit.items.find(
+    ({ itemId }) => itemId === rootItemId,
+  );
+  assert.ok(firstCommitItem !== undefined);
+  assert.equal(firstCommitItem.revisionId, originalRootView.revisionId);
+  const firstRevisionId = firstCommitItem.revisionId;
+  const firstRevision = cliData<{
+    readonly revisionId: string;
+    readonly itemId: string;
+    readonly state: {
+      readonly body?: { readonly html?: string };
+      readonly resources?: readonly { readonly resourceId: string }[];
+      readonly capture: { readonly completeness: string };
+    };
+  }>(await cliForLinuxdo(["archive", "revision", firstRevisionId]), "found");
+  assert.equal(firstRevision.itemId, rootItemId);
+  assert.equal(firstRevision.state.capture.completeness, "complete");
+  assert.match(firstRevision.state.body?.html ?? "", /主题正文版本 1/u);
+  const firstResourceIds =
+    firstRevision.state.resources?.map(({ resourceId }) => resourceId) ?? [];
+  assert.ok(firstResourceIds.length === 3);
+  let photoResourceId: string | undefined;
+  for (const resourceId of firstResourceIds) {
+    const response = await fetch(`${baseUrl}/resources/${resourceId}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(response.status, 200);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    assert.ok(bytes.byteLength > 0);
+    if (response.headers.get("content-type")?.startsWith("image/png"))
+      photoResourceId = resourceId;
+  }
+  assert.ok(photoResourceId !== undefined);
+
+  const fixtureUpdate = await fetch(sourceControlUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      topicVersion: 2,
+      replyVersion: 2,
+      addedReply: true,
+    }),
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(fixtureUpdate.status, 200, await fixtureUpdate.text());
+  const secondCollection = await triggerLinuxdoRun(
+    cliForLinuxdo,
+    binId,
+    "collect",
+    { topicId: 2401 },
+  );
+  assert.equal(secondCollection.status, "completed");
+  assert.ok(secondCollection.result?.completedScopes?.includes("topic:2401"));
+  const updatedSearch = await searchTopic("主题正文版本 2");
+  assert.equal(updatedSearch.results.length, 1);
+  assert.equal(updatedSearch.results[0]?.itemId, rootItemId);
+  const updatedItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
+    "found",
+  );
+  const updatedRootView = updatedItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(updatedRootView !== undefined);
+  assert.equal(updatedRootView.state.capture.completeness, "complete");
+  assert.ok(updatedItem.revisions.length >= 2);
+  assert.notEqual(updatedRootView.revisionId, firstRevisionId);
+  const secondRunCommitLocator = secondCollection.result?.commits?.find(
+    ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
+  );
+  assert.ok(secondRunCommitLocator !== undefined);
+  const secondCommit = cliData<typeof firstCommit>(
+    await cliForLinuxdo(["archive", "commit", secondRunCommitLocator.commitId]),
+    "found",
+  );
+  assert.equal(secondCommit.binId, binId);
+  assert.equal(secondCommit.runId, secondCollection.runId);
+  const secondCommitItem = secondCommit.items.find(
+    ({ itemId }) => itemId === rootItemId,
+  );
+  assert.ok(secondCommitItem !== undefined);
+  const secondRevisionId = secondCommitItem.revisionId;
+
+  const partialUpdate = await fetch(sourceControlUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      topicVersion: 3,
+      unavailableMedia: ["/uploads/default/original/2X/topic-photo.png"],
+      unavailableMediaStatus: 503,
+    }),
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(partialUpdate.status, 200, await partialUpdate.text());
+  const partialCollection = await triggerLinuxdoRun(
+    cliForLinuxdo,
+    binId,
+    "collect",
+    { topicId: 2401 },
+  );
+  assert.equal(partialCollection.status, "completed");
+  assert.equal(
+    partialCollection.result?.completedScopes?.includes("topic:2401"),
+    false,
+  );
+  const currentPartialSearch = await searchTopic("主题正文版本 3");
+  assert.equal(currentPartialSearch.results.length, 1);
+  assert.equal(currentPartialSearch.results[0]?.itemId, rootItemId);
+  const partialItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
+    "found",
+  );
+  const partialRootView = partialItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(partialRootView !== undefined);
+  assert.equal(partialRootView.state.capture.completeness, "partial");
+  assert.ok(
+    partialRootView.state.capture.missing.some(
+      ({ path }) => path === "body.images[0]",
+    ),
+  );
+  assert.equal(partialRootView.state.resources?.length, 2);
+  const partialRunCommitLocator = partialCollection.result?.commits?.find(
+    ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
+  );
+  assert.ok(partialRunCommitLocator !== undefined);
+  const partialCommit = cliData<typeof firstCommit>(
+    await cliForLinuxdo([
+      "archive",
+      "commit",
+      partialRunCommitLocator.commitId,
+    ]),
+    "found",
+  );
+  assert.equal(partialCommit.runId, partialCollection.runId);
+  const partialCommitItem = partialCommit.items.find(
+    ({ itemId }) => itemId === rootItemId,
+  );
+  assert.ok(partialCommitItem !== undefined);
+  const partialRevisionId = partialCommitItem.revisionId;
+  const previousPhoto = await fetch(`${baseUrl}/resources/${photoResourceId}`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  assert.equal(previousPhoto.status, 200);
+  assert.ok((await previousPhoto.arrayBuffer()).byteLength > 0);
+  const linuxdoDiff = cliData<{
+    readonly itemId: string;
+    readonly hasChanges: boolean;
+    readonly fields: { readonly body: { readonly status: string } };
+    readonly resources: {
+      readonly added: readonly string[];
+      readonly removed: readonly string[];
+    };
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "diff",
+      firstRevisionId,
+      partialRevisionId,
+    ]),
+    "found",
+  );
+  assert.equal(linuxdoDiff.itemId, rootItemId);
+  assert.equal(linuxdoDiff.hasChanges, true);
+  assert.equal(linuxdoDiff.fields.body.status, "changed");
+  assert.ok(linuxdoDiff.resources.removed.includes(photoResourceId));
+
+  const relationPage = cliData<{
+    readonly relations: readonly {
+      readonly status: string;
+      readonly state?: {
+        readonly name: string;
+        readonly cascade: boolean;
+        readonly to: { readonly sourceKey?: { readonly key: string } };
+      };
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "relations",
+      rootItemId,
+      "--bin",
+      binId,
+      "--direction",
+      "outgoing",
+      "--limit",
+      "100",
+    ]),
+    "found",
+  );
+  assert.equal(relationPage.relations.length, 3);
+  assert.deepEqual(
+    relationPage.relations
+      .map(({ state }) => state?.to.sourceKey?.key)
+      .toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
+    ["post:240002", "post:240003", "post:240004"],
+  );
+  assert.ok(
+    relationPage.relations.every(
+      ({ status, state }) =>
+        status === "observed" && state?.name === "topic_reply" && state.cascade,
+    ),
+  );
+  const timeline = cliData<{
+    readonly events: readonly {
+      readonly kind: string;
+      readonly commitId: string;
+      readonly runId?: string;
+      readonly itemId?: string;
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "timeline",
+      rootItemId,
+      "--bin",
+      binId,
+      "--limit",
+      "100",
+    ]),
+    "found",
+  );
+  for (const runId of [
+    journey.firstCollection.runId,
+    secondCollection.runId,
+    partialCollection.runId,
+  ]) {
+    assert.ok(timeline.events.some((event) => event.runId === runId));
+  }
+
+  const linuxdoAggregate = cliData<{
+    readonly unit: string;
+    readonly groups: readonly {
+      readonly metrics: readonly {
+        readonly key: string;
+        readonly value: string | null;
+      }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId },
+        unit: "item",
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.namespace",
+              operator: "eq",
+              value: namespace,
+            },
+          ],
+        },
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      }),
+    ]),
+    "aggregated",
+  );
+  assert.equal(linuxdoAggregate.unit, "item");
+  assert.deepEqual(linuxdoAggregate.groups[0]?.metrics, [
+    { key: "items", op: "count", value: "4" },
+  ]);
+
+  const deletion = cliData<{
+    readonly itemId: string;
+    readonly deletedItemIds: readonly string[];
+    readonly deletionSeq: string;
+    readonly deleted: true;
+  }>(await cliForLinuxdo(["archive", "delete", rootItemId]), "deleted");
+  assert.equal(deletion.itemId, rootItemId);
+  const deletedItemIds = [
+    ...new Set([
+      rootItemId,
+      ...journey.itemIds,
+      ...secondCommit.items.map(({ itemId }) => itemId),
+    ]),
+  ];
+  assert.deepEqual(
+    deletion.deletedItemIds.toSorted(),
+    deletedItemIds.toSorted(),
+  );
+  assert.equal(deletion.deleted, true);
+  const noDeletedSearch = await searchTopic("主题正文版本 3");
+  assert.deepEqual(noDeletedSearch.results, []);
+  cliFailure(
+    await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
+    "item_deleted",
+  );
+  for (const revisionId of [
+    firstRevisionId,
+    secondRevisionId,
+    partialRevisionId,
+  ]) {
+    cliFailure(
+      await cliForLinuxdo(["archive", "revision", revisionId]),
+      "revision_not_found",
+    );
+  }
+  cliFailure(
+    await cliForLinuxdo([
+      "archive",
+      "diff",
+      firstRevisionId,
+      partialRevisionId,
+    ]),
+    "revision_not_found",
+  );
+  const deletedCommit = cliData<{
+    readonly gaps?: {
+      readonly items: readonly { readonly itemId: string }[];
+      readonly relations: readonly { readonly relationId: string }[];
+    };
+  }>(
+    await cliForLinuxdo(["archive", "commit", partialCommit.commitId]),
+    "found",
+  );
+  assert.deepEqual(
+    deletedCommit.gaps?.items.map(({ itemId }) => itemId).toSorted(),
+    deletedItemIds.toSorted(),
+  );
+  assert.equal(deletedCommit.gaps?.relations.length, 3);
+  const historicalTimeline = cliData<{
+    readonly events: readonly {
+      readonly kind: string;
+      readonly subject?: {
+        readonly kind: string;
+        readonly itemId?: string;
+        readonly relationId?: string;
+      };
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "timeline",
+      rootItemId,
+      "--bin",
+      binId,
+      "--as-of",
+      partialCommit.archiveSeq,
+      "--limit",
+      "100",
+    ]),
+    "found",
+  );
+  assert.ok(
+    historicalTimeline.events.some(
+      (event) =>
+        event.kind === "gap" &&
+        event.subject?.kind === "item" &&
+        event.subject.itemId === rootItemId,
+    ),
+  );
+  assert.ok(
+    historicalTimeline.events.some(
+      (event) => event.kind === "gap" && event.subject?.kind === "relation",
+    ),
+  );
+  const deletedAggregate = cliData<typeof linuxdoAggregate>(
+    await cliForLinuxdo([
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId },
+        unit: "item",
+        where: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.namespace",
+              operator: "eq",
+              value: namespace,
+            },
+          ],
+        },
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      }),
+    ]),
+    "aggregated",
+  );
+  assert.deepEqual(deletedAggregate.groups, []);
+  const rssStillPresent = cliData<{ readonly itemId: string }>(
+    await cli(baseUrl, ["archive", "item", rss.itemId, "--bin", "binny22-one"]),
+    "found",
+  );
+  assert.equal(rssStillPresent.itemId, rss.itemId);
+  process.stdout.write(
+    "票 28 整合查询、更新历史、最新 partial、媒体保留与声明级联删除通过：" +
+      JSON.stringify({
+        binId,
+        linuxdoRunIds: [
+          journey.firstCollection.runId,
+          secondCollection.runId,
+          partialCollection.runId,
+        ],
+        deletedItemIds: deletion.deletedItemIds,
+        rssItemId: rss.itemId,
+        rssBinIds: rss.binIds,
+      }) +
+      "\n",
+  );
 }
 
 function rssManifestVersion(manifest: unknown): string {
@@ -2595,6 +3272,8 @@ type RssArchiveRead = {
   readonly snapshot: unknown;
   readonly views: readonly {
     readonly binId: string;
+    readonly archiveSeq: string;
+    readonly revisionId: string;
     readonly state: {
       readonly body?: {
         readonly html?: string;
@@ -4660,6 +5339,7 @@ async function verifyRestartAndRemoval(
   baseUrl: string,
   archive: string,
   sdkResource: string,
+  retainedBinIds: readonly string[],
 ): Promise<string> {
   const disabled = cliData<{ readonly status: string }>(
     await cli(baseUrl, ["bin", "disable", "rss-main"]),
@@ -4710,11 +5390,13 @@ async function verifyRestartAndRemoval(
   cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
   cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
   cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
-  const empty = cliData<{ readonly bins: readonly unknown[] }>(
-    await cli(baseUrl, ["bin", "list"]),
-    "listed",
+  const remaining = cliData<{
+    readonly bins: readonly { readonly id: string }[];
+  }>(await cli(baseUrl, ["bin", "list"]), "listed");
+  assert.deepEqual(
+    remaining.bins.map(({ id }) => id).toSorted(),
+    retainedBinIds.toSorted(),
   );
-  assert.deepEqual(empty.bins, []);
   const archiveState = await archiveHttpStep(
     "after-restart",
     baseUrl,
@@ -5241,7 +5923,7 @@ async function runRssAcceptance(
   baseUrl: string,
   source: RssControlSource,
   imageUpdate: RssImageUpdate,
-): Promise<void> {
+): Promise<RssAcceptanceResult> {
   const sourceMediaBytes = await source.mediaBytes();
   const baselineManifest = imageUpdate.baselineManifest;
   let activeManifest = imageUpdate.candidateManifest;
@@ -5308,6 +5990,10 @@ async function runRssAcceptance(
   );
   assert.equal(rssItemV1.sourceKey.namespace, "rss:rss-main");
   assert.equal(rssItemV1.sourceKey.key, "id:urn:binny:22:rss-item");
+  const initialRssView = rssItemV1.views.find(
+    ({ binId }) => binId === "binny22-one",
+  );
+  assert.ok(initialRssView !== undefined);
   const rssV1 = rssArchiveView(rssItemV1, "binny22-one");
   assert.equal(rssV1.capture.completeness, "complete");
   assert.match(rssV1.body?.html ?? "", /RSS 正文版本 1/u);
@@ -6301,6 +6987,62 @@ async function runRssAcceptance(
   assert.equal(rssItemV7.itemId, rssItemV1.itemId);
   assert.deepEqual(rssItemV7.sourceKey, rssItemV1.sourceKey);
 
+  await source.setRssVersion(8);
+  await source.setPhotoAvailable(false);
+  const latestPartialRun = await triggerRssAction(
+    baseUrl,
+    "binny22-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(latestPartialRun.status, "failed");
+  assert.equal(
+    latestPartialRun.result?.error?.code,
+    "rss_collection_incomplete",
+  );
+  const rssLatestPartial = await readRssArchive(
+    baseUrl,
+    "binny22-one",
+    "RSS 正文版本 8",
+  );
+  assert.equal(rssLatestPartial.itemId, rssItemV1.itemId);
+  const latestPartialState = rssArchiveView(rssLatestPartial, "binny22-one");
+  assert.equal(latestPartialState.capture.completeness, "partial");
+  assert.ok(latestPartialState.capture.missing.length > 0);
+  assert.ok((latestPartialState.resources?.length ?? 0) > 0);
+  assert.deepEqual(
+    await Promise.all(
+      rssResources.map(({ resourceId }) =>
+        readRssResource(baseUrl, resourceId),
+      ),
+    ),
+    rssResourceBytes,
+    "最新部分版本不得使先前版本的媒体字节失效。",
+  );
+  const crossBinItem = cliData<RssArchiveRead>(
+    await cli(baseUrl, ["archive", "item", rssItemV1.itemId]),
+    "found",
+  );
+  assert.deepEqual(
+    crossBinItem.views
+      .map(({ binId }) => binId)
+      .filter((binId) => ["binny22-one", "binny22-two"].includes(binId))
+      .toSorted(),
+    ["binny22-one", "binny22-two"],
+  );
+  assert.equal(
+    rssArchiveView(crossBinItem, "binny22-one").capture.completeness,
+    "partial",
+  );
+  assert.equal(
+    rssArchiveView(crossBinItem, "binny22-two").capture.completeness,
+    "complete",
+  );
+  const latestPartialView = rssLatestPartial.views.find(
+    ({ binId }) => binId === "binny22-one",
+  );
+  assert.ok(latestPartialView !== undefined);
+
   const badIdentityCheck = await triggerRssAction(
     baseUrl,
     "binny22-one",
@@ -6354,13 +7096,22 @@ async function runRssAcceptance(
       "\n",
   );
 
-  for (const binId of ["binny22-one", "binny22-two"]) {
-    const removed = cliData<{
-      readonly removed: boolean;
-      readonly id: string;
-    }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
-    assert.deepEqual(removed, { removed: true, id: binId });
-  }
+  const initialCommit = initialRun.result?.commits.find(({ items }) =>
+    items.some(({ itemId }) => itemId === rssItemV1.itemId),
+  );
+  assert.ok(initialCommit !== undefined);
+  assert.equal(initialCommit.commitId.length > 0, true);
+  return {
+    binIds: ["binny22-one", "binny22-two"],
+    itemId: rssItemV1.itemId,
+    initialRevisionId: initialRssView.revisionId,
+    initialRunId: initialRun.runId,
+    commitId: initialCommit.commitId,
+    resourceIds: rssV1.resources?.map(({ resourceId }) => resourceId) ?? [],
+    latestPartialRevisionId: latestPartialView.revisionId,
+    latestPartialResourceIds:
+      latestPartialState.resources?.map(({ resourceId }) => resourceId) ?? [],
+  };
 }
 
 type PostgresPerformanceStats = {
@@ -6847,6 +7598,12 @@ async function main(): Promise<void> {
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.23.0/24";
   const runtimeSubnet =
     process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.150.0/24";
+  const connectionsSubnet =
+    process.env.BINNY_E2E_CONNECTIONS_SUBNET ?? "10.253.151.0/24";
+  const browserSubnet =
+    process.env.BINNY_E2E_BROWSER_SUBNET ?? "10.253.152.0/24";
+  const linuxdoSubnet =
+    process.env.BINNY_E2E_LINUXDO_SUBNET ?? "10.253.153.0/24";
   await writeFile(
     composeOverrideFile,
     [
@@ -6859,6 +7616,10 @@ async function main(): Promise<void> {
       '    mem_limit: "2g"',
       "    ports: !override",
       '      - "3000"',
+      "    networks: !override",
+      "      - default",
+      "      - runtime",
+      "      - connections",
       "  manual-runs-source:",
       "    ports: !override",
       '      - "8081"',
@@ -6881,6 +7642,17 @@ async function main(): Promise<void> {
       "      BINNY_API_URL: http://heartbeat-proxy:8082",
       "    networks: !override",
       "      - runtime",
+      "  runtime-linuxdo:",
+      "    networks: !override",
+      "      - runtime",
+      "      - connections",
+      "      - browser",
+      "      - linuxdo",
+      "  linuxdo-e2e-source:",
+      "    ports: !override",
+      '      - "8081"',
+      "    networks: !override",
+      "      - linuxdo",
       "  heartbeat-proxy:",
       `    image: ${imageName}`,
       "    command:",
@@ -6904,6 +7676,18 @@ async function main(): Promise<void> {
       "    ipam:",
       "      config:",
       `        - subnet: ${runtimeSubnet}`,
+      "  connections:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${connectionsSubnet}`,
+      "  browser:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${browserSubnet}`,
+      "  linuxdo:",
+      "    ipam:",
+      "      config:",
+      `        - subnet: ${linuxdoSubnet}`,
       "",
     ].join("\n"),
   );
@@ -6943,6 +7727,10 @@ async function main(): Promise<void> {
     await compose(["build", "runtime-rss"]);
     builtImages.add(rssRuntimeImageName);
     if (runFunctionalJourney) {
+      await compose(["build", "runtime-linuxdo"]);
+      builtImages.add(linuxdoRuntimeImageName);
+    }
+    if (runFunctionalJourney) {
       rssImageUpdate = await buildRssImageUpdate(
         path.join(overrideDirectory, "rss-build-context"),
       );
@@ -6959,13 +7747,7 @@ async function main(): Promise<void> {
         "票 27 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
       );
     }
-    await compose([
-      "up",
-      "--detach",
-      "--wait",
-      "--wait-timeout",
-      "360",
-      "--no-build",
+    const e2eServices = [
       "postgres",
       "server",
       "manual-runs-source",
@@ -6975,9 +7757,24 @@ async function main(): Promise<void> {
       "runtime-rss",
       "runtime-rss-two",
       "heartbeat-proxy",
+    ];
+    if (runFunctionalJourney) {
+      e2eServices.push("runtime-linuxdo", "linuxdo-e2e-source");
+    }
+    await compose([
+      "up",
+      "--detach",
+      "--wait",
+      "--wait-timeout",
+      "360",
+      "--no-build",
+      ...e2eServices,
     ]);
     composePort = await publishedPort("server", 3000);
     manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    if (runFunctionalJourney) {
+      linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
+    }
     const activeHeartbeatProxy = createHeartbeatDelayProxy(
       await publishedPort("heartbeat-proxy", 8083),
     );
@@ -7003,7 +7800,11 @@ async function main(): Promise<void> {
       await manualRunControllerPartitionStep();
       await manualRunsHttpStep(baseUrl, manualRunManifest);
       baseUrl = await scheduledRunsStep(baseUrl);
-      await runRssAcceptance(baseUrl, rssControlSource, rssImageUpdate);
+      const rssAcceptance = await runRssAcceptance(
+        baseUrl,
+        rssControlSource,
+        rssImageUpdate,
+      );
       for (const binId of ["binny15-one", "binny15-two"]) {
         const removed = cliData<{
           readonly removed: boolean;
@@ -7020,9 +7821,56 @@ async function main(): Promise<void> {
       await archiveAggregationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
+      baseUrl = await verifyRestartAndRemoval(
+        baseUrl,
+        archive,
+        sdkResource,
+        rssAcceptance.binIds,
+      );
       process.stdout.write(
         "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+      );
+      await createLinuxdoBin(baseUrl);
+      linuxdoViewerBrowser = await startLinuxdoViewerBrowser({
+        projectName,
+        image: linuxdoRuntimeImageName,
+        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
+        run,
+      });
+      const outerBrowser = linuxdoViewerBrowser.browser;
+      const linuxdoSourceControlUrl =
+        "http://" +
+        (process.env.BINNY_E2E_HOST ?? "172.17.0.1") +
+        ":" +
+        String(linuxdoSourcePort) +
+        "/__control/state";
+      const linuxdoJourney = await linuxdoUserJourney({
+        binId: "binny28-linuxdo",
+        topicId: 2401,
+        cli: (args) => cli(baseUrl, args),
+        browser: outerBrowser,
+        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
+        serverPort: composePort,
+        sourceOrigin: "http://linuxdo-e2e-source:8081",
+        sourceControlUrl: linuxdoSourceControlUrl,
+        username: "binny24-user",
+        password: "linuxdo-fixture",
+      });
+      process.stdout.write(
+        "Linux.do 同项目正式镜像旅程：" +
+          JSON.stringify({
+            binId: "binny28-linuxdo",
+            checkRunId: linuxdoJourney.authenticatedCheck.runId,
+            collectRunId: linuxdoJourney.firstCollection.runId,
+            itemIds: linuxdoJourney.itemIds,
+          }) +
+          "\n",
+      );
+      await verifyLinuxdoArchiveJourney(
+        baseUrl,
+        linuxdoSourceControlUrl,
+        linuxdoJourney,
+        rssAcceptance,
       );
     }
     await runCapacityAcceptance(baseUrl);
@@ -7038,6 +7886,14 @@ async function main(): Promise<void> {
       "Compose 验收失败日志：\n" + logs.stdout + logs.stderr,
     );
   } finally {
+    if (linuxdoViewerBrowser !== undefined) {
+      try {
+        await linuxdoViewerBrowser.close();
+      } catch (error) {
+        cleanupError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
     if (heartbeatProxy !== undefined) {
       try {
         await heartbeatProxy.release();
@@ -7059,6 +7915,10 @@ async function main(): Promise<void> {
           "binny15",
           "--profile",
           "binny22",
+          "--profile",
+          "binny24",
+          "--profile",
+          "linuxdo-e2e",
           "down",
           "--volumes",
           "--remove-orphans",
