@@ -83,6 +83,42 @@
       "cache": false,
       "tags": ["quality:heavy"]
     },
+    "//#test:linuxdo-collector": {
+      "passThroughEnv": [
+        "BINNY24_PUBLISHED_HOST",
+        "BINNY24_API_SUBNET",
+        "BINNY24_RUNTIME_SUBNET",
+        "BINNY24_CONNECTIONS_SUBNET",
+        "BINNY24_BROWSER_SUBNET"
+      ],
+      "inputs": [
+        "compose.yaml",
+        "Dockerfile",
+        "packages/collector-runtime/Dockerfile.browser",
+        "scripts/test-linuxdo-collector.ts",
+        "scripts/binny-e2e-linuxdo-source.ts",
+        "packages/api/src/**",
+        "packages/binny/src/**",
+        "packages/collector-runtime/package.json",
+        "packages/collector-runtime/src/**",
+        "packages/collector-sdk/src/**",
+        "packages/contracts/src/**",
+        "packages/core/package.json",
+        "packages/core/src/**",
+        "packages/db/**",
+        "packages/server/package.json",
+        "packages/server/src/**",
+        "packages/tooling-config/**",
+        "collectors/linuxdo/package.json",
+        "collectors/linuxdo/src/**",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "package.json"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
+    },
     "//#publication:pack": {
       "tags": ["work:release"],
       "cache": false
