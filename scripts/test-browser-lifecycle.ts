@@ -9,10 +9,29 @@ import { fileURLToPath } from "node:url";
 
 import type { Browser as PlaywrightBrowser, Page } from "playwright-core";
 
+import {
+  copyImageBuildContext,
+  setBuildContextCollectorVersion,
+} from "./binny-image-update-context.ts";
+
 type ProcessResult = {
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
+};
+
+type BrowserImageUpdate = {
+  readonly baselineManifest: Record<string, unknown>;
+  readonly candidateManifest: Record<string, unknown>;
+  readonly baselineImageId: string;
+  readonly candidateImageId: string;
+};
+
+type BrowserRuntimeContainer = {
+  readonly id: string;
+  readonly imageId: string;
+  readonly status: string;
+  readonly ownerVolume: string;
 };
 
 type CliWire<T> = {
@@ -121,6 +140,7 @@ const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny19-${suffix}`;
 const serverImage = `binny19-server-${suffix}:local`;
 const browserImage = `binny19-browser-${suffix}:local`;
+const browserBaselineImage = `binny19-browser-${suffix}-image-a:local`;
 const outerBrowserContainer = `${projectName}-outer-browser`;
 const outerBrowserWsPath = `/binny19-${randomUUID()}`;
 const processObserver = `${projectName}-process-observer`;
@@ -131,15 +151,17 @@ let sitePort: number | undefined;
 let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
+let composeProjectDirectory = "";
+let activeBrowserImage = browserImage;
 let playwrightBrowser: PlaywrightBrowser | undefined;
 let composeStarted = false;
-let imageBuilt = false;
+const builtImages = new Set<string>();
 let processObserverStarted = false;
 
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY19_RUNTIME_IMAGE: browserImage,
+    BINNY19_RUNTIME_IMAGE: activeBrowserImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -173,10 +195,15 @@ function run(
 }
 
 function composePrefix(profile = "binny19"): readonly string[] {
+  const projectDirectory =
+    composeProjectDirectory.length === 0
+      ? []
+      : ["--project-directory", composeProjectDirectory];
   const prefix = [
     "compose",
     "--project-name",
     projectName,
+    ...projectDirectory,
     "--file",
     composeFile,
   ];
@@ -526,6 +553,142 @@ async function runtimeManifest(
   throw new Error(`正式浏览器运行器没有发布清单：${lastError}`);
 }
 
+function collectorVersion(manifest: Record<string, unknown>): string {
+  const version = manifest.version;
+  assert.ok(typeof version === "string" && version.length > 0);
+  return version;
+}
+
+function collectorManifestWithVersion(
+  manifest: Record<string, unknown>,
+  version: string,
+): Record<string, unknown> {
+  return { ...manifest, version };
+}
+
+async function imageId(image: string): Promise<string> {
+  const result = await run("docker", [
+    "image",
+    "inspect",
+    "--format",
+    "{{.Id}}",
+    image,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function browserRuntimeContainerInfo(
+  service: string,
+): Promise<BrowserRuntimeContainer> {
+  const containers = await compose(["ps", "--all", "--quiet", service]);
+  const id = containers.stdout.trim();
+  assert.ok(id.length > 0, `没有找到 ${service} 容器。`);
+  const result = await run("docker", ["inspect", id]);
+  assert.equal(result.code, 0, result.stderr);
+  const [container] = JSON.parse(result.stdout) as {
+    readonly Id: string;
+    readonly Image: string;
+    readonly State?: { readonly Status?: string };
+    readonly Mounts?: readonly {
+      readonly Type?: string;
+      readonly Name?: string;
+      readonly Destination?: string;
+    }[];
+  }[];
+  assert.ok(container !== undefined, `${service} 容器没有检查结果。`);
+  const ownerVolume = container?.Mounts?.find(
+    ({ Destination, Type }) =>
+      Destination === "/var/lib/binny/runtime" && Type === "volume",
+  )?.Name;
+  assert.ok(ownerVolume, `${service} 没有挂载持久运行目录。`);
+  return {
+    id: container.Id,
+    imageId: container.Image,
+    status: container.State?.Status ?? "unknown",
+    ownerVolume,
+  };
+}
+
+async function replaceBrowserRuntimeImage(
+  image: string,
+  expectedImageId: string,
+  afterOldImageStops?: () => Promise<void>,
+): Promise<{
+  readonly previous: BrowserRuntimeContainer;
+  readonly stopped: BrowserRuntimeContainer;
+  readonly current: BrowserRuntimeContainer;
+}> {
+  const previous = await browserRuntimeContainerInfo("browser-one");
+  assert.equal(previous.status, "running");
+  await compose(["stop", "browser-one"]);
+  const stopped = await browserRuntimeContainerInfo("browser-one");
+  assert.equal(stopped.id, previous.id);
+  assert.equal(stopped.status, "exited", "旧浏览器运行器必须先退出。");
+  await afterOldImageStops?.();
+
+  activeBrowserImage = image;
+  await compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--force-recreate",
+    "--no-build",
+    "browser-one",
+  ]);
+  const current = await browserRuntimeContainerInfo("browser-one");
+  assert.notEqual(current.id, previous.id);
+  assert.equal(current.status, "running");
+  assert.equal(current.imageId, expectedImageId);
+  assert.equal(current.ownerVolume, previous.ownerVolume);
+  return { previous, stopped, current };
+}
+
+async function buildBrowserImageUpdate(
+  candidateManifest: Record<string, unknown>,
+  buildContextDirectory: string,
+): Promise<BrowserImageUpdate> {
+  const candidateVersion = collectorVersion(candidateManifest);
+  const baselineVersion = candidateVersion + "-image-a";
+  const baselineManifest = collectorManifestWithVersion(
+    candidateManifest,
+    baselineVersion,
+  );
+  await copyImageBuildContext(repositoryRoot, buildContextDirectory);
+  await setBuildContextCollectorVersion(
+    buildContextDirectory,
+    "packages/collector-runtime/test/fixtures/browser-session-collector.ts",
+    "binny19.browser-session-fixture",
+    baselineVersion,
+  );
+
+  const candidateImageId = await imageId(browserImage);
+  const previousProjectDirectory = composeProjectDirectory;
+  const previousBrowserImage = activeBrowserImage;
+  let baselineImageId: string;
+  try {
+    composeProjectDirectory = buildContextDirectory;
+    activeBrowserImage = browserBaselineImage;
+    await compose(["build", "browser-one"]);
+    builtImages.add(browserBaselineImage);
+    baselineImageId = await imageId(browserBaselineImage);
+  } finally {
+    composeProjectDirectory = previousProjectDirectory;
+    activeBrowserImage = previousBrowserImage;
+  }
+  assert.notEqual(
+    baselineImageId,
+    candidateImageId,
+    "浏览器 A/B 应由不同源码构建出不同镜像制品。",
+  );
+  return {
+    baselineManifest,
+    candidateManifest,
+    baselineImageId,
+    candidateImageId,
+  };
+}
+
 async function publishedPort(
   service: string,
   containerPort: number,
@@ -719,6 +882,26 @@ async function updateBin(
     ]),
     "updated",
   );
+}
+
+async function updateCollectorManifest(
+  binId: string,
+  manifest: Record<string, unknown>,
+): Promise<{ readonly id: string; readonly version: string }> {
+  const updated = cliData<{
+    readonly id: string;
+    readonly collector: { readonly version: string };
+  }>(
+    await cli([
+      "bin",
+      "update",
+      binId,
+      "--collector",
+      JSON.stringify(manifest),
+    ]),
+    "updated",
+  );
+  return { id: updated.id, version: updated.collector.version };
 }
 
 async function readBin(binId: string): Promise<Bin> {
@@ -1485,11 +1668,17 @@ async function diagnostics(): Promise<string> {
 
 async function main(): Promise<void> {
   await createComposeOverlay();
+  assert.ok(testDirectory !== undefined);
+  const browserBuildContextDirectory = path.join(
+    testDirectory,
+    "browser-image-a",
+  );
 
   const config = await compose(["config", "--quiet"]);
   assert.equal(config.code, 0);
   composeStarted = true;
-  imageBuilt = true;
+  builtImages.add(serverImage);
+  builtImages.add(browserImage);
   await compose([
     "up",
     "--detach",
@@ -1510,9 +1699,26 @@ async function main(): Promise<void> {
   await waitForApi();
   await waitForSource();
 
+  const browserImageUpdate = await buildBrowserImageUpdate(
+    await runtimeManifest("browser-two"),
+    browserBuildContextDirectory,
+  );
+  const initialBrowserContainer =
+    await browserRuntimeContainerInfo("browser-one");
+  assert.equal(
+    initialBrowserContainer.imageId,
+    browserImageUpdate.candidateImageId,
+  );
+  const browserImageA = await replaceBrowserRuntimeImage(
+    browserBaselineImage,
+    browserImageUpdate.baselineImageId,
+  );
   const manifest = await runtimeManifest("browser-one");
+  assert.deepEqual(manifest, browserImageUpdate.baselineManifest);
+  const candidateManifest = await runtimeManifest("browser-two");
+  assert.deepEqual(candidateManifest, browserImageUpdate.candidateManifest);
   await createBin("binny19-one", manifest, 4);
-  await createBin("binny19-two", manifest, "disabled");
+  await createBin("binny19-two", candidateManifest, "disabled");
 
   const unsupported = structuredClone(manifest);
   const unsupportedEnvironment = unsupported.environment as {
@@ -1733,6 +1939,77 @@ async function main(): Promise<void> {
   assert.deepEqual(await browserMainProcess("browser-one"), checkWakeProcess);
   await waitForBrowserPower("binny19-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+
+  const archivedBeforeImageUpdate = await browserFixtureRunIds("binny19-one");
+  assert.ok(archivedBeforeImageUpdate.size > 0);
+  let updatedBrowserBin:
+    | { readonly id: string; readonly version: string }
+    | undefined;
+  const browserImageB = await replaceBrowserRuntimeImage(
+    browserImage,
+    browserImageUpdate.candidateImageId,
+    async () => {
+      updatedBrowserBin = await updateCollectorManifest(
+        "binny19-one",
+        browserImageUpdate.candidateManifest,
+      );
+      assert.equal(updatedBrowserBin.id, "binny19-one");
+      assert.equal(
+        updatedBrowserBin.version,
+        collectorVersion(browserImageUpdate.candidateManifest),
+      );
+    },
+  );
+  assert.ok(updatedBrowserBin !== undefined);
+  assert.equal(
+    browserImageB.previous.imageId,
+    browserImageUpdate.baselineImageId,
+  );
+  assert.equal(browserImageB.stopped.status, "exited");
+  assert.equal(
+    browserImageB.current.ownerVolume,
+    browserImageA.current.ownerVolume,
+  );
+  assert.deepEqual(
+    await runtimeManifest("browser-one"),
+    browserImageUpdate.candidateManifest,
+  );
+  await waitForRuntime("binny19-one");
+  const imageUpdateCheck = await triggerRun("binny19-one", "check");
+  const imageUpdateCheckResult = await waitForRun(
+    "binny19-one",
+    imageUpdateCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(imageUpdateCheckResult.status, "completed");
+  assert.equal(
+    imageUpdateCheckResult.result?.check?.availability,
+    "available",
+    "浏览器镜像替换后，持久 profile 应继续保持登录状态。",
+  );
+  assert.equal(imageUpdateCheckResult.result?.commits.length, 0);
+  assert.deepEqual(
+    await browserFixtureRunIds("binny19-one"),
+    archivedBeforeImageUpdate,
+    "浏览器镜像替换不能丢失已归档资料。",
+  );
+  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserProcessesStopped("browser-one");
+  process.stdout.write(
+    `票27浏览器镜像更新实测：${JSON.stringify({
+      binId: updatedBrowserBin.id,
+      baselineVersion: collectorVersion(browserImageUpdate.baselineManifest),
+      candidateVersion: updatedBrowserBin.version,
+      baselineImageId: browserImageUpdate.baselineImageId,
+      candidateImageId: browserImageUpdate.candidateImageId,
+      oldContainerId: browserImageB.previous.id,
+      oldContainerStatusAfterStop: browserImageB.stopped.status,
+      newContainerId: browserImageB.current.id,
+      profileVolume: browserImageB.current.ownerVolume,
+      archivedFixtureIds: [...archivedBeforeImageUpdate].toSorted(),
+      postUpdateCheck: imageUpdateCheckResult.result?.check?.availability,
+    })}\n`,
+  );
 
   await updateBin("binny19-one", 30);
   await delay(2_500);
@@ -2163,14 +2440,10 @@ try {
       ["down", "--volumes", "--remove-orphans"],
       "binny19,binny19-lock",
     ).catch(() => undefined);
-  if (imageBuilt)
-    await run("docker", [
-      "image",
-      "rm",
-      "--force",
-      serverImage,
-      browserImage,
-    ]).catch(() => undefined);
+  if (builtImages.size > 0)
+    await run("docker", ["image", "rm", "--force", ...builtImages]).catch(
+      () => undefined,
+    );
   if (testDirectory !== undefined)
     await rm(testDirectory, { recursive: true, force: true });
 }
