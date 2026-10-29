@@ -19,7 +19,7 @@ const sourceResultSchema = z.object({
 });
 
 export default defineCollector({
-  id: "binny15.manual-run-fixture",
+  id: "binny-runs.manual-run-fixture",
   version: "1.0.0",
   environment: {
     browser: { required: false, profileReuseAfterRestart: false },
@@ -121,11 +121,11 @@ export default defineCollector({
 
         const config = configurationSchema.parse(context.config);
         const submission = {
-          requestId: "binny15:manual-run:" + context.runId,
+          requestId: "binny-runs:manual-run:" + context.runId,
           items: [
             {
               sourceKey: {
-                namespace: "binny15.controlled-source",
+                namespace: "binny-runs.controlled-source",
                 key: source.sourceKey,
               },
               metadata: { title: source.title, section: config.section },

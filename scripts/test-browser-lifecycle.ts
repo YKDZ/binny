@@ -136,22 +136,22 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const composeFile = path.join(repositoryRoot, "compose.yaml");
+const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
-const projectName = `binny19-${suffix}`;
-const serverImage = `binny19-server-${suffix}:local`;
-const browserImage = `binny19-browser-${suffix}:local`;
-const browserBaselineImage = `binny19-browser-${suffix}-image-a:local`;
+const projectName = `binny-browser-${suffix}`;
+const serverImage = `binny-browser-server-${suffix}:local`;
+const browserImage = `binny-browser-browser-${suffix}:local`;
+const browserBaselineImage = `binny-browser-browser-${suffix}-image-a:local`;
 const protocol4SourceCommit = "c35af108a42db12c1a5bce627f198423abb6574d";
-const protocol4ProjectName = `binny21-upgrade-${suffix}`;
-const protocol4ServerImage = `binny21-upgrade-server-${suffix}:local`;
-const protocol4BrowserImage = `binny21-upgrade-browser-${suffix}:local`;
+const protocol4ProjectName = `binny-capacity-upgrade-${suffix}`;
+const protocol4ServerImage = `binny-capacity-upgrade-server-${suffix}:local`;
+const protocol4BrowserImage = `binny-capacity-upgrade-browser-${suffix}:local`;
 const outerBrowserContainer = `${projectName}-outer-browser`;
-const outerBrowserWsPath = `/binny19-${randomUUID()}`;
+const outerBrowserWsPath = `/binny-browser-${randomUUID()}`;
 const processObserver = `${projectName}-process-observer`;
-const password = `binny19${randomUUID().replaceAll("-", "")}`;
-const protocol4Password = `binny21${randomUUID().replaceAll("-", "")}`;
-const publishedHost = process.env.BINNY19_PUBLISHED_HOST ?? "172.17.0.1";
+const password = `binny-browser${randomUUID().replaceAll("-", "")}`;
+const protocol4Password = `binny-capacity${randomUUID().replaceAll("-", "")}`;
+const publishedHost = process.env.BINNY_BROWSER_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort: number | undefined;
 let sitePort: number | undefined;
 let heartbeatProxyControlPort: number | undefined;
@@ -171,7 +171,7 @@ let processObserverStarted = false;
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY19_RUNTIME_IMAGE: activeBrowserImage,
+    BINNY_TEST_BROWSER_IMAGE: activeBrowserImage,
     BINNY_POSTGRES_PASSWORD: password,
     BINNY_BROWSER_CAPACITY_LIMIT: "1",
   };
@@ -205,7 +205,7 @@ function run(
   });
 }
 
-function composePrefix(profile = "binny19"): readonly string[] {
+function composePrefix(profile = "binny-browser"): readonly string[] {
   const projectDirectory =
     composeProjectDirectory.length === 0
       ? []
@@ -225,7 +225,7 @@ function composePrefix(profile = "binny19"): readonly string[] {
 
 async function compose(
   args: readonly string[],
-  profile = "binny19",
+  profile = "binny-browser",
 ): Promise<ProcessResult> {
   const result = await run("docker", [...composePrefix(profile), ...args]);
   assert.equal(
@@ -238,7 +238,7 @@ async function compose(
 
 async function rawCompose(
   args: readonly string[],
-  profile = "binny19",
+  profile = "binny-browser",
 ): Promise<ProcessResult> {
   return await run("docker", [...composePrefix(profile), ...args]);
 }
@@ -376,10 +376,10 @@ async function dockerNetworkSubnets(): Promise<string[]> {
 async function freeBrowserSubnet(useConfiguredSubnet = true): Promise<string> {
   const existing = await dockerNetworkSubnets();
   if (useConfiguredSubnet) {
-    const requested = process.env.BINNY21_SUBNET ?? "10.253.21.0/24";
+    const requested = process.env.BINNY_CAPACITY_SUBNET ?? "10.253.21.0/24";
     assert.ok(
       existing.every((subnet) => !rangesOverlap(requested, subnet)),
-      `BINNY21_SUBNET ${requested} 与现有 Docker 网络重叠。`,
+      `BINNY_CAPACITY_SUBNET ${requested} 与现有 Docker 网络重叠。`,
     );
     return requested;
   }
@@ -394,7 +394,7 @@ async function freeBrowserSubnet(useConfiguredSubnet = true): Promise<string> {
 }
 
 async function createComposeOverlay(): Promise<void> {
-  testDirectory = await mkdtemp(path.join(tmpdir(), "binny19-browser-"));
+  testDirectory = await mkdtemp(path.join(tmpdir(), "binny-browser-browser-"));
   overlayFile = path.join(testDirectory, "compose.network.yaml");
   const subnet = await freeBrowserSubnet();
   await writeFile(
@@ -415,7 +415,7 @@ async function createComposeOverlay(): Promise<void> {
       "        condition: service_started",
       "  browser-idle-heartbeat-proxy:",
       `    image: ${serverImage}`,
-      "    profiles: [binny19]",
+      "    profiles: [binny-browser]",
       "    command:",
       "      - node",
       "      - scripts/binny-e2e-heartbeat-proxy.ts",
@@ -469,14 +469,14 @@ async function protocol4Compose(
       "--file",
       composeFile,
       "--profile",
-      "binny19",
+      "binny-browser",
       "--file",
       protocol4OverlayFile,
       ...args,
     ],
     {
       BINNY_IMAGE: images.server,
-      BINNY19_RUNTIME_IMAGE: images.browser,
+      BINNY_TEST_BROWSER_IMAGE: images.browser,
       BINNY_POSTGRES_PASSWORD: protocol4Password,
       BINNY_BROWSER_CAPACITY_LIMIT: "1",
     },
@@ -720,7 +720,7 @@ async function protocol4BrowserMainProcessCount(
 
 async function buildAcceptedProtocol4Images(): Promise<void> {
   assert.ok(testDirectory !== undefined);
-  protocol4Worktree = path.join(testDirectory, "accepted-c35-source");
+  protocol4Worktree = path.join(testDirectory, "protocol-v4-source");
   builtImages.add(protocol4ServerImage);
   builtImages.add(protocol4BrowserImage);
   const added = await run("git", [
@@ -743,7 +743,7 @@ async function buildAcceptedProtocol4Images(): Promise<void> {
   assert.equal(
     serverBuild.code,
     0,
-    `接受的20 core镜像构建失败：\n${(serverBuild.stdout + serverBuild.stderr).slice(-12_000)}`,
+    `旧版核心镜像构建失败：\n${(serverBuild.stdout + serverBuild.stderr).slice(-12_000)}`,
   );
   const browserBuild = await run("docker", [
     "build",
@@ -763,7 +763,7 @@ async function buildAcceptedProtocol4Images(): Promise<void> {
   assert.equal(
     browserBuild.code,
     0,
-    `接受的20浏览器镜像构建失败：\n${(browserBuild.stdout + browserBuild.stderr).slice(-12_000)}`,
+    `旧版浏览器镜像构建失败：\n${(browserBuild.stdout + browserBuild.stderr).slice(-12_000)}`,
   );
   const removed = await run("git", [
     "worktree",
@@ -1074,7 +1074,7 @@ async function buildBrowserImageUpdate(
   await setBuildContextCollectorVersion(
     buildContextDirectory,
     "packages/collector-runtime/test/fixtures/browser-session-collector.ts",
-    "binny19.browser-session-fixture",
+    "binny-browser.browser-session-fixture",
     baselineVersion,
   );
 
@@ -1141,7 +1141,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
     browserImage,
     "--input-type=module",
     "--eval",
-    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY19_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
   ]);
   assert.equal(
     launch.code,
@@ -1154,7 +1154,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
   while (Date.now() < deadline) {
     const result = await run("docker", ["logs", outerBrowserContainer]);
     logs = result.stdout + result.stderr;
-    if (logs.includes("BINNY19_OUTER_BROWSER_READY")) break;
+    if (logs.includes("BINNY_BROWSER_OUTER_BROWSER_READY")) break;
     const inspected = await run("docker", [
       "inspect",
       "--format",
@@ -1166,7 +1166,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
     await delay(100);
   }
   assert.ok(
-    logs.includes("BINNY19_OUTER_BROWSER_READY"),
+    logs.includes("BINNY_BROWSER_OUTER_BROWSER_READY"),
     `等待外层正式镜像浏览器超时：\n${logs.slice(-8_000)}`,
   );
 
@@ -1212,7 +1212,7 @@ async function browserFixtureRunIds(
       type: "field",
       field: "sourceKey.namespace",
       operator: "eq",
-      value: "binny19.browser-session-fixture",
+      value: "binny-browser.browser-session-fixture",
     },
     select: ["sourceKey"],
     orderBy: [{ field: "sourceKey.key", direction: "asc" }],
@@ -1229,7 +1229,7 @@ async function browserFixtureRunIds(
   return new Set(
     page.results.flatMap(({ sourceKey }) => {
       const prefix = `${binId}:`;
-      return sourceKey?.namespace === "binny19.browser-session-fixture" &&
+      return sourceKey?.namespace === "binny-browser.browser-session-fixture" &&
         sourceKey.key.startsWith(prefix)
         ? [sourceKey.key.slice(prefix.length)]
         : [];
@@ -1723,7 +1723,7 @@ async function enterLoginThroughCanvas(
   if (beforeInputState.canvas.pixelSamples.every((pixel) => pixel[3] === 0)) {
     const screenshotPath = path.join(
       tmpdir(),
-      `binny19-viewer-${suffix}-no-frame.png`,
+      `binny-browser-viewer-${suffix}-no-frame.png`,
     );
     await writeFile(screenshotPath, beforeInputScreenshot);
     throw new Error(
@@ -1748,11 +1748,11 @@ async function enterLoginThroughCanvas(
     const afterInputState = await readViewerState();
     const beforeScreenshotPath = path.join(
       tmpdir(),
-      `binny19-viewer-${suffix}-before.png`,
+      `binny-browser-viewer-${suffix}-before.png`,
     );
     const afterScreenshotPath = path.join(
       tmpdir(),
-      `binny19-viewer-${suffix}-after.png`,
+      `binny-browser-viewer-${suffix}-after.png`,
     );
     await writeFile(beforeScreenshotPath, beforeInputScreenshot);
     await page.screenshot({ path: afterScreenshotPath });
@@ -1760,7 +1760,7 @@ async function enterLoginThroughCanvas(
       `外层浏览器输入后没有打开受控登录页：${JSON.stringify({ beforeInputState, afterInputState, loginPageViews: (await sourceMetrics()).loginPageViews.length })}；输入前画面：${beforeScreenshotPath}；输入后画面：${afterScreenshotPath}；${String(error)}`,
     );
   }
-  await page.keyboard.type("binny19-user", { delay: 10 });
+  await page.keyboard.type("binny-browser-user", { delay: 10 });
   await page.keyboard.press("Tab");
   await page.keyboard.type("browser-session", { delay: 10 });
   await page.keyboard.press("Tab");
@@ -2123,9 +2123,9 @@ async function protocol4Diagnostics(): Promise<string> {
         browser: browserImage,
       }),
     ]);
-    return `\n票21升级项目 ${protocol4ProjectName}：\n${services.stdout}\n升级项目日志：\n${(logs.stdout + logs.stderr).slice(-18_000)}`;
+    return `\n升级项目 ${protocol4ProjectName}：\n${services.stdout}\n升级项目日志：\n${(logs.stdout + logs.stderr).slice(-18_000)}`;
   } catch (error) {
-    return `\n票21升级项目诊断失败：${String(error)}`;
+    return `\n升级项目诊断失败：${String(error)}`;
   }
 }
 
@@ -2164,11 +2164,11 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
       [
         "bin",
         "create",
-        "binny19-one",
+        "binny-browser-one",
         "--collector",
         JSON.stringify(legacyManifest),
         "--identity",
-        "identity-binny21-legacy",
+        "identity-binny-capacity-legacy",
         "--config",
         JSON.stringify(legacyConfiguration),
         "--targets",
@@ -2182,20 +2182,20 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
     "created",
   );
   await protocol4WaitForRuntime(
-    "binny19-one",
+    "binny-browser-one",
     protocol4Images.server,
     protocol4Images.browser,
   );
   const legacyWarmRun = cliData<Run>(
     await protocol4Cli(
-      ["run", "trigger", "binny19-one", "check", "--params", "{}"],
+      ["run", "trigger", "binny-browser-one", "check", "--params", "{}"],
       protocol4Images.server,
       protocol4Images.browser,
     ),
     "triggered",
   );
   const legacyWarmResult = await protocol4WaitForRun(
-    "binny19-one",
+    "binny-browser-one",
     legacyWarmRun.runId,
     protocol4Images.server,
     protocol4Images.browser,
@@ -2203,7 +2203,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   );
   assert.equal(legacyWarmResult.status, "completed");
   await protocol4WaitForBrowserPower(
-    "binny19-one",
+    "binny-browser-one",
     "ready",
     protocol4Images.server,
     protocol4Images.browser,
@@ -2220,7 +2220,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   );
   await protocol4WaitForApi(currentImages.server, currentImages.browser);
   await protocol4WaitForRuntime(
-    "binny19-one",
+    "binny-browser-one",
     currentImages.server,
     protocol4Images.browser,
   );
@@ -2245,11 +2245,11 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
       [
         "bin",
         "create",
-        "binny19-two",
+        "binny-browser-two",
         "--collector",
         JSON.stringify(currentManifest),
         "--identity",
-        "identity-binny21-current",
+        "identity-binny-capacity-current",
         "--config",
         JSON.stringify(legacyConfiguration),
         "--targets",
@@ -2263,13 +2263,13 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
     "created",
   );
   await protocol4WaitForRuntime(
-    "binny19-two",
+    "binny-browser-two",
     currentImages.server,
     currentImages.browser,
   );
   const currentQueuedRun = cliData<Run>(
     await protocol4Cli(
-      ["run", "trigger", "binny19-two", "check", "--params", "{}"],
+      ["run", "trigger", "binny-browser-two", "check", "--params", "{}"],
       currentImages.server,
       currentImages.browser,
     ),
@@ -2295,14 +2295,20 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
 
   cliData(
     await protocol4Cli(
-      ["bin", "update", "binny19-one", "--browser-idle-timeout-seconds", "0"],
+      [
+        "bin",
+        "update",
+        "binny-browser-one",
+        "--browser-idle-timeout-seconds",
+        "0",
+      ],
       currentImages.server,
       protocol4Images.browser,
     ),
     "updated",
   );
   await protocol4WaitForBrowserPower(
-    "binny19-one",
+    "binny-browser-one",
     "stopped",
     currentImages.server,
     protocol4Images.browser,
@@ -2314,7 +2320,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
     );
   assert.equal(legacyStoppedProcessCount, 0);
   const currentAfterLegacyStop = await protocol4WaitForRun(
-    "binny19-two",
+    "binny-browser-two",
     currentQueuedRun.runId,
     currentImages.server,
     currentImages.browser,
@@ -2322,7 +2328,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   );
   assert.equal(currentAfterLegacyStop.status, "completed");
   await protocol4WaitForBrowserPower(
-    "binny19-two",
+    "binny-browser-two",
     "ready",
     currentImages.server,
     currentImages.browser,
@@ -2336,7 +2342,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
 
   const unsupportedLegacyRun = cliData<Run>(
     await protocol4Cli(
-      ["run", "trigger", "binny19-one", "check", "--params", "{}"],
+      ["run", "trigger", "binny-browser-one", "check", "--params", "{}"],
       currentImages.server,
       protocol4Images.browser,
     ),
@@ -2355,14 +2361,20 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   );
   cliData(
     await protocol4Cli(
-      ["bin", "update", "binny19-two", "--browser-idle-timeout-seconds", "0"],
+      [
+        "bin",
+        "update",
+        "binny-browser-two",
+        "--browser-idle-timeout-seconds",
+        "0",
+      ],
       currentImages.server,
       currentImages.browser,
     ),
     "updated",
   );
   await protocol4WaitForBrowserPower(
-    "binny19-two",
+    "binny-browser-two",
     "stopped",
     currentImages.server,
     currentImages.browser,
@@ -2377,7 +2389,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   assert.equal(
     (
       await protocol4ReadRun(
-        "binny19-one",
+        "binny-browser-one",
         unsupportedLegacyRun.runId,
         currentImages.server,
         protocol4Images.browser,
@@ -2387,7 +2399,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
     "容量释放后，未承接 legacy 占位的旧 v4 请求仍不得启动。",
   );
   process.stdout.write(
-    `票21 protocol4 活体升级实测：${JSON.stringify({
+    `protocol4 活体升级实测：${JSON.stringify({
       project: protocol4ProjectName,
       subnet: protocol4Subnet,
       acceptedRuntimeSourceCommit: protocol4SourceCommit,
@@ -2462,8 +2474,8 @@ async function main(): Promise<void> {
   assert.deepEqual(manifest, browserImageUpdate.baselineManifest);
   const candidateManifest = await runtimeManifest("browser-two");
   assert.deepEqual(candidateManifest, browserImageUpdate.candidateManifest);
-  await createBin("binny19-one", manifest, 4);
-  await createBin("binny19-two", candidateManifest, "disabled");
+  await createBin("binny-browser-one", manifest, 4);
+  await createBin("binny-browser-two", candidateManifest, "disabled");
 
   const unsupported = structuredClone(manifest);
   const unsupportedEnvironment = unsupported.environment as {
@@ -2484,11 +2496,11 @@ async function main(): Promise<void> {
     await cli([
       "bin",
       "create",
-      "binny20-no-reason",
+      "binny-idle-no-reason",
       "--collector",
       JSON.stringify(createWithoutReason),
       "--identity",
-      "identity-binny20-no-reason",
+      "identity-binny-idle-no-reason",
       "--config",
       JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
       "--targets",
@@ -2503,11 +2515,11 @@ async function main(): Promise<void> {
     await cli([
       "bin",
       "create",
-      "binny20-incompatible",
+      "binny-idle-incompatible",
       "--collector",
       JSON.stringify(unsupported),
       "--identity",
-      "identity-binny20-incompatible",
+      "identity-binny-idle-incompatible",
       "--config",
       JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
       "--targets",
@@ -2520,23 +2532,25 @@ async function main(): Promise<void> {
   assert.deepEqual(incompatiblePolicy.path, ["browserIdleTimeoutSeconds"]);
 
   assert.equal(
-    (await updateBin("binny19-one", "disabled")).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-one", "disabled"))
+      .browserIdleTimeoutSeconds,
     null,
   );
   assert.equal(
-    (await updateBin("binny19-one", 0)).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-one", 0)).browserIdleTimeoutSeconds,
     0,
   );
   assert.equal(
-    (await updateBin("binny19-one", 4)).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-one", 4)).browserIdleTimeoutSeconds,
     4,
   );
   assert.equal(
-    (await updateBin("binny19-two", 0)).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-two", 0)).browserIdleTimeoutSeconds,
     0,
   );
   assert.equal(
-    (await updateBin("binny19-two", "disabled")).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-two", "disabled"))
+      .browserIdleTimeoutSeconds,
     null,
   );
   const incompatibleUpdate = cliFailure<{
@@ -2546,7 +2560,7 @@ async function main(): Promise<void> {
     await cli([
       "bin",
       "update",
-      "binny19-one",
+      "binny-browser-one",
       "--collector",
       JSON.stringify(unsupported),
     ]),
@@ -2555,15 +2569,22 @@ async function main(): Promise<void> {
   assert.deepEqual(incompatibleUpdate.path, ["browserIdleTimeoutSeconds"]);
 
   await Promise.all([
-    waitForRuntime("binny19-one"),
-    waitForRuntime("binny19-two"),
+    waitForRuntime("binny-browser-one"),
+    waitForRuntime("binny-browser-two"),
   ]);
-  assert.equal((await readBin("binny19-one")).browserIdleTimeoutSeconds, 4);
-  assert.equal((await readBin("binny19-two")).browserIdleTimeoutSeconds, null);
-  await updateBin("binny19-one", 30);
+  assert.equal(
+    (await readBin("binny-browser-one")).browserIdleTimeoutSeconds,
+    4,
+  );
+  assert.equal(
+    (await readBin("binny-browser-two")).browserIdleTimeoutSeconds,
+    null,
+  );
+  await updateBin("binny-browser-one", 30);
   await delay(2_500);
   assert.equal(
-    (await waitForBrowserPower("binny19-one", "stopped")).execution.status,
+    (await waitForBrowserPower("binny-browser-one", "stopped")).execution
+      .status,
     "online",
   );
   await Promise.all([
@@ -2577,8 +2598,8 @@ async function main(): Promise<void> {
   assert.equal(oneBindings["9222/tcp"], undefined);
 
   const concurrentFirstLaunches = await Promise.all([
-    triggerRun("binny19-one", "check"),
-    triggerRun("binny19-two", "check"),
+    triggerRun("binny-browser-one", "check"),
+    triggerRun("binny-browser-two", "check"),
   ]);
   const initialConcurrentBrowserCount = await activeBrowserMainProcessCount();
   const concurrentBrowserSamples = [initialConcurrentBrowserCount];
@@ -2596,8 +2617,8 @@ async function main(): Promise<void> {
   let concurrentRunStates: readonly [Run, Run] | undefined;
   while (Date.now() < concurrentRunDeadline) {
     const current = await Promise.all([
-      readRun("binny19-one", concurrentFirstLaunches[0].runId),
-      readRun("binny19-two", concurrentFirstLaunches[1].runId),
+      readRun("binny-browser-one", concurrentFirstLaunches[0].runId),
+      readRun("binny-browser-two", concurrentFirstLaunches[1].runId),
     ]);
     concurrentRunStates = current;
     const processCount = await activeBrowserMainProcessCount();
@@ -2614,11 +2635,11 @@ async function main(): Promise<void> {
       processCount === 1
     ) {
       concurrentWinner = {
-        binId: winnerIndex === 0 ? "binny19-one" : "binny19-two",
+        binId: winnerIndex === 0 ? "binny-browser-one" : "binny-browser-two",
         service: winnerIndex === 0 ? "browser-one" : "browser-two",
       };
       concurrentLoser = {
-        binId: loserIndex === 0 ? "binny19-one" : "binny19-two",
+        binId: loserIndex === 0 ? "binny-browser-one" : "binny-browser-two",
         service: loserIndex === 0 ? "browser-one" : "browser-two",
         run: current[loserIndex]!,
       };
@@ -2637,8 +2658,8 @@ async function main(): Promise<void> {
   await waitForApi();
   serverPort = await publishedPort("server", 3000);
   await Promise.all([
-    waitForRuntime("binny19-one"),
-    waitForRuntime("binny19-two"),
+    waitForRuntime("binny-browser-one"),
+    waitForRuntime("binny-browser-two"),
   ]);
   assert.equal(
     (await readRun(concurrentLoser.binId, concurrentLoser.run.runId))
@@ -2668,11 +2689,11 @@ async function main(): Promise<void> {
   await waitForBrowserProcessesStopped(concurrentLoser.service);
   concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
   assert.equal(concurrentBrowserSamples.at(-1), 0);
-  await updateBin("binny19-one", 30);
-  await updateBin("binny19-two", "disabled");
+  await updateBin("binny-browser-one", 30);
+  await updateBin("binny-browser-two", "disabled");
   assert.ok(Math.max(...concurrentBrowserSamples) <= 1);
   process.stdout.write(
-    `票21并发准入与核心重启实测：${JSON.stringify({
+    `并发准入与核心重启实测：${JSON.stringify({
       limit: 1,
       winner: concurrentWinner.binId,
       queuedBin: concurrentLoser.binId,
@@ -2683,50 +2704,60 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  await armHumanOpenResponseGate("binny19-one");
-  const lostOpenSession = await startHumanSession("binny19-one");
+  await armHumanOpenResponseGate("binny-browser-one");
+  const lostOpenSession = await startHumanSession("binny-browser-one");
   await waitForHumanOpenResponseGate();
   assert.equal(
-    (await waitForHuman("binny19-one", lostOpenSession.sessionId, "opening"))
-      .status,
+    (
+      await waitForHuman(
+        "binny-browser-one",
+        lostOpenSession.sessionId,
+        "opening",
+      )
+    ).status,
     "opening",
   );
-  const runDuringLostOpen = await triggerRun("binny19-two", "check");
+  const runDuringLostOpen = await triggerRun("binny-browser-two", "check");
   assert.equal(runDuringLostOpen.status, "queued");
   assert.equal(runDuringLostOpen.queueReason, "browser_capacity_exhausted");
   const lostOpenBrowserSamples = [await activeBrowserMainProcessCount()];
   assert.deepEqual(lostOpenBrowserSamples, [0]);
 
   const lostOpenCloseRequest = await requestHumanSessionClose(
-    "binny19-one",
+    "binny-browser-one",
     lostOpenSession.sessionId,
   );
   assert.equal(lostOpenCloseRequest.status, "closing");
   await waitForHeldHeartbeatClientClosed();
   await releaseHeartbeatGate();
   assert.equal(
-    (await waitForHuman("binny19-one", lostOpenSession.sessionId, "closed"))
-      .status,
+    (
+      await waitForHuman(
+        "binny-browser-one",
+        lostOpenSession.sessionId,
+        "closed",
+      )
+    ).status,
     "closed",
   );
   const runAfterLostOpen = await waitForRun(
-    "binny19-two",
+    "binny-browser-two",
     runDuringLostOpen.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(runAfterLostOpen.status, "completed");
-  await waitForBrowserPower("binny19-two", "ready");
+  await waitForBrowserPower("binny-browser-two", "ready");
   lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
   assert.equal(lostOpenBrowserSamples.at(-1), 1);
-  await updateBin("binny19-two", 0);
-  await waitForBrowserPower("binny19-two", "stopped");
+  await updateBin("binny-browser-two", 0);
+  await waitForBrowserPower("binny-browser-two", "stopped");
   await waitForBrowserProcessesStopped("browser-two");
   lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
   assert.equal(lostOpenBrowserSamples.at(-1), 0);
   assert.ok(Math.max(...lostOpenBrowserSamples) <= 1);
-  await updateBin("binny19-two", "disabled");
+  await updateBin("binny-browser-two", "disabled");
   process.stdout.write(
-    `票21人工 open 回包丢失实测：${JSON.stringify({
+    `人工 open 回包丢失实测：${JSON.stringify({
       heldReservationQueueReason: runDuringLostOpen.queueReason,
       closedSession: lostOpenSession.sessionId,
       browserProcessCounts: lostOpenBrowserSamples,
@@ -2735,9 +2766,9 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  const initialCheck = await triggerRun("binny19-one", "check");
+  const initialCheck = await triggerRun("binny-browser-one", "check");
   const initialResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     initialCheck.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -2745,21 +2776,21 @@ async function main(): Promise<void> {
   assert.equal(initialResult.result?.check?.availability, "unavailable");
   assert.equal(initialResult.result?.check?.problems[0]?.requiresHuman, true);
 
-  await waitForBrowserPower("binny19-one", "ready");
+  await waitForBrowserPower("binny-browser-one", "ready");
   const awakeMemory = await browserContainerMemoryBytes("browser-one");
   const initialBrowserProcess = await browserMainProcess("browser-one");
-  await holdIdleProbeAtDeadline("binny19-one", 4);
-  await updateBin("binny19-one", "disabled");
+  await holdIdleProbeAtDeadline("binny-browser-one", 4);
+  await updateBin("binny-browser-one", "disabled");
   await releaseIdleHeartbeatGate();
   await delay(4_500);
   assert.equal(
-    (await readBin("binny19-one")).execution.environment?.browser?.power
+    (await readBin("binny-browser-one")).execution.environment?.browser?.power
       ?.status,
     "ready",
     "关闭尚未开始时禁用空闲关闭，探测完成后仍关闭了浏览器。",
   );
-  await updateBin("binny19-one", 4);
-  const stoppedBin = await waitForBrowserPower("binny19-one", "stopped");
+  await updateBin("binny-browser-one", 4);
+  const stoppedBin = await waitForBrowserPower("binny-browser-one", "stopped");
   assert.equal(stoppedBin.execution.status, "online");
   await waitForBrowserProcessesStopped("browser-one");
   const stoppedMemory = await browserContainerMemoryBytes("browser-one");
@@ -2768,7 +2799,7 @@ async function main(): Promise<void> {
     `浏览器真实退出后容器内存没有下降：ready=${String(awakeMemory)} stopped=${String(stoppedMemory)}`,
   );
   process.stdout.write(
-    `票20空闲资源实测：${JSON.stringify({
+    `空闲资源实测：${JSON.stringify({
       browserHostPid: initialBrowserProcess.pid,
       browserStartTime: initialBrowserProcess.startTime,
       readyMemoryBytes: awakeMemory,
@@ -2778,10 +2809,10 @@ async function main(): Promise<void> {
 
   assert.ok(playwrightBrowser !== undefined);
   const outerBrowser = playwrightBrowser;
-  const loginSession = await startHumanSession("binny19-one");
+  const loginSession = await startHumanSession("binny-browser-one");
   assert.equal(loginSession.status, "pending");
   const readyLogin = await waitForHuman(
-    "binny19-one",
+    "binny-browser-one",
     loginSession.sessionId,
     "ready",
   );
@@ -2798,12 +2829,12 @@ async function main(): Promise<void> {
   await enterLoginThroughCanvas(loginViewer.page, 3_600, 0, loginViewer.frames);
   await delay(4_500);
   assert.equal(
-    (await readBin("binny19-one")).execution.environment?.browser?.power
+    (await readBin("binny-browser-one")).execution.environment?.browser?.power
       ?.status,
     "ready",
     "人工操作期间空闲计时关闭了浏览器。",
   );
-  await closeHumanSession("binny19-one", loginSession.sessionId);
+  await closeHumanSession("binny-browser-one", loginSession.sessionId);
   await waitForViewerClosed(loginViewer.closed);
   const loginViewerAfterClose = loginViewer.page.locator("#status");
   assert.equal(
@@ -2813,12 +2844,12 @@ async function main(): Promise<void> {
   await assertVncStopped("browser-one");
   await loginViewer.page.close();
   assert.ok(readyLogin.readyAt !== undefined);
-  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
 
-  const persistedCheck = await triggerRun("binny19-one", "check");
+  const persistedCheck = await triggerRun("binny-browser-one", "check");
   const persistedCheckResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     persistedCheck.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -2832,19 +2863,20 @@ async function main(): Promise<void> {
     "check 没有从已停止状态重新启动浏览器。",
   );
 
-  const adjacentCollect = await triggerRun("binny19-one", "collect");
+  const adjacentCollect = await triggerRun("binny-browser-one", "collect");
   const adjacentCollectResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     adjacentCollect.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(adjacentCollectResult.status, "completed");
   assert.ok((adjacentCollectResult.result?.commits.length ?? 0) > 0);
   assert.deepEqual(await browserMainProcess("browser-one"), checkWakeProcess);
-  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
 
-  const archivedBeforeImageUpdate = await browserFixtureRunIds("binny19-one");
+  const archivedBeforeImageUpdate =
+    await browserFixtureRunIds("binny-browser-one");
   assert.ok(archivedBeforeImageUpdate.size > 0);
   let updatedBrowserBin:
     | { readonly id: string; readonly version: string }
@@ -2854,10 +2886,10 @@ async function main(): Promise<void> {
     browserImageUpdate.candidateImageId,
     async () => {
       updatedBrowserBin = await updateCollectorManifest(
-        "binny19-one",
+        "binny-browser-one",
         browserImageUpdate.candidateManifest,
       );
-      assert.equal(updatedBrowserBin.id, "binny19-one");
+      assert.equal(updatedBrowserBin.id, "binny-browser-one");
       assert.equal(
         updatedBrowserBin.version,
         collectorVersion(browserImageUpdate.candidateManifest),
@@ -2878,10 +2910,10 @@ async function main(): Promise<void> {
     await runtimeManifest("browser-one"),
     browserImageUpdate.candidateManifest,
   );
-  await waitForRuntime("binny19-one");
-  const imageUpdateCheck = await triggerRun("binny19-one", "check");
+  await waitForRuntime("binny-browser-one");
+  const imageUpdateCheck = await triggerRun("binny-browser-one", "check");
   const imageUpdateCheckResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     imageUpdateCheck.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -2893,14 +2925,14 @@ async function main(): Promise<void> {
   );
   assert.equal(imageUpdateCheckResult.result?.commits.length, 0);
   assert.deepEqual(
-    await browserFixtureRunIds("binny19-one"),
+    await browserFixtureRunIds("binny-browser-one"),
     archivedBeforeImageUpdate,
     "浏览器镜像替换不能丢失已归档资料。",
   );
-  await waitForBrowserPower("binny19-one", "stopped");
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
   process.stdout.write(
-    `票27浏览器镜像更新实测：${JSON.stringify({
+    `浏览器镜像更新实测：${JSON.stringify({
       binId: updatedBrowserBin.id,
       baselineVersion: collectorVersion(browserImageUpdate.baselineManifest),
       candidateVersion: updatedBrowserBin.version,
@@ -2915,11 +2947,11 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  await updateBin("binny19-one", 30);
+  await updateBin("binny-browser-one", 30);
   await delay(2_500);
-  const collectWake = await triggerRun("binny19-one", "collect");
+  const collectWake = await triggerRun("binny-browser-one", "collect");
   const collectWakeResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     collectWake.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -2932,21 +2964,21 @@ async function main(): Promise<void> {
     "collect 没有从已停止状态重新启动浏览器。",
   );
 
-  await holdIdleProbeAtDeadline("binny19-one", 4);
-  await updateBin("binny19-one", 30);
+  await holdIdleProbeAtDeadline("binny-browser-one", 4);
+  await updateBin("binny-browser-one", 30);
   await releaseIdleHeartbeatGate();
   await delay(5_000);
   assert.equal(
-    (await readBin("binny19-one")).execution.environment?.browser?.power
+    (await readBin("binny-browser-one")).execution.environment?.browser?.power
       ?.status,
     "ready",
     "关闭尚未开始时延长空闲时限，旧截止时间仍关闭了浏览器。",
   );
-  await updateBin("binny19-one", 4);
-  await waitForBrowserPower("binny19-one", "stopped");
+  await updateBin("binny-browser-one", 4);
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
   const browserFixtureRunsBeforeSchedule =
-    await browserFixtureRunIds("binny19-one");
+    await browserFixtureRunIds("binny-browser-one");
   const scheduleGateId = randomUUID();
   const scheduleGate = await createGate(scheduleGateId);
   const scheduledWake = cliData<{
@@ -2956,7 +2988,7 @@ async function main(): Promise<void> {
     await cli([
       "schedule",
       "create",
-      "binny19-one",
+      "binny-browser-one",
       "--expression",
       "*/10 * * * * *",
       "--time-zone",
@@ -2972,7 +3004,7 @@ async function main(): Promise<void> {
   assert.ok(Date.parse(scheduledFor) > Date.now() - 2_000);
   assert.ok(Date.parse(scheduledFor) - Date.now() <= 10_000);
   await waitForGateStarted(scheduleGateId, scheduleGate);
-  await waitForBrowserPower("binny19-one", "ready");
+  await waitForBrowserPower("binny-browser-one", "ready");
   const scheduleWakeProcess = await browserMainProcess("browser-one");
   assert.notEqual(
     scheduleWakeProcess.startTime,
@@ -2980,7 +3012,12 @@ async function main(): Promise<void> {
     "已停止的浏览器没有被真实采集计划唤醒。",
   );
   const scheduleAfterDue = cliData<{ readonly nextDueAt: string }>(
-    await cli(["schedule", "get", "binny19-one", scheduledWake.scheduleId]),
+    await cli([
+      "schedule",
+      "get",
+      "binny-browser-one",
+      scheduledWake.scheduleId,
+    ]),
     "found",
   );
   assert.ok(Date.parse(scheduleAfterDue.nextDueAt) > Date.parse(scheduledFor));
@@ -2989,20 +3026,20 @@ async function main(): Promise<void> {
       await cli([
         "schedule",
         "disable",
-        "binny19-one",
+        "binny-browser-one",
         scheduledWake.scheduleId,
       ]),
       "disabled",
     ).enabled,
     false,
   );
-  await updateBin("binny19-one", 30);
+  await updateBin("binny-browser-one", 30);
   await delay(2_500);
   await releaseGate(scheduleGateId, scheduleGate);
   const scheduledRunDeadline = Date.now() + 120_000;
   let scheduledSourceRunId: string | undefined;
   while (Date.now() < scheduledRunDeadline) {
-    const current = await browserFixtureRunIds("binny19-one");
+    const current = await browserFixtureRunIds("binny-browser-one");
     scheduledSourceRunId = [...current].find(
       (runId) => !browserFixtureRunsBeforeSchedule.has(runId),
     );
@@ -3011,7 +3048,7 @@ async function main(): Promise<void> {
   }
   assert.ok(scheduledSourceRunId !== undefined, "计划采集没有提交受控资料。");
   const scheduledRun = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     scheduledSourceRunId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -3041,23 +3078,23 @@ async function main(): Promise<void> {
   await signalBrowser("SIGSTOP");
   let pendingWake: Run | undefined;
   try {
-    await updateBin("binny19-one", 0);
-    await waitForBrowserPower("binny19-one", "stopping");
-    pendingWake = await triggerRun("binny19-one", "collect");
+    await updateBin("binny-browser-one", 0);
+    await waitForBrowserPower("binny-browser-one", "stopping");
+    pendingWake = await triggerRun("binny-browser-one", "collect");
     assert.equal(pendingWake.status, "queued");
     assert.equal(pendingWake.queueReason, "bin_busy");
-    const crossBinWake = await triggerRun("binny19-two", "check");
+    const crossBinWake = await triggerRun("binny-browser-two", "check");
     assert.equal(crossBinWake.status, "queued");
     assert.equal(crossBinWake.queueReason, "browser_capacity_exhausted");
     const cancelledCrossBinWake = cliData<Run>(
-      await cli(["run", "cancel", "binny19-two", crossBinWake.runId]),
+      await cli(["run", "cancel", "binny-browser-two", crossBinWake.runId]),
       "cancellation",
     );
     assert.equal(cancelledCrossBinWake.status, "cancelled");
-    const waitingWake = await readRun("binny19-one", pendingWake.runId);
+    const waitingWake = await readRun("binny-browser-one", pendingWake.runId);
     assert.equal(waitingWake.queueReason, "bin_busy");
     assert.equal(
-      (await readBin("binny19-one")).execution.environment?.browser?.power
+      (await readBin("binny-browser-one")).execution.environment?.browser?.power
         ?.status,
       "stopping",
     );
@@ -3066,28 +3103,32 @@ async function main(): Promise<void> {
       stoppingProcess,
       "旧浏览器退出前运行器启动了第二个 profile 使用者。",
     );
-    await updateBin("binny19-one", 30);
+    await updateBin("binny-browser-one", 30);
     await delay(2_500);
   } finally {
     await signalBrowser("SIGCONT");
   }
   assert.ok(pendingWake !== undefined);
   const wakeAfterStop = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     pendingWake.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(wakeAfterStop.status, "completed");
-  await waitForBrowserPower("binny19-one", "ready");
+  await waitForBrowserPower("binny-browser-one", "ready");
   assert.notDeepEqual(
     await browserMainProcess("browser-one"),
     stoppingProcess,
     "关闭中的需求没有等旧 profile 退出后重新启动浏览器。",
   );
-  await updateBin("binny19-one", 4);
+  await updateBin("binny-browser-one", 4);
 
-  const disconnectedSession = await startHumanSession("binny19-one");
-  await waitForHuman("binny19-one", disconnectedSession.sessionId, "ready");
+  const disconnectedSession = await startHumanSession("binny-browser-one");
+  await waitForHuman(
+    "binny-browser-one",
+    disconnectedSession.sessionId,
+    "ready",
+  );
   const disconnectedViewerUrl = new URL(disconnectedSession.viewerUrl);
   disconnectedViewerUrl.hostname = publishedHost;
   disconnectedViewerUrl.port = String(serverPort);
@@ -3113,16 +3154,16 @@ async function main(): Promise<void> {
   await compose(["start", "postgres"]);
   await waitForApi();
   const recoveredSession = await waitForHumanTerminal(
-    "binny19-one",
+    "binny-browser-one",
     disconnectedSession.sessionId,
   );
   assert.equal(recoveredSession.status, "closed");
   await disconnectedViewer.page.close();
-  await waitForRuntime("binny19-one");
+  await waitForRuntime("binny-browser-one");
 
-  const profileTwoCheck = await triggerRun("binny19-two", "check");
+  const profileTwoCheck = await triggerRun("binny-browser-two", "check");
   const profileTwoCheckResult = await waitForRun(
-    "binny19-two",
+    "binny-browser-two",
     profileTwoCheck.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -3131,13 +3172,13 @@ async function main(): Promise<void> {
     profileTwoCheckResult.result?.check?.availability,
     "unavailable",
   );
-  await updateBin("binny19-two", 0);
-  await waitForBrowserPower("binny19-two", "stopped");
+  await updateBin("binny-browser-two", 0);
+  await waitForBrowserPower("binny-browser-two", "stopped");
   await waitForBrowserProcessesStopped("browser-two");
 
   const gateId = randomUUID();
   const gate = await createGate(gateId);
-  const gatedRun = await triggerRun("binny19-one", "collect", { gateId });
+  const gatedRun = await triggerRun("binny-browser-one", "collect", { gateId });
   await waitForGateStarted(gateId, gate);
   await delay(300);
   await refreshGate(gateId, gate);
@@ -3145,20 +3186,20 @@ async function main(): Promise<void> {
   await refreshGate(gateId, gate);
   assert.ok(gate.touches > 0, "受控页面没有保持自动阶段活动状态。");
   assert.equal(
-    (await readBin("binny19-one")).execution.environment?.browser?.power
+    (await readBin("binny-browser-one")).execution.environment?.browser?.power
       ?.status,
     "ready",
     "自动运行期间空闲计时关闭了浏览器。",
   );
 
-  const pendingSession = await startHumanSession("binny19-one");
+  const pendingSession = await startHumanSession("binny-browser-one");
   assert.equal(pendingSession.status, "pending");
-  const queuedRun = await triggerRun("binny19-one", "check");
-  const queuedRunCurrent = await readRun("binny19-one", queuedRun.runId);
+  const queuedRun = await triggerRun("binny-browser-one", "check");
+  const queuedRunCurrent = await readRun("binny-browser-one", queuedRun.runId);
   assert.equal(queuedRunCurrent.status, "queued");
   assert.equal(queuedRunCurrent.queueReason, "human_session_active");
   const cancelledQueued = cliData<Run>(
-    await cli(["run", "cancel", "binny19-one", queuedRun.runId]),
+    await cli(["run", "cancel", "binny-browser-one", queuedRun.runId]),
     "cancellation",
   );
   assert.equal(cancelledQueued.status, "cancelled");
@@ -3168,7 +3209,7 @@ async function main(): Promise<void> {
     gateId,
     gate,
     waitForRun(
-      "binny19-one",
+      "binny-browser-one",
       gatedRun.runId,
       (run) => run.status === "completed" || run.status === "failed",
     ),
@@ -3187,7 +3228,7 @@ async function main(): Promise<void> {
   );
 
   const pendingReady = await waitForHuman(
-    "binny19-one",
+    "binny-browser-one",
     pendingSession.sessionId,
     "ready",
   );
@@ -3197,12 +3238,12 @@ async function main(): Promise<void> {
         new Date(gatedResult.stopConfirmedAt).getTime(),
     "人工会话在原运行停止确认前进入 ready。",
   );
-  await closeHumanSession("binny19-one", pendingSession.sessionId);
+  await closeHumanSession("binny-browser-one", pendingSession.sessionId);
   await assertVncStopped("browser-one");
 
-  const beforeRestartSession = await startHumanSession("binny19-one");
+  const beforeRestartSession = await startHumanSession("binny-browser-one");
   const readyBeforeRestart = await waitForHuman(
-    "binny19-one",
+    "binny-browser-one",
     beforeRestartSession.sessionId,
     "ready",
   );
@@ -3226,8 +3267,12 @@ async function main(): Promise<void> {
 
   await compose(["rm", "--force", "--stop", "browser-one"]);
   await compose(["up", "--detach", "--no-deps", "browser-one"]);
-  await waitForRuntime("binny19-one");
-  await waitForHuman("binny19-one", beforeRestartSession.sessionId, "closed");
+  await waitForRuntime("binny-browser-one");
+  await waitForHuman(
+    "binny-browser-one",
+    beforeRestartSession.sessionId,
+    "closed",
+  );
 
   const rejectedOldViewer = await outerBrowser.newPage();
   await rejectedOldViewer.goto(oldViewerUrl.href);
@@ -3241,19 +3286,19 @@ async function main(): Promise<void> {
   assert.equal(await rejectedOldViewer.locator("#screen canvas").count(), 0);
   await rejectedOldViewer.close();
 
-  const afterRestartCollect = await triggerRun("binny19-one", "collect");
+  const afterRestartCollect = await triggerRun("binny-browser-one", "collect");
   const afterRestartResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     afterRestartCollect.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(afterRestartResult.status, "completed");
   assert.ok((afterRestartResult.result?.commits.length ?? 0) > 0);
-  await updateBin("binny19-two", "disabled");
+  await updateBin("binny-browser-two", "disabled");
 
   const contender = await compose(
     ["up", "--detach", "--no-deps", "browser-one-contender"],
-    "binny19,binny19-lock",
+    "binny-browser,binny-browser-lock",
   );
   assert.equal(contender.code, 0);
   const contenderName = `${projectName}-browser-one-contender-1`;
@@ -3279,8 +3324,8 @@ async function main(): Promise<void> {
     `同卷第二实例退出码异常：${contenderState}`,
   );
 
-  const shortSession = await startHumanSession("binny19-two");
-  await waitForHuman("binny19-two", shortSession.sessionId, "ready");
+  const shortSession = await startHumanSession("binny-browser-two");
+  await waitForHuman("binny-browser-two", shortSession.sessionId, "ready");
   const shortViewerUrl = new URL(shortSession.viewerUrl);
   shortViewerUrl.hostname = publishedHost;
   shortViewerUrl.port = String(serverPort);
@@ -3293,11 +3338,11 @@ async function main(): Promise<void> {
     shortViewer.frames,
   );
   assert.equal((await sourceMetrics()).loginSubmissions.at(-1)?.maxAge, 10);
-  await closeHumanSession("binny19-two", shortSession.sessionId);
+  await closeHumanSession("binny-browser-two", shortSession.sessionId);
   await waitForViewerClosed(shortViewer.closed);
   await shortViewer.page.close();
   await delay(11_000);
-  const disabledIdleBin = await readBin("binny19-two");
+  const disabledIdleBin = await readBin("binny-browser-two");
   assert.equal(disabledIdleBin.browserIdleTimeoutSeconds, null);
   assert.equal(disabledIdleBin.execution.status, "online");
   assert.equal(
@@ -3306,9 +3351,9 @@ async function main(): Promise<void> {
     "禁用空闲关闭后浏览器仍被自动停掉。",
   );
 
-  const expiredCheck = await triggerRun("binny19-two", "check");
+  const expiredCheck = await triggerRun("binny-browser-two", "check");
   const expiredCheckResult = await waitForRun(
-    "binny19-two",
+    "binny-browser-two",
     expiredCheck.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -3319,9 +3364,9 @@ async function main(): Promise<void> {
     true,
   );
 
-  const expiredCollect = await triggerRun("binny19-two", "collect");
+  const expiredCollect = await triggerRun("binny-browser-two", "collect");
   const expiredCollectResult = await waitForRun(
-    "binny19-two",
+    "binny-browser-two",
     expiredCollect.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -3329,36 +3374,39 @@ async function main(): Promise<void> {
   assert.equal(expiredCollectResult.result?.error?.code, "login_required");
   assert.equal(expiredCollectResult.result?.error?.requiresHuman, true);
 
-  await updateBin("binny19-one", 0);
-  await waitForBrowserPower("binny19-one", "stopped");
+  await updateBin("binny-browser-one", 0);
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
-  await updateBin("binny19-one", 30);
-  await waitForBrowserPower("binny19-two", "ready");
+  await updateBin("binny-browser-one", 30);
+  await waitForBrowserPower("binny-browser-two", "ready");
   const browserCapacitySamples: number[] = [
     await activeBrowserMainProcessCount(),
   ];
   assert.equal(browserCapacitySamples.at(-1), 1);
 
-  const capacityCheck = await triggerRun("binny19-one", "check");
+  const capacityCheck = await triggerRun("binny-browser-one", "check");
   assert.equal(capacityCheck.status, "queued");
   assert.equal(capacityCheck.queueReason, "browser_capacity_exhausted");
   const cancelledCapacityCheck = cliData<Run>(
-    await cli(["run", "cancel", "binny19-one", capacityCheck.runId]),
+    await cli(["run", "cancel", "binny-browser-one", capacityCheck.runId]),
     "cancellation",
   );
   assert.equal(cancelledCapacityCheck.status, "cancelled");
 
-  const waitingCollect = await triggerRun("binny19-one", "collect");
+  const waitingCollect = await triggerRun("binny-browser-one", "collect");
   assert.equal(waitingCollect.status, "queued");
   assert.equal(waitingCollect.queueReason, "browser_capacity_exhausted");
-  const waitingHuman = await startHumanSession("binny19-one");
+  const waitingHuman = await startHumanSession("binny-browser-one");
   assert.equal(waitingHuman.status, "pending");
   assert.equal(waitingHuman.queueReason, "browser_capacity_exhausted");
 
   const activeRemove = cliFailure<{
     readonly code: string;
     readonly message: string;
-  }>(await cli(["bin", "remove", "binny19-two"]), "browser_capacity_active");
+  }>(
+    await cli(["bin", "remove", "binny-browser-two"]),
+    "browser_capacity_active",
+  );
   assert.match(activeRemove.message, /浏览器尚未确认退出/u);
 
   const heldBrowser = await browserMainProcess("browser-two");
@@ -3372,23 +3420,28 @@ async function main(): Promise<void> {
     `process.kill(${String(heldBrowserPid)}, "SIGSTOP");`,
   ]);
   try {
-    await updateBin("binny19-two", 0);
-    await waitForBrowserPower("binny19-two", "stopping");
+    await updateBin("binny-browser-two", 0);
+    await waitForBrowserPower("binny-browser-two", "stopping");
     browserCapacitySamples.push(await activeBrowserMainProcessCount());
     assert.equal(browserCapacitySamples.at(-1), 1);
     assert.equal(
-      (await readRun("binny19-one", waitingCollect.runId)).queueReason,
+      (await readRun("binny-browser-one", waitingCollect.runId)).queueReason,
       "human_session_active",
     );
     assert.equal(
       cliData<HumanSessionStatus>(
-        await cli(["human", "get", "binny19-one", waitingHuman.sessionId]),
+        await cli([
+          "human",
+          "get",
+          "binny-browser-one",
+          waitingHuman.sessionId,
+        ]),
         "found",
       ).queueReason,
       "browser_capacity_exhausted",
     );
     const stoppingRemove = cliFailure<{ readonly code: string }>(
-      await cli(["bin", "remove", "binny19-two"]),
+      await cli(["bin", "remove", "binny-browser-two"]),
       "browser_capacity_active",
     );
     assert.equal(stoppingRemove.code, "browser_capacity_active");
@@ -3402,7 +3455,7 @@ async function main(): Promise<void> {
       `process.kill(${String(heldBrowserPid)}, "SIGCONT");`,
     ]);
   }
-  await waitForBrowserPower("binny19-two", "stopped");
+  await waitForBrowserPower("binny-browser-two", "stopped");
   await waitForBrowserProcessesStopped("browser-two");
   const afterCapacityHandoffCount = await activeBrowserMainProcessCount();
   browserCapacitySamples.push(afterCapacityHandoffCount);
@@ -3411,15 +3464,18 @@ async function main(): Promise<void> {
     "关闭确认与排队人工会话恢复之间突破了容量上限。",
   );
 
-  await waitForHuman("binny19-one", waitingHuman.sessionId, "ready");
+  await waitForHuman("binny-browser-one", waitingHuman.sessionId, "ready");
   browserCapacitySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserCapacitySamples.at(-1), 1);
-  const collectDuringHuman = await readRun("binny19-one", waitingCollect.runId);
+  const collectDuringHuman = await readRun(
+    "binny-browser-one",
+    waitingCollect.runId,
+  );
   assert.equal(collectDuringHuman.status, "queued");
   assert.equal(collectDuringHuman.queueReason, "human_session_active");
-  await closeHumanSession("binny19-one", waitingHuman.sessionId);
+  await closeHumanSession("binny-browser-one", waitingHuman.sessionId);
   const capacityCollectResult = await waitForRun(
-    "binny19-one",
+    "binny-browser-one",
     waitingCollect.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
@@ -3427,14 +3483,14 @@ async function main(): Promise<void> {
   assert.ok((capacityCollectResult.result?.commits.length ?? 0) > 0);
   browserCapacitySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserCapacitySamples.at(-1), 1);
-  await updateBin("binny19-one", 0);
-  await waitForBrowserPower("binny19-one", "stopped");
+  await updateBin("binny-browser-one", 0);
+  await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
   browserCapacitySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserCapacitySamples.at(-1), 0);
   assert.ok(Math.max(...browserCapacitySamples) <= 1);
   process.stdout.write(
-    `票21跨 bin 容量实测：${JSON.stringify({
+    `跨 bin 容量实测：${JSON.stringify({
       limit: 1,
       observedBrowserProcessCounts: browserCapacitySamples,
       heldReservationQueueReasons: [
@@ -3448,7 +3504,7 @@ async function main(): Promise<void> {
   );
 
   cliData<{ readonly removed: true; readonly id: string }>(
-    await cli(["bin", "remove", "binny19-two"]),
+    await cli(["bin", "remove", "binny-browser-two"]),
     "removed",
   );
   await runProtocol4UpgradeAcceptance();
@@ -3457,9 +3513,7 @@ async function main(): Promise<void> {
 try {
   try {
     await main();
-    process.stdout.write(
-      "票19、票20与票21浏览器生命周期正式 Compose 验收通过。\n",
-    );
+    process.stdout.write("浏览器生命周期正式 Compose 验收通过。\n");
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}${protocol4ComposeStarted ? await protocol4Diagnostics() : ""}`,
@@ -3483,7 +3537,7 @@ try {
   if (composeStarted)
     await rawCompose(
       ["down", "--volumes", "--remove-orphans"],
-      "binny19,binny19-lock",
+      "binny-browser,binny-browser-lock",
     ).catch(() => undefined);
   if (protocol4Worktree !== undefined)
     await run("git", [

@@ -95,7 +95,7 @@ function isAuthenticated(
 ): boolean {
   return (request.headers.cookie ?? "")
     .split(";")
-    .some((value) => value.trim() === "binny25_session=fixture");
+    .some((value) => value.trim() === "binny-discovery_session=fixture");
 }
 
 function record(action: string, path: string, authenticated?: boolean): void {
@@ -376,7 +376,7 @@ const server = createServer((request, response) => {
     if (request.method === "POST" && pathname === "/login") {
       const form = new URLSearchParams(await readBody(request));
       if (
-        form.get("username") !== "binny25-user" ||
+        form.get("username") !== "binny-discovery-user" ||
         form.get("password") !== "linuxdo-fixture"
       ) {
         record("login-rejected", pathname);
@@ -390,7 +390,7 @@ const server = createServer((request, response) => {
       response.writeHead(303, {
         location: "/",
         "set-cookie":
-          "binny25_session=fixture; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
+          "binny-discovery_session=fixture; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
       });
       response.end();
       return;
@@ -400,7 +400,7 @@ const server = createServer((request, response) => {
       response.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "set-cookie":
-          "binny25_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+          "binny-discovery_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
       });
       response.end("<!doctype html><html><body>已退出登录。</body></html>");
       return;
@@ -418,7 +418,7 @@ const server = createServer((request, response) => {
         return;
       }
       sendJson(response, 200, {
-        current_user: { id: 24, username: "binny25-user" },
+        current_user: { id: 24, username: "binny-discovery-user" },
       });
       return;
     }
@@ -581,7 +581,7 @@ const server = createServer((request, response) => {
   });
 });
 
-const port = Number(process.env.BINNY25_SOURCE_PORT ?? "8081");
+const port = Number(process.env.BINNY_DISCOVERY_SOURCE_PORT ?? "8081");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
   throw new Error("受控 Linux.do 信源端口配置无效。");
 }

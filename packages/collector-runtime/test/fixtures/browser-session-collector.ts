@@ -57,7 +57,7 @@ function isAuthenticated(page: Page): Promise<boolean> {
 }
 
 export const collector = defineCollector({
-  id: "binny19.browser-session-fixture",
+  id: "binny-browser.browser-session-fixture",
   version: "1.0.0",
   description: "使用受控登录页验证浏览器人工会话与采集共享。",
   environment: {
@@ -129,8 +129,8 @@ export const collector = defineCollector({
             if (params.gateId !== undefined) {
               await page.waitForFunction(
                 () =>
-                  (window as Window & { binny19GateReleased?: boolean })
-                    .binny19GateReleased === true,
+                  (window as Window & { binnyBrowserGateReleased?: boolean })
+                    .binnyBrowserGateReleased === true,
                 undefined,
                 { timeout: 120_000 },
               );
@@ -148,7 +148,7 @@ export const collector = defineCollector({
           items: [
             {
               sourceKey: {
-                namespace: "binny19.browser-session-fixture",
+                namespace: "binny-browser.browser-session-fixture",
                 key: `${context.binId}:${context.runId}`,
               },
               body: { text: result.content, searchText: result.content },

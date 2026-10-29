@@ -71,7 +71,7 @@ type RssImageUpdate = {
 };
 
 type RssAcceptanceResult = {
-  readonly binIds: readonly ["binny22-one", "binny22-two"];
+  readonly binIds: readonly ["binny-rss-one", "binny-rss-two"];
   readonly itemId: string;
   readonly initialRevisionId: string;
   readonly initialRunId: string;
@@ -85,7 +85,7 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const composeFile = path.join(repositoryRoot, "compose.yaml");
+const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
 const capacityProfile = process.env.BINNY_E2E_CAPACITY_PROFILE ?? "smoke";
 assert.ok(
   capacityProfile === "full" || capacityProfile === "smoke",
@@ -105,8 +105,8 @@ const isFullCapacityRun = capacityProfile === "full";
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
-  ? "binny26-capacity"
-  : "binny12-revision-diff-" + process.pid.toString(10);
+  ? "binny-load-capacity"
+  : "binny-archive-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
@@ -214,12 +214,12 @@ function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: activeServerImage,
     BINNY_BROWSER_CAPACITY_LIMIT: "1",
-    BINNY15_RUNTIME_IMAGE: runtimeImageName,
-    BINNY18_STOP_GRACE_MS: "1500",
-    BINNY22_RUNTIME_IMAGE: activeRssRuntimeImage,
-    BINNY24_BIN_ID: "binny28-linuxdo",
-    BINNY24_BIN_ID_TWO: "binny28-linuxdo-two",
-    BINNY24_RUNTIME_IMAGE: linuxdoRuntimeImageName,
+    BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
+    BINNY_LIFECYCLE_STOP_GRACE_MS: "1500",
+    BINNY_RSS_IMAGE: activeRssRuntimeImage,
+    BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
+    BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
+    BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -734,7 +734,7 @@ async function seedUpgradeRun(
   manifest: unknown,
 ): Promise<string> {
   const binId = "rss-main";
-  const runtimeId = "binny36-upgrade-baseline-runtime";
+  const runtimeId = "binny-database-upgrade-baseline-runtime";
   // 基线协议3心跳会将不含 power 的旧 environment 快照写入真实 PostgreSQL。
   const heartbeat = await fetch(`${baseUrl}/bins/${binId}/runtime/heartbeat`, {
     method: "POST",
@@ -937,7 +937,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   await waitForApiAndDatabase(baseUrl);
 
   const legacyBrowserManifest = (reason?: string) => ({
-    id: "binny36.upgrade-browser",
+    id: "binny-database.upgrade-browser",
     version: "1.0.0",
     configSchema: { type: "object" },
     actions: {
@@ -976,21 +976,21 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     "旧浏览器不能复用配置文件。",
   );
   await createLegacyBrowserBin(
-    "binny36-upgrade-browser-no-reason",
+    "binny-database-upgrade-browser-no-reason",
     legacyBrowserWithoutReason,
   );
   await createLegacyBrowserBin(
-    "binny36-upgrade-browser-empty-reason",
+    "binny-database-upgrade-browser-empty-reason",
     legacyBrowserWithEmptyReason,
   );
   const oldEmptyReasonHeartbeat = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         protocolVersion: 3,
-        runtimeId: "binny36-upgrade-empty-reason-runtime",
+        runtimeId: "binny-database-upgrade-empty-reason-runtime",
         ownerGeneration: "1",
         ownerLockAcquired: true,
         activeRunId: null,
@@ -1012,7 +1012,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     await oldEmptyReasonHeartbeat.clone().text(),
   );
   await createLegacyBrowserBin(
-    "binny36-upgrade-browser-with-reason",
+    "binny-database-upgrade-browser-with-reason",
     legacyBrowserWithReason,
   );
 
@@ -1047,7 +1047,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     baselineObservations.push(
       await submitUpgradeArchiveObservation(
         baseUrl,
-        `binny36:database-package-upgrade:observation-${String(index + 1)}`,
+        `binny-database:database-package-upgrade:observation-${String(index + 1)}`,
         state.title,
         state.markdown,
         state.phase,
@@ -1128,12 +1128,12 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         "name" in record &&
         record.name === "20261029021307_wide_surge",
     ),
-    "升级没有应用票20浏览器空闲策略迁移。",
+    "升级没有应用浏览器空闲策略迁移。",
   );
 
   // 先通过公开读取验证旧持久行；后续才发送新协议心跳或 PATCH 修复配置。
   const oldEmptyReasonResponse = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
   );
   assert.equal(
     oldEmptyReasonResponse.status,
@@ -1163,7 +1163,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(oldEmptyReason.execution.reason, "runtime_protocol_outdated");
   assert.equal(
     oldEmptyReason.execution.runtimeId,
-    "binny36-upgrade-empty-reason-runtime",
+    "binny-database-upgrade-empty-reason-runtime",
   );
   assert.ok(oldEmptyReason.execution.lastHeartbeatAt);
 
@@ -1192,7 +1192,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
       }[];
     };
   const oldEmptyReasonInList = oldBinListBeforeHeartbeatBody.bins.find(
-    ({ id }) => id === "binny36-upgrade-browser-empty-reason",
+    ({ id }) => id === "binny-database-upgrade-browser-empty-reason",
   );
   assert.ok(oldEmptyReasonInList);
   assert.equal(oldEmptyReasonInList.browserIdleTimeoutSeconds, null);
@@ -1214,13 +1214,13 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(oldRuntimeInList.execution.reason, "runtime_protocol_outdated");
 
   const missingPowerHeartbeat = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         protocolVersion: 4,
-        runtimeId: "binny36-upgrade-empty-reason-runtime",
+        runtimeId: "binny-database-upgrade-empty-reason-runtime",
         ownerGeneration: "1",
         ownerLockAcquired: true,
         activeRunId: null,
@@ -1251,7 +1251,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   ]);
 
   const oldWithoutReasonResponse = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
   );
   assert.equal(
     oldWithoutReasonResponse.status,
@@ -1262,11 +1262,11 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     readonly id: string;
     readonly browserIdleTimeoutSeconds: number | null;
   };
-  assert.equal(oldWithoutReason.id, "binny36-upgrade-browser-no-reason");
+  assert.equal(oldWithoutReason.id, "binny-database-upgrade-browser-no-reason");
   assert.equal(oldWithoutReason.browserIdleTimeoutSeconds, null);
 
   const oldWithReasonResponse = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-with-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-with-reason`,
   );
   assert.equal(oldWithReasonResponse.status, 200);
   const oldWithReason = (await oldWithReasonResponse.json()) as {
@@ -1292,9 +1292,9 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     }[];
   };
   for (const oldBinId of [
-    "binny36-upgrade-browser-no-reason",
-    "binny36-upgrade-browser-empty-reason",
-    "binny36-upgrade-browser-with-reason",
+    "binny-database-upgrade-browser-no-reason",
+    "binny-database-upgrade-browser-empty-reason",
+    "binny-database-upgrade-browser-with-reason",
   ]) {
     const oldBin = oldBinList.bins.find(({ id }) => id === oldBinId);
     assert.ok(oldBin, `列表没有返回旧配置 ${oldBinId}。`);
@@ -1305,9 +1305,9 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      id: "binny36-upgrade-new-empty-reason",
+      id: "binny-database-upgrade-new-empty-reason",
       collector: legacyBrowserWithEmptyReason,
-      identityId: "identity-binny36-upgrade-new-empty-reason",
+      identityId: "identity-binny-database-upgrade-new-empty-reason",
       config: {},
       targets: [],
     }),
@@ -1328,7 +1328,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   ]);
 
   const emptyReasonUpdate = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -1360,7 +1360,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     },
   };
   const repairedEmptyReasonResponse = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -1388,13 +1388,13 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
 
   const upgradedRuntimeHeartbeat = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason/runtime/heartbeat`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         protocolVersion: 4,
-        runtimeId: "binny36-upgrade-empty-reason-runtime",
+        runtimeId: "binny-database-upgrade-empty-reason-runtime",
         ownerGeneration: "1",
         ownerLockAcquired: true,
         activeRunId: null,
@@ -1429,7 +1429,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     "ready",
   );
   const oldRuntimeAfterHeartbeat = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-empty-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
   );
   assert.equal(oldRuntimeAfterHeartbeat.status, 200);
   const oldRuntimeAfterHeartbeatBin =
@@ -1448,13 +1448,13 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
 
   const legacyRuntimeHeartbeat = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-no-reason/runtime/heartbeat`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason/runtime/heartbeat`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         protocolVersion: 4,
-        runtimeId: "binny36-upgrade-browser-old-runtime",
+        runtimeId: "binny-database-upgrade-browser-old-runtime",
         ownerGeneration: "1",
         ownerLockAcquired: true,
         activeRunId: null,
@@ -1491,7 +1491,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     },
   };
   const repairedLegacyResponse = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -1509,7 +1509,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(repairedLegacyBin.browserIdleTimeoutSeconds, null);
 
   const incompatibleLegacyUpdate = await fetch(
-    `${baseUrl}/bins/binny36-upgrade-browser-no-reason`,
+    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -1548,7 +1548,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
 
   const continuedItem = await submitUpgradeArchiveObservation(
     baseUrl,
-    "binny36:database-package-upgrade:candidate",
+    "binny-database:database-package-upgrade:candidate",
     "候选数据库包追加版本",
     "候选数据库包写入的新正文",
     "candidate",
@@ -1616,7 +1616,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
 
   process.stdout.write(
-    "票 27 旧正式镜像升级证据：" +
+    "旧正式镜像升级证据：" +
       JSON.stringify({
         baselineImage,
         baselineImageId: runningBaselineId,
@@ -1638,7 +1638,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
 async function runDatabasePackageUpgradeAcceptance(): Promise<void> {
   await verifyDatabasePackageUpgrade();
   await compose(["down", "--volumes", "--remove-orphans"]);
-  process.stdout.write("票 27 升级专用数据库与资源卷已清理。\n");
+  process.stdout.write("升级专用数据库与资源卷已清理。\n");
 }
 
 function archiveIds(state: string): {
@@ -1831,9 +1831,9 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
   );
   const lock = startManagedProcess("docker", postgresExecArgs([]));
   lock.write(
-    `BEGIN;\nLOCK TABLE ${table} IN SHARE MODE;\nSELECT 'BINNY04_LOCK_HELD';\n`,
+    `BEGIN;\nLOCK TABLE ${table} IN SHARE MODE;\nSELECT 'BINNY_RESOURCES_LOCK_HELD';\n`,
   );
-  await lock.waitForMarker("BINNY04_LOCK_HELD");
+  await lock.waitForMarker("BINNY_RESOURCES_LOCK_HELD");
   let released = false;
   return {
     async release() {
@@ -1853,9 +1853,9 @@ async function holdManualRunRowLock(runId: string): Promise<{
   assert.match(runId, /^[0-9a-f-]{36}$/u);
   const lock = startManagedProcess("docker", postgresExecArgs([]));
   lock.write(
-    `BEGIN;\nSELECT pg_backend_pid();\nSELECT run_id FROM manual_runs WHERE run_id = '${runId}'::uuid FOR UPDATE;\nSELECT 'BINNY18_MANUAL_RUN_ROW_LOCK_HELD';\n`,
+    `BEGIN;\nSELECT pg_backend_pid();\nSELECT run_id FROM manual_runs WHERE run_id = '${runId}'::uuid FOR UPDATE;\nSELECT 'BINNY_LIFECYCLE_MANUAL_RUN_ROW_LOCK_HELD';\n`,
   );
-  await lock.waitForMarker("BINNY18_MANUAL_RUN_ROW_LOCK_HELD");
+  await lock.waitForMarker("BINNY_LIFECYCLE_MANUAL_RUN_ROW_LOCK_HELD");
   const backendPid = Number(lock.stdout().trim().split("\n")[0]);
   assert.ok(Number.isInteger(backendPid) && backendPid > 0);
   let released = false;
@@ -1977,10 +1977,10 @@ async function restartServer(): Promise<string> {
 
 function resourceUploadProcess(): ManagedProcess {
   const program = [
-    'const body = Buffer.from("binny15 interrupted resource publish");',
-    'process.stdout.write("BINNY04_UPLOAD_STARTED\\n");',
+    'const body = Buffer.from("binny-runs interrupted resource publish");',
+    'process.stdout.write("BINNY_RESOURCES_UPLOAD_STARTED\\n");',
     'const response = await fetch("http://127.0.0.1:3000/resources", { method: "POST", headers: { "content-type": "application/octet-stream" }, body });',
-    'process.stdout.write("BINNY04_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
+    'process.stdout.write("BINNY_RESOURCES_UPLOAD_RESPONSE " + response.status + " " + await response.text() + "\\n");',
   ].join("\n");
   return startManagedProcess("docker", [
     ...composePrefix(),
@@ -2015,9 +2015,9 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
     ],
   });
   const program = [
-    'process.stdout.write("BINNY04_REFERENCE_STARTED\\n");',
+    'process.stdout.write("BINNY_RESOURCES_REFERENCE_STARTED\\n");',
     `const response = await fetch("http://127.0.0.1:3000/archives", { method: "POST", headers: { "content-type": "application/json" }, body: ${JSON.stringify(request)} });`,
-    'process.stdout.write("BINNY04_REFERENCE_RESPONSE " + response.status + " " + await response.text() + "\\n");',
+    'process.stdout.write("BINNY_RESOURCES_REFERENCE_RESPONSE " + response.status + " " + await response.text() + "\\n");',
   ].join("\n");
   return startManagedProcess("docker", [
     ...composePrefix(),
@@ -2043,7 +2043,7 @@ async function verifyResourceStorageInterruptions(
   try {
     publishLock = await holdTableShareLock("archive_resource");
     publishRequest = resourceUploadProcess();
-    await publishRequest.waitForMarker("BINNY04_UPLOAD_STARTED");
+    await publishRequest.waitForMarker("BINNY_RESOURCES_UPLOAD_STARTED");
     const publishedFiles = await waitFor(
       () => resourceFiles(),
       (files) => files.some((file) => !filesBeforePublish.includes(file)),
@@ -2056,7 +2056,10 @@ async function verifyResourceStorageInterruptions(
     const publishedFile = newPublishedFiles[0];
     assert.ok(publishedFile);
     await waitForBlockedTableWrite("archive_resource");
-    assert.doesNotMatch(publishRequest.stdout(), /BINNY04_UPLOAD_RESPONSE/u);
+    assert.doesNotMatch(
+      publishRequest.stdout(),
+      /BINNY_RESOURCES_UPLOAD_RESPONSE/u,
+    );
 
     await compose(["kill", "-s", "SIGKILL", "server"]);
     publishServerNeedsRestart = true;
@@ -2090,7 +2093,7 @@ async function verifyResourceStorageInterruptions(
   }
 
   const referenceBytes = new TextEncoder().encode(
-    "binny15 committed upload survives interrupted reference registration",
+    "binny-runs committed upload survives interrupted reference registration",
   );
   const uploadResponse = await fetch(currentBaseUrl + "/resources", {
     method: "POST",
@@ -2110,11 +2113,11 @@ async function verifyResourceStorageInterruptions(
   try {
     referenceLock = await holdTableShareLock("archive_revision_resource");
     referenceRequest = archiveReferenceProcess(uploaded.resourceId);
-    await referenceRequest.waitForMarker("BINNY04_REFERENCE_STARTED");
+    await referenceRequest.waitForMarker("BINNY_RESOURCES_REFERENCE_STARTED");
     await waitForBlockedTableWrite("archive_revision_resource");
     assert.doesNotMatch(
       referenceRequest.stdout(),
-      /BINNY04_REFERENCE_RESPONSE/u,
+      /BINNY_RESOURCES_REFERENCE_RESPONSE/u,
     );
 
     await compose(["kill", "-s", "SIGKILL", "server"]);
@@ -2511,9 +2514,9 @@ async function waitForLinuxdoRuntimeHealth(
 
 async function createLinuxdoBin(
   baseUrl: string,
-  binId = "binny28-linuxdo",
+  binId = "binny-integration-linuxdo",
   service = "runtime-linuxdo",
-  identityId = "binny28-profile",
+  identityId = "binny-integration-profile",
 ): Promise<void> {
   const created = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
@@ -2671,7 +2674,7 @@ async function verifyLinuxdoArchiveJourney(
   journey: LinuxdoUserJourney,
   rss: RssAcceptanceResult,
 ): Promise<void> {
-  const binId = "binny28-linuxdo";
+  const binId = "binny-integration-linuxdo";
   const namespace = "linuxdo:linuxdo-e2e-source:8081";
   const cliForLinuxdo = (args: readonly string[]) => cli(baseUrl, args);
   assert.equal(journey.firstCollection.status, "completed");
@@ -2723,12 +2726,12 @@ async function verifyLinuxdoArchiveJourney(
     [...rss.binIds].toSorted(),
   );
   assert.equal(
-    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny22-one")
+    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny-rss-one")
       ?.state.capture.completeness,
     "partial",
   );
   assert.equal(
-    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny22-two")
+    rssItem.views.find(({ binId: viewBinId }) => viewBinId === "binny-rss-two")
       ?.state.capture.completeness,
     "complete",
   );
@@ -2758,7 +2761,7 @@ async function verifyLinuxdoArchiveJourney(
     readonly runId: string;
     readonly items: readonly { readonly itemId: string }[];
   }>(await cli(baseUrl, ["archive", "commit", rss.commitId]), "found");
-  assert.equal(rssCommit.binId, "binny22-one");
+  assert.equal(rssCommit.binId, "binny-rss-one");
   assert.equal(rssCommit.runId, rss.initialRunId);
   assert.ok(rssCommit.items.some(({ itemId }) => itemId === rss.itemId));
   const rssDiff = cliData<{
@@ -3287,12 +3290,18 @@ async function verifyLinuxdoArchiveJourney(
     { keys: [], metrics: [{ key: "items", op: "count", value: "0" }] },
   ]);
   const rssStillPresent = cliData<{ readonly itemId: string }>(
-    await cli(baseUrl, ["archive", "item", rss.itemId, "--bin", "binny22-one"]),
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      rss.itemId,
+      "--bin",
+      "binny-rss-one",
+    ]),
     "found",
   );
   assert.equal(rssStillPresent.itemId, rss.itemId);
   process.stdout.write(
-    "票 28 整合查询、更新历史、最新 partial、媒体保留与声明级联删除通过：" +
+    "整合查询、更新历史、最新 partial、媒体保留与声明级联删除通过：" +
       JSON.stringify({
         binId,
         linuxdoRunIds: [
@@ -3310,8 +3319,8 @@ async function verifyLinuxdoArchiveJourney(
 }
 
 async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
-  const firstBinId = "binny28-linuxdo";
-  const secondBinId = "binny28-linuxdo-two";
+  const firstBinId = "binny-integration-linuxdo";
+  const secondBinId = "binny-integration-linuxdo-two";
   const browserServices = ["runtime-linuxdo", "runtime-linuxdo-two"] as const;
   type BrowserBin = {
     readonly browserIdleTimeoutSeconds: number | null;
@@ -3488,7 +3497,7 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   assert.equal((await browserProcesses()).length, 0);
 
   process.stdout.write(
-    "票 28 同项目 Linux.do 容量交接实测：" +
+    "同项目 Linux.do 容量交接实测：" +
       JSON.stringify({
         capacityLimit: 1,
         queuedBin: secondBinId,
@@ -3671,7 +3680,7 @@ async function rebuildRssRuntimeWithComposeWatch(
       "Compose Watch 替换 RSS 运行器",
     );
     await waitForRuntimeHealth("runtime-rss");
-    await waitForRuntime(baseUrl, "binny22-one");
+    await waitForRuntime(baseUrl, "binny-rss-one");
     const updatedContainerId = await runningContainerId("runtime-rss");
     assert.notEqual(updatedContainerId, previousContainerId);
     return {
@@ -4197,7 +4206,7 @@ async function verifyDelayedOldOwnerCannotDisturbRun(
   label: string,
   currentRuntimeId: string,
 ): Promise<void> {
-  const binId = "binny15-one";
+  const binId = "binny-runs-one";
   const service = "runtime-fifteen-one";
   const sourceControlUrl = manualRunSourceControlUrl();
   const gateKey = `18-${label}-late-owner-${randomUUID()}`;
@@ -4302,7 +4311,7 @@ async function ownerGenerationOverlapStep(
   heartbeatProxy: HeartbeatDelayProxy,
   previousStoppedRunId: string,
 ): Promise<void> {
-  const binId = "binny15-one";
+  const binId = "binny-runs-one";
   const service = "runtime-fifteen-one";
   const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
   assert.equal(initialOwner.status, "online");
@@ -4394,7 +4403,7 @@ async function ownerGenerationOverlapStep(
 async function replacementPreservesAcceptedCancellationStep(
   baseUrl: string,
 ): Promise<void> {
-  const binId = "binny15-one";
+  const binId = "binny-runs-one";
   const service = "runtime-fifteen-one";
   const sourceControlUrl = manualRunSourceControlUrl();
   const initialOwner = await readRuntimeExecutionState(baseUrl, binId);
@@ -4495,7 +4504,7 @@ async function manualRunsCliStep(
 ): Promise<void> {
   const manifestJson = JSON.stringify(manifest);
   assert.ok(manifestJson !== undefined);
-  for (const binId of ["binny15-one", "binny15-two"]) {
+  for (const binId of ["binny-runs-one", "binny-runs-two"]) {
     const created = cliData<{
       readonly id: string;
       readonly execution: unknown;
@@ -4519,14 +4528,14 @@ async function manualRunsCliStep(
   }
 
   await Promise.all([
-    waitForRuntime(baseUrl, "binny15-one"),
-    waitForRuntime(baseUrl, "binny15-two"),
+    waitForRuntime(baseUrl, "binny-runs-one"),
+    waitForRuntime(baseUrl, "binny-runs-two"),
   ]);
 
   await waitForManualRunSource();
   const sourceRuntimeUrl = manualRunSourceRuntimeUrl();
   const sourceControlUrl = manualRunSourceControlUrl();
-  const gateKey = "15-cli-manual-run";
+  const gateKey = "runs-cli-manual-run";
   const parameters = {
     sourceUrl: sourceRuntimeUrl,
     gateKey,
@@ -4540,7 +4549,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny15-one",
+      "binny-runs-one",
       "collect",
       "--params",
       JSON.stringify(parameters),
@@ -4548,12 +4557,12 @@ async function manualRunsCliStep(
     "triggered",
   );
   assert.equal(triggered.status, "queued");
-  assert.equal(triggered.binId, "binny15-one");
+  assert.equal(triggered.binId, "binny-runs-one");
   await waitForSourceArrival(
     sourceControlUrl,
     gateKey,
     triggered.runId,
-    "binny15-one",
+    "binny-runs-one",
   );
   await releaseSource(sourceControlUrl, gateKey);
 
@@ -4561,7 +4570,7 @@ async function manualRunsCliStep(
   let completed: ManualRunCliState | undefined;
   while (Date.now() < deadline) {
     const current = cliData<ManualRunCliState>(
-      await cli(baseUrl, ["run", "get", "binny15-one", triggered.runId]),
+      await cli(baseUrl, ["run", "get", "binny-runs-one", triggered.runId]),
       "found",
     );
     if (current.status === "completed" || current.status === "failed") {
@@ -4586,7 +4595,7 @@ async function manualRunsCliStep(
     readonly runId?: string;
     readonly collectorVersion?: string;
   }>(await cli(baseUrl, ["archive", "commit", savedCommit.commitId]), "found");
-  assert.equal(commit.binId, "binny15-one");
+  assert.equal(commit.binId, "binny-runs-one");
   assert.equal(commit.runId, triggered.runId);
   assert.equal(commit.collectorVersion, "1.0.0");
 
@@ -4601,7 +4610,7 @@ async function manualRunsCliStep(
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
 
-  const checkGateKey = "16-cli-check-unknown";
+  const checkGateKey = "check-cli-check-unknown";
   const checkTriggered = cliData<{
     readonly runId: string;
     readonly status: string;
@@ -4610,7 +4619,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny15-one",
+      "binny-runs-one",
       "check",
       "--params",
       JSON.stringify({
@@ -4626,7 +4635,7 @@ async function manualRunsCliStep(
     sourceControlUrl,
     checkGateKey,
     checkTriggered.runId,
-    "binny15-one",
+    "binny-runs-one",
   );
   await releaseSource(sourceControlUrl, checkGateKey, "unknown");
 
@@ -4634,7 +4643,12 @@ async function manualRunsCliStep(
   let checkedRun: ManualRunCliState | undefined;
   while (Date.now() < checkDeadline) {
     const current = cliData<ManualRunCliState>(
-      await cli(baseUrl, ["run", "get", "binny15-one", checkTriggered.runId]),
+      await cli(baseUrl, [
+        "run",
+        "get",
+        "binny-runs-one",
+        checkTriggered.runId,
+      ]),
       "found",
     );
     if (current.status === "completed" || current.status === "failed") {
@@ -4652,7 +4666,7 @@ async function manualRunsCliStep(
   );
   assert.equal(checkedRun.result?.stopReason.code, "completed");
 
-  const followUpGateKey = "16-cli-collect-after-check";
+  const followUpGateKey = "check-cli-collect-after-check";
   const followUp = cliData<{
     readonly runId: string;
     readonly status: string;
@@ -4660,7 +4674,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny15-one",
+      "binny-runs-one",
       "collect",
       "--params",
       JSON.stringify({
@@ -4675,14 +4689,14 @@ async function manualRunsCliStep(
     sourceControlUrl,
     followUpGateKey,
     followUp.runId,
-    "binny15-one",
+    "binny-runs-one",
   );
   await releaseSource(sourceControlUrl, followUpGateKey);
   const followUpDeadline = Date.now() + 30_000;
   let collectedAfterCheck: ManualRunCliState | undefined;
   while (Date.now() < followUpDeadline) {
     const current = cliData<ManualRunCliState>(
-      await cli(baseUrl, ["run", "get", "binny15-one", followUp.runId]),
+      await cli(baseUrl, ["run", "get", "binny-runs-one", followUp.runId]),
       "found",
     );
     if (current.status === "completed" || current.status === "failed") {
@@ -4703,12 +4717,12 @@ async function manualRunsCliStep(
   await ownerGenerationOverlapStep(baseUrl, heartbeatProxy, followUp.runId);
   await replacementPreservesAcceptedCancellationStep(baseUrl);
 
-  const slowGateKey = "18-cli-slow-stop";
+  const slowGateKey = "lifecycle-cli-slow-stop";
   const slowRun = cliData<ManualRunCliState>(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny15-one",
+      "binny-runs-one",
       "collect",
       "--params",
       JSON.stringify({
@@ -4724,7 +4738,7 @@ async function manualRunsCliStep(
     sourceControlUrl,
     slowGateKey,
     slowRun.runId,
-    "binny15-one",
+    "binny-runs-one",
   );
   await releaseSource(sourceControlUrl, slowGateKey, "slow");
   await waitForSourceMarker(
@@ -4738,12 +4752,12 @@ async function manualRunsCliStep(
   ).find((process) => process.command.includes("worker.js"));
   assert.ok(originalWorker, "慢动作应由独立执行进程运行。");
 
-  const nextGateKey = "18-cli-next-after-stop";
+  const nextGateKey = "lifecycle-cli-next-after-stop";
   const nextRun = cliData<ManualRunCliState>(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny15-one",
+      "binny-runs-one",
       "collect",
       "--params",
       JSON.stringify({
@@ -4755,21 +4769,21 @@ async function manualRunsCliStep(
     "triggered",
   );
   const queuedBehindSlowRun = cliData<ManualRunCliState>(
-    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    await cli(baseUrl, ["run", "get", "binny-runs-one", nextRun.runId]),
     "found",
   );
   assert.equal(queuedBehindSlowRun.status, "queued");
   assert.equal(queuedBehindSlowRun.queueReason, "earlier_run_active");
 
   const acceptedCancel = cliData<ManualRunCliState>(
-    await cli(baseUrl, ["run", "cancel", "binny15-one", slowRun.runId]),
+    await cli(baseUrl, ["run", "cancel", "binny-runs-one", slowRun.runId]),
     "cancellation",
   );
   assert.equal(acceptedCancel.status, "cancelling");
   assert.ok(acceptedCancel.cancellationRequestedAt);
   assert.equal(acceptedCancel.stopConfirmedAt, undefined);
   const stillQueued = cliData<ManualRunCliState>(
-    await cli(baseUrl, ["run", "get", "binny15-one", nextRun.runId]),
+    await cli(baseUrl, ["run", "get", "binny-runs-one", nextRun.runId]),
     "found",
   );
   assert.equal(stillQueued.status, "queued");
@@ -4785,7 +4799,7 @@ async function manualRunsCliStep(
 
   const cancelled = await waitForCliManualRunState(
     baseUrl,
-    "binny15-one",
+    "binny-runs-one",
     slowRun.runId,
     ["cancelled"],
   );
@@ -4834,12 +4848,12 @@ async function manualRunsCliStep(
     sourceControlUrl,
     nextGateKey,
     nextRun.runId,
-    "binny15-one",
+    "binny-runs-one",
   );
   await releaseSource(sourceControlUrl, nextGateKey);
   const nextCompleted = await waitForCliManualRunState(
     baseUrl,
-    "binny15-one",
+    "binny-runs-one",
     nextRun.runId,
     ["completed"],
   );
@@ -4847,7 +4861,7 @@ async function manualRunsCliStep(
 
   const ownerBeforeStorageFailure = await readRuntimeExecutionState(
     baseUrl,
-    "binny15-one",
+    "binny-runs-one",
   );
   assert.equal(ownerBeforeStorageFailure.status, "online");
   assert.ok(ownerBeforeStorageFailure.runtimeId !== undefined);
@@ -4866,7 +4880,7 @@ async function manualRunsCliStep(
   assert.equal(makeOwnerVolumeReadOnly.code, 0, makeOwnerVolumeReadOnly.stderr);
   await compose(["stop", "runtime-fifteen-one"]);
   await waitFor(
-    () => readRuntimeExecutionState(baseUrl, "binny15-one"),
+    () => readRuntimeExecutionState(baseUrl, "binny-runs-one"),
     (current) =>
       current.status === "offline" &&
       current.runtimeId === ownerBeforeStorageFailure.runtimeId,
@@ -4907,7 +4921,7 @@ async function manualRunsCliStep(
   );
   const ownerAfterStorageFailure = await readRuntimeExecutionState(
     baseUrl,
-    "binny15-one",
+    "binny-runs-one",
   );
   assert.equal(ownerAfterStorageFailure.status, "offline");
   assert.equal(
@@ -4929,12 +4943,12 @@ async function manualRunsCliStep(
   ]);
   await compose(["restart", "runtime-fifteen-one"]);
   await waitForRuntimeHealth("runtime-fifteen-one");
-  await waitForRuntime(baseUrl, "binny15-one");
+  await waitForRuntime(baseUrl, "binny-runs-one");
 
   const scheduleParameters = {
     sourceUrl: manualRunSourceRuntimeUrl(),
-    gateKey: "17-cli-schedule",
-    sourceKey: "17-cli-schedule-item",
+    gateKey: "schedule-cli-schedule",
+    sourceKey: "schedule-cli-schedule-item",
   };
   const createdSchedule = cliData<{
     readonly scheduleId: string;
@@ -4946,7 +4960,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "schedule",
       "create",
-      "binny15-one",
+      "binny-runs-one",
       "--expression",
       "0 0 0 1 1 *",
       "--time-zone",
@@ -4960,11 +4974,11 @@ async function manualRunsCliStep(
   );
   assert.equal(createdSchedule.expression, "0 0 0 1 1 *");
   assert.equal(createdSchedule.action, "collect");
-  assert.equal(createdSchedule.params.gateKey, "17-cli-schedule");
+  assert.equal(createdSchedule.params.gateKey, "schedule-cli-schedule");
   assert.equal(createdSchedule.enabled, true);
   const scheduleList = cliData<{
     readonly schedules: readonly { readonly scheduleId: string }[];
-  }>(await cli(baseUrl, ["schedule", "list", "binny15-one"]), "listed");
+  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
   assert.ok(
     scheduleList.schedules.some(
       ({ scheduleId }) => scheduleId === createdSchedule.scheduleId,
@@ -4979,7 +4993,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "schedule",
       "update",
-      "binny15-one",
+      "binny-runs-one",
       createdSchedule.scheduleId,
       "--expression",
       "0 0 0 1 2 *",
@@ -4990,7 +5004,7 @@ async function manualRunsCliStep(
       "--params",
       JSON.stringify({
         ...scheduleParameters,
-        gateKey: "17-cli-schedule-updated",
+        gateKey: "schedule-cli-schedule-updated",
       }),
     ]),
     "updated",
@@ -4998,12 +5012,12 @@ async function manualRunsCliStep(
   assert.equal(updatedSchedule.expression, "0 0 0 1 2 *");
   assert.equal(updatedSchedule.timeZone, "Europe/London");
   assert.equal(updatedSchedule.action, "check");
-  assert.equal(updatedSchedule.params.gateKey, "17-cli-schedule-updated");
+  assert.equal(updatedSchedule.params.gateKey, "schedule-cli-schedule-updated");
   const disabledSchedule = cliData<{ readonly enabled: boolean }>(
     await cli(baseUrl, [
       "schedule",
       "disable",
-      "binny15-one",
+      "binny-runs-one",
       createdSchedule.scheduleId,
     ]),
     "disabled",
@@ -5013,7 +5027,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "schedule",
       "enable",
-      "binny15-one",
+      "binny-runs-one",
       createdSchedule.scheduleId,
     ]),
     "enabled",
@@ -5023,7 +5037,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "schedule",
       "remove",
-      "binny15-one",
+      "binny-runs-one",
       createdSchedule.scheduleId,
     ]),
     "removed",
@@ -5033,7 +5047,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "schedule",
       "get",
-      "binny15-one",
+      "binny-runs-one",
       createdSchedule.scheduleId,
     ]),
     "schedule_not_found",
@@ -5058,8 +5072,8 @@ async function manualRunsHttpStep(
     {
       env: {
         BINNY_E2E_BASE_URL: baseUrl,
-        BINNY15_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
-        BINNY15_COLLECTOR_MANIFEST: JSON.stringify(manifest),
+        BINNY_RUNS_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
+        BINNY_RUNS_COLLECTOR_MANIFEST: JSON.stringify(manifest),
       },
     },
   );
@@ -5068,11 +5082,11 @@ async function manualRunsHttpStep(
 }
 
 async function scheduledRunsStep(baseUrl: string): Promise<string> {
-  const binId = "binny15-one";
+  const binId = "binny-runs-one";
   const sourceControlUrl = manualRunSourceControlUrl();
   const sourceUrl = manualRunSourceRuntimeUrl();
-  const collectGateKey = "17-scheduled-collect-" + randomUUID();
-  const checkGateKey = "17-scheduled-check-" + randomUUID();
+  const collectGateKey = "schedule-scheduled-collect-" + randomUUID();
+  const checkGateKey = "schedule-scheduled-check-" + randomUUID();
 
   // 两个正式 server 实例共享 PostgreSQL，验证竞争扫描只会排入一次到期运行。
   await compose([
@@ -5329,7 +5343,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     assert.equal(completedSecond.result?.commits.length, 1);
   else assert.ok(completedSecond.result?.check !== undefined);
 
-  const manualGateKey = "17-scheduled-queue-marker-" + randomUUID();
+  const manualGateKey = "schedule-scheduled-queue-marker-" + randomUUID();
   const manualRun = cliData<{
     readonly runId: string;
     readonly status: string;
@@ -5419,7 +5433,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   ]);
   composePort = await publishedPort("server", 3000);
   process.stdout.write(
-    "票 17 计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
+    "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
   return apiBaseUrl();
 }
@@ -5427,8 +5441,8 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
 async function manualRunControllerPartitionStep(): Promise<void> {
   const baseUrl = apiBaseUrl();
   const sourceControlUrl = manualRunSourceControlUrl();
-  const binId = "binny15-two";
-  const interruptedGateKey = "18-controller-link-loss";
+  const binId = "binny-runs-two";
+  const interruptedGateKey = "lifecycle-controller-link-loss";
   const interrupted = cliData<ManualRunCliState>(
     await cli(baseUrl, [
       "run",
@@ -5473,7 +5487,7 @@ async function manualRunControllerPartitionStep(): Promise<void> {
   assert.equal(detached.code, 0, detached.stderr);
   let reconnected = false;
   try {
-    const nextGateKey = "18-after-controller-link-loss";
+    const nextGateKey = "lifecycle-after-controller-link-loss";
     const next = cliData<ManualRunCliState>(
       await cli(baseUrl, [
         "run",
@@ -6266,10 +6280,10 @@ async function verifyRestartAndRemoval(
   assert.equal(cliInvalidPath.code, "invalid_input");
 
   const downloadDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny10-resource-cli-"),
+    path.join(tmpdir(), "binny-relations-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny10-resource-${process.pid}.bin`;
+  const containerResourcePath = `/tmp/binny-relations-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -6429,8 +6443,8 @@ async function runRssAcceptance(
     ],
   };
   await Promise.all([
-    createRssBin(baseUrl, "binny22-one", baselineManifest, config),
-    createRssBin(baseUrl, "binny22-two", baselineManifest, config),
+    createRssBin(baseUrl, "binny-rss-one", baselineManifest, config),
+    createRssBin(baseUrl, "binny-rss-two", baselineManifest, config),
   ]);
   assert.equal(
     await containerImageId("runtime-rss"),
@@ -6443,8 +6457,8 @@ async function runRssAcceptance(
   await Promise.all([
     waitForRuntimeHealth("runtime-rss"),
     waitForRuntimeHealth("runtime-rss-two"),
-    waitForRuntime(baseUrl, "binny22-one"),
-    waitForRuntime(baseUrl, "binny22-two"),
+    waitForRuntime(baseUrl, "binny-rss-one"),
+    waitForRuntime(baseUrl, "binny-rss-two"),
   ]);
   const latestRequest = async (
     pathname: string,
@@ -6453,9 +6467,14 @@ async function runRssAcceptance(
       .reverse()
       .find((entry) => entry.path === pathname);
 
-  const initialRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
-    feedIds: ["rss-main", "atom-main", "temporary", "static-main"],
-  });
+  const initialRun = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "collect",
+    {
+      feedIds: ["rss-main", "atom-main", "temporary", "static-main"],
+    },
+  );
   const initialRequests = await source.requests();
   const initialAtomRequest = initialRequests.find(
     ({ path }) => path === "/atom",
@@ -6463,7 +6482,7 @@ async function runRssAcceptance(
   assert.ok(initialAtomRequest !== undefined);
   assert.equal(initialAtomRequest.ifModifiedSince, undefined);
   process.stdout.write(
-    "票 22 受控信源首批运行结果：" +
+    "受控信源首批运行结果：" +
       JSON.stringify({ run: initialRun, requests: initialRequests }) +
       "\n",
   );
@@ -6472,16 +6491,16 @@ async function runRssAcceptance(
 
   const rssItemV1 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 1",
   );
   assert.equal(rssItemV1.sourceKey.namespace, "rss:rss-main");
-  assert.equal(rssItemV1.sourceKey.key, "id:urn:binny:22:rss-item");
+  assert.equal(rssItemV1.sourceKey.key, "id:urn:binny:rss:rss-item");
   const initialRssView = rssItemV1.views.find(
-    ({ binId }) => binId === "binny22-one",
+    ({ binId }) => binId === "binny-rss-one",
   );
   assert.ok(initialRssView !== undefined);
-  const rssV1 = rssArchiveView(rssItemV1, "binny22-one");
+  const rssV1 = rssArchiveView(rssItemV1, "binny-rss-one");
   assert.equal(rssV1.capture.completeness, "complete");
   assert.match(rssV1.body?.html ?? "", /RSS 正文版本 1/u);
   assert.doesNotMatch(rssV1.body?.html ?? "", /RSS 摘要版本 1/u);
@@ -6502,10 +6521,10 @@ async function runRssAcceptance(
 
   const rssSummary = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "只有摘要版本 1",
   );
-  const summaryState = rssArchiveView(rssSummary, "binny22-one");
+  const summaryState = rssArchiveView(rssSummary, "binny-rss-one");
   assert.equal(summaryState.capture.completeness, "partial");
   assert.ok(
     summaryState.capture.missing.some(({ reason }) =>
@@ -6515,12 +6534,15 @@ async function runRssAcceptance(
 
   const staticArticleV1 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "公开静态正文版本 1",
   );
   assert.equal(staticArticleV1.sourceKey.namespace, "rss:static-main");
-  assert.equal(staticArticleV1.sourceKey.key, "id:urn:binny:23:static-article");
-  const staticArticleStateV1 = rssArchiveView(staticArticleV1, "binny22-one");
+  assert.equal(
+    staticArticleV1.sourceKey.key,
+    "id:urn:binny:static:static-article",
+  );
+  const staticArticleStateV1 = rssArchiveView(staticArticleV1, "binny-rss-one");
   assert.equal(staticArticleStateV1.capture.completeness, "complete");
   assert.equal(staticArticleStateV1.capture.scope.bodySource, "static-html");
   assert.equal(
@@ -6555,24 +6577,32 @@ async function runRssAcceptance(
 
   const realBbcUrl =
     "https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&at_campaign=rss";
-  const realBbcRun = await triggerRssAction(baseUrl, "binny22-one", "collect", {
-    feedIds: ["real-bbc"],
-  });
+  const realBbcRun = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "collect",
+    {
+      feedIds: ["real-bbc"],
+    },
+  );
   assert.equal(realBbcRun.status, "completed", JSON.stringify(realBbcRun));
   const realBbcArticle = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "650 passengers",
   );
   assert.equal(realBbcArticle.sourceKey.namespace, "rss:real-bbc");
-  assert.equal(realBbcArticle.sourceKey.key, "id:urn:binny:23:real-static-bbc");
-  const realBbcState = rssArchiveView(realBbcArticle, "binny22-one");
+  assert.equal(
+    realBbcArticle.sourceKey.key,
+    "id:urn:binny:static:real-static-bbc",
+  );
+  const realBbcState = rssArchiveView(realBbcArticle, "binny-rss-one");
   assert.equal(realBbcState.capture.completeness, "complete");
   assert.equal(realBbcState.capture.scope.bodySource, "static-html");
   assert.equal(realBbcState.capture.scope.bodyUrl, realBbcUrl);
   assert.match(realBbcState.body?.text ?? "", /650 passengers/u);
   process.stdout.write(
-    "票 23 真实静态站点兼容性结果：" +
+    "真实静态站点兼容性结果：" +
       JSON.stringify({
         url: realBbcUrl,
         environment:
@@ -6590,14 +6620,14 @@ async function runRssAcceptance(
 
   const staticSecondBinRun = await triggerRssAction(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "collect",
     { feedIds: ["static-main"] },
   );
   assert.equal(staticSecondBinRun.status, "failed");
   const staticArticleSecondBin = await readRssArchive(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "公开静态正文版本 1",
   );
   assert.equal(staticArticleSecondBin.itemId, staticArticleV1.itemId);
@@ -6605,7 +6635,7 @@ async function runRssAcceptance(
 
   const staticArchiveBeforeCheck = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "公开静态正文版本 1",
   );
   const staticPageRequestsBeforeCheck = (await source.requests()).filter(
@@ -6614,9 +6644,14 @@ async function runRssAcceptance(
   const staticMediaRequestsBeforeCheck = (await source.requests()).filter(
     ({ path }) => path.startsWith("/media/"),
   ).length;
-  const staticCheck = await triggerRssAction(baseUrl, "binny22-one", "check", {
-    feedIds: ["static-main"],
-  });
+  const staticCheck = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "check",
+    {
+      feedIds: ["static-main"],
+    },
+  );
   assert.equal(staticCheck.status, "completed");
   assert.equal(staticCheck.result?.check?.availability, "unavailable");
   assert.deepEqual(staticCheck.result?.check?.scope, ["static-main"]);
@@ -6636,7 +6671,7 @@ async function runRssAcceptance(
   assert.equal(staticPageRequestsAfterCheck, staticPageRequestsBeforeCheck + 5);
   assert.equal(staticMediaRequestsAfterCheck, staticMediaRequestsBeforeCheck);
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "公开静态正文版本 1"),
+    await readRssArchive(baseUrl, "binny-rss-one", "公开静态正文版本 1"),
     staticArchiveBeforeCheck,
   );
 
@@ -6650,10 +6685,10 @@ async function runRssAcceptance(
 
   const javascriptSummary = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "JavaScript 页面摘要",
   );
-  const javascriptState = rssArchiveView(javascriptSummary, "binny22-one");
+  const javascriptState = rssArchiveView(javascriptSummary, "binny-rss-one");
   assert.equal(javascriptState.capture.completeness, "partial");
   assert.ok(
     javascriptState.capture.missing.some(
@@ -6664,10 +6699,10 @@ async function runRssAcceptance(
 
   const loginSummary = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "登录页面摘要",
   );
-  const loginState = rssArchiveView(loginSummary, "binny22-one");
+  const loginState = rssArchiveView(loginSummary, "binny-rss-one");
   assert.equal(loginState.capture.completeness, "partial");
   assert.ok(
     loginState.capture.missing.some(({ path }) => path === "body.fullText"),
@@ -6680,10 +6715,10 @@ async function runRssAcceptance(
 
   const recoverySummary = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "恢复页面摘要",
   );
-  const recoveryState = rssArchiveView(recoverySummary, "binny22-one");
+  const recoveryState = rssArchiveView(recoverySummary, "binny-rss-one");
   assert.equal(recoveryState.capture.completeness, "partial");
   assert.ok(
     recoveryState.capture.missing.some(({ path }) => path === "body.fullText"),
@@ -6705,7 +6740,7 @@ async function runRssAcceptance(
   await source.setRecoveryPageAvailable(true);
   const recoveredPageRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["static-main"] },
   );
@@ -6722,25 +6757,26 @@ async function runRssAcceptance(
   );
   const recoveredArticle = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "恢复后静态正文",
   );
   assert.equal(recoveredArticle.itemId, recoverySummary.itemId);
   assert.equal(recoveredArticle.revisions.length, 2);
   assert.equal(
-    rssArchiveView(recoveredArticle, "binny22-one").capture.completeness,
+    rssArchiveView(recoveredArticle, "binny-rss-one").capture.completeness,
     "complete",
   );
   assert.equal(
-    rssArchiveView(recoveredArticle, "binny22-one").metadata?.item?.bodySource,
+    rssArchiveView(recoveredArticle, "binny-rss-one").metadata?.item
+      ?.bodySource,
     "static-html",
   );
   assert.match(
-    rssArchiveView(recoveredArticle, "binny22-one").body?.text ?? "",
+    rssArchiveView(recoveredArticle, "binny-rss-one").body?.text ?? "",
     /恢复后静态正文/u,
   );
   assert.doesNotMatch(
-    rssArchiveView(recoveredArticle, "binny22-one").body?.text ?? "",
+    rssArchiveView(recoveredArticle, "binny-rss-one").body?.text ?? "",
     /恢复页面摘要/u,
   );
   assert.deepEqual(
@@ -6761,7 +6797,7 @@ async function runRssAcceptance(
   await source.setStaticArticleVersion(2);
   const staticArticleV2Run = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["static-main"] },
   );
@@ -6776,7 +6812,7 @@ async function runRssAcceptance(
   assert.equal(staticArticleV2Requests.at(-1)?.ifNoneMatch, undefined);
   const staticArticleV2 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "公开静态正文版本 2",
   );
   assert.equal(staticArticleV2.itemId, staticArticleV1.itemId);
@@ -6784,13 +6820,13 @@ async function runRssAcceptance(
   const stableStaticArticleV2 = staticArticleV2;
   const repeatedStaticRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["static-main"] },
   );
   assert.equal(repeatedStaticRun.status, "failed");
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "公开静态正文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "公开静态正文版本 2"),
     stableStaticArticleV2,
   );
 
@@ -6798,20 +6834,20 @@ async function runRssAcceptance(
   await source.setStaticArticleVersion(3);
   const partialStaticMediaRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["static-main"] },
   );
   assert.equal(partialStaticMediaRun.status, "failed");
   const staticArticleV3Partial = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "公开静态正文版本 3",
   );
   assert.equal(staticArticleV3Partial.itemId, staticArticleV1.itemId);
   const staticArticleV3PartialState = rssArchiveView(
     staticArticleV3Partial,
-    "binny22-one",
+    "binny-rss-one",
   );
   assert.equal(staticArticleV3PartialState.capture.completeness, "partial");
   assert.equal(staticArticleV3PartialState.resources?.length ?? 0, 0);
@@ -6839,14 +6875,14 @@ async function runRssAcceptance(
   await source.setStaticPhotoAvailable(true);
   const recoveredStaticMediaRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["static-main"] },
   );
   assert.equal(recoveredStaticMediaRun.status, "failed");
   const staticArticleV3 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "公开静态正文版本 3",
   );
   assert.equal(staticArticleV3.itemId, staticArticleV1.itemId);
@@ -6863,25 +6899,25 @@ async function runRssAcceptance(
     archivedStaticArticleV3PartialRevision,
   );
   assert.equal(
-    rssArchiveView(staticArticleV3, "binny22-one").capture.completeness,
+    rssArchiveView(staticArticleV3, "binny-rss-one").capture.completeness,
     "complete",
   );
   assert.equal(
-    rssArchiveView(staticArticleV3, "binny22-one").resources?.length,
+    rssArchiveView(staticArticleV3, "binny-rss-one").resources?.length,
     1,
   );
 
   const atomItemV1 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "Atom 全文版本 1",
   );
   assert.equal(atomItemV1.sourceKey.namespace, "rss:atom-main");
   assert.equal(
     atomItemV1.sourceKey.key,
-    "id:tag:example.test,2026:binny-22-atom",
+    "id:tag:example.test,2026:binny-rss-atom",
   );
-  const atomV1 = rssArchiveView(atomItemV1, "binny22-one");
+  const atomV1 = rssArchiveView(atomItemV1, "binny-rss-one");
   assert.equal(atomV1.capture.completeness, "complete");
   assert.match(atomV1.body?.html ?? "", /Atom 全文版本 1/u);
   assert.equal(atomV1.resources?.length, 1);
@@ -6892,7 +6928,7 @@ async function runRssAcceptance(
 
   const literalWidgetMatches = await searchRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "<widget>",
   );
   assert.equal(
@@ -6903,7 +6939,13 @@ async function runRssAcceptance(
   const literalWidgetItems = await Promise.all(
     literalWidgetMatches.map(async ({ itemId }) =>
       cliData<RssArchiveRead>(
-        await cli(baseUrl, ["archive", "item", itemId, "--bin", "binny22-one"]),
+        await cli(baseUrl, [
+          "archive",
+          "item",
+          itemId,
+          "--bin",
+          "binny-rss-one",
+        ]),
         "found",
       ),
     ),
@@ -6911,9 +6953,9 @@ async function runRssAcceptance(
   assert.deepEqual(
     new Set(literalWidgetItems.map(({ sourceKey }) => sourceKey.key)),
     new Set([
-      "id:urn:binny:22:rss-item",
-      "id:urn:binny:22:rss-item-escaped",
-      "id:tag:example.test,2026:binny-22-atom",
+      "id:urn:binny:rss:rss-item",
+      "id:urn:binny:rss:rss-item-escaped",
+      "id:tag:example.test,2026:binny-rss-atom",
       "id:tag:example.test,2026:atom-text-explicit",
       "id:tag:example.test,2026:atom-text-default",
       "id:tag:example.test,2026:atom-html-literal",
@@ -6928,7 +6970,7 @@ async function runRssAcceptance(
   ]) {
     const atomTextItem = literalWidgetItemsByKey.get(key);
     assert.ok(atomTextItem !== undefined);
-    const state = rssArchiveView(atomTextItem, "binny22-one");
+    const state = rssArchiveView(atomTextItem, "binny-rss-one");
     assert.equal(state.capture.completeness, "complete");
     assert.equal(state.body?.text, "代码 <widget> 与 A & B");
     assert.equal(state.body?.searchText, "代码 <widget> 与 A & B");
@@ -6940,10 +6982,10 @@ async function runRssAcceptance(
     assert.equal(state.metadata?.item?.bodyType, "text");
   }
   const rssLiteralItem = literalWidgetItemsByKey.get(
-    "id:urn:binny:22:rss-item",
+    "id:urn:binny:rss:rss-item",
   );
   assert.ok(rssLiteralItem !== undefined);
-  const rssLiteralState = rssArchiveView(rssLiteralItem, "binny22-one");
+  const rssLiteralState = rssArchiveView(rssLiteralItem, "binny-rss-one");
   assert.equal(rssLiteralState.capture.completeness, "complete");
   assert.match(rssLiteralState.body?.text ?? "", /代码 <widget> 与 A & B/u);
   assert.match(
@@ -6954,12 +6996,12 @@ async function runRssAcceptance(
   assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
   assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
   const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
-    "id:urn:binny:22:rss-item-escaped",
+    "id:urn:binny:rss:rss-item-escaped",
   );
   assert.ok(rssEscapedLiteralItem !== undefined);
   const rssEscapedLiteralState = rssArchiveView(
     rssEscapedLiteralItem,
-    "binny22-one",
+    "binny-rss-one",
   );
   assert.equal(rssEscapedLiteralState.capture.completeness, "complete");
   assert.equal(rssEscapedLiteralState.body?.text, "代码 <widget> 与 A & B");
@@ -6971,12 +7013,12 @@ async function runRssAcceptance(
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
   assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
   for (const [key, bodyType] of [
-    ["id:tag:example.test,2026:binny-22-atom", "xhtml"],
+    ["id:tag:example.test,2026:binny-rss-atom", "xhtml"],
     ["id:tag:example.test,2026:atom-html-literal", "html"],
   ] as const) {
     const atomMarkupItem = literalWidgetItemsByKey.get(key);
     assert.ok(atomMarkupItem !== undefined);
-    const state = rssArchiveView(atomMarkupItem, "binny22-one");
+    const state = rssArchiveView(atomMarkupItem, "binny-rss-one");
     assert.equal(state.capture.completeness, "complete");
     assert.match(state.body?.text ?? "", /代码 <widget> 与 A & B/u);
     assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
@@ -6986,7 +7028,7 @@ async function runRssAcceptance(
   }
   const atomEntityTextMatches = await searchRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "&lt;widget&gt;",
   );
   assert.equal(atomEntityTextMatches.length, 1);
@@ -6998,11 +7040,14 @@ async function runRssAcceptance(
       "item",
       atomEntityTextMatch.itemId,
       "--bin",
-      "binny22-one",
+      "binny-rss-one",
     ]),
     "found",
   );
-  const atomEntityTextState = rssArchiveView(atomEntityTextItem, "binny22-one");
+  const atomEntityTextState = rssArchiveView(
+    atomEntityTextItem,
+    "binny-rss-one",
+  );
   assert.equal(
     atomEntityTextItem.sourceKey.key,
     "id:tag:example.test,2026:atom-text-entities",
@@ -7022,12 +7067,12 @@ async function runRssAcceptance(
   );
   const atomModeTextV1 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "语义固定内容",
   );
   assert.equal(atomModeTextV1.revisions.length, 1);
   assert.equal(
-    rssArchiveView(atomModeTextV1, "binny22-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeTextV1, "binny-rss-one").metadata?.item?.bodyType,
     "text",
   );
 
@@ -7044,7 +7089,7 @@ async function runRssAcceptance(
     await cli(baseUrl, [
       "run",
       "trigger",
-      "binny22-one",
+      "binny-rss-one",
       "collect",
       "--params",
       JSON.stringify({ feedIds: ["rss-main", "atom-main"] }),
@@ -7054,13 +7099,13 @@ async function runRssAcceptance(
   assert.equal(interruptedRun.status, "queued");
   await source.waitUntilFeedHeld("/atom");
   const activeInterruptedRun = cliData<RssManualRun>(
-    await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+    await cli(baseUrl, ["run", "get", "binny-rss-one", interruptedRun.runId]),
     "found",
   );
   assert.equal(activeInterruptedRun.status, "executing");
   const rssCommittedBeforeStop = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 2",
   );
   assert.equal(rssCommittedBeforeStop.itemId, rssItemV1.itemId);
@@ -7069,11 +7114,16 @@ async function runRssAcceptance(
 
   await compose(["stop", "--timeout", "30", "runtime-rss"]);
   assert.equal(await containerStatus(oldRuntimeContainerId), "exited");
-  await updateRssBinCollector(baseUrl, "binny22-one", activeManifest);
+  await updateRssBinCollector(baseUrl, "binny-rss-one", activeManifest);
   const interruptedResult = await waitFor(
     async () =>
       cliData<RssManualRun>(
-        await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+        await cli(baseUrl, [
+          "run",
+          "get",
+          "binny-rss-one",
+          interruptedRun.runId,
+        ]),
         "found",
       ),
     (run) => run.status === "failed",
@@ -7102,9 +7152,9 @@ async function runRssAcceptance(
     imageUpdate.candidateImageId,
   );
   await waitForRuntimeHealth("runtime-rss");
-  await waitForRuntime(baseUrl, "binny22-one");
+  await waitForRuntime(baseUrl, "binny-rss-one");
   const persistedInterruptedRun = cliData<RssManualRun>(
-    await cli(baseUrl, ["run", "get", "binny22-one", interruptedRun.runId]),
+    await cli(baseUrl, ["run", "get", "binny-rss-one", interruptedRun.runId]),
     "found",
   );
   assert.equal(persistedInterruptedRun.status, "failed");
@@ -7115,7 +7165,7 @@ async function runRssAcceptance(
   assert.ok(persistedInterruptedRun.stopConfirmedAt);
   const configuredUpdatedBin = cliData<{
     readonly collector: { readonly version: string };
-  }>(await cli(baseUrl, ["bin", "get", "binny22-one"]), "found");
+  }>(await cli(baseUrl, ["bin", "get", "binny-rss-one"]), "found");
   assert.equal(
     configuredUpdatedBin.collector.version,
     rssManifestVersion(activeManifest),
@@ -7127,7 +7177,7 @@ async function runRssAcceptance(
         baselineImageId: imageUpdate.baselineImageId,
         candidateImage: rssRuntimeImageName,
         candidateImageId: imageUpdate.candidateImageId,
-        binId: "binny22-one",
+        binId: "binny-rss-one",
         interruptedRunId: interruptedRun.runId,
         runStatus: persistedInterruptedRun.status,
         stopConfirmed: true,
@@ -7140,7 +7190,7 @@ async function runRssAcceptance(
   );
   const afterRestart = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     {
       feedIds: ["rss-main", "atom-main", "temporary"],
@@ -7155,7 +7205,7 @@ async function runRssAcceptance(
 
   const rssItemV2 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 2",
   );
   assert.equal(rssItemV2.itemId, rssItemV1.itemId);
@@ -7163,7 +7213,7 @@ async function runRssAcceptance(
   assert.equal(rssItemV2.revisions.length, 2);
   const atomModeHtmlV2 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "语义固定内容",
   );
   assert.equal(atomModeHtmlV2.itemId, atomModeTextV1.itemId);
@@ -7173,17 +7223,17 @@ async function runRssAcceptance(
     "Atom 正文同值从 text 切换到 html 时应形成新的归档状态。",
   );
   assert.equal(
-    rssArchiveView(atomModeHtmlV2, "binny22-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeHtmlV2, "binny-rss-one").metadata?.item?.bodyType,
     "html",
   );
   const stableItem = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 2",
   );
   const repeatedRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     {
       feedIds: ["rss-main"],
@@ -7193,17 +7243,17 @@ async function runRssAcceptance(
   assert.deepEqual(repeatedRun.result?.commits, []);
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "RSS 正文版本 2"),
     stableItem,
   );
   const stableAtomItem = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "Atom 全文版本 2",
   );
   const repeatedAtomRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["atom-main"] },
   );
@@ -7211,20 +7261,20 @@ async function runRssAcceptance(
   assert.deepEqual(repeatedAtomRun.result?.commits, []);
   assert.match((await latestRequest("/atom"))?.ifModifiedSince ?? "", /GMT$/u);
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "Atom 全文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "Atom 全文版本 2"),
     stableAtomItem,
   );
 
   await source.setRssVersion(3);
   const archiveBeforeCheck = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 2",
   );
   const mediaRequestCount = (await source.requests()).filter(({ path }) =>
     path.startsWith("/media/"),
   ).length;
-  const checkRun = await triggerRssAction(baseUrl, "binny22-one", "check", {
+  const checkRun = await triggerRssAction(baseUrl, "binny-rss-one", "check", {
     feedIds: ["rss-main"],
   });
   assert.equal(checkRun.status, "completed");
@@ -7244,7 +7294,7 @@ async function runRssAcceptance(
     mediaRequestCount,
   );
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "RSS 正文版本 2"),
     archiveBeforeCheck,
   );
 
@@ -7257,7 +7307,7 @@ async function runRssAcceptance(
       await cli(baseUrl, [
         "run",
         "trigger",
-        "binny22-one",
+        "binny-rss-one",
         "check",
         "--params",
         JSON.stringify({ feedIds: ["rss-main"] }),
@@ -7267,7 +7317,7 @@ async function runRssAcceptance(
     assert.equal(triggered.status, "queued");
     await source.waitUntilFeedHeld("/rss");
     const activeCheck = cliData<RssManualRun & { readonly action: string }>(
-      await cli(baseUrl, ["run", "get", "binny22-one", triggered.runId]),
+      await cli(baseUrl, ["run", "get", "binny-rss-one", triggered.runId]),
       "found",
     );
     assert.equal(activeCheck.status, "executing");
@@ -7281,14 +7331,19 @@ async function runRssAcceptance(
   ).find((process) => process.command.includes("worker.js"));
   assert.ok(cancelledCheckWorker, "执行中的 RSS check 应有真实 worker 进程。");
   const cancellationRequest = cliData<{ readonly status: string }>(
-    await cli(baseUrl, ["run", "cancel", "binny22-one", cancelledCheckRunId]),
+    await cli(baseUrl, ["run", "cancel", "binny-rss-one", cancelledCheckRunId]),
     "cancellation",
   );
   assert.equal(cancellationRequest.status, "cancelling");
   const cancelledCheckResult = await waitFor(
     async () =>
       cliData<RssManualRun>(
-        await cli(baseUrl, ["run", "get", "binny22-one", cancelledCheckRunId]),
+        await cli(baseUrl, [
+          "run",
+          "get",
+          "binny-rss-one",
+          cancelledCheckRunId,
+        ]),
         "found",
       ),
     (run) => run.status === "cancelled",
@@ -7305,7 +7360,7 @@ async function runRssAcceptance(
   );
   await source.releaseFeed();
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "RSS 正文版本 2"),
     archiveBeforeCheck,
   );
 
@@ -7333,7 +7388,7 @@ async function runRssAcceptance(
         await cli(baseUrl, [
           "run",
           "get",
-          "binny22-one",
+          "binny-rss-one",
           interruptedCheckRunId,
         ]),
         "found",
@@ -7367,9 +7422,9 @@ async function runRssAcceptance(
     imageUpdate.candidateImageId,
   );
   await waitForRuntimeHealth("runtime-rss");
-  await waitForRuntime(baseUrl, "binny22-one");
+  await waitForRuntime(baseUrl, "binny-rss-one");
   const persistedInterruptedCheck = cliData<RssManualRun>(
-    await cli(baseUrl, ["run", "get", "binny22-one", interruptedCheckRunId]),
+    await cli(baseUrl, ["run", "get", "binny-rss-one", interruptedCheckRunId]),
     "found",
   );
   assert.equal(persistedInterruptedCheck.status, "failed");
@@ -7379,7 +7434,7 @@ async function runRssAcceptance(
   );
   assert.ok(persistedInterruptedCheck.stopConfirmedAt);
   assert.deepEqual(
-    await readRssArchive(baseUrl, "binny22-one", "RSS 正文版本 2"),
+    await readRssArchive(baseUrl, "binny-rss-one", "RSS 正文版本 2"),
     archiveBeforeCheck,
   );
   assert.equal(
@@ -7389,13 +7444,18 @@ async function runRssAcceptance(
   );
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
 
-  const afterCheck = await triggerRssAction(baseUrl, "binny22-one", "collect", {
-    feedIds: ["rss-main"],
-  });
+  const afterCheck = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "collect",
+    {
+      feedIds: ["rss-main"],
+    },
+  );
   assert.equal(afterCheck.status, "completed");
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-2"');
   process.stdout.write(
-    "票 28 RSS 独立 check 执行中取消与运行器中断：" +
+    "RSS 独立 check 执行中取消与运行器中断：" +
       JSON.stringify({
         cancelledCheckRunId,
         cancelledStatus: cancelledCheckResult.status,
@@ -7412,7 +7472,7 @@ async function runRssAcceptance(
   );
   const rssItemV3 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 3",
   );
   assert.equal(rssItemV3.itemId, rssItemV1.itemId);
@@ -7421,7 +7481,7 @@ async function runRssAcceptance(
   await source.setPhotoAvailable(false);
   const partialMediaRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7432,11 +7492,11 @@ async function runRssAcceptance(
   );
   const rssItemPartial = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 4",
   );
   assert.equal(rssItemPartial.itemId, rssItemV1.itemId);
-  const partialState = rssArchiveView(rssItemPartial, "binny22-one");
+  const partialState = rssArchiveView(rssItemPartial, "binny-rss-one");
   assert.equal(partialState.capture.completeness, "partial");
   assert.ok(
     partialState.capture.missing.some(
@@ -7451,7 +7511,7 @@ async function runRssAcceptance(
   await source.setPhotoAvailable(true);
   const mediaRecovery = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7459,11 +7519,11 @@ async function runRssAcceptance(
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
   const rssItemV4 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 4",
   );
   assert.equal(rssItemV4.itemId, rssItemV1.itemId);
-  const rssV4 = rssArchiveView(rssItemV4, "binny22-one");
+  const rssV4 = rssArchiveView(rssItemV4, "binny-rss-one");
   assert.equal(rssV4.capture.completeness, "complete");
   assert.equal(rssV4.resources?.length, 2);
   assert.match(rssV4.body?.html ?? "", /binny:\/\/resource\//u);
@@ -7496,7 +7556,7 @@ async function runRssAcceptance(
   if (!preserveCapacityProject) {
     const watchVersion = rssManifestVersion(activeManifest) + "-watch";
     const watchManifest = rssManifestWithVersion(activeManifest, watchVersion);
-    await updateRssBinCollector(baseUrl, "binny22-one", watchManifest);
+    await updateRssBinCollector(baseUrl, "binny-rss-one", watchManifest);
     activeManifest = watchManifest;
     const watchedUpdate = await rebuildRssRuntimeWithComposeWatch(
       baseUrl,
@@ -7509,7 +7569,7 @@ async function runRssAcceptance(
   }
   const postMediaRestart = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7517,7 +7577,7 @@ async function runRssAcceptance(
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-4"');
   const rssItemV5 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 5",
   );
   assert.equal(rssItemV5.itemId, rssItemV1.itemId);
@@ -7546,7 +7606,7 @@ async function runRssAcceptance(
 
   const separateBinRun = await triggerRssAction(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7554,14 +7614,14 @@ async function runRssAcceptance(
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, undefined);
   const secondBinItemV5 = await readRssArchive(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "RSS 正文版本 5",
   );
   assert.equal(secondBinItemV5.itemId, rssItemV1.itemId);
   assert.deepEqual(secondBinItemV5.sourceKey, rssItemV1.sourceKey);
 
   await source.setRssVersion(6);
-  await updateRssBinCollector(baseUrl, "binny22-two", activeManifest);
+  await updateRssBinCollector(baseUrl, "binny-rss-two", activeManifest);
   const secondOldImageId = await containerImageId("runtime-rss-two");
   await compose([
     "up",
@@ -7580,10 +7640,10 @@ async function runRssAcceptance(
     "第二个 bin 的 RSS 运行器应切换到更新后的镜像。",
   );
   await waitForRuntimeHealth("runtime-rss-two");
-  await waitForRuntime(baseUrl, "binny22-two");
+  await waitForRuntime(baseUrl, "binny-rss-two");
   const separateBinRestart = await triggerRssAction(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7591,7 +7651,7 @@ async function runRssAcceptance(
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-5"');
   const secondBinItemV6 = await readRssArchive(
     baseUrl,
-    "binny22-two",
+    "binny-rss-two",
     "RSS 正文版本 6",
   );
   assert.equal(secondBinItemV6.itemId, rssItemV1.itemId);
@@ -7608,16 +7668,16 @@ async function runRssAcceptance(
     await cli(baseUrl, [
       "bin",
       "update",
-      "binny22-one",
+      "binny-rss-one",
       "--config",
       JSON.stringify(editedConfig),
     ]),
     "updated",
   );
-  assert.equal(updatedBin.id, "binny22-one");
+  assert.equal(updatedBin.id, "binny-rss-one");
   const afterUrlEdit = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7625,7 +7685,7 @@ async function runRssAcceptance(
   assert.equal((await latestRequest("/rss-edited"))?.ifNoneMatch, undefined);
   const rssItemV7 = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 7",
   );
   assert.equal(rssItemV7.itemId, rssItemV1.itemId);
@@ -7635,7 +7695,7 @@ async function runRssAcceptance(
   await source.setPhotoAvailable(false);
   const latestPartialRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["rss-main"] },
   );
@@ -7646,11 +7706,11 @@ async function runRssAcceptance(
   );
   const rssLatestPartial = await readRssArchive(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "RSS 正文版本 8",
   );
   assert.equal(rssLatestPartial.itemId, rssItemV1.itemId);
-  const latestPartialState = rssArchiveView(rssLatestPartial, "binny22-one");
+  const latestPartialState = rssArchiveView(rssLatestPartial, "binny-rss-one");
   assert.equal(latestPartialState.capture.completeness, "partial");
   assert.ok(latestPartialState.capture.missing.length > 0);
   assert.ok((latestPartialState.resources?.length ?? 0) > 0);
@@ -7670,26 +7730,26 @@ async function runRssAcceptance(
   assert.deepEqual(
     crossBinItem.views
       .map(({ binId }) => binId)
-      .filter((binId) => ["binny22-one", "binny22-two"].includes(binId))
+      .filter((binId) => ["binny-rss-one", "binny-rss-two"].includes(binId))
       .toSorted(),
-    ["binny22-one", "binny22-two"],
+    ["binny-rss-one", "binny-rss-two"],
   );
   assert.equal(
-    rssArchiveView(crossBinItem, "binny22-one").capture.completeness,
+    rssArchiveView(crossBinItem, "binny-rss-one").capture.completeness,
     "partial",
   );
   assert.equal(
-    rssArchiveView(crossBinItem, "binny22-two").capture.completeness,
+    rssArchiveView(crossBinItem, "binny-rss-two").capture.completeness,
     "complete",
   );
   const latestPartialView = rssLatestPartial.views.find(
-    ({ binId }) => binId === "binny22-one",
+    ({ binId }) => binId === "binny-rss-one",
   );
   assert.ok(latestPartialView !== undefined);
 
   const badIdentityCheck = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "check",
     { feedIds: ["bad-identity"] },
   );
@@ -7704,14 +7764,14 @@ async function runRssAcceptance(
   );
   const badIdentityRun = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "collect",
     { feedIds: ["bad-identity"] },
   );
   assert.equal(badIdentityRun.status, "failed");
   assert.equal(badIdentityRun.result?.error?.code, "rss_collection_incomplete");
   assert.equal(
-    (await searchRssArchive(baseUrl, "binny22-one", "坏身份正文不得进入归档"))
+    (await searchRssArchive(baseUrl, "binny-rss-one", "坏身份正文不得进入归档"))
       .length,
     0,
   );
@@ -7720,14 +7780,14 @@ async function runRssAcceptance(
     "https://github.com/rowanmanning/feed-parser/releases.atom";
   const realFeedCheck = await triggerRssAction(
     baseUrl,
-    "binny22-one",
+    "binny-rss-one",
     "check",
     { feedIds: ["real-feed-parser"] },
   );
   assert.equal(realFeedCheck.status, "completed");
   assert.deepEqual(realFeedCheck.result?.check?.scope, ["real-feed-parser"]);
   process.stdout.write(
-    "票 22 真实 feed 兼容性结果：" +
+    "真实 feed 兼容性结果：" +
       JSON.stringify({
         url: realFeedUrl,
         environment: "Compose runtime-rss 正式轻量镜像",
@@ -7746,7 +7806,7 @@ async function runRssAcceptance(
   assert.ok(initialCommit !== undefined);
   assert.equal(initialCommit.commitId.length > 0, true);
   return {
-    binIds: ["binny22-one", "binny22-two"],
+    binIds: ["binny-rss-one", "binny-rss-two"],
     itemId: rssItemV1.itemId,
     initialRevisionId: initialRssView.revisionId,
     initialRunId: initialRun.runId,
@@ -8258,7 +8318,7 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
 async function main(): Promise<void> {
   const upgradeOnly = process.env.BINNY_E2E_UPGRADE_ONLY === "1";
   const overrideDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny12-revision-diff-compose-"),
+    path.join(tmpdir(), "binny-archive-revision-diff-compose-"),
   );
   composeOverrideFile = path.join(overrideDirectory, "compose.yaml");
   const e2eSubnet = process.env.BINNY_E2E_SUBNET ?? "10.253.23.0/24";
@@ -8416,7 +8476,7 @@ async function main(): Promise<void> {
       await runDatabasePackageUpgradeAcceptance();
     } else {
       process.stdout.write(
-        "票 27 本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
+        "本次未执行旧→新升级证明；本次验收不提供跨版本兼容结论。\n",
       );
     }
     const e2eServices = [
@@ -8481,7 +8541,7 @@ async function main(): Promise<void> {
         rssControlSource,
         rssImageUpdate,
       );
-      for (const binId of ["binny15-one", "binny15-two"]) {
+      for (const binId of ["binny-runs-one", "binny-runs-two"]) {
         const removed = cliData<{
           readonly removed: boolean;
           readonly id: string;
@@ -8510,9 +8570,9 @@ async function main(): Promise<void> {
       await createLinuxdoBin(baseUrl);
       await createLinuxdoBin(
         baseUrl,
-        "binny28-linuxdo-two",
+        "binny-integration-linuxdo-two",
         "runtime-linuxdo-two",
-        "binny28-profile-two",
+        "binny-integration-profile-two",
       );
       linuxdoViewerBrowser = await startLinuxdoViewerBrowser({
         projectName,
@@ -8528,7 +8588,7 @@ async function main(): Promise<void> {
         String(linuxdoSourcePort) +
         "/__control/state";
       const linuxdoJourney = await linuxdoUserJourney({
-        binId: "binny28-linuxdo",
+        binId: "binny-integration-linuxdo",
         topicId: 2401,
         cli: (args) => cli(baseUrl, args),
         browser: outerBrowser,
@@ -8536,13 +8596,13 @@ async function main(): Promise<void> {
         serverPort: composePort,
         sourceOrigin: "http://linuxdo-e2e-source:8081",
         sourceControlUrl: linuxdoSourceControlUrl,
-        username: "binny25-user",
+        username: "binny-discovery-user",
         password: "linuxdo-fixture",
       });
       process.stdout.write(
         "Linux.do 同项目正式镜像旅程：" +
           JSON.stringify({
-            binId: "binny28-linuxdo",
+            binId: "binny-integration-linuxdo",
             checkRunId: linuxdoJourney.authenticatedCheck.runId,
             collectRunId: linuxdoJourney.firstCollection.runId,
             itemIds: linuxdoJourney.itemIds,
@@ -8588,7 +8648,9 @@ async function main(): Promise<void> {
     }
     if (preserveCapacityProject || acceptanceFailed) {
       process.stdout.write(
-        "保留本票 Compose 项目与持久卷供最终聚合验收：" + projectName + "。\n",
+        "保留当前验收 Compose 项目与持久卷供最终聚合验收：" +
+          projectName +
+          "。\n",
       );
     } else {
       const cleanup = await run(
@@ -8596,11 +8658,11 @@ async function main(): Promise<void> {
         [
           ...composePrefix(),
           "--profile",
-          "binny15",
+          "binny-runs",
           "--profile",
-          "binny22",
+          "binny-rss",
           "--profile",
-          "binny24",
+          "binny-linuxdo",
           "--profile",
           "linuxdo-e2e",
           "down",

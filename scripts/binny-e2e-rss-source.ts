@@ -268,7 +268,7 @@ const server = createServer((request, response) => {
         response,
         { etag },
         "application/rss+xml; charset=utf-8",
-        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>票 22 RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:22:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>票 22 作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:22:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:22:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item></channel></rss>`,
+        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item></channel></rss>`,
       );
       return;
     }
@@ -279,7 +279,7 @@ const server = createServer((request, response) => {
         response,
         { etag: '"static-rss-1"' },
         "application/rss+xml; charset=utf-8",
-        '<rss version="2.0"><channel><title>受控静态正文信源</title><item><guid isPermaLink="false">urn:binny:23:static-article</guid><title>RSS 静态补采文章</title><link>http://rss-e2e-source:8081/story/static</link><description>静态页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:javascript-shell</guid><title>JavaScript 页面文章</title><link>http://rss-e2e-source:8081/story/javascript</link><description>JavaScript 页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:login-page</guid><title>需要登录的文章</title><link>http://rss-e2e-source:8081/story/login</link><description>登录页面摘要</description></item><item><guid isPermaLink="false">urn:binny:23:recovery-page</guid><title>暂时无法访问的文章</title><link>http://rss-e2e-source:8081/story/recovery</link><description>恢复页面摘要</description></item></channel></rss>',
+        '<rss version="2.0"><channel><title>受控静态正文信源</title><item><guid isPermaLink="false">urn:binny:static:static-article</guid><title>RSS 静态补采文章</title><link>http://rss-e2e-source:8081/story/static</link><description>静态页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:javascript-shell</guid><title>JavaScript 页面文章</title><link>http://rss-e2e-source:8081/story/javascript</link><description>JavaScript 页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:login-page</guid><title>需要登录的文章</title><link>http://rss-e2e-source:8081/story/login</link><description>登录页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:recovery-page</guid><title>暂时无法访问的文章</title><link>http://rss-e2e-source:8081/story/recovery</link><description>恢复页面摘要</description></item></channel></rss>',
       );
       return;
     }
@@ -290,7 +290,7 @@ const server = createServer((request, response) => {
         response,
         { etag: '"real-static-rss-1"' },
         "application/rss+xml; charset=utf-8",
-        '<rss version="2.0"><channel><title>真实静态站点兼容信源</title><item><guid isPermaLink="false">urn:binny:23:real-static-bbc</guid><title>BBC 真实静态正文兼容验证</title><link>https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&amp;at_campaign=rss</link><description>由受控 RSS 摘要指向真实 BBC 公开文章页面。</description></item></channel></rss>',
+        '<rss version="2.0"><channel><title>真实静态站点兼容信源</title><item><guid isPermaLink="false">urn:binny:static:real-static-bbc</guid><title>BBC 真实静态正文兼容验证</title><link>https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&amp;at_campaign=rss</link><description>由受控 RSS 摘要指向真实 BBC 公开文章页面。</description></item></channel></rss>',
       );
       return;
     }
@@ -306,7 +306,7 @@ const server = createServer((request, response) => {
         response,
         { lastModified },
         "application/atom+xml; charset=utf-8",
-        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:22:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-22-atom</id><title>Atom 全文测试文章</title><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}；代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>票 22 作者乙</name></author><category term="测试" /></entry><entry><id>tag:example.test,2026:atom-text-explicit</id><title>Atom 显式纯文本</title><content type="text">代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-default</id><title>Atom 默认纯文本</title><content>代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-html-literal</id><title>Atom HTML 中的代码文字</title><content type="html">&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content></entry><entry><id>tag:example.test,2026:atom-text-entities</id><title>Atom 纯文本中的实体字面值</title><content type="text">A &amp;lt;widget&amp;gt; &amp;amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-kind-switch</id><title>Atom 正文类型切换</title><content type="${atomTextMode}">语义固定内容</content></entry></feed>`,
+        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:rss:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-rss-atom</id><title>Atom 全文测试文章</title><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}；代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>作者乙</name></author><category term="测试" /></entry><entry><id>tag:example.test,2026:atom-text-explicit</id><title>Atom 显式纯文本</title><content type="text">代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-default</id><title>Atom 默认纯文本</title><content>代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-html-literal</id><title>Atom HTML 中的代码文字</title><content type="html">&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content></entry><entry><id>tag:example.test,2026:atom-text-entities</id><title>Atom 纯文本中的实体字面值</title><content type="text">A &amp;lt;widget&amp;gt; &amp;amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-kind-switch</id><title>Atom 正文类型切换</title><content type="${atomTextMode}">语义固定内容</content></entry></feed>`,
       );
       return;
     }
@@ -324,7 +324,7 @@ const server = createServer((request, response) => {
         response,
         { etag: '"temporary-1"' },
         "application/rss+xml; charset=utf-8",
-        `<rss version="2.0"><channel><title>恢复的受控 feed</title><link>http://rss-e2e-source:8081/temporary</link><item><guid isPermaLink="false">urn:binny:22:temporary-item</guid><title>恢复后正文</title><description>临时失败后取得的正文</description><content:encoded><![CDATA[<p>temporary feed 恢复后正文</p>]]></content:encoded></item></channel></rss>`,
+        `<rss version="2.0"><channel><title>恢复的受控 feed</title><link>http://rss-e2e-source:8081/temporary</link><item><guid isPermaLink="false">urn:binny:rss:temporary-item</guid><title>恢复后正文</title><description>临时失败后取得的正文</description><content:encoded><![CDATA[<p>temporary feed 恢复后正文</p>]]></content:encoded></item></channel></rss>`,
       );
       return;
     }
@@ -437,7 +437,7 @@ const server = createServer((request, response) => {
   });
 });
 
-const port = Number(process.env.BINNY22_SOURCE_PORT ?? "8081");
+const port = Number(process.env.BINNY_RSS_SOURCE_PORT ?? "8081");
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error("受控 RSS 信源端口配置无效。");
 }

@@ -33,12 +33,12 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const composeFile = path.join(repositoryRoot, "compose.yaml");
-const projectName = "binny14-" + process.pid.toString(10);
+const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
+const projectName = "binny-runtime-" + process.pid.toString(10);
 const runtimeImage = projectName + ":lightweight";
 const imageName = projectName + ":server";
 const jsonHeaders = { "content-type": "application/json" };
-const publishedHost = process.env.BINNY14_PUBLISHED_HOST ?? "172.17.0.1";
+const publishedHost = process.env.BINNY_RUNTIME_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort = 0;
 let runtimeOnePort = 0;
 let runtimeTwoPort = 0;
@@ -48,7 +48,7 @@ let composeOverlayFile: string | undefined;
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: imageName,
-    BINNY14_RUNTIME_IMAGE: runtimeImage,
+    BINNY_TEST_LIGHTWEIGHT_IMAGE: runtimeImage,
   };
 }
 
@@ -88,7 +88,7 @@ function composePrefix(): readonly string[] {
     "--file",
     composeFile,
     "--profile",
-    "binny14",
+    "binny-runtime",
     "--parallel",
     "1",
   ];
@@ -99,13 +99,13 @@ function composePrefix(): readonly string[] {
 
 async function createNetworkOverlay(): Promise<void> {
   composeOverlayDirectory = await mkdtemp(
-    path.join(tmpdir(), "binny14-compose-"),
+    path.join(tmpdir(), "binny-runtime-compose-"),
   );
   composeOverlayFile = path.join(
     composeOverlayDirectory,
     "compose.network.yaml",
   );
-  const subnet = process.env.BINNY14_SUBNET ?? "10.253.151.0/24";
+  const subnet = process.env.BINNY_RUNTIME_SUBNET ?? "10.253.151.0/24";
   const subnetMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/24$/u.exec(
     subnet,
   );
@@ -363,25 +363,25 @@ try {
   const collector = runtimeOneManifest.collector;
   assert.ok(typeof collector === "object" && collector !== null);
 
-  const createdOne = await createBin("binny14-one", collector, "one");
-  const createdTwo = await createBin("binny14-two", collector, "two");
+  const createdOne = await createBin("binny-runtime-one", collector, "one");
+  const createdTwo = await createBin("binny-runtime-two", collector, "two");
   assert.equal(createdOne.execution.status, "offline");
   assert.equal(createdTwo.execution.status, "offline");
   const initialOffline = await createBin(
-    "binny14-offline",
+    "binny-runtime-offline",
     collector,
     "not-running",
   );
   assert.equal(initialOffline.execution.status, "offline");
 
-  const onlineOne = await waitForCliStatus("binny14-one", "online");
-  const onlineTwo = await waitForCliStatus("binny14-two", "online");
+  const onlineOne = await waitForCliStatus("binny-runtime-one", "online");
+  const onlineTwo = await waitForCliStatus("binny-runtime-two", "online");
   assert.notEqual(onlineOne.execution.runtimeId, onlineTwo.execution.runtimeId);
   assert.equal(onlineOne.execution.environment?.kind, "lightweight");
   assert.equal(onlineTwo.execution.environment?.kind, "lightweight");
   const discovered = cliData<{
     readonly execution: RuntimeStatus;
-  }>(await cli(["bin", "actions", "binny14-one"]), "discovered");
+  }>(await cli(["bin", "actions", "binny-runtime-one"]), "discovered");
   assert.equal(discovered.execution.status, "online");
   assert.equal(
     await containerImage("runtime-one"),
@@ -398,9 +398,14 @@ try {
       },
     },
   };
-  await createBin("binny14-browser", browserCollector, "browser", "disabled");
-  const incompatibleEnvironment = await postHeartbeat("binny14-browser", {
-    runtimeId: "binny14-browser-probe",
+  await createBin(
+    "binny-runtime-browser",
+    browserCollector,
+    "browser",
+    "disabled",
+  );
+  const incompatibleEnvironment = await postHeartbeat("binny-runtime-browser", {
+    runtimeId: "binny-runtime-browser-probe",
     collector: browserCollector,
     environment: {
       kind: "lightweight",
@@ -421,7 +426,7 @@ try {
     ["collector", "environment", "browser", "required"],
   );
   const browserState = cliData<{ readonly execution: RuntimeStatus }>(
-    await cli(["bin", "get", "binny14-browser"]),
+    await cli(["bin", "get", "binny-runtime-browser"]),
     "found",
   );
   assert.equal(browserState.execution.status, "incompatible");
@@ -445,19 +450,22 @@ try {
       additionalProperties: false,
     },
   };
-  await createBin("binny14-config-allof-valid", allOfCollector, "az");
-  const compatibleConfig = await postHeartbeat("binny14-config-allof-valid", {
-    runtimeId: "binny14-config-allof-valid-probe",
-    collector: allOfCollector,
-    environment: {
-      kind: "lightweight",
-      browser: {
-        available: false,
-        profileReuseAfterRestart: false,
-        power: { status: "unavailable" },
+  await createBin("binny-runtime-config-allof-valid", allOfCollector, "az");
+  const compatibleConfig = await postHeartbeat(
+    "binny-runtime-config-allof-valid",
+    {
+      runtimeId: "binny-runtime-config-allof-valid-probe",
+      collector: allOfCollector,
+      environment: {
+        kind: "lightweight",
+        browser: {
+          available: false,
+          profileReuseAfterRestart: false,
+          power: { status: "unavailable" },
+        },
       },
     },
-  });
+  );
   assert.equal(compatibleConfig.status, 200);
   assert.equal((compatibleConfig.body as RuntimeStatus).status, "online");
 
@@ -476,11 +484,11 @@ try {
     await cli([
       "bin",
       "create",
-      "binny14-config-mismatch",
+      "binny-runtime-config-mismatch",
       "--collector",
       JSON.stringify(configMismatchCollector),
       "--identity",
-      "identity-binny14-config-mismatch",
+      "identity-binny-runtime-config-mismatch",
       "--config",
       JSON.stringify({ section: "ab" }),
       "--targets",
@@ -488,19 +496,22 @@ try {
     ]),
     "created",
   );
-  assert.equal(incompatibleConfigCreated.id, "binny14-config-mismatch");
-  const incompatibleConfig = await postHeartbeat("binny14-config-mismatch", {
-    runtimeId: "binny14-config-probe",
-    collector: allOfCollector,
-    environment: {
-      kind: "lightweight",
-      browser: {
-        available: false,
-        profileReuseAfterRestart: false,
-        power: { status: "unavailable" },
+  assert.equal(incompatibleConfigCreated.id, "binny-runtime-config-mismatch");
+  const incompatibleConfig = await postHeartbeat(
+    "binny-runtime-config-mismatch",
+    {
+      runtimeId: "binny-runtime-config-probe",
+      collector: allOfCollector,
+      environment: {
+        kind: "lightweight",
+        browser: {
+          available: false,
+          profileReuseAfterRestart: false,
+          power: { status: "unavailable" },
+        },
       },
     },
-  });
+  );
   assert.equal(incompatibleConfig.status, 409);
   assert.equal(
     (incompatibleConfig.body.error as { readonly code: string }).code,
@@ -515,8 +526,8 @@ try {
     ...collector,
     version: "2.0.0",
   };
-  const manifestMismatch = await postHeartbeat("binny14-offline", {
-    runtimeId: "binny14-manifest-probe",
+  const manifestMismatch = await postHeartbeat("binny-runtime-offline", {
+    runtimeId: "binny-runtime-manifest-probe",
     collector: driftedManifest,
     environment: {
       kind: "lightweight",
@@ -539,16 +550,19 @@ try {
 
   await compose(["stop", "runtime-one"]);
   const stoppedOne = await waitForCliStatus(
-    "binny14-one",
+    "binny-runtime-one",
     "offline",
     "runtime_not_connected",
   );
   const disconnectedId = stoppedOne.execution.runtimeId;
   await compose(["start", "runtime-one"]);
-  const reconnectedOne = await waitForCliStatus("binny14-one", "online");
+  const reconnectedOne = await waitForCliStatus("binny-runtime-one", "online");
   assert.notEqual(reconnectedOne.execution.runtimeId, disconnectedId);
   assert.ok(disconnectedId !== undefined);
-  const staleDisconnect = await postDisconnect("binny14-one", disconnectedId);
+  const staleDisconnect = await postDisconnect(
+    "binny-runtime-one",
+    disconnectedId,
+  );
   assert.equal(staleDisconnect.status, 200);
   assert.equal(staleDisconnect.body.status, "online");
   assert.equal(
@@ -557,9 +571,9 @@ try {
   );
 
   await compose(["kill", "--signal", "SIGKILL", "runtime-one"]);
-  await waitForCliStatus("binny14-one", "offline", "heartbeat_expired");
+  await waitForCliStatus("binny-runtime-one", "offline", "heartbeat_expired");
   await compose(["start", "runtime-one"]);
-  await waitForCliStatus("binny14-one", "online");
+  await waitForCliStatus("binny-runtime-one", "online");
   await compose(["stop", "runtime-one", "runtime-two"]);
 
   await compose(["up", "--detach", "--force-recreate", "server"]);
@@ -568,16 +582,16 @@ try {
     readonly id: string;
     readonly identityId: string;
     readonly config: { readonly section: string };
-  }>(await cli(["bin", "get", "binny14-one"]), "found");
+  }>(await cli(["bin", "get", "binny-runtime-one"]), "found");
   const persistedTwo = cliData<{
     readonly id: string;
     readonly identityId: string;
     readonly config: { readonly section: string };
-  }>(await cli(["bin", "get", "binny14-two"]), "found");
-  assert.equal(persistedOne.id, "binny14-one");
-  assert.equal(persistedTwo.id, "binny14-two");
-  assert.equal(persistedOne.identityId, "identity-binny14-one");
-  assert.equal(persistedTwo.identityId, "identity-binny14-two");
+  }>(await cli(["bin", "get", "binny-runtime-two"]), "found");
+  assert.equal(persistedOne.id, "binny-runtime-one");
+  assert.equal(persistedTwo.id, "binny-runtime-two");
+  assert.equal(persistedOne.identityId, "identity-binny-runtime-one");
+  assert.equal(persistedTwo.identityId, "identity-binny-runtime-two");
   assert.deepEqual(persistedOne.config, { section: "one" });
   assert.deepEqual(persistedTwo.config, { section: "two" });
 

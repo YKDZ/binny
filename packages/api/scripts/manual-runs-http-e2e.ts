@@ -17,15 +17,16 @@ import {
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
 const sourceRuntimeUrl = "http://manual-runs-source:8081";
 const sourceControlUrl = (() => {
-  const url = process.env.BINNY15_SOURCE_CONTROL_URL;
-  if (url === undefined) throw new Error("缺少 BINNY15_SOURCE_CONTROL_URL。");
+  const url = process.env.BINNY_RUNS_SOURCE_CONTROL_URL;
+  if (url === undefined)
+    throw new Error("缺少 BINNY_RUNS_SOURCE_CONTROL_URL。");
   return url;
 })();
-const manifestJson = process.env.BINNY15_COLLECTOR_MANIFEST;
+const manifestJson = process.env.BINNY_RUNS_COLLECTOR_MANIFEST;
 
 if (baseUrl === undefined) throw new Error("缺少 BINNY_E2E_BASE_URL。");
 if (manifestJson === undefined)
-  throw new Error("缺少由 SDK 构造的 BINNY15_COLLECTOR_MANIFEST。");
+  throw new Error("缺少由 SDK 构造的 BINNY_RUNS_COLLECTOR_MANIFEST。");
 
 const manifest = collectorManifestSchema.parse(
   JSON.parse(manifestJson) as unknown,
@@ -174,14 +175,14 @@ async function cancelRun(binId: string, runId: string) {
 }
 
 async function verifyQueuedCancellation(): Promise<void> {
-  const binId = "binny18-queued-cancel";
-  const runtimeId = "binny18-queued-cancel-runtime";
+  const binId = "binny-lifecycle-queued-cancel";
+  const runtimeId = "binny-lifecycle-queued-cancel-runtime";
   await createConcurrencyBin(binId);
   try {
     const queued = await triggerRun(
       binId,
       sourceRuntimeUrl,
-      "18-queued-cancel",
+      "lifecycle-queued-cancel",
       "queued-cancel",
     );
     assert.equal(queued.status, "queued");
@@ -205,29 +206,29 @@ async function verifyQueuedCancellation(): Promise<void> {
 }
 
 async function verifyCancellationFencesLateWrites(): Promise<void> {
-  const binId = "binny18-fenced-cancel";
-  const runtimeId = "binny18-fenced-cancel-runtime";
+  const binId = "binny-lifecycle-fenced-cancel";
+  const runtimeId = "binny-lifecycle-fenced-cancel-runtime";
   await createConcurrencyBin(binId);
   try {
     await heartbeat(binId, runtimeId);
     const queued = await triggerRun(
       binId,
       sourceRuntimeUrl,
-      "18-fenced-cancel",
+      "lifecycle-fenced-cancel",
       "fenced-cancel",
     );
     const claimed = await claimRun(binId, runtimeId);
     assert.equal(claimed?.runId, queued.runId);
 
     const submission = {
-      requestId: "binny18-replay:" + queued.runId,
+      requestId: "binny-lifecycle-replay:" + queued.runId,
       binId,
       runId: queued.runId,
       collectorVersion: manifest.version,
       items: [
         {
           sourceKey: {
-            namespace: "binny18.cancellation",
+            namespace: "binny-lifecycle.cancellation",
             key: queued.runId,
           },
           body: { text: "取消前已提交的资料。" },
@@ -308,15 +309,15 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
 }
 
 async function verifyConcurrentRuns(): Promise<void> {
-  const firstBin = "binny15-pool-one";
-  const secondBin = "binny15-pool-two";
-  const firstRuntime = "binny15-pool-runtime-one";
-  const secondRuntime = "binny15-pool-runtime-two";
+  const firstBin = "binny-runs-pool-one";
+  const secondBin = "binny-runs-pool-two";
+  const firstRuntime = "binny-runs-pool-runtime-one";
+  const secondRuntime = "binny-runs-pool-runtime-two";
   const firstKeys = Array.from(
     { length: 16 },
-    (_, index) => "15-pool-one-" + String(index),
+    (_, index) => "runs-pool-one-" + String(index),
   );
-  const secondKey = "15-pool-two";
+  const secondKey = "runs-pool-two";
 
   await Promise.all([
     createConcurrencyBin(firstBin),
@@ -456,7 +457,7 @@ async function verifyAvailabilityChecks(): Promise<void> {
     const gateKey = `16-check-${current.disposition}`;
     const sourceKey = `16-check-scope-${String(index)}`;
     const queued = await triggerCheckRun(
-      "binny15-one",
+      "binny-runs-one",
       sourceRuntimeUrl,
       gateKey,
       sourceKey,
@@ -466,7 +467,11 @@ async function verifyAvailabilityChecks(): Promise<void> {
     await waitForArrival(sourceControlUrl, gateKey);
     await releaseSource(sourceControlUrl, gateKey, current.disposition);
 
-    const finished = await waitForRun("binny15-one", queued.runId, "completed");
+    const finished = await waitForRun(
+      "binny-runs-one",
+      queued.runId,
+      "completed",
+    );
     assert.equal(finished.status, "completed");
     assert.equal(finished.result?.error, undefined);
     assert.deepEqual(finished.result?.commits, []);
@@ -490,10 +495,10 @@ async function verifyAvailabilityChecks(): Promise<void> {
     completedCheck = finished;
   }
 
-  const failedKey = "16-check-execution-error";
-  const failedSourceKey = "16-check-execution-error-scope";
+  const failedKey = "check-check-execution-error";
+  const failedSourceKey = "check-check-execution-error-scope";
   const queuedFailure = await triggerCheckRun(
-    "binny15-one",
+    "binny-runs-one",
     sourceRuntimeUrl,
     failedKey,
     failedSourceKey,
@@ -501,7 +506,7 @@ async function verifyAvailabilityChecks(): Promise<void> {
   await waitForArrival(sourceControlUrl, failedKey);
   await releaseSource(sourceControlUrl, failedKey, "execution-error");
   const executionFailure = await waitForRun(
-    "binny15-one",
+    "binny-runs-one",
     queuedFailure.runId,
     "failed",
   );
@@ -510,17 +515,17 @@ async function verifyAvailabilityChecks(): Promise<void> {
   assert.equal(executionFailure.result?.stopReason.code, "source_check_failed");
 
   assert.ok(completedCheck !== undefined);
-  const marker = "16-check-archive-marker-" + completedCheck.runId;
+  const marker = "check-check-archive-marker-" + completedCheck.runId;
   const forbidden = await client.archives.$post({
     json: {
-      requestId: "binny16-check-archive-" + completedCheck.runId,
-      binId: "binny15-one",
+      requestId: "binny-check-check-archive-" + completedCheck.runId,
+      binId: "binny-runs-one",
       runId: completedCheck.runId,
       collectorVersion: manifest.version,
       items: [
         {
           sourceKey: {
-            namespace: "binny16.check-guard",
+            namespace: "binny-check.check-guard",
             key: completedCheck.runId,
           },
           body: { text: marker },
@@ -539,7 +544,7 @@ async function verifyAvailabilityChecks(): Promise<void> {
 
   const search = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "binny15-one" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: marker },
       limit: 10,
     },
@@ -560,12 +565,12 @@ function nextLastSundayAtUtc(month: number, hour: number, minute = 0): Date {
 }
 
 async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
-  const binId = "binny15-one";
+  const binId = "binny-runs-one";
   const expression = "0 0 0 1 1 *";
   const params = {
     sourceUrl: runtimeSourceUrl,
-    gateKey: "17-schedule-crud",
-    sourceKey: "17-schedule-crud",
+    gateKey: "schedule-schedule-crud",
+    sourceKey: "schedule-schedule-crud",
   };
 
   const invalidExpression = await client.bins[":binId"].schedules.$post({
@@ -662,7 +667,7 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
       expression: "0 30 2 * * *",
       timeZone: "Europe/London",
       action: "check",
-      params: { ...params, gateKey: "17-schedule-updated" },
+      params: { ...params, gateKey: "schedule-schedule-updated" },
     },
   });
   assert.equal(updated.status, 200);
@@ -671,7 +676,7 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
     assert.equal(value.expression, "0 30 2 * * *");
     assert.equal(value.timeZone, "Europe/London");
     assert.equal(value.action, "check");
-    assert.equal(value.params.gateKey, "17-schedule-updated");
+    assert.equal(value.params.gateKey, "schedule-schedule-updated");
   }
 
   const disabled = await client.bins[":binId"].schedules[
@@ -794,9 +799,9 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      id: "binny16-missing-check",
+      id: "binny-check-missing-check",
       collector: {
-        id: "binny16.missing-check",
+        id: "binny-check.missing-check",
         version: "1.0.0",
         configSchema: { type: "object" },
         actions: {
@@ -809,7 +814,7 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
           browser: { required: false, profileReuseAfterRestart: false },
         },
       },
-      identityId: "binny16-missing-check",
+      identityId: "binny-check-missing-check",
       config: {},
       targets: [],
     }),
@@ -822,10 +827,10 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   assert.equal(missingCheckBody.error.code, "invalid_input");
 
   const incompleteCheck = await client.bins[":binId"].runs.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
     json: {
       action: "check",
-      params: { sourceUrl, gateKey: "16-check-invalid-params" },
+      params: { sourceUrl, gateKey: "check-check-invalid-params" },
     },
   });
   assert.equal(incompleteCheck.status, 400);
@@ -836,10 +841,10 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   }
 
   const invalidParams = await client.bins[":binId"].runs.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
     json: {
       action: "collect",
-      params: { sourceUrl, gateKey: "15-invalid-params" },
+      params: { sourceUrl, gateKey: "runs-invalid-params" },
     },
   });
   assert.equal(invalidParams.status, 400);
@@ -849,7 +854,7 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   assert.deepEqual(invalidParamsError.path, ["params", "sourceKey"]);
 
   const unknownAction = await client.bins[":binId"].runs.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
     json: { action: "missing", params: {} },
   });
   assert.equal(unknownAction.status, 400);
@@ -859,7 +864,7 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   assert.deepEqual(unknownActionError.path, ["action"]);
 
   const missingBin = await client.bins[":binId"].runs.$post({
-    param: { binId: "binny15-missing" },
+    param: { binId: "binny-runs-missing" },
     json: { action: "collect", params: {} },
   });
   assert.equal(missingBin.status, 404);
@@ -871,11 +876,11 @@ async function verifySerialParallelAndSnapshot(
   runtimeSourceUrl: string,
   controlSourceUrl: string,
 ): Promise<string> {
-  const firstKey = "15-http-first";
-  const secondKey = "15-http-queued";
-  const parallelKey = "15-http-parallel";
+  const firstKey = "runs-http-first";
+  const secondKey = "runs-http-queued";
+  const parallelKey = "runs-http-parallel";
   const first = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     firstKey,
     "serial-first",
@@ -883,17 +888,17 @@ async function verifySerialParallelAndSnapshot(
   await waitForArrival(controlSourceUrl, firstKey);
 
   const second = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     secondKey,
     "serial-queued",
   );
-  const waitingSecond = await readRun("binny15-one", second.runId);
+  const waitingSecond = await readRun("binny-runs-one", second.runId);
   assert.equal(waitingSecond.status, "queued");
   assert.equal(waitingSecond.queueReason, "earlier_run_active");
 
   const updatedBin = await client.bins[":binId"].$patch({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
     json: { config: { section: "changed-while-queued" } },
   });
   assert.equal(updatedBin.status, 200);
@@ -903,7 +908,7 @@ async function verifySerialParallelAndSnapshot(
   }
 
   const parallel = await triggerRun(
-    "binny15-two",
+    "binny-runs-two",
     runtimeSourceUrl,
     parallelKey,
     "parallel-other-bin",
@@ -919,8 +924,8 @@ async function verifySerialParallelAndSnapshot(
   await releaseSource(controlSourceUrl, firstKey);
   await releaseSource(controlSourceUrl, parallelKey);
   const [completedFirst, completedParallel] = await Promise.all([
-    waitForRun("binny15-one", first.runId, "completed"),
-    waitForRun("binny15-two", parallel.runId, "completed"),
+    waitForRun("binny-runs-one", first.runId, "completed"),
+    waitForRun("binny-runs-two", parallel.runId, "completed"),
   ]);
   const firstArchive = await verifyRunCommit(completedFirst);
   await verifyRunCommit(completedParallel);
@@ -929,7 +934,7 @@ async function verifySerialParallelAndSnapshot(
   await waitForArrival(controlSourceUrl, secondKey);
   await releaseSource(controlSourceUrl, secondKey);
   const completedSecond = await waitForRun(
-    "binny15-one",
+    "binny-runs-one",
     second.runId,
     "completed",
   );
@@ -943,16 +948,20 @@ async function verifyActionFailures(
   controlSourceUrl: string,
   existingItemId: string,
 ): Promise<void> {
-  const manualKey = "15-http-manual";
+  const manualKey = "runs-http-manual";
   const manual = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     manualKey,
     "manual-existing-item",
   );
   await waitForArrival(controlSourceUrl, manualKey);
   await releaseSource(controlSourceUrl, manualKey, "manual");
-  const failedManual = await waitForRun("binny15-one", manual.runId, "failed");
+  const failedManual = await waitForRun(
+    "binny-runs-one",
+    manual.runId,
+    "failed",
+  );
   assert.equal(failedManual.result?.error?.code, "source_requires_human");
   assert.equal(failedManual.result?.error?.requiresHuman, true);
   assert.deepEqual(failedManual.result?.error?.path, ["source", "title"]);
@@ -969,16 +978,16 @@ async function verifyActionFailures(
   if (before.status !== 200) return;
   const original = await before.json();
 
-  const emptyKey = "15-http-empty";
+  const emptyKey = "runs-http-empty";
   const empty = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     emptyKey,
     "serial-first",
   );
   await waitForArrival(controlSourceUrl, emptyKey);
   await releaseSource(controlSourceUrl, emptyKey, "empty");
-  const failedEmpty = await waitForRun("binny15-one", empty.runId, "failed");
+  const failedEmpty = await waitForRun("binny-runs-one", empty.runId, "failed");
   assert.equal(failedEmpty.result?.error?.code, "source_returned_no_material");
   assert.equal(failedEmpty.result?.commits.length, 0);
 
@@ -996,9 +1005,9 @@ async function verifyActionFailures(
     assert.equal(unchanged.views[0]?.revisionId, original.views[0]?.revisionId);
   }
 
-  const partialKey = "15-http-partial";
+  const partialKey = "runs-http-partial";
   const partial = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     partialKey,
     "partial-before-manual",
@@ -1006,7 +1015,7 @@ async function verifyActionFailures(
   await waitForArrival(controlSourceUrl, partialKey);
   await releaseSource(controlSourceUrl, partialKey, "partial");
   const failedPartial = await waitForRun(
-    "binny15-one",
+    "binny-runs-one",
     partial.runId,
     "failed",
   );
@@ -1025,7 +1034,7 @@ async function verifyActionFailures(
   if (savedCommitResponse.status === 200) {
     const archivedCommit = await savedCommitResponse.json();
     assert.equal(archivedCommit.runId, partial.runId);
-    assert.equal(archivedCommit.binId, "binny15-one");
+    assert.equal(archivedCommit.binId, "binny-runs-one");
     assert.equal(archivedCommit.collectorVersion, manifest.version);
   }
   const savedItemResponse = await client.archives.items[":itemId"].$get({
@@ -1046,27 +1055,27 @@ async function verifyDisabledQueueBoundary(
   runtimeSourceUrl: string,
   controlSourceUrl: string,
 ): Promise<void> {
-  const activeKey = "15-http-active-on-disable";
-  const queuedKey = "15-http-queued-on-disable";
+  const activeKey = "runs-http-active-on-disable";
+  const queuedKey = "runs-http-queued-on-disable";
   const active = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     activeKey,
     "active-on-disable",
   );
   await waitForArrival(controlSourceUrl, activeKey);
   const queued = await triggerRun(
-    "binny15-one",
+    "binny-runs-one",
     runtimeSourceUrl,
     queuedKey,
     "queued-on-disable",
   );
 
   const disabled = await client.bins[":binId"].disable.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
   });
   assert.equal(disabled.status, 200);
-  const disabledRun = await readRun("binny15-one", queued.runId);
+  const disabledRun = await readRun("binny-runs-one", queued.runId);
   assert.equal(disabledRun.status, "failed");
   assert.equal(disabledRun.result?.error?.code, "bin_disabled");
   assert.equal(
@@ -1077,7 +1086,7 @@ async function verifyDisabledQueueBoundary(
   );
 
   const blocked = await client.bins[":binId"].runs.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
     json: { action: "collect", params: {} },
   });
   assert.equal(blocked.status, 409);
@@ -1086,13 +1095,13 @@ async function verifyDisabledQueueBoundary(
 
   await releaseSource(controlSourceUrl, activeKey);
   const completedActive = await waitForRun(
-    "binny15-one",
+    "binny-runs-one",
     active.runId,
     "completed",
   );
   await verifyRunCommit(completedActive);
   const enabled = await client.bins[":binId"].enable.$post({
-    param: { binId: "binny15-one" },
+    param: { binId: "binny-runs-one" },
   });
   assert.equal(enabled.status, 200);
 }

@@ -329,12 +329,12 @@ export async function startControlledSource(
 }
 
 async function serveSource(): Promise<void> {
-  const port = Number(process.env.BINNY15_SOURCE_PORT ?? "0");
+  const port = Number(process.env.BINNY_RUNS_SOURCE_PORT ?? "0");
   if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
-    throw new Error("BINNY15_SOURCE_PORT 必须是 0 到 65535 的整数。");
+    throw new Error("BINNY_RUNS_SOURCE_PORT 必须是 0 到 65535 的整数。");
   }
   const source = await startControlledSource({ port });
-  process.stdout.write(`BINNY15_SOURCE_READY ${String(source.port)}\n`);
+  process.stdout.write(`BINNY_RUNS_SOURCE_READY ${String(source.port)}\n`);
   let closing: Promise<void> | undefined;
   const close = (): void => {
     if (closing !== undefined) return;

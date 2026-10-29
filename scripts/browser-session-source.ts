@@ -12,7 +12,7 @@ type GateState = {
   unloadedAt?: number;
 };
 
-const port = Number(process.env.BINNY19_SOURCE_PORT ?? "8081");
+const port = Number(process.env.BINNY_BROWSER_SOURCE_PORT ?? "8081");
 const loginSubmissions: { readonly maxAge: number; readonly at: number }[] = [];
 const loginPageViews: number[] = [];
 const authenticatedProtectedVisits: number[] = [];
@@ -96,7 +96,7 @@ const server = createServer(async (request, response) => {
       const form = new URLSearchParams(await body(request));
       const maxAge = Number(form.get("lifetime"));
       if (
-        form.get("username") !== "binny19-user" ||
+        form.get("username") !== "binny-browser-user" ||
         form.get("password") !== "browser-session" ||
         !Number.isSafeInteger(maxAge) ||
         maxAge < 1
@@ -108,7 +108,7 @@ const server = createServer(async (request, response) => {
       response.writeHead(303, {
         "cache-control": "no-store",
         location: "/protected",
-        "set-cookie": `binny19_session=valid; Path=/; HttpOnly; Max-Age=${String(maxAge)}; SameSite=Lax`,
+        "set-cookie": `binny-browser_session=valid; Path=/; HttpOnly; Max-Age=${String(maxAge)}; SameSite=Lax`,
       });
       response.end();
       return;
@@ -117,7 +117,7 @@ const server = createServer(async (request, response) => {
       if (
         !(request.headers.cookie ?? "")
           .split(";")
-          .some((part) => part.trim() === "binny19_session=valid")
+          .some((part) => part.trim() === "binny-browser_session=valid")
       ) {
         response.writeHead(302, {
           "cache-control": "no-store",
@@ -137,9 +137,9 @@ const server = createServer(async (request, response) => {
               setInterval(async () => {
                 fetch("/touch?gate=" + encodeURIComponent(gateId), { cache: "no-store" });
                 const state = await fetch("/gate-state?gate=" + encodeURIComponent(gateId), { cache: "no-store" });
-                if (await state.text() === "released") window.binny19GateReleased = true;
+                if (await state.text() === "released") window.binnyBrowserGateReleased = true;
               }, 100);
-              window.binny19GateReleased = false;
+              window.binnyBrowserGateReleased = false;
             </script>`;
       if (gateId !== null) {
         const gate = gates.get(gateId);

@@ -7510,9 +7510,11 @@ async function verifyHardDeleteEntryPoint(
     namespace: "e2e",
     key: "hard-delete-unrelated:" + runId,
   };
-  const sharedBytes = new TextEncoder().encode("binny06 shared delete media");
+  const sharedBytes = new TextEncoder().encode(
+    "binny-deletion shared delete media",
+  );
   const exclusiveBytes = new TextEncoder().encode(
-    "binny06 exclusive delete media",
+    "binny-deletion exclusive delete media",
   );
   const upload = async (bytes: Uint8Array) => {
     const body = new ArrayBuffer(bytes.byteLength);
@@ -8026,9 +8028,11 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   const changedKey = { namespace: "e2e", key: "cascade-changed:" + runId };
   const withdrawnKey = { namespace: "e2e", key: "cascade-withdrawn:" + runId };
   const unrelatedKey = { namespace: "e2e", key: "cascade-unrelated:" + runId };
-  const sharedBytes = new TextEncoder().encode("binny07 shared cascade media");
+  const sharedBytes = new TextEncoder().encode(
+    "binny-cascade shared cascade media",
+  );
   const exclusiveBytes = new TextEncoder().encode(
-    "binny07 exclusive cascade media",
+    "binny-cascade exclusive cascade media",
   );
   const upload = async (bytes: Uint8Array) => {
     const body = new ArrayBuffer(bytes.byteLength);

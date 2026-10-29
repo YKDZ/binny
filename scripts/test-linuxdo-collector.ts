@@ -99,13 +99,14 @@ const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const composeFile = path.join(repositoryRoot, "compose.yaml");
+const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
-const projectName = `binny25-${suffix}`;
+const projectName = `binny-discovery-${suffix}`;
 const serverImage = `${projectName}-server:local`;
 const browserImage = `${projectName}-linuxdo:local`;
-const publishedHost = process.env.BINNY25_PUBLISHED_HOST ?? "172.17.0.1";
-const password = `binny25-${randomUUID().replaceAll("-", "")}`;
+const publishedHost =
+  process.env.BINNY_DISCOVERY_PUBLISHED_HOST ?? "172.17.0.1";
+const password = `binny-discovery-${randomUUID().replaceAll("-", "")}`;
 let overlayDirectory: string | undefined;
 let overlayFile: string | undefined;
 let browser: Browser | undefined;
@@ -117,8 +118,8 @@ let composeStarted = false;
 function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: serverImage,
-    BINNY24_BIN_ID: "binny25-topic",
-    BINNY24_RUNTIME_IMAGE: browserImage,
+    BINNY_LINUXDO_BIN_ID: "binny-discovery-topic",
+    BINNY_LINUXDO_IMAGE: browserImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -159,7 +160,7 @@ function composePrefix(): readonly string[] {
     "--file",
     composeFile,
     "--profile",
-    "binny24",
+    "binny-linuxdo",
     "--profile",
     "linuxdo-e2e",
     "--parallel",
@@ -205,13 +206,16 @@ function cliData<T>(result: ProcessResult, variant: string): T {
 }
 
 async function createOverlay(): Promise<void> {
-  overlayDirectory = await mkdtemp(path.join(tmpdir(), "binny25-compose-"));
+  overlayDirectory = await mkdtemp(
+    path.join(tmpdir(), "binny-discovery-compose-"),
+  );
   overlayFile = path.join(overlayDirectory, "compose.network.yaml");
   const subnets = {
-    api: process.env.BINNY25_API_SUBNET ?? "10.253.25.0/24",
-    runtime: process.env.BINNY25_RUNTIME_SUBNET ?? "10.253.187.0/24",
-    connections: process.env.BINNY25_CONNECTIONS_SUBNET ?? "10.253.188.0/24",
-    browser: process.env.BINNY25_BROWSER_SUBNET ?? "10.253.189.0/24",
+    api: process.env.BINNY_DISCOVERY_API_SUBNET ?? "10.253.25.0/24",
+    runtime: process.env.BINNY_DISCOVERY_RUNTIME_SUBNET ?? "10.253.187.0/24",
+    connections:
+      process.env.BINNY_DISCOVERY_CONNECTIONS_SUBNET ?? "10.253.188.0/24",
+    browser: process.env.BINNY_DISCOVERY_BROWSER_SUBNET ?? "10.253.189.0/24",
   };
   await writeFile(
     overlayFile,
@@ -373,7 +377,7 @@ async function waitForRuntime(): Promise<void> {
   const deadline = Date.now() + 45_000;
   let latest = "运行器还没有上线。";
   while (Date.now() < deadline) {
-    const result = await cli(["bin", "get", "binny25-topic"]);
+    const result = await cli(["bin", "get", "binny-discovery-topic"]);
     if (result.code === 0) {
       const bin = cliData<{
         readonly execution: { readonly status: string };
@@ -392,7 +396,7 @@ async function trigger(
   action: "check" | "collect",
   params: Readonly<Record<string, unknown>>,
 ): Promise<ManualRun> {
-  return await triggerLinuxdoRun(cli, "binny25-topic", action, params);
+  return await triggerLinuxdoRun(cli, "binny-discovery-topic", action, params);
 }
 
 async function startOuterBrowser(): Promise<Browser> {
@@ -415,16 +419,16 @@ async function navigateThroughViewer(page: Page, url: string): Promise<void> {
 }
 
 async function openHumanSession(): Promise<BrowserSession> {
-  return await openLinuxdoHumanSession(cli, "binny25-topic");
+  return await openLinuxdoHumanSession(cli, "binny-discovery-topic");
 }
 
 async function closeHumanSession(sessionId: string): Promise<void> {
-  await closeLinuxdoHumanSession(cli, "binny25-topic", sessionId);
+  await closeLinuxdoHumanSession(cli, "binny-discovery-topic", sessionId);
 }
 
 async function searchArchiveItem(text: string): Promise<ArchiveItem> {
   const query = {
-    scope: { kind: "current", binId: "binny25-topic" },
+    scope: { kind: "current", binId: "binny-discovery-topic" },
     text: { kind: "literal", value: text },
     select: ["sourceKey", "sourceRef", "capture.completeness"],
     limit: 10,
@@ -439,14 +443,20 @@ async function searchArchiveItem(text: string): Promise<ArchiveItem> {
   const result = page.results[0];
   assert.ok(result !== undefined);
   return cliData<ArchiveItem>(
-    await cli(["archive", "item", result.itemId, "--bin", "binny25-topic"]),
+    await cli([
+      "archive",
+      "item",
+      result.itemId,
+      "--bin",
+      "binny-discovery-topic",
+    ]),
     "found",
   );
 }
 
 async function readArchiveItem(itemId: string): Promise<ArchiveItem> {
   return cliData<ArchiveItem>(
-    await cli(["archive", "item", itemId, "--bin", "binny25-topic"]),
+    await cli(["archive", "item", itemId, "--bin", "binny-discovery-topic"]),
     "found",
   );
 }
@@ -461,7 +471,9 @@ async function readArchiveRevision(
 }
 
 function binState(item: ArchiveItem): ArchiveItemState {
-  const view = item.views.find(({ binId }) => binId === "binny25-topic");
+  const view = item.views.find(
+    ({ binId }) => binId === "binny-discovery-topic",
+  );
   assert.ok(view !== undefined, "归档条目缺少当前 bin 视图。");
   return view.state;
 }
@@ -491,7 +503,7 @@ async function readOutgoingRelations(itemId: string): Promise<
       "relations",
       itemId,
       "--bin",
-      "binny25-topic",
+      "binny-discovery-topic",
       "--direction",
       "outgoing",
     ]),
@@ -551,7 +563,7 @@ async function verifyLoginRequired(): Promise<
 > {
   assert.ok(browser !== undefined);
   return await linuxdoUserJourney({
-    binId: "binny25-topic",
+    binId: "binny-discovery-topic",
     topicId: 2401,
     cli,
     browser,
@@ -559,7 +571,7 @@ async function verifyLoginRequired(): Promise<
     serverPort,
     sourceOrigin: "http://linuxdo-e2e-source:8081",
     sourceControlUrl: sourceUrl("/__control/state"),
-    username: "binny25-user",
+    username: "binny-discovery-user",
     password: "linuxdo-fixture",
   });
 }
@@ -568,18 +580,21 @@ async function verifyActionParameterValidation(): Promise<void> {
   const before = cliData<{
     readonly config: unknown;
     readonly targets: readonly unknown[];
-  }>(await cli(["bin", "get", "binny25-topic"]), "found");
+  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
   for (const [params, path] of [
     [{ createdAfter: "yesterday" }, ["params", "createdAfter"]],
     [{ maxTopics: 501 }, ["params", "maxTopics"]],
     [{ targetIds: [1] }, ["params", "targetIds", "0"]],
   ] as const) {
-    const response = await fetch(`${apiUrl()}/bins/binny25-topic/runs`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "collect", params }),
-      signal: AbortSignal.timeout(5_000),
-    });
+    const response = await fetch(
+      `${apiUrl()}/bins/binny-discovery-topic/runs`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "collect", params }),
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
     assert.equal(response.status, 400);
     const payload = (await response.json()) as {
       readonly error: {
@@ -600,7 +615,7 @@ async function verifyActionParameterValidation(): Promise<void> {
   const after = cliData<{
     readonly config: unknown;
     readonly targets: readonly unknown[];
-  }>(await cli(["bin", "get", "binny25-topic"]), "found");
+  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
   assert.deepEqual(after.config, before.config);
   assert.deepEqual(after.targets, before.targets);
 }
@@ -890,7 +905,7 @@ async function verifyTopicArchive(
   );
   const finiteRoot = await readArchiveItem(root.itemId);
   const finiteView = finiteRoot.views.find(
-    ({ binId }) => binId === "binny25-topic",
+    ({ binId }) => binId === "binny-discovery-topic",
   );
   assert.ok(
     finiteView?.diagnostics?.some(
@@ -919,7 +934,7 @@ async function verifyTopicArchive(
   assert.equal(missingPhoto.reason, "媒体资源未能归档。");
   assert.equal(partialRootState.resources?.length, 2);
   const partialRootView = partialRoot.views.find(
-    ({ binId }) => binId === "binny25-topic",
+    ({ binId }) => binId === "binny-discovery-topic",
   );
   assert.ok(
     partialRootView?.diagnostics?.some(
@@ -941,7 +956,7 @@ async function verifyTopicArchive(
     missingObservationCount + 1,
   );
   const retriedMissingView = retriedMissingRoot.views.find(
-    ({ binId }) => binId === "binny25-topic",
+    ({ binId }) => binId === "binny-discovery-topic",
   );
   assert.ok(
     retriedMissingView?.diagnostics?.some(
@@ -965,7 +980,7 @@ async function verifyTopicArchive(
   );
   assert.equal(challengedRootState.resources?.length, 2);
   const challengedRootView = challengedRoot.views.find(
-    ({ binId }) => binId === "binny25-topic",
+    ({ binId }) => binId === "binny-discovery-topic",
   );
   assert.ok(
     challengedRootView?.diagnostics?.some(
@@ -1429,11 +1444,11 @@ async function main(): Promise<void> {
       await cli([
         "bin",
         "create",
-        "binny25-topic",
+        "binny-discovery-topic",
         "--collector",
         JSON.stringify(manifest),
         "--identity",
-        "binny25-profile",
+        "binny-discovery-profile",
         "--config",
         JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
         "--targets",
@@ -1450,7 +1465,7 @@ async function main(): Promise<void> {
       ]),
       "created",
     );
-    assert.equal(created.id, "binny25-topic");
+    assert.equal(created.id, "binny-discovery-topic");
     await waitForRuntime();
 
     await verifyActionParameterValidation();

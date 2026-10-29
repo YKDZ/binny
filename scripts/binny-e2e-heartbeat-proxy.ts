@@ -16,7 +16,7 @@ let clientClosedAt: number | undefined;
 let heldForHumanOpenResponse = false;
 let heldForward: (() => Promise<void>) | undefined;
 let armedForStoppedRunId: string | undefined;
-let armedForBinId = "binny15-one";
+let armedForBinId = "binny-runs-one";
 let armedForIdleHeartbeat = false;
 let armedForHumanOpenResponse = false;
 let heldRuntimeId: string | undefined;
@@ -372,7 +372,7 @@ const control = createServer((request, response) => {
         "binId" in value &&
         typeof value.binId === "string"
           ? value.binId
-          : "binny15-one";
+          : "binny-runs-one";
       const stoppedRunId =
         typeof value === "object" &&
         value !== null &&

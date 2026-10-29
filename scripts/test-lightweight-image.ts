@@ -4,8 +4,8 @@ import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 
 const workspaceRoot = process.cwd();
-const image = `binny14/lightweight:${process.pid}`;
-const container = `binny14-runtime-${process.pid}`;
+const image = `binny-runtime/lightweight:${process.pid}`;
+const container = `binny-runtime-runtime-${process.pid}`;
 const runtimePort = 14140 + (process.pid % 1000);
 
 async function run(command: string, args: readonly string[]): Promise<string> {
@@ -72,7 +72,7 @@ try {
     "--name",
     container,
     "--env",
-    "BINNY_BIN_ID=binny14-fixture",
+    "BINNY_BIN_ID=binny-runtime-fixture",
     "--env",
     "BINNY_API_URL=http://127.0.0.1:1",
     "--env",
@@ -98,7 +98,7 @@ try {
   assert.deepStrictEqual(manifest, {
     protocolVersion: 5,
     collector: {
-      id: "binny14.protocol-fixture",
+      id: "binny-runtime.protocol-fixture",
       version: "1.0.0",
       environment: {
         browser: { required: false, profileReuseAfterRestart: false },

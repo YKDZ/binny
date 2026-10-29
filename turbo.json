@@ -56,7 +56,7 @@
         "BINNY_E2E_LINUXDO_SUBNET"
       ],
       "inputs": [
-        "compose.yaml",
+        "compose.acceptance.yaml",
         "Dockerfile",
         "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
@@ -90,14 +90,14 @@
     },
     "//#test:linuxdo-collector": {
       "passThroughEnv": [
-        "BINNY25_PUBLISHED_HOST",
-        "BINNY25_API_SUBNET",
-        "BINNY25_RUNTIME_SUBNET",
-        "BINNY25_CONNECTIONS_SUBNET",
-        "BINNY25_BROWSER_SUBNET"
+        "BINNY_DISCOVERY_PUBLISHED_HOST",
+        "BINNY_DISCOVERY_API_SUBNET",
+        "BINNY_DISCOVERY_RUNTIME_SUBNET",
+        "BINNY_DISCOVERY_CONNECTIONS_SUBNET",
+        "BINNY_DISCOVERY_BROWSER_SUBNET"
       ],
       "inputs": [
-        "compose.yaml",
+        "compose.acceptance.yaml",
         "Dockerfile",
         "packages/collector-runtime/Dockerfile.browser",
         "scripts/test-linuxdo-collector.ts",
@@ -154,9 +154,12 @@
       "tags": ["quality:heavy"]
     },
     "//#test:browser-lifecycle": {
-      "passThroughEnv": ["BINNY19_PUBLISHED_HOST", "BINNY21_SUBNET"],
+      "passThroughEnv": [
+        "BINNY_BROWSER_PUBLISHED_HOST",
+        "BINNY_CAPACITY_SUBNET"
+      ],
       "inputs": [
-        "compose.yaml",
+        "compose.acceptance.yaml",
         "Dockerfile",
         "packages/collector-runtime/Dockerfile.browser",
         "scripts/binny-image-update-context.ts",
@@ -185,9 +188,12 @@
     },
     "//#test:runtime-connections": {
       "dependsOn": ["@binny/binny#build"],
-      "passThroughEnv": ["BINNY14_PUBLISHED_HOST", "BINNY14_SUBNET"],
+      "passThroughEnv": [
+        "BINNY_RUNTIME_PUBLISHED_HOST",
+        "BINNY_RUNTIME_SUBNET"
+      ],
       "inputs": [
-        "compose.yaml",
+        "compose.acceptance.yaml",
         "Dockerfile",
         "packages/collector-runtime/Dockerfile.lightweight",
         "scripts/test-runtime-connections.ts",

@@ -1,0 +1,402 @@
+x-binny-image: &binny-image
+  image: ${BINNY_IMAGE:-binny/server:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-binny-runtime-watch: &binny-runtime-watch
+  - path: ./collectors/rss/src
+    action: rebuild
+  - path: ./collectors/rss/package.json
+    action: rebuild
+  - path: ./packages/collector-runtime
+    action: rebuild
+  - path: ./packages/collector-sdk/src
+    action: rebuild
+  - path: ./packages/api/src
+    action: rebuild
+  - path: ./packages/contracts/src
+    action: rebuild
+  - path: ./packages/core/src
+    action: rebuild
+  - path: ./packages/db
+    action: rebuild
+  - path: ./packages/server/src
+    action: rebuild
+  - path: ./packages/collector-runtime/package.json
+    action: rebuild
+  - path: ./packages/collector-sdk/package.json
+    action: rebuild
+  - path: ./packages/api/package.json
+    action: rebuild
+  - path: ./packages/contracts/package.json
+    action: rebuild
+  - path: ./packages/core/package.json
+    action: rebuild
+  - path: ./packages/db/package.json
+    action: rebuild
+  - path: ./packages/server/package.json
+    action: rebuild
+  - path: ./packages/tooling-config
+    action: rebuild
+  - path: ./package.json
+    action: rebuild
+  - path: ./pnpm-lock.yaml
+    action: rebuild
+  - path: ./pnpm-workspace.yaml
+    action: rebuild
+  - path: ./.dockerignore
+    action: rebuild
+
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: binny
+      POSTGRES_USER: binny
+      POSTGRES_PASSWORD: ${BINNY_POSTGRES_PASSWORD:-binny}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U binny -d binny
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  server:
+    <<: *binny-image
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://binny:${BINNY_POSTGRES_PASSWORD:-binny}@postgres:5432/binny
+      BINNY_BROWSER_CAPACITY_LIMIT: ${BINNY_BROWSER_CAPACITY_LIMIT:-2}
+      BINNY_API_URL: http://127.0.0.1:3000
+      BINNY_RESOURCE_DIRECTORY: /var/lib/binny/resources
+      BINNY_RESOURCE_UNREFERENCED_AGE_MS: ${BINNY_RESOURCE_UNREFERENCED_AGE_MS:-86400000}
+      BINNY_RESOURCE_CLEANUP_INTERVAL_MS: ${BINNY_RESOURCE_CLEANUP_INTERVAL_MS:-3600000}
+      PORT: 3000
+    ports:
+      - "${BINNY_PORT:-3000}:3000"
+    volumes:
+      - bins:/var/lib/binny/bins
+      - resource-data:/var/lib/binny/resources
+    restart: unless-stopped
+
+  browser-session-source:
+    <<: *binny-image
+    profiles: [binny-browser]
+    command:
+      - node
+      - --conditions=source
+      - scripts/browser-session-source.ts
+    environment:
+      BINNY_BROWSER_SOURCE_PORT: 8081
+    restart: unless-stopped
+
+  manual-runs-source:
+    <<: *binny-image
+    profiles: [binny-runs]
+    command:
+      - node
+      - --conditions=source
+      - packages/api/scripts/manual-runs-source.ts
+      - --serve
+    environment:
+      BINNY_RUNS_SOURCE_PORT: 8081
+    ports:
+      - "${BINNY_RUNS_SOURCE_HOST_PORT:-18815}:8081"
+    restart: unless-stopped
+
+  rss-e2e-source:
+    <<: *binny-image
+    profiles: [binny-rss]
+    command:
+      - node
+      - --conditions=source
+      - scripts/binny-e2e-rss-source.ts
+    environment:
+      BINNY_RSS_SOURCE_PORT: 8081
+    restart: unless-stopped
+
+  runtime-one:
+    image: ${BINNY_TEST_LIGHTWEIGHT_IMAGE:-binny/lightweight-fixture:local}
+    profiles: [binny-runtime]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-runtime-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    volumes:
+      - runtime-one-owner:/var/lib/binny/runtime
+    ports:
+      - "${BINNY_RUNTIME_ONE_PORT:-14141}:8080"
+    restart: unless-stopped
+
+  runtime-two:
+    image: ${BINNY_TEST_LIGHTWEIGHT_IMAGE:-binny/lightweight-fixture:local}
+    profiles: [binny-runtime]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-runtime-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    volumes:
+      - runtime-two-owner:/var/lib/binny/runtime
+    ports:
+      - "${BINNY_RUNTIME_TWO_PORT:-14142}:8080"
+    restart: unless-stopped
+
+  runtime-fifteen-one:
+    image: ${BINNY_TEST_RUNNER_IMAGE:-binny/runner-fixture:local}
+    profiles: [binny-runs]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-runs-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    volumes:
+      - runtime-fifteen-one-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-fifteen-two:
+    image: ${BINNY_TEST_RUNNER_IMAGE:-binny/runner-fixture:local}
+    profiles: [binny-runs]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-runs-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    volumes:
+      - runtime-fifteen-two-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-rss:
+    image: ${BINNY_RSS_IMAGE:-binny/rss:local}
+    profiles: [binny-rss]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-rss-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+    volumes:
+      - rss-one-collector-state:/var/lib/binny/collector-state
+      - rss-one-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    develop:
+      watch: *binny-runtime-watch
+    restart: unless-stopped
+
+  runtime-rss-two:
+    image: ${BINNY_RSS_IMAGE:-binny/rss:local}
+    profiles: [binny-rss]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-rss-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+    volumes:
+      - rss-two-collector-state:/var/lib/binny/collector-state
+      - rss-two-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    develop:
+      watch: *binny-runtime-watch
+    restart: unless-stopped
+
+  browser-one:
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    profiles: [binny-browser]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-browser-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-one-owner:/var/lib/binny/runtime
+    develop:
+      watch: *binny-runtime-watch
+    restart: unless-stopped
+
+  browser-two:
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    profiles: [binny-browser]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
+        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-browser-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-two-owner:/var/lib/binny/runtime
+    develop:
+      watch: *binny-runtime-watch
+    restart: unless-stopped
+
+  browser-one-contender:
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    profiles: [binny-browser-lock]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: binny-browser-one
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - browser-one-owner:/var/lib/binny/runtime
+    restart: "no"
+
+  runtime-linuxdo:
+    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
+    profiles: [binny-linuxdo]
+    build:
+      context: .
+      dockerfile: packages/collector-runtime/Dockerfile.browser
+      args:
+        BINNY_COLLECTOR_PACKAGE: "@binny/collector-linuxdo"
+        BINNY_COLLECTOR_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: ${BINNY_LINUXDO_BIN_ID:-linuxdo}
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - linuxdo-runtime-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-linuxdo-two:
+    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
+    profiles: [binny-linuxdo]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: ${BINNY_LINUXDO_BIN_ID_TWO:-linuxdo-two}
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - linuxdo-runtime-two-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  linuxdo-e2e-source:
+    <<: *binny-image
+    profiles: [linuxdo-e2e]
+    command:
+      - node
+      - --conditions=source
+      - scripts/binny-e2e-linuxdo-source.ts
+    environment:
+      BINNY_DISCOVERY_SOURCE_PORT: 8081
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  bins:
+  resource-data:
+  runtime-one-owner:
+  runtime-two-owner:
+  runtime-fifteen-one-owner:
+  runtime-fifteen-two-owner:
+  rss-one-owner:
+  rss-one-collector-state:
+  rss-two-owner:
+  rss-two-collector-state:
+  browser-one-owner:
+  browser-two-owner:
+  linuxdo-runtime-owner:
+  linuxdo-runtime-two-owner:

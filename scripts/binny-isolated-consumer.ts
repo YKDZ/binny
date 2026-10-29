@@ -61,7 +61,7 @@ export async function verifyIsolatedApiConsumer({
   projectName,
 }: ConsumerOptions): Promise<unknown> {
   const temporaryRoot = await mkdtemp(
-    path.join(tmpdir(), "binny01-isolated-consumer-"),
+    path.join(tmpdir(), "binny-configuration-isolated-consumer-"),
   );
   const deployedApiDirectory = path.join(temporaryRoot, "api-deploy");
   const consumerDirectory = path.join(temporaryRoot, "consumer");

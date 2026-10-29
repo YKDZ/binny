@@ -17,3 +17,7 @@ node_modules
 **/fixture-dist
 coverage
 *.log
+
+.turbo
+.env
+.env.*

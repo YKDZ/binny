@@ -7,7 +7,7 @@ import { z } from "zod";
 import { sampleActionDescription } from "./helper.ts";
 
 export default defineCollector({
-  id: "binny14.protocol-fixture",
+  id: "binny-runtime.protocol-fixture",
   version: "1.0.0",
   environment: {
     browser: { required: false, profileReuseAfterRestart: false },
