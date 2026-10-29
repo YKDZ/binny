@@ -90,11 +90,11 @@
     },
     "//#test:linuxdo-collector": {
       "passThroughEnv": [
-        "BINNY24_PUBLISHED_HOST",
-        "BINNY24_API_SUBNET",
-        "BINNY24_RUNTIME_SUBNET",
-        "BINNY24_CONNECTIONS_SUBNET",
-        "BINNY24_BROWSER_SUBNET"
+        "BINNY25_PUBLISHED_HOST",
+        "BINNY25_API_SUBNET",
+        "BINNY25_RUNTIME_SUBNET",
+        "BINNY25_CONNECTIONS_SUBNET",
+        "BINNY25_BROWSER_SUBNET"
       ],
       "inputs": [
         "compose.yaml",

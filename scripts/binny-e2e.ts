@@ -2428,7 +2428,16 @@ async function createLinuxdoBin(
       "--config",
       JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
       "--targets",
-      "[]",
+      JSON.stringify([
+        { id: "latest", kind: "latest" },
+        {
+          id: "category",
+          kind: "category",
+          categoryId: 42,
+          categorySlugPath: "controlled",
+        },
+        { id: "pinned", kind: "topic", topicId: 2401 },
+      ]),
     ]),
     "created",
   );
@@ -2773,6 +2782,50 @@ async function verifyLinuxdoArchiveJourney(
   }
   assert.ok(photoResourceId !== undefined);
 
+  const discoveryCheck = await triggerLinuxdoRun(
+    cliForLinuxdo,
+    binId,
+    "check",
+    { targetIds: ["latest"] },
+  );
+  assert.equal(discoveryCheck.status, "completed");
+  assert.equal(discoveryCheck.result?.check?.availability, "available");
+  assert.deepEqual(discoveryCheck.result?.check?.scope, ["target:latest"]);
+  assert.equal(discoveryCheck.result?.commits?.length ?? 0, 0);
+  const discoveryCollection = await triggerLinuxdoRun(
+    cliForLinuxdo,
+    binId,
+    "collect",
+    { targetIds: ["latest"], maxTopics: 1 },
+  );
+  assert.equal(discoveryCollection.status, "completed");
+  assert.ok(
+    discoveryCollection.result?.completedScopes?.some((scope) =>
+      scope.startsWith("target:latest"),
+    ),
+  );
+  assert.ok(
+    discoveryCollection.result?.completedScopes?.includes("topic:2401"),
+  );
+  assert.ok(
+    discoveryCollection.result?.completedScopes?.includes("post:240001"),
+  );
+  const discoveryCommitLocator = discoveryCollection.result?.commits?.find(
+    ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
+  );
+  assert.ok(discoveryCommitLocator !== undefined);
+  const discoveryCommit = cliData<{
+    readonly binId: string;
+    readonly runId: string;
+    readonly items: readonly { readonly itemId: string }[];
+  }>(
+    await cliForLinuxdo(["archive", "commit", discoveryCommitLocator.commitId]),
+    "found",
+  );
+  assert.equal(discoveryCommit.binId, binId);
+  assert.equal(discoveryCommit.runId, discoveryCollection.runId);
+  assert.ok(discoveryCommit.items.some(({ itemId }) => itemId === rootItemId));
+
   const fixtureUpdate = await fetch(sourceControlUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2789,7 +2842,7 @@ async function verifyLinuxdoArchiveJourney(
     sourceControlUrl,
     binId,
     rootItemId,
-    journey.firstCollection.runId,
+    discoveryCollection.runId,
   );
   assert.equal(secondCollection.status, "completed");
   assert.ok(secondCollection.result?.completedScopes?.includes("topic:2401"));
@@ -2965,6 +3018,7 @@ async function verifyLinuxdoArchiveJourney(
   );
   for (const runId of [
     journey.firstCollection.runId,
+    discoveryCollection.runId,
     secondCollection.runId,
     partialCollection.runId,
   ]) {
@@ -3140,6 +3194,7 @@ async function verifyLinuxdoArchiveJourney(
         binId,
         linuxdoRunIds: [
           journey.firstCollection.runId,
+          discoveryCollection.runId,
           secondCollection.runId,
           partialCollection.runId,
         ],
@@ -8220,7 +8275,7 @@ async function main(): Promise<void> {
         serverPort: composePort,
         sourceOrigin: "http://linuxdo-e2e-source:8081",
         sourceControlUrl: linuxdoSourceControlUrl,
-        username: "binny24-user",
+        username: "binny25-user",
         password: "linuxdo-fixture",
       });
       process.stdout.write(

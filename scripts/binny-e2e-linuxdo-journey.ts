@@ -28,11 +28,13 @@ export type LinuxdoManualRun = {
       readonly problems: readonly {
         readonly code: string;
         readonly requiresHuman: boolean;
+        readonly suggestion?: string;
       }[];
     };
     readonly error?: {
       readonly code: string;
       readonly requiresHuman: boolean;
+      readonly path?: readonly (string | number)[];
     };
     readonly completedScopes?: readonly string[];
     readonly commits?: readonly {
