@@ -355,6 +355,24 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  runtime-linuxdo-two:
+    image: ${BINNY24_RUNTIME_IMAGE:-binny24-linuxdo:local}
+    profiles: [binny24]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_BIN_ID: ${BINNY24_BIN_ID_TWO:-linuxdo-two}
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: browser
+      BINNY_BROWSER_PROFILE_REUSE: "true"
+    volumes:
+      - linuxdo-runtime-two-owner:/var/lib/binny/runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   linuxdo-e2e-source:
     <<: *binny-image
     profiles: [linuxdo-e2e]
@@ -381,3 +399,4 @@ volumes:
   browser-one-owner:
   browser-two-owner:
   linuxdo-runtime-owner:
+  linuxdo-runtime-two-owner:

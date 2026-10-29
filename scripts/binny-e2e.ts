@@ -7,7 +7,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  closeLinuxdoHumanSession,
   linuxdoUserJourney,
+  openLinuxdoHumanSession,
   startLinuxdoViewerBrowser,
   triggerLinuxdoRun,
   type LinuxdoViewerBrowser,
@@ -211,10 +213,12 @@ function composePrefix(): readonly string[] {
 function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: activeServerImage,
+    BINNY_BROWSER_CAPACITY_LIMIT: "1",
     BINNY15_RUNTIME_IMAGE: runtimeImageName,
     BINNY18_STOP_GRACE_MS: "1500",
     BINNY22_RUNTIME_IMAGE: activeRssRuntimeImage,
     BINNY24_BIN_ID: "binny28-linuxdo",
+    BINNY24_BIN_ID_TWO: "binny28-linuxdo-two",
     BINNY24_RUNTIME_IMAGE: linuxdoRuntimeImageName,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
@@ -2363,12 +2367,14 @@ async function createRssManifest(): Promise<unknown> {
   return JSON.parse(result.stdout) as unknown;
 }
 
-async function linuxdoRuntimeManifest(): Promise<unknown> {
-  await waitForLinuxdoRuntimeHealth();
+async function linuxdoRuntimeManifest(
+  service = "runtime-linuxdo",
+): Promise<unknown> {
+  await waitForLinuxdoRuntimeHealth(service);
   const result = await compose([
     "exec",
     "--no-TTY",
-    "runtime-linuxdo",
+    service,
     "node",
     "--input-type=module",
     "-e",
@@ -2377,7 +2383,9 @@ async function linuxdoRuntimeManifest(): Promise<unknown> {
   return JSON.parse(result.stdout) as unknown;
 }
 
-async function waitForLinuxdoRuntimeHealth(): Promise<void> {
+async function waitForLinuxdoRuntimeHealth(
+  service = "runtime-linuxdo",
+): Promise<void> {
   const deadline = Date.now() + 90_000;
   let latest = "Linux.do 浏览器运行器尚未就绪。";
   while (Date.now() < deadline) {
@@ -2387,7 +2395,7 @@ async function waitForLinuxdoRuntimeHealth(): Promise<void> {
         ...composePrefix(),
         "exec",
         "--no-TTY",
-        "runtime-linuxdo",
+        service,
         "node",
         "--input-type=module",
         "-e",
@@ -2402,16 +2410,21 @@ async function waitForLinuxdoRuntimeHealth(): Promise<void> {
   throw new Error(`Linux.do 正式浏览器运行器没有就绪：\n${latest}`);
 }
 
-async function createLinuxdoBin(baseUrl: string): Promise<void> {
+async function createLinuxdoBin(
+  baseUrl: string,
+  binId = "binny28-linuxdo",
+  service = "runtime-linuxdo",
+  identityId = "binny28-profile",
+): Promise<void> {
   const created = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
       "bin",
       "create",
-      "binny28-linuxdo",
+      binId,
       "--collector",
-      JSON.stringify(await linuxdoRuntimeManifest()),
+      JSON.stringify(await linuxdoRuntimeManifest(service)),
       "--identity",
-      "binny28-profile",
+      identityId,
       "--config",
       JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
       "--targets",
@@ -2419,8 +2432,129 @@ async function createLinuxdoBin(baseUrl: string): Promise<void> {
     ]),
     "created",
   );
-  assert.equal(created.id, "binny28-linuxdo");
-  await waitForRuntime(baseUrl, "binny28-linuxdo");
+  assert.equal(created.id, binId);
+  await waitForRuntime(baseUrl, binId);
+}
+
+async function collectLinuxdoOnSchedule(
+  baseUrl: string,
+  sourceControlUrl: string,
+  binId: string,
+  rootItemId: string,
+  previousRunId: string,
+): Promise<ManualRunCliState> {
+  const sourceTopicReadCount = async (): Promise<number> => {
+    const response = await fetch(sourceControlUrl, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    assert.equal(response.status, 200);
+    const value = (await response.json()) as {
+      readonly events: readonly {
+        readonly action: string;
+        readonly path: string;
+        readonly authenticated?: boolean;
+      }[];
+    };
+    return value.events.filter(
+      (event) =>
+        event.action === "topic" &&
+        event.path === "/t/2401.json" &&
+        event.authenticated === true,
+    ).length;
+  };
+  const readsBefore = await sourceTopicReadCount();
+  const created = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      binId,
+      "--expression",
+      "*/10 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({ topicId: 2401 }),
+    ]),
+    "created",
+  );
+  assert.equal(created.enabled, true);
+  const scheduledFor = created.nextDueAt;
+  const dueTimestamp = Date.parse(scheduledFor);
+  assert.ok(dueTimestamp > Date.now());
+
+  const advanced = await waitFor(
+    async () =>
+      cliData<{ readonly nextDueAt: string }>(
+        await cli(baseUrl, ["schedule", "get", binId, created.scheduleId]),
+        "found",
+      ),
+    (schedule) => Date.parse(schedule.nextDueAt) > dueTimestamp,
+    "Linux.do 主题采集计划到期并推进",
+  );
+  assert.ok(Date.parse(advanced.nextDueAt) > dueTimestamp);
+  cliData(
+    await cli(baseUrl, ["schedule", "disable", binId, created.scheduleId]),
+    "disabled",
+  );
+
+  const currentRoot = await waitFor(
+    async () => {
+      const item = cliData<{
+        readonly views: readonly {
+          readonly binId: string;
+          readonly revisionId: string;
+          readonly runId?: string;
+          readonly state: { readonly body?: { readonly html?: string } };
+        }[];
+      }>(
+        await cli(baseUrl, ["archive", "item", rootItemId, "--bin", binId]),
+        "found",
+      );
+      return item.views.find((view) => view.binId === binId);
+    },
+    (view) =>
+      view?.runId !== undefined &&
+      view.runId !== previousRunId &&
+      (view.state.body?.html ?? "").includes("主题正文版本 2"),
+    "计划采集提交 Linux.do 主题更新",
+  );
+  assert.ok(currentRoot !== undefined);
+  const scheduledRunId = currentRoot.runId;
+  assert.ok(scheduledRunId !== undefined);
+  const scheduledRun = await waitFor(
+    async () =>
+      cliData<ManualRunCliState>(
+        await cli(baseUrl, ["run", "get", binId, scheduledRunId]),
+        "found",
+      ),
+    (runState) =>
+      runState.status === "completed" || runState.status === "failed",
+    "计划 Linux.do 运行终结",
+  );
+  assert.equal(scheduledRun.status, "completed");
+  assert.equal(scheduledRun.action, "collect");
+  assert.equal(scheduledRun.trigger.kind, "schedule");
+  if (scheduledRun.trigger.kind === "schedule") {
+    assert.equal(scheduledRun.trigger.scheduleId, created.scheduleId);
+    assert.equal(scheduledRun.trigger.scheduledFor, scheduledFor);
+  }
+  assert.ok(
+    scheduledRun.result?.commits.some(({ items }) =>
+      items.some(({ itemId }) => itemId === rootItemId),
+    ),
+  );
+  assert.ok((await sourceTopicReadCount()) > readsBefore);
+  cliData(
+    await cli(baseUrl, ["schedule", "remove", binId, created.scheduleId]),
+    "removed",
+  );
+  return scheduledRun;
 }
 
 async function verifyLinuxdoArchiveJourney(
@@ -2650,11 +2784,12 @@ async function verifyLinuxdoArchiveJourney(
     signal: AbortSignal.timeout(2_000),
   });
   assert.equal(fixtureUpdate.status, 200, await fixtureUpdate.text());
-  const secondCollection = await triggerLinuxdoRun(
-    cliForLinuxdo,
+  const secondCollection = await collectLinuxdoOnSchedule(
+    baseUrl,
+    sourceControlUrl,
     binId,
-    "collect",
-    { topicId: 2401 },
+    rootItemId,
+    journey.firstCollection.runId,
   );
   assert.equal(secondCollection.status, "completed");
   assert.ok(secondCollection.result?.completedScopes?.includes("topic:2401"));
@@ -3011,6 +3146,200 @@ async function verifyLinuxdoArchiveJourney(
         deletedItemIds: deletion.deletedItemIds,
         rssItemId: rss.itemId,
         rssBinIds: rss.binIds,
+      }) +
+      "\n",
+  );
+}
+
+async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
+  const firstBinId = "binny28-linuxdo";
+  const secondBinId = "binny28-linuxdo-two";
+  const browserServices = ["runtime-linuxdo", "runtime-linuxdo-two"] as const;
+  type BrowserBin = {
+    readonly browserIdleTimeoutSeconds: number | null;
+    readonly execution: {
+      readonly status: string;
+      readonly environment?: {
+        readonly browser?: { readonly power?: { readonly status: string } };
+      };
+    };
+  };
+  const cliForLinuxdo = (args: readonly string[]) => cli(baseUrl, args);
+  const readBin = async (binId: string): Promise<BrowserBin> =>
+    cliData<BrowserBin>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  const updateIdleTimeout = async (
+    binId: string,
+    timeout: number | "disabled",
+  ): Promise<void> => {
+    cliData(
+      await cli(baseUrl, [
+        "bin",
+        "update",
+        binId,
+        "--browser-idle-timeout-seconds",
+        String(timeout),
+      ]),
+      "updated",
+    );
+  };
+  const waitForPower = async (
+    binId: string,
+    status: string,
+  ): Promise<BrowserBin> =>
+    await waitFor(
+      () => readBin(binId),
+      (bin) =>
+        bin.execution.status === "online" &&
+        bin.execution.environment?.browser?.power?.status === status,
+      `${binId} 浏览器进入 ${status}`,
+    );
+  const browserProcesses = async (service?: string) => {
+    const snapshots = await Promise.all(
+      (service === undefined ? browserServices : [service]).map((serviceName) =>
+        runtimeProcessSnapshot(serviceName),
+      ),
+    );
+    return snapshots
+      .flat()
+      .filter(
+        ({ command }) =>
+          /(?:chrom(?:e|ium))/iu.test(command) &&
+          !command.includes("--type=") &&
+          !command.includes("chrome_crashpad_handler"),
+      );
+  };
+  const closeHuman = async (
+    binId: string,
+    sessionId: string,
+  ): Promise<void> => {
+    await closeLinuxdoHumanSession(cliForLinuxdo, binId, sessionId);
+    await waitFor(
+      async () =>
+        cliData<{ readonly status: string }>(
+          await cli(baseUrl, ["human", "get", binId, sessionId]),
+          "found",
+        ),
+      (session) => session.status === "closed",
+      `${binId} 人工会话关闭`,
+    );
+  };
+  const triggerCheck = async (binId: string): Promise<ManualRunCliState> =>
+    cliData<ManualRunCliState>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        binId,
+        "check",
+        "--params",
+        JSON.stringify({ topicId: 2401 }),
+      ]),
+      "triggered",
+    );
+  const waitForRunEnd = async (
+    binId: string,
+    runId: string,
+  ): Promise<ManualRunCliState> =>
+    await waitFor(
+      async () =>
+        cliData<ManualRunCliState>(
+          await cli(baseUrl, ["run", "get", binId, runId]),
+          "found",
+        ),
+      (current) =>
+        current.status === "completed" || current.status === "failed",
+      `${binId} 检查运行结束`,
+    );
+
+  await updateIdleTimeout(firstBinId, 0);
+  await updateIdleTimeout(secondBinId, "disabled");
+  const firstHuman = await openLinuxdoHumanSession(cliForLinuxdo, firstBinId);
+  await waitForPower(firstBinId, "ready");
+  const firstProcess = await browserProcesses("runtime-linuxdo");
+  assert.equal(firstProcess.length, 1);
+  const queuedOnCapacity = await triggerCheck(secondBinId);
+  assert.equal(queuedOnCapacity.status, "queued");
+  assert.equal(queuedOnCapacity.queueReason, "browser_capacity_exhausted");
+  assert.equal((await browserProcesses()).length, 1);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+  assert.equal(
+    (await waitForPower(firstBinId, "ready")).browserIdleTimeoutSeconds,
+    0,
+  );
+  assert.deepEqual(
+    (await browserProcesses()).map(({ pid, command }) => ({ pid, command })),
+    firstProcess.map(({ pid, command }) => ({ pid, command })),
+    "人工会话 ready 时空闲策略不应关闭浏览器。",
+  );
+
+  await closeHuman(firstBinId, firstHuman.sessionId);
+  const firstStopped = await waitForPower(firstBinId, "stopped");
+  assert.equal(firstStopped.browserIdleTimeoutSeconds, 0);
+  assert.equal((await browserProcesses("runtime-linuxdo")).length, 0);
+  assert.ok((await browserProcesses()).length <= 1);
+  const secondRun = await waitForRunEnd(secondBinId, queuedOnCapacity.runId);
+  assert.equal(secondRun.status, "completed");
+  assert.equal(secondRun.result?.check?.availability, "unavailable");
+  await waitForPower(secondBinId, "ready");
+  const disabledOwnerProcess = await browserProcesses();
+  assert.equal(disabledOwnerProcess.length, 1);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
+  assert.equal(
+    (await waitForPower(secondBinId, "ready")).browserIdleTimeoutSeconds,
+    null,
+  );
+  assert.deepEqual(
+    (await browserProcesses()).map(({ pid, command }) => ({ pid, command })),
+    disabledOwnerProcess.map(({ pid, command }) => ({ pid, command })),
+    "禁用空闲关闭的容量持有者应保留原浏览器进程。",
+  );
+
+  const waitingFirstRun = await triggerCheck(firstBinId);
+  assert.equal(waitingFirstRun.status, "queued");
+  assert.equal(waitingFirstRun.queueReason, "browser_capacity_exhausted");
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
+  assert.equal(
+    (await readBin(secondBinId)).execution.environment?.browser?.power?.status,
+    "ready",
+  );
+  assert.equal((await browserProcesses()).length, 1);
+  await updateIdleTimeout(secondBinId, 0);
+  await waitForPower(secondBinId, "stopped");
+  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 0);
+  assert.ok((await browserProcesses()).length <= 1);
+  const firstRun = await waitForRunEnd(firstBinId, waitingFirstRun.runId);
+  assert.equal(firstRun.status, "completed");
+  assert.equal(firstRun.result?.check?.availability, "available");
+  await waitForPower(firstBinId, "stopped");
+  assert.equal((await browserProcesses()).length, 0);
+
+  const secondHuman = await openLinuxdoHumanSession(cliForLinuxdo, firstBinId);
+  await waitForPower(firstBinId, "ready");
+  const blockedRun = await triggerCheck(firstBinId);
+  assert.equal(blockedRun.status, "queued");
+  assert.equal(blockedRun.queueReason, "human_session_active");
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
+  assert.equal(
+    (await readBin(firstBinId)).execution.environment?.browser?.power?.status,
+    "ready",
+  );
+  assert.equal((await browserProcesses()).length, 1);
+  await closeHuman(firstBinId, secondHuman.sessionId);
+  const unblockedRun = await waitForRunEnd(firstBinId, blockedRun.runId);
+  assert.equal(unblockedRun.status, "completed");
+  await waitForPower(firstBinId, "stopped");
+  assert.equal((await browserProcesses()).length, 0);
+
+  process.stdout.write(
+    "票 28 同项目 Linux.do 容量交接实测：" +
+      JSON.stringify({
+        capacityLimit: 1,
+        queuedBin: secondBinId,
+        queueReason: queuedOnCapacity.queueReason,
+        stoppedBeforeWake:
+          firstStopped.execution.environment?.browser?.power?.status,
+        disabledOwnerStayedReady: true,
+        manualRunQueueReason: blockedRun.queueReason,
+        finalBrowserMainProcessCount: 0,
       }) +
       "\n",
   );
@@ -7398,6 +7727,14 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
   const networkSubnets = {
     api: await networkSubnet(projectName + "_default"),
     runtime: await networkSubnet(projectName + "_runtime"),
+    connections: await networkSubnet(projectName + "_connections"),
+    ...(isFullCapacityRun &&
+    (capacityPhase === "verify" || capacityPhase === "delete")
+      ? {}
+      : {
+          browser: await networkSubnet(projectName + "_browser"),
+          linuxdo: await networkSubnet(projectName + "_linuxdo"),
+        }),
   };
   assert.equal(
     networkSubnets.api,
@@ -7407,6 +7744,20 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
     networkSubnets.runtime,
     process.env.BINNY_E2E_RUNTIME_SUBNET ?? "10.253.150.0/24",
   );
+  assert.equal(
+    networkSubnets.connections,
+    process.env.BINNY_E2E_CONNECTIONS_SUBNET ?? "10.253.151.0/24",
+  );
+  if ("browser" in networkSubnets && "linuxdo" in networkSubnets) {
+    assert.equal(
+      networkSubnets.browser,
+      process.env.BINNY_E2E_BROWSER_SUBNET ?? "10.253.152.0/24",
+    );
+    assert.equal(
+      networkSubnets.linuxdo,
+      process.env.BINNY_E2E_LINUXDO_SUBNET ?? "10.253.153.0/24",
+    );
+  }
   const serverId = (await compose(["ps", "-q", "server"])).stdout.trim();
   const postgresId = (await compose(["ps", "-q", "postgres"])).stdout.trim();
   assert.ok(serverId && postgresId);
@@ -7648,6 +7999,12 @@ async function main(): Promise<void> {
       "      - connections",
       "      - browser",
       "      - linuxdo",
+      "  runtime-linuxdo-two:",
+      "    networks: !override",
+      "      - runtime",
+      "      - connections",
+      "      - browser",
+      "      - linuxdo",
       "  linuxdo-e2e-source:",
       "    ports: !override",
       '      - "8081"',
@@ -7759,7 +8116,11 @@ async function main(): Promise<void> {
       "heartbeat-proxy",
     ];
     if (runFunctionalJourney) {
-      e2eServices.push("runtime-linuxdo", "linuxdo-e2e-source");
+      e2eServices.push(
+        "runtime-linuxdo",
+        "runtime-linuxdo-two",
+        "linuxdo-e2e-source",
+      );
     }
     await compose([
       "up",
@@ -7831,6 +8192,12 @@ async function main(): Promise<void> {
         "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
       );
       await createLinuxdoBin(baseUrl);
+      await createLinuxdoBin(
+        baseUrl,
+        "binny28-linuxdo-two",
+        "runtime-linuxdo-two",
+        "binny28-profile-two",
+      );
       linuxdoViewerBrowser = await startLinuxdoViewerBrowser({
         projectName,
         image: linuxdoRuntimeImageName,
@@ -7872,6 +8239,7 @@ async function main(): Promise<void> {
         linuxdoJourney,
         rssAcceptance,
       );
+      await verifyLinuxdoCapacityJourney(baseUrl);
     }
     await runCapacityAcceptance(baseUrl);
   } catch (error) {
