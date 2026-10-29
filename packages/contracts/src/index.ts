@@ -5,3 +5,4 @@ export * from "./archive-relations.ts";
 export * from "./bin-configuration.ts";
 export * from "./manual-run.ts";
 export * from "./postgres-text.ts";
+export * from "./schedule.ts";

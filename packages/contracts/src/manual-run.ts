@@ -25,6 +25,17 @@ export const manualRunStatusSchema = z.enum([
   "cancelled",
 ]);
 
+export const manualRunTriggerSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("manual") }).strict(),
+  z
+    .object({
+      kind: z.literal("schedule"),
+      scheduleId: runIdSchema,
+      scheduledFor: z.iso.datetime(),
+    })
+    .strict(),
+]);
+
 export const manualRunQueueReasonSchema = z.enum([
   "runtime_offline",
   "earlier_run_active",
@@ -168,6 +179,7 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
       collectorId: postgresTextSchema.min(1),
       collectorVersion: postgresTextSchema.min(1),
       status: manualRunStatusSchema,
+      trigger: manualRunTriggerSchema,
       queueReason: manualRunQueueReasonSchema.optional(),
       cancellationRequestedAt: z.iso.datetime().optional(),
       stopConfirmedAt: z.iso.datetime().optional(),
@@ -230,6 +242,7 @@ export type ManualRunTriggerInput = z.infer<typeof manualRunTriggerInputSchema>;
 export type ManualRunFailure = z.infer<typeof manualRunFailureSchema>;
 export type ManualRunCompletion = z.infer<typeof manualRunCompletionSchema>;
 export type ManualRun = z.infer<typeof manualRunSchema>;
+export type ManualRunTrigger = z.infer<typeof manualRunTriggerSchema>;
 export type ManualRunExecution = z.infer<typeof manualRunExecutionSchema>;
 export type ManualRunCheckInput = z.infer<typeof manualRunCheckInputSchema>;
 export type ManualRunCheckResult = z.infer<typeof manualRunCheckResultSchema>;

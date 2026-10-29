@@ -1871,6 +1871,80 @@ async function waitForSourceArrival(
   assert.fail(`运行没有到达受控信源：${gateKey}`);
 }
 
+async function waitForScheduledArrival(
+  sourceUrl: string,
+  gateKeys: readonly string[],
+  binId: string,
+): Promise<{ readonly gateKey: string; readonly runId: string }> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(sourceUrl + "/control/arrivals", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    assert.equal(response.status, 200);
+    const status: unknown = await response.json();
+    if (
+      typeof status === "object" &&
+      status !== null &&
+      "arrivals" in status &&
+      Array.isArray(status.arrivals)
+    ) {
+      for (const gateKey of gateKeys) {
+        const arrival = status.arrivals.find(
+          (value: unknown) =>
+            typeof value === "object" &&
+            value !== null &&
+            "gateKey" in value &&
+            value.gateKey === gateKey &&
+            "binId" in value &&
+            value.binId === binId &&
+            "runId" in value &&
+            typeof value.runId === "string",
+        );
+        if (
+          typeof arrival === "object" &&
+          arrival !== null &&
+          "runId" in arrival &&
+          typeof arrival.runId === "string"
+        ) {
+          return { gateKey, runId: arrival.runId };
+        }
+      }
+    }
+    await wait(50);
+  }
+  assert.fail("重启后没有受控信源到达计划运行。");
+}
+
+async function countSourceArrivals(
+  sourceUrl: string,
+  gateKey: string,
+  binId: string,
+): Promise<number> {
+  const response = await fetch(sourceUrl + "/control/arrivals", {
+    signal: AbortSignal.timeout(3_000),
+  });
+  assert.equal(response.status, 200);
+  const status: unknown = await response.json();
+  if (
+    typeof status !== "object" ||
+    status === null ||
+    !("arrivals" in status) ||
+    !Array.isArray(status.arrivals)
+  ) {
+    return 0;
+  }
+  return status.arrivals.filter(
+    (value: unknown) =>
+      typeof value === "object" &&
+      value !== null &&
+      "gateKey" in value &&
+      value.gateKey === gateKey &&
+      "binId" in value &&
+      value.binId === binId,
+  ).length;
+}
+
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
@@ -1987,6 +2061,14 @@ async function runtimeProcessSnapshot(service: string): Promise<
 type ManualRunCliState = {
   readonly runId: string;
   readonly binId: string;
+  readonly action: string;
+  readonly trigger:
+    | { readonly kind: "manual" }
+    | {
+        readonly kind: "schedule";
+        readonly scheduleId: string;
+        readonly scheduledFor: string;
+      };
   readonly status: string;
   readonly queueReason?:
     | "runtime_offline"
@@ -2807,6 +2889,114 @@ async function manualRunsCliStep(
   await compose(["restart", "runtime-fifteen-one"]);
   await waitForRuntimeHealth("runtime-fifteen-one");
   await waitForRuntime(baseUrl, "binny15-one");
+
+  const scheduleParameters = {
+    sourceUrl: manualRunSourceRuntimeUrl(),
+    gateKey: "17-cli-schedule",
+    sourceKey: "17-cli-schedule-item",
+  };
+  const createdSchedule = cliData<{
+    readonly scheduleId: string;
+    readonly expression: string;
+    readonly action: string;
+    readonly params: { readonly gateKey: string };
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      "binny15-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify(scheduleParameters),
+    ]),
+    "created",
+  );
+  assert.equal(createdSchedule.expression, "0 0 0 1 1 *");
+  assert.equal(createdSchedule.action, "collect");
+  assert.equal(createdSchedule.params.gateKey, "17-cli-schedule");
+  assert.equal(createdSchedule.enabled, true);
+  const scheduleList = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", "binny15-one"]), "listed");
+  assert.ok(
+    scheduleList.schedules.some(
+      ({ scheduleId }) => scheduleId === createdSchedule.scheduleId,
+    ),
+  );
+  const updatedSchedule = cliData<{
+    readonly expression: string;
+    readonly timeZone: string;
+    readonly action: string;
+    readonly params: { readonly gateKey: string };
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "update",
+      "binny15-one",
+      createdSchedule.scheduleId,
+      "--expression",
+      "0 0 0 1 2 *",
+      "--time-zone",
+      "Europe/London",
+      "--action",
+      "check",
+      "--params",
+      JSON.stringify({
+        ...scheduleParameters,
+        gateKey: "17-cli-schedule-updated",
+      }),
+    ]),
+    "updated",
+  );
+  assert.equal(updatedSchedule.expression, "0 0 0 1 2 *");
+  assert.equal(updatedSchedule.timeZone, "Europe/London");
+  assert.equal(updatedSchedule.action, "check");
+  assert.equal(updatedSchedule.params.gateKey, "17-cli-schedule-updated");
+  const disabledSchedule = cliData<{ readonly enabled: boolean }>(
+    await cli(baseUrl, [
+      "schedule",
+      "disable",
+      "binny15-one",
+      createdSchedule.scheduleId,
+    ]),
+    "disabled",
+  );
+  assert.equal(disabledSchedule.enabled, false);
+  const enabledSchedule = cliData<{ readonly enabled: boolean }>(
+    await cli(baseUrl, [
+      "schedule",
+      "enable",
+      "binny15-one",
+      createdSchedule.scheduleId,
+    ]),
+    "enabled",
+  );
+  assert.equal(enabledSchedule.enabled, true);
+  const removedSchedule = cliData<{ readonly scheduleId: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "remove",
+      "binny15-one",
+      createdSchedule.scheduleId,
+    ]),
+    "removed",
+  );
+  assert.equal(removedSchedule.scheduleId, createdSchedule.scheduleId);
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "get",
+      "binny15-one",
+      createdSchedule.scheduleId,
+    ]),
+    "schedule_not_found",
+  );
 }
 
 async function manualRunsHttpStep(
@@ -2834,6 +3024,363 @@ async function manualRunsHttpStep(
   );
   assert.equal(result.code, 0, result.stderr);
   process.stdout.write(result.stdout);
+}
+
+async function scheduledRunsStep(baseUrl: string): Promise<string> {
+  const binId = "binny15-one";
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const sourceUrl = manualRunSourceRuntimeUrl();
+  const collectGateKey = "17-scheduled-collect-" + randomUUID();
+  const checkGateKey = "17-scheduled-check-" + randomUUID();
+
+  // 两个正式 server 实例共享 PostgreSQL，验证竞争扫描只会排入一次到期运行。
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "120",
+    "--scale",
+    "server=2",
+    "server",
+  ]);
+  await waitForApiAndDatabase(baseUrl);
+
+  const collectSchedule = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      binId,
+      "--expression",
+      "*/30 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: collectGateKey,
+        sourceKey: collectGateKey,
+      }),
+      "--disabled",
+    ]),
+    "created",
+  );
+  assert.equal(collectSchedule.enabled, false);
+  const firstDueAt = Date.parse(collectSchedule.nextDueAt);
+  assert.ok(firstDueAt > Date.now());
+  if (firstDueAt - Date.now() < 20_000)
+    await wait(firstDueAt - Date.now() + 100);
+
+  const enabledCollectSchedule = cliData<{
+    readonly nextDueAt: string;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "enable",
+      binId,
+      collectSchedule.scheduleId,
+    ]),
+    "enabled",
+  );
+  const scheduledFor = enabledCollectSchedule.nextDueAt;
+  const scheduledTimestamp = Date.parse(scheduledFor);
+  assert.ok(scheduledTimestamp - Date.now() > 15_000);
+
+  const dueDate = new Date(scheduledTimestamp);
+  const checkExpression = [
+    dueDate.getUTCSeconds(),
+    dueDate.getUTCMinutes(),
+    dueDate.getUTCHours(),
+    dueDate.getUTCDate(),
+    dueDate.getUTCMonth() + 1,
+    "*",
+  ].join(" ");
+  const checkSchedule = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      binId,
+      "--expression",
+      checkExpression,
+      "--time-zone",
+      "UTC",
+      "--action",
+      "check",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: checkGateKey,
+        sourceKey: checkGateKey,
+      }),
+    ]),
+    "created",
+  );
+  assert.equal(checkSchedule.enabled, true);
+  assert.equal(checkSchedule.nextDueAt, scheduledFor);
+  const schedules = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", binId]), "listed");
+  assert.ok(
+    schedules.schedules.some(
+      ({ scheduleId }) => scheduleId === collectSchedule.scheduleId,
+    ),
+  );
+  assert.ok(
+    schedules.schedules.some(
+      ({ scheduleId }) => scheduleId === checkSchedule.scheduleId,
+    ),
+  );
+
+  await wait(Math.max(0, scheduledTimestamp - Date.now() - 5_000));
+  assert.ok(scheduledTimestamp - Date.now() >= 4_000);
+  await compose(["stop", "server"]);
+  await wait(65_000);
+  await compose(["start", "server"]);
+  await waitForApiAndDatabase(baseUrl);
+  await waitForRuntime(baseUrl, binId);
+
+  const controlArrivals = [collectGateKey, checkGateKey] as const;
+  const firstArrival = await waitForScheduledArrival(
+    sourceControlUrl,
+    controlArrivals,
+    binId,
+  );
+  const firstScheduleId =
+    firstArrival.gateKey === collectGateKey
+      ? collectSchedule.scheduleId
+      : checkSchedule.scheduleId;
+  const secondGateKey =
+    firstArrival.gateKey === collectGateKey ? checkGateKey : collectGateKey;
+  const secondScheduleId =
+    firstArrival.gateKey === collectGateKey
+      ? checkSchedule.scheduleId
+      : collectSchedule.scheduleId;
+  await waitForSourceArrival(
+    sourceControlUrl,
+    firstArrival.gateKey,
+    firstArrival.runId,
+    binId,
+  );
+  const firstRun = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    firstArrival.runId,
+    ["executing"],
+  );
+  assert.equal(firstRun.trigger.kind, "schedule");
+  assert.equal(
+    firstRun.action,
+    firstArrival.gateKey === collectGateKey ? "collect" : "check",
+  );
+  if (firstRun.trigger.kind === "schedule") {
+    assert.equal(firstRun.trigger.scheduleId, firstScheduleId);
+    assert.equal(firstRun.trigger.scheduledFor, scheduledFor);
+  }
+
+  const resumedCollectSchedule = await waitFor(
+    async () =>
+      cliData<{ readonly nextDueAt: string }>(
+        await cli(baseUrl, [
+          "schedule",
+          "get",
+          binId,
+          collectSchedule.scheduleId,
+        ]),
+        "found",
+      ),
+    (schedule) => Date.parse(schedule.nextDueAt) > Date.now(),
+    "重启后推进采集计划的到期时间",
+  );
+  const resumedCheckSchedule = await waitFor(
+    async () =>
+      cliData<{ readonly nextDueAt: string }>(
+        await cli(baseUrl, [
+          "schedule",
+          "get",
+          binId,
+          checkSchedule.scheduleId,
+        ]),
+        "found",
+      ),
+    (schedule) => Date.parse(schedule.nextDueAt) > Date.now(),
+    "重启后推进检查计划的到期时间",
+  );
+  assert.ok(Date.parse(resumedCollectSchedule.nextDueAt) > Date.now());
+  assert.ok(Date.parse(resumedCheckSchedule.nextDueAt) > Date.now());
+
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, secondGateKey, binId),
+    0,
+  );
+  await wait(300);
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, secondGateKey, binId),
+    0,
+  );
+
+  for (const scheduleId of [
+    collectSchedule.scheduleId,
+    checkSchedule.scheduleId,
+  ]) {
+    cliData(
+      await cli(baseUrl, ["schedule", "disable", binId, scheduleId]),
+      "disabled",
+    );
+  }
+
+  const firstDisposition =
+    firstArrival.gateKey === collectGateKey ? "material" : "available";
+  await releaseSource(sourceControlUrl, firstArrival.gateKey, firstDisposition);
+  const completedFirst = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    firstRun.runId,
+    ["completed", "failed"],
+  );
+  assert.equal(completedFirst.status, "completed");
+  if (completedFirst.action === "collect")
+    assert.equal(completedFirst.result?.commits.length, 1);
+  else assert.ok(completedFirst.result?.check !== undefined);
+
+  const secondArrival = await waitForScheduledArrival(
+    sourceControlUrl,
+    [secondGateKey],
+    binId,
+  );
+  assert.equal(secondArrival.gateKey, secondGateKey);
+  assert.notEqual(secondArrival.runId, firstArrival.runId);
+  const secondRun = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    secondArrival.runId,
+    ["executing"],
+  );
+  assert.equal(secondRun.trigger.kind, "schedule");
+  assert.equal(
+    secondRun.action,
+    secondGateKey === collectGateKey ? "collect" : "check",
+  );
+  if (secondRun.trigger.kind === "schedule") {
+    assert.equal(secondRun.trigger.scheduleId, secondScheduleId);
+    assert.equal(secondRun.trigger.scheduledFor, scheduledFor);
+  }
+  const secondDisposition =
+    secondGateKey === collectGateKey ? "material" : "available";
+  await releaseSource(sourceControlUrl, secondGateKey, secondDisposition);
+  const completedSecond = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    secondRun.runId,
+    ["completed", "failed"],
+  );
+  assert.equal(completedSecond.status, "completed");
+  if (completedSecond.action === "collect")
+    assert.equal(completedSecond.result?.commits.length, 1);
+  else assert.ok(completedSecond.result?.check !== undefined);
+
+  const manualGateKey = "17-scheduled-queue-marker-" + randomUUID();
+  const manualRun = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: manualGateKey,
+        sourceKey: manualGateKey,
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(manualRun.status, "queued");
+  await waitForSourceArrival(
+    sourceControlUrl,
+    manualGateKey,
+    manualRun.runId,
+    binId,
+  );
+  const completedManualRun = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    manualRun.runId,
+    ["executing"],
+  );
+  assert.equal(completedManualRun.trigger.kind, "manual");
+  await releaseSource(sourceControlUrl, manualGateKey, "material");
+  const finishedManualRun = await waitForCliManualRunState(
+    baseUrl,
+    binId,
+    manualRun.runId,
+    ["completed", "failed"],
+  );
+  assert.equal(finishedManualRun.status, "completed");
+
+  // 队尾人工运行到达前，所有并发扫描已排入的计划运行都应已先行执行。
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, collectGateKey, binId),
+    1,
+  );
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, checkGateKey, binId),
+    1,
+  );
+  assert.equal(completedFirst.result?.stopReason.code, "completed");
+  assert.equal(completedSecond.result?.stopReason.code, "completed");
+
+  for (const [scheduleId, runId] of [
+    [
+      collectSchedule.scheduleId,
+      firstArrival.gateKey === collectGateKey
+        ? firstRun.runId
+        : secondRun.runId,
+    ],
+    [
+      checkSchedule.scheduleId,
+      firstArrival.gateKey === checkGateKey ? firstRun.runId : secondRun.runId,
+    ],
+  ] as const) {
+    cliData(
+      await cli(baseUrl, ["schedule", "remove", binId, scheduleId]),
+      "removed",
+    );
+    const retained = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, runId]),
+      "found",
+    );
+    assert.equal(retained.trigger.kind, "schedule");
+    if (retained.trigger.kind === "schedule")
+      assert.equal(retained.trigger.scheduleId, scheduleId);
+  }
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "120",
+    "--scale",
+    "server=1",
+    "server",
+  ]);
+  composePort = await publishedPort("server", 3000);
+  process.stdout.write(
+    "票 17 计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
+  );
+  return apiBaseUrl();
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -4914,6 +5461,7 @@ async function main(): Promise<void> {
     await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
     await manualRunControllerPartitionStep();
     await manualRunsHttpStep(baseUrl, manualRunManifest);
+    baseUrl = await scheduledRunsStep(baseUrl);
     await runRssAcceptance(baseUrl, rssControlSource);
     for (const binId of ["binny15-one", "binny15-two"]) {
       const removed = cliData<{

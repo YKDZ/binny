@@ -1,4 +1,15 @@
-import { eq, gt, gte, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -27,6 +38,7 @@ const manualRunStatuses = [
   "failed",
   "cancelled",
 ] as const;
+const manualRunTriggerTypes = ["manual", "schedule"] as const;
 const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
 
 export const binConfigurations = pgTable(
@@ -461,6 +473,37 @@ export const archiveRelationObservationGaps = pgTable(
   ],
 );
 
+export const schedules = pgTable(
+  "schedules",
+  {
+    scheduleId: uuid("schedule_id").primaryKey(),
+    binId: text("bin_id")
+      .notNull()
+      .references(() => binConfigurations.id, { onDelete: "cascade" }),
+    expression: text("expression").notNull(),
+    timeZone: text("time_zone").notNull(),
+    action: text("action").notNull(),
+    params: jsonb("params").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    nextDueAt: timestamp("next_due_at", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
+    lastError: jsonb("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => [
+    index("schedules_due_idx")
+      .on(table.nextDueAt, table.binId, table.scheduleId)
+      .where(eq(table.enabled, true)),
+  ],
+);
+
 export const manualRuns = pgTable(
   "manual_runs",
   {
@@ -474,6 +517,15 @@ export const manualRuns = pgTable(
     params: jsonb("params").notNull(),
     configSnapshot: jsonb("config_snapshot").notNull(),
     targetsSnapshot: jsonb("targets_snapshot").notNull(),
+    triggerType: text("trigger_type", { enum: manualRunTriggerTypes })
+      .notNull()
+      .default("manual"),
+    // 不建立计划外键，删除计划后运行仍保留当时的触发来源。
+    scheduleId: uuid("schedule_id"),
+    scheduledFor: timestamp("scheduled_for", {
+      withTimezone: true,
+      mode: "date",
+    }),
     status: text("status", { enum: manualRunStatuses }).notNull(),
     runtimeId: text("runtime_id"),
     completedScopes: jsonb("completed_scopes").notNull().default([]),
@@ -495,6 +547,21 @@ export const manualRuns = pgTable(
   },
   (table) => [
     check("manual_runs_status_check", inArray(table.status, manualRunStatuses)),
+    check(
+      "manual_runs_trigger_source_check",
+      or(
+        and(
+          eq(table.triggerType, "manual"),
+          isNull(table.scheduleId),
+          isNull(table.scheduledFor),
+        ),
+        and(
+          eq(table.triggerType, "schedule"),
+          isNotNull(table.scheduleId),
+          isNotNull(table.scheduledFor),
+        ),
+      )!,
+    ),
     index("manual_runs_bin_queue_idx")
       .on(table.binId, table.createdAt, table.runId)
       .where(eq(table.status, "queued")),
