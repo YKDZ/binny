@@ -3304,7 +3304,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const groupedInput = {
     scope: { kind: "current" },
     unit: "item",
-    text: { kind: "literal", value: "聚合完整候选集合" },
+    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
     where,
     groupBy: [
       {
@@ -3452,6 +3452,19 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     }),
   });
   assert.equal(mismatchedCursor.status, 400);
+  const invalidRegex = await client.archives.aggregate.$post({
+    json: archiveAggregationInputSchema.parse({
+      ...groupedInput,
+      text: { kind: "regex", pattern: "(" },
+    }),
+  });
+  assert.equal(invalidRegex.status, 400);
+  if (invalidRegex.status === 400) {
+    const invalidRegexError = archiveErrorSchema.parse(
+      await invalidRegex.json(),
+    );
+    assert.deepEqual(invalidRegexError.error.path, ["text", "pattern"]);
+  }
 
   const decimalKeys = [
     "aggregation-decimal-a-" + runId,
@@ -4060,6 +4073,39 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     metrics: [{ key: "items", op: "count" }],
   });
   assert.equal(finitePathFilter.groups[0]?.metrics[0]?.value, "1");
+
+  await submitArchive(client, {
+    requestId: "e2e:archive:aggregation-budget:" + runId,
+    binId: "rss-main",
+    items: [
+      {
+        sourceKey: {
+          namespace: "e2e",
+          key: "aggregation-budget-" + runId,
+        },
+        body: { searchText: "a".repeat(250_000) },
+        capture: {
+          scope: { case: "aggregation-budget" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const overBudget = await client.archives.aggregate.$post({
+    json: archiveAggregationInputSchema.parse({
+      scope: { kind: "current" },
+      unit: "item",
+      text: { kind: "regex", pattern: ".*" },
+      groupBy: [],
+      metrics: [{ key: "items", op: "count" }],
+      budgetMs: 1,
+    }),
+  });
+  assert.equal(overBudget.status, 422);
+  if (overBudget.status === 422) {
+    assert.equal((await overBudget.json()).error.code, "query_budget_exceeded");
+  }
 
   const invalid = await fetch(new URL("/archives/aggregate", baseUrl), {
     method: "POST",
