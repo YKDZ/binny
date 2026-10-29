@@ -1,0 +1,384 @@
+import { createServer } from "node:http";
+
+type SourceState = {
+  readonly challengePage: boolean;
+  readonly challengeTopic: boolean;
+  readonly challengePosts: boolean;
+  readonly topicVisible: boolean;
+  readonly topicVersion: number;
+  readonly replyVersion: number;
+  readonly addedReply: boolean;
+  readonly omittedPostIds: readonly number[];
+  readonly unavailableMedia: readonly string[];
+};
+
+type SourceEvent = {
+  readonly action: string;
+  readonly path: string;
+  readonly authenticated?: boolean;
+};
+
+const rootPostId = 240_001;
+const firstReplyId = 240_002;
+const secondReplyId = 240_003;
+const thirdReplyId = 240_004;
+const photoPath = "/uploads/default/original/2X/topic-photo.png";
+const replyPhotoPath = "/uploads/default/original/2X/reply-photo.png";
+const attachmentPath = "/uploads/default/original/2X/topic-notes.pdf";
+const photoBytes = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9S8AAAAASUVORK5CYII=",
+  "base64",
+);
+const attachmentBytes = Buffer.from("%PDF-1.4\n% Linux.do fixture\n%%EOF\n");
+
+let activeState: SourceState = {
+  challengePage: false,
+  challengeTopic: false,
+  challengePosts: false,
+  topicVisible: true,
+  topicVersion: 1,
+  replyVersion: 1,
+  addedReply: false,
+  omittedPostIds: [],
+  unavailableMedia: [],
+};
+const events: SourceEvent[] = [];
+
+function sendJson(
+  response: import("node:http").ServerResponse,
+  status: number,
+  value: unknown,
+): void {
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "private, max-age=60",
+  });
+  response.end(JSON.stringify(value));
+}
+
+async function readBody(
+  request: import("node:http").IncomingMessage,
+): Promise<string> {
+  let body = "";
+  for await (const chunk of request) body += String(chunk);
+  return body;
+}
+
+function isAuthenticated(
+  request: import("node:http").IncomingMessage,
+): boolean {
+  return (request.headers.cookie ?? "")
+    .split(";")
+    .some((value) => value.trim() === "binny24_session=fixture");
+}
+
+function record(action: string, path: string, authenticated?: boolean): void {
+  events.push({
+    action,
+    path,
+    ...(authenticated === undefined ? {} : { authenticated }),
+  });
+  if (events.length > 500) events.shift();
+}
+
+function post(
+  id: number,
+  postNumber: number,
+  cooked: string,
+  updatedAt: string,
+  replyToPostNumber?: number,
+): Record<string, unknown> {
+  return {
+    id,
+    topic_id: 2401,
+    post_number: postNumber,
+    username:
+      postNumber === 1 ? "fixture-author" : `fixture-reply-${postNumber}`,
+    name: postNumber === 1 ? "Linux.do 示例作者" : `示例回复 ${postNumber}`,
+    created_at: `2026-10-28T0${postNumber}:00:00.000Z`,
+    updated_at: updatedAt,
+    cooked,
+    ...(replyToPostNumber === undefined
+      ? {}
+      : { reply_to_post_number: String(replyToPostNumber) }),
+  };
+}
+
+function posts(): readonly Record<string, unknown>[] {
+  const rootTitle = `受控主题标题版本 ${String(activeState.topicVersion)}`;
+  const replyText = `回复正文版本 ${String(activeState.replyVersion)}`;
+  return [
+    post(
+      rootPostId,
+      1,
+      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}"><img src="${photoPath}" alt="主题封面"></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p>`,
+      `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
+    ),
+    post(
+      firstReplyId,
+      2,
+      `<p>${replyText}</p><img src="${replyPhotoPath}" alt="回复插图">`,
+      `2026-10-28T01:00:0${String(activeState.replyVersion)}.000Z`,
+      1,
+    ),
+    post(
+      secondReplyId,
+      3,
+      "<p>保持不变的另一条回复。</p>",
+      "2026-10-28T02:00:00.000Z",
+      1,
+    ),
+    ...(activeState.addedReply
+      ? [
+          post(
+            thirdReplyId,
+            4,
+            "<p>后来新增的回复。</p>",
+            "2026-10-28T03:00:00.000Z",
+            1,
+          ),
+        ]
+      : []),
+  ].map((value, index) =>
+    index === 0 ? { ...value, title: rootTitle } : value,
+  );
+}
+
+function updateState(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const updates = value as Record<string, unknown>;
+  for (const key of ["topicVersion", "replyVersion"] as const) {
+    if (
+      key in updates &&
+      (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 1)
+    ) {
+      return false;
+    }
+  }
+  for (const key of [
+    "challengePage",
+    "challengeTopic",
+    "challengePosts",
+    "topicVisible",
+    "addedReply",
+  ] as const) {
+    if (key in updates && typeof updates[key] !== "boolean") return false;
+  }
+  for (const key of ["omittedPostIds", "unavailableMedia"] as const) {
+    if (
+      key in updates &&
+      (!Array.isArray(updates[key]) ||
+        updates[key].some(
+          (entry) =>
+            typeof entry !== (key === "omittedPostIds" ? "number" : "string"),
+        ))
+    ) {
+      return false;
+    }
+  }
+  activeState = {
+    ...activeState,
+    ...updates,
+  } as SourceState;
+  return true;
+}
+
+const server = createServer((request, response) => {
+  void (async () => {
+    const url = new URL(request.url ?? "/", "http://linuxdo-e2e-source");
+    const pathname = url.pathname;
+    const authenticated = isAuthenticated(request);
+
+    if (request.method === "GET" && pathname === "/health") {
+      sendJson(response, 200, { process: "ready" });
+      return;
+    }
+    if (request.method === "GET" && pathname === "/__control/state") {
+      sendJson(response, 200, { state: activeState, events: [...events] });
+      return;
+    }
+    if (request.method === "POST" && pathname === "/__control/state") {
+      let value: unknown;
+      try {
+        value = JSON.parse(await readBody(request)) as unknown;
+      } catch {
+        sendJson(response, 400, { error: "控制状态不是有效 JSON。" });
+        return;
+      }
+      if (!updateState(value)) {
+        sendJson(response, 400, { error: "控制状态格式无效。" });
+        return;
+      }
+      sendJson(response, 200, { state: activeState, events: [...events] });
+      return;
+    }
+    if (request.method === "GET" && pathname === "/login") {
+      record("login-page", pathname);
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<!doctype html><html><body><form method="post" action="/login"><label>用户名<input name="username" autocomplete="username"></label><label>密码<input name="password" type="password" autocomplete="current-password"></label><button>登录</button></form></body></html>',
+      );
+      return;
+    }
+    if (request.method === "POST" && pathname === "/login") {
+      const form = new URLSearchParams(await readBody(request));
+      if (
+        form.get("username") !== "binny24-user" ||
+        form.get("password") !== "linuxdo-fixture"
+      ) {
+        record("login-rejected", pathname);
+        response.writeHead(401, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end("受控登录信息无效。");
+        return;
+      }
+      record("login-complete", pathname);
+      response.writeHead(303, {
+        location: "/",
+        "set-cookie":
+          "binny24_session=fixture; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax",
+      });
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && pathname === "/logout") {
+      record("logout", pathname, authenticated);
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "set-cookie":
+          "binny24_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+      });
+      response.end("<!doctype html><html><body>已退出登录。</body></html>");
+      return;
+    }
+    if (request.method === "GET" && pathname === "/session/current.json") {
+      record("session-current", pathname, authenticated);
+      if (activeState.challengePage) {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><html><body>受控挑战页面</body></html>");
+        return;
+      }
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      sendJson(response, 200, {
+        current_user: { id: 24, username: "binny24-user" },
+      });
+      return;
+    }
+    if (pathname === "/t/2401.json" && request.method === "GET") {
+      record("topic", pathname, authenticated);
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (activeState.challengeTopic) {
+        response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><html><body>受控主题挑战页</body></html>");
+        return;
+      }
+      if (!activeState.topicVisible) {
+        sendJson(response, 404, { errors: ["主题当前不可见。"] });
+        return;
+      }
+      const availablePosts = posts();
+      sendJson(response, 200, {
+        id: 2401,
+        title: `受控主题标题版本 ${String(activeState.topicVersion)}`,
+        slug: "controlled-linuxdo-topic",
+        created_at: "2026-10-28T00:00:00.000Z",
+        updated_at: `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
+        posts_count: availablePosts.length,
+        reply_count: availablePosts.length - 1,
+        category_id: 42,
+        tags: ["受控", "归档"],
+        post_stream: {
+          posts: [availablePosts[0]],
+          stream: availablePosts.map(({ id }) => id),
+        },
+      });
+      return;
+    }
+    if (pathname === "/t/2401/posts.json" && request.method === "GET") {
+      record(
+        "posts",
+        `${pathname}?${url.searchParams.toString()}`,
+        authenticated,
+      );
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (activeState.challengePosts) {
+        response.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+        response.end(
+          "<!doctype html><html><body>受控帖子补取挑战页</body></html>",
+        );
+        return;
+      }
+      if (!activeState.topicVisible) {
+        sendJson(response, 404, { errors: ["主题当前不可见。"] });
+        return;
+      }
+      const requestedIds = url.searchParams
+        .getAll("post_ids[]")
+        .map(Number)
+        .filter(Number.isSafeInteger);
+      const selectedPosts = posts().filter(
+        ({ id }) =>
+          requestedIds.includes(Number(id)) &&
+          !activeState.omittedPostIds.includes(Number(id)),
+      );
+      sendJson(response, 200, {
+        post_stream: { posts: selectedPosts },
+      });
+      return;
+    }
+    if (pathname.startsWith("/uploads/") && request.method === "GET") {
+      record("media", pathname, authenticated);
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (activeState.unavailableMedia.includes(pathname)) {
+        response.writeHead(503, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end("受控媒体暂时不可用。");
+        return;
+      }
+      const bytes = pathname === attachmentPath ? attachmentBytes : photoBytes;
+      response.writeHead(200, {
+        "content-type":
+          pathname === attachmentPath ? "application/pdf" : "image/png",
+      });
+      response.end(bytes);
+      return;
+    }
+
+    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    response.end("没有找到受控 Discourse 兼容路由。");
+  })().catch((error: unknown) => {
+    if (!response.headersSent) {
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : "受控信源内部错误。",
+      });
+    } else {
+      response.destroy(error instanceof Error ? error : undefined);
+    }
+  });
+});
+
+const port = Number(process.env.BINNY24_SOURCE_PORT ?? "8081");
+if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+  throw new Error("受控 Linux.do 信源端口配置无效。");
+}
+server.listen(port, "0.0.0.0");
