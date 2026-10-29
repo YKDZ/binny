@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  binCreateInputSchema,
-  collectorManifestSchema,
+  binConfigurationSettingsSchema,
+  collectorManifestStoredSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
   manualRunCheckInputSchema,
@@ -378,7 +378,7 @@ export async function createQueuedRunInTransaction(
     ]);
   }
 
-  const configuredBin = binCreateInputSchema.parse({
+  const configuredBin = binConfigurationSettingsSchema.parse({
     id: bin.id,
     collector: bin.collector,
     identityId: bin.identityId,
@@ -582,7 +582,7 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           return { ok: true, value: null };
         }
 
-        const collector = collectorManifestSchema.parse(bin.collector);
+        const collector = collectorManifestStoredSchema.parse(bin.collector);
         const [active] = await transaction
           .select({ runId: manualRuns.runId })
           .from(manualRuns)
@@ -638,7 +638,7 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           return { ok: true, value: null };
         }
 
-        const runCollector = collectorManifestSchema.parse(
+        const runCollector = collectorManifestStoredSchema.parse(
           run.collectorSnapshot,
         );
         const [runtimeConnection] = await transaction

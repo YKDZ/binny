@@ -1,0 +1,67 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "4bbb25ad-7603-46b6-8724-ff984005402e",
+  "prevIds": ["725b15cf-d254-447f-ab8c-d49858a3670e"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "browser_idle_timeout_seconds"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.browser_idle_timeout_seconds",
+        "n|col|public.bin_configurations.browser_idle_timeout_seconds",
+        "e|col|public.bin_configurations.browser_idle_timeout_seconds"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "bin_configurations"],
+      "writes": [
+        "s|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "n|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "e|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "n|con|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check"
+      ],
+      "reads": [
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.bin_configurations.browser_idle_timeout_seconds"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "browser_idle_timeout_seconds",
+        "type": "integer",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": "300",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "bin_configurations_browser_idle_timeout_seconds_check",
+        "value": "\"browser_idle_timeout_seconds\" between 0 and 2147483",
+        "entityType": "checks"
+      }
+    }
+  ]
+}

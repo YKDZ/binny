@@ -111,13 +111,13 @@
       "cache": false,
       "tags": ["quality:heavy"]
     },
-    "//#test:browser-human-session": {
+    "//#test:browser-lifecycle": {
       "passThroughEnv": ["BINNY19_PUBLISHED_HOST", "BINNY19_SUBNET"],
       "inputs": [
         "compose.yaml",
         "Dockerfile",
         "packages/collector-runtime/Dockerfile.browser",
-        "scripts/test-browser-human-session.ts",
+        "scripts/test-browser-lifecycle.ts",
         "packages/api/src/**",
         "packages/binny/src/**",
         "packages/collector-runtime/package.json",

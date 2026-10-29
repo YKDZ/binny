@@ -22,10 +22,12 @@ import {
 import {
   manualRunCompletionSchema,
   runtimeHeartbeatIntervalMs,
+  runtimeEnvironmentKindSchema,
   runtimeProtocolVersion,
   type ManualRunCompletion,
   type ManualRunExecution,
   type ManualRun,
+  type BrowserPower,
   type RuntimeHumanSessionControl,
   type RuntimeHumanSessionEvent,
   type RuntimeEnvironment,
@@ -38,7 +40,9 @@ const collectorPath = process.env.BINNY_COLLECTOR_ENTRY ?? "/app/dist/index.js";
 const binId = process.env.BINNY_BIN_ID;
 const apiUrl = process.env.BINNY_API_URL;
 const runtimePort = Number(process.env.BINNY_RUNTIME_PORT ?? "8080");
-const environmentKind = process.env.BINNY_RUNTIME_ENVIRONMENT ?? "lightweight";
+const environmentKind = runtimeEnvironmentKindSchema.parse(
+  process.env.BINNY_RUNTIME_ENVIRONMENT ?? "lightweight",
+);
 const heartbeatInterval = Number(
   process.env.BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS ??
     String(runtimeHeartbeatIntervalMs),
@@ -88,10 +92,6 @@ try {
 
 if (!Number.isInteger(runtimePort) || runtimePort < 1 || runtimePort > 65_535) {
   throw new Error(`BINNY_RUNTIME_PORT 不是有效端口：${String(runtimePort)}`);
-}
-
-if (environmentKind !== "lightweight" && environmentKind !== "browser") {
-  throw new Error(`未知运行环境：${environmentKind}`);
 }
 
 if (!Number.isInteger(heartbeatInterval) || heartbeatInterval < 250) {
@@ -196,15 +196,14 @@ if (collector === undefined)
 
 const activeCollector: CollectorDefinition = collector;
 const manifest = collectorManifest(activeCollector);
-const environment: RuntimeEnvironment = {
-  kind: environmentKind,
-  browser: {
-    available: environmentKind === "browser",
-    profileReuseAfterRestart:
-      environmentKind === "browser" &&
-      process.env.BINNY_BROWSER_PROFILE_REUSE === "true",
-  },
+let browserPower: BrowserPower = {
+  status: environmentKind === "browser" ? "stopped" : "unavailable",
 };
+let browserIdleTimeoutSeconds: number | null | undefined;
+let browserIdleSince: number | undefined;
+let browserIdleTimer: NodeJS.Timeout | undefined;
+let browserIdleProbeInFlight = false;
+let browserIdleCloseInFlight: Promise<void> | undefined;
 const runtimeId = randomUUID();
 const browserLifecycle =
   environmentKind === "browser"
@@ -216,8 +215,26 @@ const browserLifecycle =
         profileDirectory:
           process.env.BINNY_BROWSER_PROFILE_DIRECTORY ??
           "/var/lib/binny/runtime/browser-profile",
+        onPowerChange(power) {
+          browserPower = power;
+          refreshBrowserIdle();
+          startHeartbeat();
+        },
       })
     : undefined;
+function runtimeEnvironment(): RuntimeEnvironment {
+  return {
+    kind: environmentKind,
+    browser: {
+      available: environmentKind === "browser",
+      profileReuseAfterRestart:
+        environmentKind === "browser" &&
+        process.env.BINNY_BROWSER_PROFILE_REUSE === "true",
+      power: browserLifecycle?.currentPower ?? browserPower,
+    },
+  };
+}
+
 const server = createRuntimeServer({ collector: activeCollector });
 const client = createApiClient(apiUrl, {
   fetch: (input, init) => {
@@ -234,6 +251,7 @@ let activeWorker: ActionWorker | undefined;
 let activeRunId: string | null = null;
 let pendingStoppedRunId: string | undefined;
 let activeHumanSessionId: string | undefined;
+let openingHumanSessionId: string | undefined;
 let pendingHumanSessionEvent: RuntimeHumanSessionEvent | undefined;
 let claimInFlight = false;
 let stopping: Promise<void> | undefined;
@@ -660,7 +678,148 @@ async function closeHumanSessionAfterHeartbeatFailure(): Promise<void> {
   }
 }
 
-async function heartbeat(allowStopping = false): Promise<void> {
+function clearBrowserIdleTimer(): void {
+  if (browserIdleTimer !== undefined) clearTimeout(browserIdleTimer);
+  browserIdleTimer = undefined;
+}
+
+function browserHasActiveUse(): boolean {
+  return (
+    runInFlight !== undefined ||
+    activeRunId !== null ||
+    pendingStoppedRunId !== undefined ||
+    activeHumanSessionId !== undefined ||
+    openingHumanSessionId !== undefined ||
+    pendingHumanSessionEvent !== undefined ||
+    stopping !== undefined
+  );
+}
+
+function browserIdleCloseIsDue(): boolean {
+  if (
+    browserIdleSince === undefined ||
+    browserIdleTimeoutSeconds === undefined ||
+    browserIdleTimeoutSeconds === null
+  )
+    return false;
+  return Date.now() >= browserIdleSince + browserIdleTimeoutSeconds * 1_000;
+}
+
+function scheduleBrowserIdleClose(waitMs: number): void {
+  clearBrowserIdleTimer();
+  const timer = setTimeout(
+    () => {
+      if (browserIdleTimer === timer) browserIdleTimer = undefined;
+      void closeBrowserWhenIdle();
+    },
+    Math.max(0, waitMs),
+  );
+  browserIdleTimer = timer;
+}
+
+function refreshBrowserIdle(): void {
+  if (browserLifecycle === undefined) return;
+  if (browserHasActiveUse()) {
+    clearBrowserIdleTimer();
+    browserIdleSince = undefined;
+    return;
+  }
+  if (browserPower.status === "stopped") {
+    clearBrowserIdleTimer();
+    browserIdleSince = undefined;
+    return;
+  }
+  if (browserPower.status !== "ready") {
+    clearBrowserIdleTimer();
+    return;
+  }
+  if (browserIdleProbeInFlight) return;
+  if (browserIdleSince === undefined) browserIdleSince = Date.now();
+  if (browserIdleTimeoutSeconds === undefined) return;
+  if (browserIdleTimeoutSeconds === null) {
+    clearBrowserIdleTimer();
+    return;
+  }
+  if (browserIdleTimer !== undefined) return;
+  scheduleBrowserIdleClose(
+    browserIdleSince + browserIdleTimeoutSeconds * 1_000 - Date.now(),
+  );
+}
+
+function acceptBrowserIdleTimeout(value: number | null): void {
+  if (browserIdleTimeoutSeconds !== value) {
+    browserIdleTimeoutSeconds = value;
+    if (browserIdleSince !== undefined) browserIdleSince = Date.now();
+    clearBrowserIdleTimer();
+  }
+  refreshBrowserIdle();
+}
+
+function closeBrowserWhenIdle(): Promise<void> {
+  if (browserIdleCloseInFlight !== undefined) return browserIdleCloseInFlight;
+  const closing = runBrowserIdleClose();
+  browserIdleCloseInFlight = closing;
+  void closing.finally(() => {
+    if (browserIdleCloseInFlight === closing)
+      browserIdleCloseInFlight = undefined;
+  });
+  return closing;
+}
+
+async function runBrowserIdleClose(): Promise<void> {
+  if (
+    browserLifecycle === undefined ||
+    browserHasActiveUse() ||
+    browserPower.status !== "ready" ||
+    !browserIdleCloseIsDue()
+  ) {
+    refreshBrowserIdle();
+    return;
+  }
+  if (claimInFlight) {
+    scheduleBrowserIdleClose(50);
+    return;
+  }
+
+  browserIdleProbeInFlight = true;
+  try {
+    await sendHeartbeatNow(false, false);
+    if (!browserHasActiveUse() && browserPower.status === "ready")
+      await pollRun();
+  } finally {
+    browserIdleProbeInFlight = false;
+  }
+  if (
+    browserHasActiveUse() ||
+    browserPower.status !== "ready" ||
+    claimInFlight
+  ) {
+    if (!browserHasActiveUse() && claimInFlight) scheduleBrowserIdleClose(50);
+    else refreshBrowserIdle();
+    return;
+  }
+
+  // heartbeat 与领取探测会让出事件循环，期间策略及空闲起点都可能改变。
+  if (!browserIdleCloseIsDue()) {
+    refreshBrowserIdle();
+    return;
+  }
+
+  // 关闭开始后新 run／人工请求沿同一生命周期等待真实退出再唤醒。
+  browserIdleSince = undefined;
+  try {
+    await browserLifecycle.closeWhenIdle();
+  } catch (error) {
+    process.stderr.write(
+      `浏览器空闲关闭未确认：${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
+}
+
+async function heartbeat(
+  allowStopping = false,
+  pollRuns = true,
+): Promise<void> {
   if (stopping !== undefined && !allowStopping) return;
   const stoppedRunId = pendingStoppedRunId;
   const humanSessionEvent = pendingHumanSessionEvent;
@@ -678,12 +837,13 @@ async function heartbeat(allowStopping = false): Promise<void> {
         ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
         ...(humanSessionEvent === undefined ? {} : { humanSessionEvent }),
         collector: manifest,
-        environment,
+        environment: runtimeEnvironment(),
       },
     });
     if (response.status === 200) {
       const execution = await response.json();
       heartbeatAccepted = true;
+      acceptBrowserIdleTimeout(execution.browserIdleTimeoutSeconds);
       if (stoppedRunId !== undefined && pendingStoppedRunId === stoppedRunId)
         pendingStoppedRunId = undefined;
       if (
@@ -694,10 +854,12 @@ async function heartbeat(allowStopping = false): Promise<void> {
       if (execution.humanSession !== undefined)
         await applyHumanSessionControl(execution.humanSession);
       logStatus(execution.status);
+      refreshBrowserIdle();
       if (
         execution.status === "online" &&
         stopping === undefined &&
-        pendingStoppedRunId === undefined
+        pendingStoppedRunId === undefined &&
+        pollRuns
       )
         void pollRun();
     } else {
@@ -726,7 +888,10 @@ async function heartbeat(allowStopping = false): Promise<void> {
   }
 }
 
-async function sendHeartbeatNow(allowStopping = false): Promise<void> {
+async function sendHeartbeatNow(
+  allowStopping = false,
+  pollRuns = true,
+): Promise<void> {
   if (heartbeatTimer !== undefined) {
     clearTimeout(heartbeatTimer);
     heartbeatTimer = undefined;
@@ -737,7 +902,7 @@ async function sendHeartbeatNow(allowStopping = false): Promise<void> {
     heartbeatTimer = undefined;
   }
   if (stopping !== undefined && !allowStopping) return;
-  const current = heartbeat(allowStopping);
+  const current = heartbeat(allowStopping, pollRuns);
   heartbeatInFlight = current;
   try {
     await current;
@@ -768,12 +933,16 @@ async function applyHumanSessionControl(
       };
       return;
     }
+    clearBrowserIdleTimer();
+    browserIdleSince = undefined;
+    openingHumanSessionId = control.sessionId;
     try {
       const { ended } = await browserLifecycle.openHumanSession(
         control.sessionId,
         control.tunnelToken,
       );
       activeHumanSessionId = control.sessionId;
+      openingHumanSessionId = undefined;
       pendingHumanSessionEvent = {
         sessionId: control.sessionId,
         event: "ready",
@@ -792,6 +961,8 @@ async function applyHumanSessionControl(
         startHeartbeat();
       });
     } catch (error) {
+      if (openingHumanSessionId === control.sessionId)
+        openingHumanSessionId = undefined;
       pendingHumanSessionEvent = {
         sessionId: control.sessionId,
         event: "failed",
@@ -849,6 +1020,8 @@ async function pollRun(): Promise<void> {
       case 200: {
         const result = await response.json();
         if (result.run === null) return;
+        clearBrowserIdleTimer();
+        browserIdleSince = undefined;
         activeRunId = result.run.runId;
         const current = executeRun(result.run);
         runInFlight = current;
@@ -856,7 +1029,10 @@ async function pollRun(): Promise<void> {
           () => {
             if (runInFlight === current) runInFlight = undefined;
             if (activeRunId === result.run?.runId) activeRunId = null;
-            if (stopping === undefined) startHeartbeat();
+            if (stopping === undefined) {
+              startHeartbeat();
+              refreshBrowserIdle();
+            }
           },
           (error: unknown) => {
             process.stderr.write(
@@ -882,6 +1058,7 @@ async function pollRun(): Promise<void> {
     );
   } finally {
     claimInFlight = false;
+    if (!browserIdleProbeInFlight) refreshBrowserIdle();
   }
 }
 
@@ -926,12 +1103,14 @@ function closeServer(): Promise<void> {
 function shutdown(): Promise<void> {
   if (stopping !== undefined) return stopping;
   stopping = (async () => {
+    clearBrowserIdleTimer();
     if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
     heartbeatTimer = undefined;
     if (heartbeatInFlight !== undefined) await heartbeatInFlight;
     while (claimInFlight) await delay(25);
     if (activeWorker !== undefined) await stopActionWorker(activeWorker);
     if (runInFlight !== undefined) await runInFlight;
+    if (browserIdleCloseInFlight !== undefined) await browserIdleCloseInFlight;
     await closeBrowserRuntime();
     await disconnect();
     await closeServer();

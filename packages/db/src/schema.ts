@@ -63,6 +63,9 @@ export const binConfigurations = pgTable(
     identityId: text("identity_id").notNull(),
     config: jsonb("config").notNull(),
     targets: jsonb("targets").notNull(),
+    browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
+      300,
+    ),
     status: text("status", { enum: binConfigurationStatuses }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -75,6 +78,10 @@ export const binConfigurations = pgTable(
     check(
       "bin_configurations_status_check",
       inArray(table.status, binConfigurationStatuses),
+    ),
+    check(
+      "bin_configurations_browser_idle_timeout_seconds_check",
+      sql`${table.browserIdleTimeoutSeconds} between 0 and 2147483`,
     ),
   ],
 );

@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 
 import {
-  collectorManifestSchema,
+  collectorManifestStoredSchema,
   humanSessionFailureSchema,
   humanSessionSchema,
   type HumanSession,
@@ -317,7 +317,7 @@ export function createHumanSessionStore(database: Database): HumanSessionStore {
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
 
-        const manifest = collectorManifestSchema.parse(bin.collector);
+        const manifest = collectorManifestStoredSchema.parse(bin.collector);
         if (!manifest.environment.browser.required)
           return failure(
             409,
