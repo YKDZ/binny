@@ -66,6 +66,7 @@ function forward(
   request: IncomingMessage,
   response: ServerResponse,
   body: Buffer,
+  deferResponse = false,
 ): Promise<ForwardedResponse> {
   return new Promise((resolve) => {
     const responseChunks: Buffer[] = [];
@@ -77,7 +78,7 @@ function forward(
     let finished = false;
     let responseBody = Buffer.alloc(0);
     const deliver = (): void => {
-      if (delivered || response.destroyed) return;
+      if (!deferResponse || delivered || response.destroyed) return;
       delivered = true;
       response.writeHead(statusCode, headers);
       response.end(responseBody);
@@ -99,36 +100,43 @@ function forward(
       (upstreamResponse) => {
         statusCode = upstreamResponse.statusCode ?? 502;
         headers = upstreamResponse.headers;
+        if (!deferResponse && !response.destroyed)
+          response.writeHead(statusCode, headers);
+        response.once("close", () => {
+          if (!response.writableEnded) upstreamResponse.resume();
+        });
         upstreamResponse.once("end", () => {
+          if (!deferResponse && !response.destroyed) response.end();
           finish();
         });
         upstreamResponse.once("error", (error: unknown) => {
           statusCode = 502;
           headers = { "content-type": "application/json" };
-          responseChunks.push(
-            Buffer.from(
-              JSON.stringify({
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            ),
+          const errorBody = Buffer.from(
+            JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+            }),
           );
+          responseChunks.push(errorBody);
+          if (!deferResponse) sendFailure(response, error);
           finish();
         });
         upstreamResponse.on("data", (chunk: Buffer) => {
           responseChunks.push(chunk);
+          if (!deferResponse && !response.destroyed) response.write(chunk);
         });
       },
     );
     upstream.once("error", (error: unknown) => {
       statusCode = 502;
       headers = { "content-type": "application/json" };
-      responseChunks.push(
-        Buffer.from(
-          JSON.stringify({
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        ),
+      const errorBody = Buffer.from(
+        JSON.stringify({
+          error: error instanceof Error ? error.message : String(error),
+        }),
       );
+      responseChunks.push(errorBody);
+      if (!deferResponse) sendFailure(response, error);
       finish();
     });
     upstream.end(body);
@@ -177,7 +185,7 @@ async function handleRuntimeRequest(
       decoded.stoppedRunId === armedForStoppedRunId);
   if (
     armed &&
-    armedForIdleHeartbeat &&
+    !armedForHumanOpenResponse &&
     requestBinId === armedForBinId &&
     isIdleHeartbeat &&
     matchesStoppedRun
@@ -237,7 +245,14 @@ async function handleRuntimeRequest(
   ) {
     forwardedOwnerGeneration = decoded.ownerGeneration;
   }
-  const forwarded = await forward(request, response, body);
+  const deferForHumanOpenResponse =
+    armed && armedForHumanOpenResponse && requestBinId === armedForBinId;
+  const forwarded = await forward(
+    request,
+    response,
+    body,
+    deferForHumanOpenResponse,
+  );
   const holdHumanOpenResponse =
     armed &&
     armedForHumanOpenResponse &&
