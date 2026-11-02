@@ -42,9 +42,9 @@ import {
   exists,
   gt,
   inArray,
+  isNull,
   lte,
   min,
-  notExists,
   or,
   sql,
   type AnyColumn,
@@ -59,6 +59,12 @@ import {
   validationFailure,
 } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
+import {
+  latestArchiveItemObservation,
+  latestArchiveRelationObservation,
+  latestCurrentRelationObservationGap,
+  relationObservationGapIsCurrent,
+} from "./archive-relation-view.ts";
 
 export type ResolvedSnapshot = {
   readonly asOf: string;
@@ -1063,69 +1069,20 @@ async function readRelationsPage(
   const asOf = BigInt(snapshot.asOf);
   const gap = alias(archiveRelationObservationGaps, "gap");
   const gapCommit = alias(archiveCommits, "gap_commit");
-  const laterObservation = alias(
-    archiveRelationObservations,
-    "later_observation",
+  const latest = latestArchiveRelationObservation(
+    transaction,
+    archiveRelations.relationId,
+    sql`${binId}`,
+    asOf,
+    "latest_relation_observation",
   );
-  const latestObservation = alias(
-    archiveRelationObservations,
-    "latest_observation",
+  const currentGap = latestCurrentRelationObservationGap(
+    transaction,
+    archiveRelations.relationId,
+    sql`${binId}`,
+    asOf,
+    "current_relation_gap",
   );
-  const latestCommit = alias(archiveCommits, "latest_commit");
-  const latest = transaction
-    .select({
-      commitId: latestObservation.commitId,
-      archiveSequence: latestObservation.archiveSequence,
-      ordinal: latestObservation.ordinal,
-      relationRevisionId: latestObservation.relationRevisionId,
-      observedAt: latestCommit.observedAt,
-      recordedAt: latestCommit.recordedAt,
-      runId: latestCommit.runId,
-      collectorVersion: latestCommit.collectorVersion,
-    })
-    .from(latestObservation)
-    .innerJoin(
-      latestCommit,
-      eq(latestCommit.commitId, latestObservation.commitId),
-    )
-    .where(
-      and(
-        eq(latestObservation.relationId, archiveRelations.relationId),
-        eq(latestObservation.binId, binId),
-        lte(latestObservation.archiveSequence, asOf),
-      ),
-    )
-    .orderBy(
-      desc(latestObservation.archiveSequence),
-      desc(latestObservation.ordinal),
-      desc(latestObservation.commitId),
-    )
-    .limit(1)
-    .as("latest_relation_observation");
-
-  const laterObservations = transaction
-    .select({ relationId: laterObservation.relationId })
-    .from(laterObservation)
-    .where(
-      and(
-        eq(laterObservation.relationId, gap.relationId),
-        eq(laterObservation.binId, binId),
-        gt(laterObservation.archiveSequence, gapCommit.archiveSequence),
-        lte(laterObservation.archiveSequence, asOf),
-      ),
-    );
-  const currentGaps = transaction
-    .select({ relationId: gap.relationId })
-    .from(gap)
-    .innerJoin(gapCommit, eq(gapCommit.commitId, gap.commitId))
-    .where(
-      and(
-        eq(gap.relationId, archiveRelations.relationId),
-        eq(gapCommit.binId, binId),
-        lte(gapCommit.archiveSequence, asOf),
-        notExists(laterObservations),
-      ),
-    );
 
   const gapRows = transaction
     .selectDistinctOn([gap.relationId], {
@@ -1172,7 +1129,14 @@ async function readRelationsPage(
           : eq(gap.targetItemId, itemId),
         eq(gapCommit.binId, binId),
         lte(gapCommit.archiveSequence, asOf),
-        notExists(laterObservations),
+        relationObservationGapIsCurrent(
+          transaction,
+          gap.relationId,
+          sql`${binId}`,
+          gapCommit.archiveSequence,
+          asOf,
+          "relation_read_gap_later_observation",
+        ),
       ),
     )
     .orderBy(
@@ -1227,6 +1191,7 @@ async function readRelationsPage(
     .from(archiveRelations)
     // RC 的 lateral join 要求显式 on 表达式；true 表示保留子查询的单行或空结果。
     .leftJoinLateral(latest, sql`true`)
+    .leftJoinLateral(currentGap, sql`true`)
     .leftJoin(
       archiveRelationRevisions,
       and(
@@ -1243,7 +1208,7 @@ async function readRelationsPage(
           ? eq(archiveRelations.fromItemId, itemId)
           : eq(archiveRelations.targetItemId, itemId),
         lte(archiveRelations.createdSequence, asOf),
-        notExists(currentGaps),
+        isNull(currentGap.commitId),
       ),
     );
 
@@ -1285,32 +1250,13 @@ async function readRelationsPage(
       }),
     ),
   ];
-  const latestItemObservation = alias(
-    archiveObservations,
-    "latest_item_observation",
+  const latestItem = latestArchiveItemObservation(
+    transaction,
+    archiveItems.itemId,
+    sql`${binId}`,
+    asOf,
+    "latest_item_view",
   );
-  const latestItemCommit = alias(archiveCommits, "latest_item_commit");
-  const latestItem = transaction
-    .select({ revisionId: latestItemObservation.revisionId })
-    .from(latestItemObservation)
-    .innerJoin(
-      latestItemCommit,
-      eq(latestItemCommit.commitId, latestItemObservation.commitId),
-    )
-    .where(
-      and(
-        eq(latestItemObservation.itemId, archiveItems.itemId),
-        eq(latestItemCommit.binId, binId),
-        lte(latestItemCommit.archiveSequence, asOf),
-      ),
-    )
-    .orderBy(
-      desc(latestItemCommit.archiveSequence),
-      desc(latestItemObservation.ordinal),
-      desc(latestItemCommit.commitId),
-    )
-    .limit(1)
-    .as("latest_item_view");
   const endpointRows =
     endpointIds.length === 0
       ? []
