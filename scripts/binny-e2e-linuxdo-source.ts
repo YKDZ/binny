@@ -10,6 +10,8 @@ type SourceState = {
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
   readonly targetInvalidResponsePage: number | null;
+  readonly categoriesUnavailable: boolean;
+  readonly categoriesInvalidResponse: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -59,6 +61,8 @@ let activeState: SourceState = {
   targetUnavailablePage: null,
   targetChallengePage: null,
   targetInvalidResponsePage: null,
+  categoriesUnavailable: false,
+  categoriesInvalidResponse: false,
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
@@ -242,9 +246,13 @@ function discoveredTopicList(
   category: boolean,
   page: number,
   perPage: number,
+  childCategory = false,
 ): Record<string, unknown> {
-  const topicIds =
-    page === 0
+  const topicIds = childCategory
+    ? page === 0
+      ? [2499].slice(0, perPage)
+      : []
+    : page === 0
       ? (category
           ? [2402, 2403, 2401, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
           : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
@@ -252,7 +260,11 @@ function discoveredTopicList(
       : category
         ? [2403, 2401].slice(0, perPage)
         : [2402, 2403].slice(0, perPage);
-  const pathname = category ? "/c/controlled/42/l/latest.json" : "/latest.json";
+  const pathname = childCategory
+    ? "/c/controlled/child/43/l/latest.json"
+    : category
+      ? "/c/controlled/42/l/latest.json"
+      : "/latest.json";
   return {
     topic_list: {
       topics: topicIds.map((id) => {
@@ -306,6 +318,8 @@ function updateState(value: unknown): boolean {
     "legacyTags",
     "addedReply",
     "discoveryAddedReply",
+    "categoriesUnavailable",
+    "categoriesInvalidResponse",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
   }
@@ -422,6 +436,61 @@ const server = createServer((request, response) => {
       });
       return;
     }
+    if (request.method === "GET" && pathname === "/categories.json") {
+      record(
+        "categories",
+        `${pathname}?${url.searchParams.toString()}`,
+        authenticated,
+      );
+      if (!authenticated) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      if (activeState.categoriesUnavailable) {
+        sendJson(response, 503, { errors: ["板块暂不可用。"] });
+        return;
+      }
+      if (activeState.categoriesInvalidResponse) {
+        sendJson(response, 200, { category_list: { categories: [{}] } });
+        return;
+      }
+      sendJson(response, 200, {
+        category_list: {
+          categories: [
+            {
+              id: 42,
+              name: "受控板块",
+              slug: "controlled",
+              parent_category_id: null,
+              position: 1,
+            },
+            {
+              id: 43,
+              name: "可见子板块",
+              slug: "child",
+              parent_category_id: 42,
+              position: 1,
+            },
+            {
+              id: 44,
+              name: "另一可见板块",
+              slug: "other",
+              parent_category_id: null,
+              position: 2,
+            },
+            {
+              id: 43,
+              name: "可见子板块",
+              slug: "child",
+              parent_category_id: 42,
+              position: 1,
+            },
+          ],
+        },
+      });
+      return;
+    }
     const topicJsonMatch = /^\/t\/(\d+)\.json$/u.exec(pathname);
     if (topicJsonMatch !== null && request.method === "GET") {
       const topicId = Number(topicJsonMatch[1]);
@@ -448,10 +517,12 @@ const server = createServer((request, response) => {
     }
     const topicListMatch =
       pathname === "/latest.json"
-        ? { category: false }
+        ? { category: false, childCategory: false }
         : pathname === "/c/controlled/42/l/latest.json"
-          ? { category: true }
-          : undefined;
+          ? { category: true, childCategory: false }
+          : pathname === "/c/controlled/child/43/l/latest.json"
+            ? { category: true, childCategory: true }
+            : undefined;
     if (topicListMatch !== undefined && request.method === "GET") {
       record(
         "topic-list",
@@ -484,6 +555,7 @@ const server = createServer((request, response) => {
           topicListMatch.category,
           listPage,
           Number(url.searchParams.get("per_page") ?? "30"),
+          topicListMatch.childCategory,
         ),
       );
       return;
