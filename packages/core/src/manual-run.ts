@@ -348,6 +348,7 @@ type RunBinSnapshot = {
   readonly sourceAdapter: unknown;
   readonly identityId: string;
   readonly config: unknown;
+  readonly configNativeValid: boolean;
   readonly status: "active" | "disabled";
 };
 
@@ -382,6 +383,14 @@ export async function createQueuedRunInTransaction(
     return failure(409, "bin_disabled", "这个 bin 已停用，不能触发新的运行。", [
       "binId",
     ]);
+  }
+  if (!bin.configNativeValid) {
+    return failure(
+      400,
+      "invalid_configuration",
+      "长期配置尚未通过当前运行器的原生校验，请先更新配置。",
+      ["config"],
+    );
   }
 
   const configuredBin = binConfigurationSettingsSchema.parse({
@@ -461,6 +470,7 @@ export function createManualRunStore(
             sourceAdapter: binConfigurations.sourceAdapter,
             identityId: binConfigurations.identityId,
             config: binConfigurations.config,
+            configNativeValid: binConfigurations.configNativeValid,
             status: binConfigurations.status,
           })
           .from(binConfigurations)

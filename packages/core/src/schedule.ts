@@ -178,6 +178,7 @@ function readBinForRun(transaction: Transaction, binId: string) {
       sourceAdapter: binConfigurations.sourceAdapter,
       identityId: binConfigurations.identityId,
       config: binConfigurations.config,
+      configNativeValid: binConfigurations.configNativeValid,
       status: binConfigurations.status,
     })
     .from(binConfigurations)

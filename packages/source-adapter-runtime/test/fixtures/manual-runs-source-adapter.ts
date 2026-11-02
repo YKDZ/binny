@@ -8,13 +8,18 @@ import {
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
 
-const configurationSchema = z.object({
-  section: z.string(),
-  label: z
-    .string()
-    .default("runtime")
-    .transform((value) => value + "!"),
-});
+const configurationSchema = z
+  .object({
+    section: z.string(),
+    label: z
+      .string()
+      .default("runtime")
+      .transform((value) => value + "!"),
+  })
+  .refine((configuration) => configuration.section !== "forbidden", {
+    path: ["section"],
+    message: "该板块不可用。",
+  });
 const sourceResultSchema = z.object({
   disposition: z.enum(["material", "manual", "empty", "partial", "slow"]),
   sourceKey: z.string(),

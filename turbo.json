@@ -138,6 +138,7 @@
       "cache": false
     },
     "//#test:lightweight-image": {
+      "passThroughEnv": ["BINNY_RUNTIME_PUBLISHED_HOST"],
       "inputs": [
         "scripts/test-lightweight-image.ts",
         ".dockerignore",

@@ -69,6 +69,7 @@ export const binConfigurations = pgTable(
     sourceAdapter: jsonb("source_adapter").notNull(),
     identityId: text("identity_id").notNull(),
     config: jsonb("config").notNull(),
+    configNativeValid: boolean("config_native_valid").notNull().default(true),
     browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
       300,
     ),
@@ -109,6 +110,7 @@ export const runtimeConnections = pgTable(
       .defaultNow(),
     disconnected: boolean("disconnected").notNull().default(false),
     protocolVersion: smallint("protocol_version").notNull().default(0),
+    runtimeControlUrl: text("runtime_control_url"),
     ownerState: text("owner_state", { enum: runtimeOwnerStates })
       .notNull()
       .default("confirmed"),

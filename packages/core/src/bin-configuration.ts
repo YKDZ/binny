@@ -1,8 +1,11 @@
+import { isDeepStrictEqual } from "node:util";
+
 import {
   binConfigurationSchema,
   binConfigurationSettingsSchema,
-  binCreateInputSchema,
   binUpdateInputSchema,
+  runtimeHeartbeatTimeoutMs,
+  runtimeProtocolVersion,
   sourceAdapterManifestStoredSchema,
   type BinConfiguration,
   type BinConfigurationOperations,
@@ -15,6 +18,7 @@ import {
   binConfigurations,
   databaseErrorCode,
   manualRuns,
+  runtimeConnections,
   type Database,
 } from "@binny/db";
 import * as formats from "ajv-formats";
@@ -27,16 +31,31 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
+import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
 
 const binSelection = {
   id: binConfigurations.id,
   sourceAdapter: binConfigurations.sourceAdapter,
   identityId: binConfigurations.identityId,
   config: binConfigurations.config,
+  configNativeValid: binConfigurations.configNativeValid,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   status: binConfigurations.status,
   createdAt: binConfigurations.createdAt,
   updatedAt: binConfigurations.updatedAt,
+};
+const configValidationSelection = {
+  id: binConfigurations.id,
+  sourceAdapter: binConfigurations.sourceAdapter,
+  config: binConfigurations.config,
+  configNativeValid: binConfigurations.configNativeValid,
+  runtimeId: runtimeConnections.runtimeId,
+  runtimeSourceAdapter: runtimeConnections.sourceAdapter,
+  runtimeControlUrl: runtimeConnections.runtimeControlUrl,
+  protocolVersion: runtimeConnections.protocolVersion,
+  ownerGeneration: runtimeConnections.ownerGeneration,
+  disconnected: runtimeConnections.disconnected,
+  lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
 };
 const addFormats = formats.default.default;
 const sourceAdapterValidatorCacheLimit = 32;
@@ -310,6 +329,21 @@ async function selectBin(database: Database, id: string) {
   return row;
 }
 
+async function selectConfigurationValidationSnapshot(
+  database: Database,
+  id: string,
+) {
+  const [row] = await database
+    .select(configValidationSelection)
+    .from(binConfigurations)
+    .leftJoin(
+      runtimeConnections,
+      eq(runtimeConnections.binId, binConfigurations.id),
+    )
+    .where(eq(binConfigurations.id, id));
+  return row;
+}
+
 type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
 
 function rowToConfiguration(row: BinRow): BinConfiguration {
@@ -353,57 +387,6 @@ export function createBinConfigurationStore(
         : { ok: true, value: rowToConfiguration(row) };
     },
 
-    async createBin(input) {
-      const checked = binCreateInputSchema.safeParse(input);
-      if (!checked.success) {
-        const issue = checked.error.issues[0];
-        return failure(
-          400,
-          "invalid_input",
-          "bin 配置格式无效。",
-          issue === undefined ? undefined : issue.path.map(String),
-        );
-      }
-      const invalid = validateSourceAdapterConfiguration(
-        checked.data.sourceAdapter,
-        checked.data.config,
-      );
-      if (invalid !== undefined)
-        return { ok: false, status: 400, error: invalid };
-      const browserIdleTimeoutSeconds =
-        checked.data.browserIdleTimeoutSeconds === undefined
-          ? 300
-          : checked.data.browserIdleTimeoutSeconds;
-      const invalidIdlePolicy = validateBrowserIdlePolicy(
-        checked.data.sourceAdapter,
-        browserIdleTimeoutSeconds,
-      );
-      if (invalidIdlePolicy !== undefined)
-        return { ok: false, status: 400, error: invalidIdlePolicy };
-
-      try {
-        const [row] = await database
-          .insert(binConfigurations)
-          .values({
-            id: checked.data.id,
-            sourceAdapter: checked.data.sourceAdapter,
-            identityId: checked.data.identityId,
-            config: checked.data.config,
-            browserIdleTimeoutSeconds,
-            status: "active",
-          })
-          .returning(binSelection);
-        if (row === undefined) throw new Error("bin 创建后没有返回记录。");
-        return { ok: true, value: rowToConfiguration(row) };
-      } catch (error) {
-        if (databaseErrorCode(error) === "23505")
-          return failure(409, "bin_already_exists", "这个 bin 标识已被使用。", [
-            "id",
-          ]);
-        throw error;
-      }
-    },
-
     async updateBin(id, input) {
       const checked = binUpdateInputSchema.safeParse(input);
       if (!checked.success) {
@@ -414,6 +397,51 @@ export function createBinConfigurationStore(
           "bin 修改内容无效。",
           issue === undefined ? undefined : issue.path.map(String),
         );
+      }
+
+      const validationSnapshot =
+        checked.data.config === undefined
+          ? undefined
+          : await selectConfigurationValidationSnapshot(database, id);
+      if (validationSnapshot === undefined && checked.data.config !== undefined)
+        return notFound(id);
+
+      if (validationSnapshot !== undefined) {
+        const available =
+          validationSnapshot.runtimeId !== null &&
+          validationSnapshot.runtimeControlUrl !== null &&
+          validationSnapshot.protocolVersion === runtimeProtocolVersion &&
+          validationSnapshot.lastHeartbeatAt !== null &&
+          !validationSnapshot.disconnected &&
+          Date.now() - validationSnapshot.lastHeartbeatAt.getTime() <=
+            runtimeHeartbeatTimeoutMs &&
+          isDeepStrictEqual(
+            validationSnapshot.sourceAdapter,
+            validationSnapshot.runtimeSourceAdapter,
+          );
+        if (!available) {
+          return failure(
+            409,
+            "runtime_configuration_validation_unavailable",
+            "当前运行器离线、协议过期或源码声明未同步，不能验证长期配置。",
+            ["config"],
+          );
+        }
+        const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+          validationSnapshot.sourceAdapter,
+        );
+        const validation = await validateConfigurationAtRuntime(
+          validationSnapshot.runtimeControlUrl!,
+          sourceAdapter,
+          checked.data.config!,
+        );
+        if (!validation.ok) {
+          return {
+            ok: false,
+            status: validation.kind === "invalid" ? 400 : 409,
+            error: validation.error,
+          } as const;
+        }
       }
 
       return await database.transaction(async (transaction) => {
@@ -430,8 +458,7 @@ export function createBinConfigurationStore(
           identityId: previous.identityId,
           config: previous.config,
         });
-        const sourceAdapter =
-          checked.data.sourceAdapter ?? existing.sourceAdapter;
+        const sourceAdapter = existing.sourceAdapter;
         const config = checked.data.config ?? existing.config;
         const browserIdleTimeoutSeconds =
           checked.data.browserIdleTimeoutSeconds === undefined
@@ -441,8 +468,52 @@ export function createBinConfigurationStore(
           sourceAdapter,
           config,
         );
-        if (invalid !== undefined)
+        if (invalid !== undefined && checked.data.config === undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
+
+        if (validationSnapshot !== undefined) {
+          const [currentRuntime] = await transaction
+            .select(configValidationSelection)
+            .from(binConfigurations)
+            .leftJoin(
+              runtimeConnections,
+              eq(runtimeConnections.binId, binConfigurations.id),
+            )
+            .where(eq(binConfigurations.id, id));
+          if (
+            currentRuntime === undefined ||
+            !isDeepStrictEqual(
+              currentRuntime.config,
+              validationSnapshot.config,
+            ) ||
+            !isDeepStrictEqual(
+              currentRuntime.sourceAdapter,
+              validationSnapshot.sourceAdapter,
+            ) ||
+            currentRuntime.runtimeId !== validationSnapshot.runtimeId ||
+            currentRuntime.ownerGeneration !==
+              validationSnapshot.ownerGeneration ||
+            currentRuntime.protocolVersion !==
+              validationSnapshot.protocolVersion ||
+            currentRuntime.runtimeControlUrl !==
+              validationSnapshot.runtimeControlUrl ||
+            !isDeepStrictEqual(
+              currentRuntime.runtimeSourceAdapter,
+              validationSnapshot.runtimeSourceAdapter,
+            ) ||
+            currentRuntime.disconnected ||
+            currentRuntime.lastHeartbeatAt === null ||
+            Date.now() - currentRuntime.lastHeartbeatAt.getTime() >
+              runtimeHeartbeatTimeoutMs
+          ) {
+            return failure(
+              409,
+              "configuration_changed",
+              "配置或运行器声明在原生校验期间发生变化，请重新提交并验证。",
+              ["config"],
+            );
+          }
+        }
         const invalidIdlePolicy = validateBrowserIdlePolicy(
           sourceAdapter,
           browserIdleTimeoutSeconds,
@@ -458,9 +529,11 @@ export function createBinConfigurationStore(
         const [updated] = await transaction
           .update(binConfigurations)
           .set({
-            sourceAdapter,
             identityId: checked.data.identityId ?? existing.identityId,
             config,
+            ...(checked.data.config === undefined
+              ? {}
+              : { configNativeValid: true }),
             browserIdleTimeoutSeconds,
             updatedAt: sql`now()`,
           })

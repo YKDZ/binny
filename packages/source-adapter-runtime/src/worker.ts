@@ -9,6 +9,7 @@ import {
 } from "@binny/contracts";
 import {
   createSourceAdapterContext,
+  parseSourceAdapterInput,
   sourceAdapterManifest,
   isSourceAdapterActionError,
   type SourceAdapterDefinition,
@@ -88,7 +89,10 @@ async function executeRun(
     };
   }
 
-  const configured = activeSourceAdapter.configSchema.safeParse(run.config);
+  const configured = await parseSourceAdapterInput(
+    activeSourceAdapter.configSchema,
+    run.config,
+  );
   if (!configured.success) {
     const issue = configured.error.issues[0];
     return {
