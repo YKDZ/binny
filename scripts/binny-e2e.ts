@@ -578,7 +578,7 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
 
 async function archiveSearchPaginationCliStep(baseUrl: string): Promise<void> {
   const query = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     text: { kind: "regex", pattern: "^聚合完整候选集合$" },
     where: {
       type: "and",
@@ -688,7 +688,7 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         text: { kind: "literal", value: "正文 A" },
       }),
     ]),
@@ -710,9 +710,9 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
 
     const validRequest =
       command === "search"
-        ? { scope: { kind: "current", binId: "rss-main" } }
+        ? { scope: { kind: "current", binId: "binny-runs-one" } }
         : {
-            scope: { kind: "current", binId: "rss-main" },
+            scope: { kind: "current", binId: "binny-runs-one" },
             unit: "item",
             groupBy: [],
             metrics: [{ key: "items", op: "count" }],
@@ -1246,7 +1246,7 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
   const sourceKey = "resource-interrupted-reference:" + randomUUID();
   const request = JSON.stringify({
     requestId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: sourceKey },
