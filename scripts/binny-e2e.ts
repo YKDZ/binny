@@ -6463,7 +6463,6 @@ async function verifyRestartAndRemoval(
     path.join(tmpdir(), "binny-relations-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny-relations-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -6477,7 +6476,7 @@ async function verifyRestartAndRemoval(
         "resource",
         expectedArchive.sdkResourceMetadata.resourceId,
         "--output",
-        containerResourcePath,
+        localResourcePath,
       ]),
       "downloaded",
     );
@@ -6487,7 +6486,7 @@ async function verifyRestartAndRemoval(
     );
     assert.equal(downloaded.mediaType, "image/svg+xml");
     assert.equal(downloaded.sha256, expectedArchive.sdkResourceMetadata.sha256);
-    await compose(["cp", `server:${containerResourcePath}`, localResourcePath]);
+    assert.equal(downloaded.savedTo, localResourcePath);
     assert.deepEqual(
       await readFile(localResourcePath),
       Buffer.from("sourceAdapter sdk image v1"),
@@ -6495,14 +6494,6 @@ async function verifyRestartAndRemoval(
   } finally {
     await rm(downloadDirectory, { recursive: true, force: true });
   }
-  await compose([
-    "exec",
-    "--no-TTY",
-    "server",
-    "rm",
-    "-f",
-    containerResourcePath,
-  ]);
 
   const cliFirstTimelinePage = cliData<{ readonly nextCursor?: string }>(
     await cli(baseUrl, [
