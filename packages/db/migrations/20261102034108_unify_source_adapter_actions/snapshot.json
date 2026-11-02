@@ -1,0 +1,84 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "35e414f9-2638-4191-975a-ec4bb2adc96a",
+  "prevIds": ["83bfd479-fa6e-4180-927c-69695347fbdc"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "output"],
+      "writes": [
+        "s|col|public.manual_runs.output",
+        "n|col|public.manual_runs.output",
+        "e|col|public.manual_runs.output"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "manual_runs",
+        "targets_snapshot"
+      ],
+      "writes": [
+        "s|col|public.manual_runs.targets_snapshot",
+        "n|col|public.manual_runs.targets_snapshot",
+        "e|col|public.manual_runs.targets_snapshot"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": ["column", "public", "manual_runs", "check_result"],
+      "writes": [
+        "s|col|public.manual_runs.check_result",
+        "n|col|public.manual_runs.check_result",
+        "e|col|public.manual_runs.check_result"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": ["column", "public", "bin_configurations", "targets"],
+      "writes": [
+        "s|col|public.bin_configurations.targets",
+        "n|col|public.bin_configurations.targets",
+        "e|col|public.bin_configurations.targets"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "output",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"bin_configurations\",\"targets\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"manual_runs\",\"targets_snapshot\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"manual_runs\",\"check_result\"]"
+    }
+  ]
+}

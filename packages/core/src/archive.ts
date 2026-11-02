@@ -26,7 +26,6 @@ import {
   archiveRevisions,
   archiveWriteClock,
   binConfigurations,
-  manualRuns,
   type Database,
   type Transaction,
 } from "@binny/db";
@@ -458,19 +457,6 @@ export function createArchiveStore(
           }
 
           if (submission.runId !== undefined) {
-            // runId 在提交契约中是不透明文本；按 UUID 文本比较可保留无效格式只是不匹配的旧行为。
-            const matchingRuns = await transaction
-              .select({ action: manualRuns.action })
-              .from(manualRuns)
-              .where(eq(sql`${manualRuns.runId}::text`, submission.runId));
-            if (matchingRuns[0]?.action === "check") {
-              return failure(
-                409,
-                "check_run_archive_forbidden",
-                "可用性检查运行不能提交归档资料。",
-                ["runId"],
-              );
-            }
             if (
               !(await lockManualRunForArchiveWrite(
                 transaction,

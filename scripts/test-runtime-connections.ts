@@ -274,8 +274,6 @@ async function createBin(
       `identity-${id}`,
       "--config",
       JSON.stringify({ section }),
-      "--targets",
-      "[]",
       "--browser-idle-timeout-seconds",
       String(browserIdleTimeout),
     ]),
@@ -491,8 +489,6 @@ try {
       "identity-binny-runtime-config-mismatch",
       "--config",
       JSON.stringify({ section: "ab" }),
-      "--targets",
-      "[]",
     ]),
     "created",
   );

@@ -56,6 +56,36 @@ type FixtureState = {
   readonly unavailableMediaStatus: number;
 };
 
+const targetDefinitions = {
+  latest: { id: "latest", kind: "latest" },
+  category: {
+    id: "category",
+    kind: "category",
+    categoryId: 42,
+    categorySlugPath: "controlled",
+  },
+  pinned: { id: "pinned", kind: "topic", topicId: 2401 },
+} as const;
+
+function linuxdoTargets(...ids: (keyof typeof targetDefinitions)[]) {
+  return ids.map((id) => targetDefinitions[id]);
+}
+
+type LinuxdoCheckOutput = {
+  readonly availability: "available" | "unavailable" | "unknown";
+  readonly scope: readonly string[];
+  readonly problems: readonly {
+    readonly code: string;
+    readonly requiresHuman: boolean;
+    readonly suggestion?: string;
+  }[];
+};
+
+function checkOutput(run: ManualRun): LinuxdoCheckOutput {
+  assert.ok(run.result?.output !== undefined);
+  return run.result.output as LinuxdoCheckOutput;
+}
+
 type ArchiveItemState = {
   readonly sourceKey: { readonly namespace: string; readonly key: string };
   readonly sourceRef?: string;
@@ -581,14 +611,10 @@ async function verifyLoginRequired(): Promise<
 }
 
 async function verifyActionParameterValidation(): Promise<void> {
-  const before = cliData<{
-    readonly config: unknown;
-    readonly targets: readonly unknown[];
-  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
   for (const [params, path] of [
     [{ createdAfter: "yesterday" }, ["params", "createdAfter"]],
     [{ maxTopics: 501 }, ["params", "maxTopics"]],
-    [{ targetIds: [1] }, ["params", "targetIds", "0"]],
+    [{ targets: [1] }, ["params", "targets", "0"]],
   ] as const) {
     const response = await fetch(
       `${apiUrl()}/bins/binny-discovery-topic/runs`,
@@ -609,19 +635,6 @@ async function verifyActionParameterValidation(): Promise<void> {
     assert.equal(payload.error.code, "invalid_action_parameters");
     assert.deepEqual(payload.error.path, path);
   }
-
-  const missingTarget = await trigger("collect", {
-    targetIds: ["not-configured"],
-  });
-  assert.equal(missingTarget.status, "failed");
-  assert.equal(missingTarget.result?.error?.code, "linuxdo_target_not_found");
-  assert.deepEqual(missingTarget.result?.error?.path, ["targetIds", 0]);
-  const after = cliData<{
-    readonly config: unknown;
-    readonly targets: readonly unknown[];
-  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  assert.deepEqual(after.config, before.config);
-  assert.deepEqual(after.targets, before.targets);
 }
 
 async function assertSignedInCheckFailures(): Promise<void> {
@@ -633,9 +646,9 @@ async function assertSignedInCheckFailures(): Promise<void> {
   await updateFixtureState({ challengePage: true });
   const challengeCheck = await trigger("check", { topicId: 2401 });
   assert.equal(challengeCheck.status, "completed");
-  assert.equal(challengeCheck.result?.check?.availability, "unknown");
+  assert.equal(checkOutput(challengeCheck).availability, "unknown");
   assert.ok(
-    challengeCheck.result?.check?.problems.some(
+    checkOutput(challengeCheck).problems.some(
       ({ code, requiresHuman }) =>
         code === "discourse_challenge_response" && requiresHuman,
     ),
@@ -647,9 +660,9 @@ async function assertSignedInCheckFailures(): Promise<void> {
   await updateFixtureState({ challengePage: false, challengeTopic: true });
   const topicChallengeCheck = await trigger("check", { topicId: 2401 });
   assert.equal(topicChallengeCheck.status, "completed");
-  assert.equal(topicChallengeCheck.result?.check?.availability, "unknown");
+  assert.equal(checkOutput(topicChallengeCheck).availability, "unknown");
   assert.ok(
-    topicChallengeCheck.result?.check?.problems.some(
+    checkOutput(topicChallengeCheck).problems.some(
       ({ code, requiresHuman }) =>
         code === "discourse_topic_challenge_response" && requiresHuman,
     ),
@@ -661,9 +674,9 @@ async function assertSignedInCheckFailures(): Promise<void> {
   await updateFixtureState({ challengeTopic: false, challengePosts: true });
   const postsChallengeCheck = await trigger("check", { topicId: 2401 });
   assert.equal(postsChallengeCheck.status, "completed");
-  assert.equal(postsChallengeCheck.result?.check?.availability, "unknown");
+  assert.equal(checkOutput(postsChallengeCheck).availability, "unknown");
   assert.ok(
-    postsChallengeCheck.result?.check?.problems.some(
+    checkOutput(postsChallengeCheck).problems.some(
       ({ code, requiresHuman }) =>
         code === "discourse_topic_posts_challenge_response" && requiresHuman,
     ),
@@ -675,9 +688,9 @@ async function assertSignedInCheckFailures(): Promise<void> {
   await updateFixtureState({ challengePosts: false, topicVisible: false });
   const inaccessibleCheck = await trigger("check", { topicId: 2401 });
   assert.equal(inaccessibleCheck.status, "completed");
-  assert.equal(inaccessibleCheck.result?.check?.availability, "unavailable");
+  assert.equal(checkOutput(inaccessibleCheck).availability, "unavailable");
   assert.ok(
-    inaccessibleCheck.result?.check?.problems.some(
+    checkOutput(inaccessibleCheck).problems.some(
       ({ code }) => code === "discourse_topic_unavailable",
     ),
   );
@@ -800,8 +813,10 @@ async function verifyTopicArchive(
       !rootState.body?.html?.includes("topic-photo-large.webp"),
     rootState.body?.html,
   );
-  assert.ok(firstCollection.result?.completedScopes?.includes("topic:2401"));
-  assert.deepEqual(firstCollection.result?.completedScopes, [
+  assert.ok(
+    firstCollection.result?.output?.completedScopes?.includes("topic:2401"),
+  );
+  assert.deepEqual(firstCollection.result?.output?.completedScopes, [
     "post:240001",
     "post:240002",
     "post:240003",
@@ -891,7 +906,9 @@ async function verifyTopicArchive(
 
   await updateFixtureState({ addedReply: true });
   const addedReplyRun = await collectTopic();
-  assert.ok(addedReplyRun.result?.completedScopes?.includes("post:240004"));
+  assert.ok(
+    addedReplyRun.result?.output?.completedScopes?.includes("post:240004"),
+  );
   const addedReply = await searchArchiveItem("后来新增的回复");
   assert.equal(addedReply.sourceKey.key, "post:240004");
   assert.equal(
@@ -903,11 +920,11 @@ async function verifyTopicArchive(
   await updateFixtureState({ omittedPostIds: [240003] });
   const finiteReadRun = await collectTopic();
   assert.equal(
-    finiteReadRun.result?.completedScopes?.includes("topic:2401"),
+    finiteReadRun.result?.output?.completedScopes?.includes("topic:2401"),
     false,
   );
   assert.equal(
-    finiteReadRun.result?.completedScopes?.includes("post:240003"),
+    finiteReadRun.result?.output?.completedScopes?.includes("post:240003"),
     false,
   );
   const finiteRoot = await readArchiveItem(root.itemId);
@@ -928,7 +945,7 @@ async function verifyTopicArchive(
   });
   const mediaPartialRun = await collectTopic();
   assert.equal(
-    mediaPartialRun.result?.completedScopes?.includes("topic:2401"),
+    mediaPartialRun.result?.output?.completedScopes?.includes("topic:2401"),
     false,
   );
   const partialRoot = await readArchiveItem(root.itemId);
@@ -975,7 +992,7 @@ async function verifyTopicArchive(
   await updateFixtureState({ challengeMedia: true });
   const challengedMediaRun = await collectTopic();
   assert.equal(
-    challengedMediaRun.result?.completedScopes?.includes("topic:2401"),
+    challengedMediaRun.result?.output?.completedScopes?.includes("topic:2401"),
     false,
   );
   const challengedRoot = await readArchiveItem(root.itemId);
@@ -1043,19 +1060,17 @@ async function verifyDiscovery(): Promise<void> {
 
   await updateFixtureState({ targetUnavailablePage: 0 });
   const unavailableListCheck = await trigger("check", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
   });
   assert.equal(
     unavailableListCheck.status,
     "completed",
     JSON.stringify(unavailableListCheck),
   );
-  assert.equal(unavailableListCheck.result?.check?.availability, "unavailable");
-  assert.deepEqual(unavailableListCheck.result?.check?.scope, [
-    "target:latest",
-  ]);
+  assert.equal(checkOutput(unavailableListCheck).availability, "unavailable");
+  assert.deepEqual(checkOutput(unavailableListCheck).scope, ["target:latest"]);
   assert.ok(
-    unavailableListCheck.result?.check?.problems.some(
+    checkOutput(unavailableListCheck).problems.some(
       ({ code, requiresHuman }) =>
         code === "discourse_target_unavailable" && !requiresHuman,
     ),
@@ -1067,17 +1082,17 @@ async function verifyDiscovery(): Promise<void> {
     targetChallengePage: 0,
   });
   const challengedListCheck = await trigger("check", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
   });
   assert.equal(
     challengedListCheck.status,
     "completed",
     JSON.stringify(challengedListCheck),
   );
-  assert.equal(challengedListCheck.result?.check?.availability, "unknown");
-  assert.deepEqual(challengedListCheck.result?.check?.scope, ["target:latest"]);
+  assert.equal(checkOutput(challengedListCheck).availability, "unknown");
+  assert.deepEqual(checkOutput(challengedListCheck).scope, ["target:latest"]);
   assert.ok(
-    challengedListCheck.result?.check?.problems.some(
+    checkOutput(challengedListCheck).problems.some(
       ({ code, requiresHuman }) =>
         code === "discourse_target_challenge_response" && requiresHuman,
     ),
@@ -1087,17 +1102,17 @@ async function verifyDiscovery(): Promise<void> {
 
   await updateFixtureState({ targetInvalidResponsePage: 0 });
   const invalidListCheck = await trigger("check", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
   });
   assert.equal(
     invalidListCheck.status,
     "completed",
     JSON.stringify(invalidListCheck),
   );
-  assert.equal(invalidListCheck.result?.check?.availability, "unknown");
-  assert.deepEqual(invalidListCheck.result?.check?.scope, ["target:latest"]);
+  assert.equal(checkOutput(invalidListCheck).availability, "unknown");
+  assert.deepEqual(checkOutput(invalidListCheck).scope, ["target:latest"]);
   assert.ok(
-    invalidListCheck.result?.check?.problems.some(
+    checkOutput(invalidListCheck).problems.some(
       ({ code, requiresHuman, suggestion }) =>
         code === "discourse_topic_list_response_invalid" &&
         !requiresHuman &&
@@ -1109,10 +1124,12 @@ async function verifyDiscovery(): Promise<void> {
   await updateFixtureState({ targetInvalidResponsePage: null });
 
   const beforeCheck = await sourceState();
-  const latestCheck = await trigger("check", { targetIds: ["latest"] });
+  const latestCheck = await trigger("check", {
+    targets: linuxdoTargets("latest"),
+  });
   assert.equal(latestCheck.status, "completed", JSON.stringify(latestCheck));
-  assert.equal(latestCheck.result?.check?.availability, "available");
-  assert.deepEqual(latestCheck.result?.check?.scope, ["target:latest"]);
+  assert.equal(checkOutput(latestCheck).availability, "available");
+  assert.deepEqual(checkOutput(latestCheck).scope, ["target:latest"]);
   const afterCheck = await sourceState();
   const latestPage = afterCheck.events
     .filter(
@@ -1125,14 +1142,16 @@ async function verifyDiscovery(): Promise<void> {
   assert.ok(latestPage.path.includes("per_page=1"));
   assert.ok(afterCheck.events.length > beforeCheck.events.length);
 
-  const categoryCheck = await trigger("check", { targetIds: ["category"] });
+  const categoryCheck = await trigger("check", {
+    targets: linuxdoTargets("category"),
+  });
   assert.equal(
     categoryCheck.status,
     "completed",
     JSON.stringify(categoryCheck),
   );
-  assert.equal(categoryCheck.result?.check?.availability, "available");
-  assert.deepEqual(categoryCheck.result?.check?.scope, ["target:category"]);
+  assert.equal(checkOutput(categoryCheck).availability, "available");
+  assert.deepEqual(checkOutput(categoryCheck).scope, ["target:category"]);
   const afterCategoryCheck = await sourceState();
   const categoryCheckPage = afterCategoryCheck.events
     .filter(
@@ -1146,14 +1165,20 @@ async function verifyDiscovery(): Promise<void> {
 
   const beforeCollection = await sourceState();
   const collection = await trigger("collect", {
-    targetIds: ["latest", "category"],
+    targets: linuxdoTargets("latest", "category"),
     maxTopics: 15,
   });
   assert.equal(collection.status, "completed", JSON.stringify(collection));
-  assert.ok(collection.result?.completedScopes?.includes("target:latest"));
-  assert.ok(collection.result?.completedScopes?.includes("target:category"));
-  assert.ok(collection.result?.completedScopes?.includes("topic:2401"));
-  assert.ok(collection.result?.completedScopes?.includes("post:240005"));
+  assert.ok(
+    collection.result?.output?.completedScopes?.includes("target:latest"),
+  );
+  assert.ok(
+    collection.result?.output?.completedScopes?.includes("target:category"),
+  );
+  assert.ok(collection.result?.output?.completedScopes?.includes("topic:2401"));
+  assert.ok(
+    collection.result?.output?.completedScopes?.includes("post:240005"),
+  );
 
   const afterCollection = await sourceState();
   const newTopicRequests = afterCollection.events
@@ -1183,7 +1208,7 @@ async function verifyDiscovery(): Promise<void> {
 
   const beforePaginatedCollection = await sourceState();
   const paginatedCollection = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     maxTopics: 10,
   });
   assert.equal(
@@ -1192,7 +1217,9 @@ async function verifyDiscovery(): Promise<void> {
     JSON.stringify(paginatedCollection),
   );
   assert.ok(
-    paginatedCollection.result?.completedScopes?.includes("target:latest"),
+    paginatedCollection.result?.output?.completedScopes?.includes(
+      "target:latest",
+    ),
   );
   const afterPaginatedCollection = await sourceState();
   const paginatedEvents = afterPaginatedCollection.events.slice(
@@ -1227,7 +1254,7 @@ async function verifyDiscovery(): Promise<void> {
 
   const beforeCategoryPagination = await sourceState();
   const categoryPagination = await trigger("collect", {
-    targetIds: ["category"],
+    targets: linuxdoTargets("category"),
     maxTopics: 10,
   });
   assert.equal(
@@ -1236,7 +1263,9 @@ async function verifyDiscovery(): Promise<void> {
     JSON.stringify(categoryPagination),
   );
   assert.ok(
-    categoryPagination.result?.completedScopes?.includes("target:category"),
+    categoryPagination.result?.output?.completedScopes?.includes(
+      "target:category",
+    ),
   );
   const afterCategoryPagination = await sourceState();
   const categoryPaginationEvents = afterCategoryPagination.events.slice(
@@ -1271,7 +1300,7 @@ async function verifyDiscovery(): Promise<void> {
 
   await updateFixtureState({ targetUnavailablePage: 1 });
   const unavailableTargetCollection = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     maxTopics: 1,
   });
   assert.equal(unavailableTargetCollection.status, "failed");
@@ -1295,7 +1324,7 @@ async function verifyDiscovery(): Promise<void> {
     targetChallengePage: 1,
   });
   const challengedTargetCollection = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     maxTopics: 1,
   });
   assert.equal(challengedTargetCollection.status, "failed");
@@ -1315,7 +1344,7 @@ async function verifyDiscovery(): Promise<void> {
 
   await updateFixtureState({ targetInvalidResponsePage: 1 });
   const invalidTargetCollection = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     maxTopics: 1,
   });
   assert.equal(invalidTargetCollection.status, "failed");
@@ -1344,36 +1373,36 @@ async function verifyDiscovery(): Promise<void> {
   );
 
   const cutoff = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     createdAfter: "2026-10-27T00:00:00.000Z",
     maxTopics: 10,
   });
   assert.equal(cutoff.status, "completed", JSON.stringify(cutoff));
-  assert.ok(cutoff.result?.completedScopes?.includes("target:latest"));
-  assert.ok(cutoff.result?.completedScopes?.includes("topic:2402"));
-  assert.ok(cutoff.result?.completedScopes?.includes("post:240200"));
-  assert.ok(!cutoff.result?.completedScopes?.includes("topic:2403"));
-  assert.ok(!cutoff.result?.completedScopes?.includes("post:240300"));
+  assert.ok(cutoff.result?.output?.completedScopes?.includes("target:latest"));
+  assert.ok(cutoff.result?.output?.completedScopes?.includes("topic:2402"));
+  assert.ok(cutoff.result?.output?.completedScopes?.includes("post:240200"));
+  assert.ok(!cutoff.result?.output?.completedScopes?.includes("topic:2403"));
+  assert.ok(!cutoff.result?.output?.completedScopes?.includes("post:240300"));
 
   const limited = await trigger("collect", {
-    targetIds: ["latest", "category"],
+    targets: linuxdoTargets("latest", "category"),
     maxTopics: 1,
   });
   assert.equal(limited.status, "completed", JSON.stringify(limited));
   assert.ok(
-    limited.result?.completedScopes?.includes(
+    limited.result?.output?.completedScopes?.includes(
       "target:latest:limited:maxTopics=1",
     ),
   );
   assert.ok(
-    limited.result?.completedScopes?.includes(
+    limited.result?.output?.completedScopes?.includes(
       "target:category:not-visited:maxTopics=1",
     ),
   );
 
   await updateFixtureState({ unavailableTopicIds: [2402] });
   const failed = await trigger("collect", {
-    targetIds: ["latest"],
+    targets: linuxdoTargets("latest"),
     maxTopics: 3,
   });
   assert.equal(failed.status, "failed", JSON.stringify(failed));
@@ -1415,9 +1444,9 @@ async function verifyLogout(): Promise<void> {
 
   const check = await trigger("check", { topicId: 2401 });
   assert.equal(check.status, "completed");
-  assert.equal(check.result?.check?.availability, "unavailable");
+  assert.equal(checkOutput(check).availability, "unavailable");
   assert.ok(
-    check.result?.check?.problems.some(({ code }) => code === "login_required"),
+    checkOutput(check).problems.some(({ code }) => code === "login_required"),
   );
   const collect = await trigger("collect", { topicId: 2401 });
   assert.equal(collect.status, "failed");
@@ -1458,17 +1487,6 @@ async function main(): Promise<void> {
         "binny-discovery-profile",
         "--config",
         JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
-        "--targets",
-        JSON.stringify([
-          { id: "latest", kind: "latest" },
-          {
-            id: "category",
-            kind: "category",
-            categoryId: 42,
-            categorySlugPath: "controlled",
-          },
-          { id: "pinned", kind: "topic", topicId: 2401 },
-        ]),
       ]),
       "created",
     );

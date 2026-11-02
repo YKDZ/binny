@@ -12,10 +12,12 @@ async function checkPublicBinContract(): Promise<void> {
         check: {
           description: "检查订阅源当前是否可用",
           params: { type: "object", properties: {} },
+          output: { type: "object", properties: {} },
         },
         collect: {
           description: "轮询订阅源",
           params: { type: "object", properties: {} },
+          output: { type: "object", properties: {} },
         },
       },
       environment: {
@@ -27,7 +29,6 @@ async function checkPublicBinContract(): Promise<void> {
     },
     identityId: "personal-account",
     config: {},
-    targets: [{ url: "https://example.test/feed.xml" }],
   };
   const created = await client.bins.$post({
     json: createInput,
@@ -56,6 +57,7 @@ async function checkPublicBinContract(): Promise<void> {
   if (created.status === 201) {
     const bin = await created.json();
     void bin.sourceAdapter.actions.collect?.params.type;
+    void bin.sourceAdapter.actions.collect?.output.type;
     void bin.execution.status;
     // @ts-expect-error 执行器尚未连接，响应不会伪称在线。
     void bin.execution.isOnline;
@@ -77,7 +79,7 @@ async function checkPublicBinContract(): Promise<void> {
     param: { binId: "rss-main" },
   });
   if (lookup.status === 200) {
-    void (await lookup.json()).targets;
+    void (await lookup.json()).sourceAdapter.actions.collect.output;
   } else if (lookup.status === 404) {
     void (await lookup.json()).error.path;
   }
@@ -113,13 +115,10 @@ async function checkPublicManualRunContract(): Promise<void> {
     if (status === "cancelled") void run.stopConfirmedAt;
     void returnedRunId;
     void status;
-    if (run.result?.check !== undefined) {
-      const availability: "available" | "unavailable" | "unknown" =
-        run.result.check.availability;
-      void availability;
-      // @ts-expect-error 诊断结果只能使用公开的三类可用性。
-      void (run.result.check.availability satisfies "ready");
-    }
+    const output: unknown = run.result?.output;
+    void output;
+    // @ts-expect-error 动态动作输出不能在通用运行类型中假定具体结构。
+    void run.result?.output.availability;
     // @ts-expect-error 触发成功响应不包含错误封装。
     void run.error;
   } else if (
@@ -176,7 +175,10 @@ async function checkPublicManualRunContract(): Promise<void> {
     param: { binId, runId },
     json: {
       runtimeId: "runtime-one",
-      completion: { status: "completed", completedScopes: ["main"] },
+      completion: {
+        status: "completed",
+        output: { completedScopes: ["main"] },
+      },
     },
   });
   if (completed.status === 200) {

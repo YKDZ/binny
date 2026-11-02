@@ -55,20 +55,8 @@ registerPostgresJsonSchemaProjection(
   z.record(postgresTextSchema, z.unknown()),
 );
 
-/** 信源适配器以 JSON Schema 声明运行时才知道的配置、目标和动作参数。 */
+/** 信源适配器以 JSON Schema 声明运行时才知道的配置、动作参数和输出。 */
 export const jsonSchemaDocumentSchema = jsonObjectSchema;
-
-const targetsBaseSchema = z.custom<unknown[]>(Array.isArray, {
-  message: "目标必须是 JSON 数组。",
-});
-const targetsSchema = targetsBaseSchema.superRefine((targets, context) => {
-  validatePostgresJsonText(targets, context);
-});
-registerPostgresJsonSchemaProjection(
-  targetsBaseSchema,
-  targetsSchema,
-  z.array(z.unknown()),
-);
 
 export const sourceAdapterActionNameSchema = postgresTextSchema.regex(
   /^[a-z][a-z0-9-]*$/u,
@@ -79,6 +67,7 @@ export const sourceAdapterActionSchema = withPostgresJsonSchemaProjection(
   z.object({
     description: postgresTextSchema.min(1, "动作说明不能为空。"),
     params: jsonSchemaDocumentSchema,
+    output: jsonSchemaDocumentSchema,
   }),
 );
 
@@ -224,7 +213,6 @@ export const binCreateInputSchema = withPostgresJsonSchemaProjection(
     sourceAdapter: sourceAdapterManifestSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
-    targets: targetsSchema,
     browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
       .nullable()
       .optional(),
@@ -238,7 +226,6 @@ export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
     sourceAdapter: sourceAdapterManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
-    targets: targetsSchema,
   }),
 );
 
@@ -248,7 +235,6 @@ export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
       sourceAdapter: sourceAdapterManifestSchema.optional(),
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
-      targets: targetsSchema.optional(),
       browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
         .nullable()
         .optional(),
@@ -402,7 +388,6 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
     sourceAdapter: sourceAdapterManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
-    targets: targetsSchema,
     browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
     status: binStatusSchema,
     execution: runtimeExecutionSchema,

@@ -69,7 +69,6 @@ export const binConfigurations = pgTable(
     sourceAdapter: jsonb("source_adapter").notNull(),
     identityId: text("identity_id").notNull(),
     config: jsonb("config").notNull(),
-    targets: jsonb("targets").notNull(),
     browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
       300,
     ),
@@ -626,7 +625,6 @@ export const manualRuns = pgTable(
     action: text("action").notNull(),
     params: jsonb("params").notNull(),
     configSnapshot: jsonb("config_snapshot").notNull(),
-    targetsSnapshot: jsonb("targets_snapshot").notNull(),
     triggerType: text("trigger_type", { enum: manualRunTriggerTypes })
       .notNull()
       .default("manual"),
@@ -640,7 +638,7 @@ export const manualRuns = pgTable(
     runtimeId: text("runtime_id"),
     completedScopes: jsonb("completed_scopes").notNull().default([]),
     failure: jsonb("failure"),
-    checkResult: jsonb("check_result"),
+    output: jsonb("output"),
     cancelRequestedAt: timestamp("cancel_requested_at", {
       withTimezone: true,
       mode: "date",

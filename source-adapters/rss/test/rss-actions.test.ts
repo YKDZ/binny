@@ -13,8 +13,11 @@ import type {
   ArchiveResourceMetadata,
   SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
+import { z } from "zod";
 
 import sourceAdapter from "../src/index.ts";
+
+type RssConfig = z.output<typeof sourceAdapter.configSchema>;
 
 void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "binny-rss-test-"));
@@ -107,7 +110,7 @@ void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", 
   const resources: ArchiveResourceMetadata[] = [];
   let commitSequence = 0;
   const runId = randomUUID();
-  const context: SourceAdapterContext = {
+  const context: SourceAdapterContext<RssConfig> = {
     binId: "rss-test-bin",
     identityId: "rss-test-identity",
     runId,
@@ -120,7 +123,6 @@ void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", 
         { id: "login-main", url: `${origin}/login-rss` },
       ],
     },
-    targets: [],
     signal: new AbortController().signal,
     archive: {
       async submit(input) {

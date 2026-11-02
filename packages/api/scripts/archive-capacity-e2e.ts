@@ -107,8 +107,16 @@ const capacitySourceAdapter = sourceAdapterManifestSchema.parse({
   version: "1.0.0",
   configSchema: { type: "object", properties: {} },
   actions: {
-    check: { description: "检查容量验收配置。", params: { type: "object" } },
-    collect: { description: "提交容量验收资料。", params: { type: "object" } },
+    check: {
+      description: "检查容量验收配置。",
+      params: { type: "object" },
+      output: { type: "object" },
+    },
+    collect: {
+      description: "提交容量验收资料。",
+      params: { type: "object" },
+      output: { type: "object" },
+    },
   },
   environment: {
     browser: { required: false, profileReuseAfterRestart: false },
@@ -206,7 +214,6 @@ async function ensureCapacityBin(
       sourceAdapter: capacitySourceAdapter,
       identityId: "capacity26-test-identity",
       config: {},
-      targets: [],
     },
   });
   if (created.status !== 201) {

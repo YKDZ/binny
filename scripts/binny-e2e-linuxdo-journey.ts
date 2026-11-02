@@ -20,12 +20,12 @@ export type LinuxdoCommandRunner = (
 export type LinuxdoManualRun = {
   readonly runId: string;
   readonly status: "queued" | "running" | "completed" | "failed";
-  readonly completedScopes: readonly string[];
   readonly result?: {
-    readonly check?: {
-      readonly availability: "available" | "unavailable" | "unknown";
-      readonly scope: readonly string[];
-      readonly problems: readonly {
+    readonly output?: {
+      readonly completedScopes?: readonly string[];
+      readonly availability?: "available" | "unavailable" | "unknown";
+      readonly scope?: readonly string[];
+      readonly problems?: readonly {
         readonly code: string;
         readonly requiresHuman: boolean;
         readonly suggestion?: string;
@@ -43,6 +43,21 @@ export type LinuxdoManualRun = {
     }[];
   };
 };
+
+type LinuxdoCheckOutput = {
+  readonly availability: "available" | "unavailable" | "unknown";
+  readonly scope: readonly string[];
+  readonly problems: readonly {
+    readonly code: string;
+    readonly requiresHuman: boolean;
+    readonly suggestion?: string;
+  }[];
+};
+
+function checkOutput(run: LinuxdoManualRun): LinuxdoCheckOutput {
+  assert.ok(run.result?.output !== undefined);
+  return run.result.output as LinuxdoCheckOutput;
+}
 
 export type LinuxdoBrowserSession = {
   readonly sessionId: string;
@@ -324,16 +339,16 @@ export async function linuxdoUserJourney(input: {
   });
   assert.equal(unavailableCheck.status, "completed");
   assert.equal(
-    unavailableCheck.result?.check?.availability,
+    checkOutput(unavailableCheck).availability,
     "unavailable",
     JSON.stringify({
-      check: unavailableCheck.result?.check,
+      output: unavailableCheck.result?.output,
       sourceEvents: (await readSourceState(input.sourceControlUrl)).events,
     }),
   );
-  assert.deepEqual(unavailableCheck.result?.check?.scope, [topicScope]);
+  assert.deepEqual(checkOutput(unavailableCheck).scope, [topicScope]);
   assert.ok(
-    unavailableCheck.result?.check?.problems.some(
+    checkOutput(unavailableCheck).problems.some(
       ({ code, requiresHuman }) => code === "login_required" && requiresHuman,
     ),
   );
@@ -442,10 +457,10 @@ export async function linuxdoUserJourney(input: {
   });
   assert.equal(authenticatedCheck.status, "completed");
   assert.equal(
-    authenticatedCheck.result?.check?.availability,
+    checkOutput(authenticatedCheck).availability,
     "available",
     JSON.stringify({
-      check: authenticatedCheck.result?.check,
+      output: authenticatedCheck.result?.output,
       recentSourceEvents: (
         await readSourceState(input.sourceControlUrl)
       ).events.slice(-12),

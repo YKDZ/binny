@@ -2,8 +2,6 @@ import {
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
-  defineSourceAdapterCheckAction,
-  type SourceAdapterCheckContext,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { chromium, type Page } from "playwright-core";
@@ -13,6 +11,22 @@ const configSchema = z.object({ baseUrl: z.url() });
 const collectParamsSchema = z.object({
   gateId: z.string().uuid().optional(),
 });
+type BrowserConfig = z.output<typeof configSchema>;
+const diagnosticOutputSchema = z.object({
+  availability: z.enum(["available", "unavailable", "unknown"]),
+  scope: z.array(z.string()),
+  basis: z.string(),
+  problems: z.array(
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      impact: z.string(),
+      suggestion: z.string(),
+      requiresHuman: z.boolean(),
+    }),
+  ),
+});
+const collectOutputSchema = z.object({ completedScopes: z.array(z.string()) });
 
 async function withSharedPage<T>(
   context: Pick<SourceAdapterContext, "browser">,
@@ -44,9 +58,10 @@ async function withSharedPage<T>(
   }
 }
 
-function baseUrlFrom(context: Pick<SourceAdapterContext, "config">): URL {
-  const { baseUrl } = configSchema.parse(context.config);
-  return new URL(baseUrl);
+function baseUrlFrom(
+  context: Pick<SourceAdapterContext<BrowserConfig>, "config">,
+): URL {
+  return new URL(context.config.baseUrl);
 }
 
 function isAuthenticated(page: Page): Promise<boolean> {
@@ -65,10 +80,11 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema,
   actions: {
-    check: defineSourceAdapterCheckAction({
+    check: defineSourceAdapterAction(configSchema, {
       description: "检查持久浏览器是否能读取受控保护页面。",
       params: z.object({}),
-      async execute(context: SourceAdapterCheckContext) {
+      output: diagnosticOutputSchema,
+      async execute(context) {
         const pageResult = await withSharedPage(context, async (page) => {
           const response = await page.goto(
             new URL("protected", baseUrlFrom(context)).href,
@@ -81,14 +97,14 @@ export const sourceAdapter = defineSourceAdapter({
         });
         if (pageResult.authenticated) {
           return {
-            availability: "available",
+            availability: "available" as const,
             scope: ["受控保护页面"],
             basis: "持久浏览器已读取受控保护页面。",
             problems: [],
           };
         }
         return {
-          availability: "unavailable",
+          availability: "unavailable" as const,
           scope: ["受控保护页面"],
           basis: `受控登录页返回 HTTP ${String(pageResult.status)}。`,
           problems: [
@@ -103,10 +119,11 @@ export const sourceAdapter = defineSourceAdapter({
         };
       },
     }),
-    collect: defineSourceAdapterAction({
+    collect: defineSourceAdapterAction(configSchema, {
       description: "读取受控保护页面并通过正式 SDK 提交归档。",
       params: collectParamsSchema,
-      async execute(context: SourceAdapterContext, params) {
+      output: collectOutputSchema,
+      async execute(context: SourceAdapterContext<BrowserConfig>, params) {
         const baseUrl = baseUrlFrom(context);
         const result = await withSharedPage(
           context,

@@ -11,8 +11,6 @@ import {
   type ArchiveResourceReference,
   type ArchiveSubmissionInput,
   type ManualRunFailure,
-  type ManualRunCheckInput,
-  postgresTextSchema,
 } from "@binny/contracts";
 import { z } from "zod";
 
@@ -114,13 +112,12 @@ export type SourceAdapterBrowserConnection = z.infer<
   typeof sourceAdapterBrowserConnectionSchema
 >;
 
-export interface SourceAdapterContext {
+export interface SourceAdapterContext<TConfig = unknown> {
   readonly binId: string;
   readonly identityId: string;
   readonly runId: string;
   readonly sourceAdapterVersion: string;
-  readonly config: unknown;
-  readonly targets: readonly unknown[];
+  readonly config: TConfig;
   readonly signal: AbortSignal;
   readonly browser?: SourceAdapterBrowserConnection;
   readonly archive: {
@@ -131,63 +128,53 @@ export interface SourceAdapterContext {
   };
 }
 
-export type SourceAdapterCheckContext = Omit<
-  SourceAdapterContext,
-  "archive" | "resources"
->;
-
 export type SourceAdapterEnvironment = SourceAdapterManifest["environment"];
 
 export interface SourceAdapterAction<
+  TConfig extends z.ZodType = z.ZodType,
   TParams extends z.ZodType = z.ZodType,
-  TContext = SourceAdapterContext,
-  TResult = unknown,
+  TOutput extends z.ZodType = z.ZodType,
 > {
   readonly description: string;
   readonly params: TParams;
-  execute(context: TContext, params: z.output<TParams>): Promise<TResult>;
+  readonly output: TOutput;
+  execute(
+    context: SourceAdapterContext<z.output<TConfig>>,
+    params: z.output<TParams>,
+  ): Promise<z.input<TOutput>>;
+}
+
+/** 用同一份配置声明、参数 schema 与输出 schema 定义一个可执行动作。 */
+export function defineSourceAdapterAction<
+  TConfig extends z.ZodType,
+  TParams extends z.ZodType,
+  TOutput extends z.ZodType,
+>(
+  configSchema: TConfig,
+  action: {
+    readonly description: string;
+    readonly params: TParams;
+    readonly output: TOutput;
+    execute(
+      context: SourceAdapterContext<z.output<TConfig>>,
+      params: z.output<TParams>,
+    ): Promise<z.input<TOutput>>;
+  },
+): SourceAdapterAction<TConfig, TParams, TOutput> {
+  void configSchema;
+  return action;
 }
 
 type SourceAdapterActionShape = {
   readonly description: string;
   readonly params: z.ZodType;
+  readonly output: z.ZodType;
   execute(context: never, params: never): Promise<unknown>;
 };
 
-export type SourceAdapterActionResult = {
-  readonly completedScopes: readonly string[];
-};
-
 const sourceAdapterActionErrorType = "binny.source-adapter-action-error";
-
-export const sourceAdapterActionResultSchema = z
-  .object({ completedScopes: z.array(postgresTextSchema) })
-  .strict();
-
-/** 将单个动作与其 Zod 参数输出类型关联，供清单声明保持编译期类型。 */
-export function defineSourceAdapterAction<TParams extends z.ZodType>(
-  action: SourceAdapterAction<TParams, SourceAdapterContext, unknown>,
-): SourceAdapterAction<TParams, SourceAdapterContext, unknown> {
-  return action;
-}
-
-/** 声明只能读取运行环境、不能提交归档的可用性检查动作。 */
-export function defineSourceAdapterCheckAction<TParams extends z.ZodType>(
-  action: SourceAdapterAction<
-    TParams,
-    SourceAdapterCheckContext,
-    ManualRunCheckInput
-  >,
-): SourceAdapterAction<
-  TParams,
-  SourceAdapterCheckContext,
-  ManualRunCheckInput
-> {
-  return action;
-}
-
-export type SourceAdapterRunContext = Omit<
-  SourceAdapterContext,
+export type SourceAdapterRunContext<TConfig = unknown> = Omit<
+  SourceAdapterContext<TConfig>,
   | "archive"
   | "resources"
   | "binId"
@@ -242,10 +229,10 @@ export function sourceAdapterActionError(
 }
 
 /** 给动作提供固定 run/bin/version 的正式 API 归档提交能力。 */
-export function createSourceAdapterContext(
+export function createSourceAdapterContext<TConfig>(
   client: SourceAdapterApiClient,
-  context: SourceAdapterRunContext,
-): SourceAdapterContext {
+  context: SourceAdapterRunContext<TConfig>,
+): SourceAdapterContext<TConfig> {
   return {
     ...context,
     archive: {
@@ -302,11 +289,7 @@ export interface SourceAdapterDefinition<
     readonly check: SourceAdapterActionShape;
     readonly collect: SourceAdapterActionShape;
   } = Readonly<Record<string, SourceAdapterAction>> & {
-    readonly check: SourceAdapterAction<
-      z.ZodType,
-      SourceAdapterCheckContext,
-      ManualRunCheckInput
-    >;
+    readonly check: SourceAdapterAction;
     readonly collect: SourceAdapterAction;
   },
 > {
@@ -319,56 +302,52 @@ export interface SourceAdapterDefinition<
 }
 
 type TypedSourceAdapterActions<
-  TActions extends Readonly<Record<string, SourceAdapterActionShape>> & {
-    readonly check: SourceAdapterActionShape;
-    readonly collect: SourceAdapterActionShape;
+  TConfig extends z.ZodType,
+  TActions extends Readonly<Record<string, SourceAdapterActionSchema>> & {
+    readonly check: SourceAdapterActionSchema;
+    readonly collect: SourceAdapterActionSchema;
   },
 > = {
-  readonly [Name in keyof TActions]: Name extends "check"
-    ? SourceAdapterAction<
-        TActions[Name]["params"],
-        SourceAdapterCheckContext,
-        ManualRunCheckInput
-      >
-    : SourceAdapterAction<
-        TActions[Name]["params"],
-        SourceAdapterContext,
-        unknown
-      >;
+  readonly [Name in keyof TActions]: SourceAdapterAction<
+    TConfig,
+    TActions[Name]["params"],
+    TActions[Name]["output"]
+  >;
+};
+
+type SourceAdapterActionSchema = {
+  readonly description: string;
+  readonly params: z.ZodType;
+  readonly output: z.ZodType;
 };
 
 export function defineSourceAdapter<
   TConfig extends z.ZodType,
-  TActions extends Readonly<Record<string, SourceAdapterActionShape>> & {
-    readonly check: SourceAdapterActionShape;
-    readonly collect: SourceAdapterActionShape;
+  TActions extends Readonly<Record<string, SourceAdapterActionSchema>> & {
+    readonly check: SourceAdapterActionSchema;
+    readonly collect: SourceAdapterActionSchema;
   },
->(
-  definition: Omit<
-    SourceAdapterDefinition<TConfig, TypedSourceAdapterActions<TActions>>,
-    "actions"
-  > & {
-    readonly actions: TypedSourceAdapterActions<TActions>;
-  },
-): SourceAdapterDefinition<TConfig, TypedSourceAdapterActions<TActions>> {
+>(definition: {
+  readonly id: string;
+  readonly version: string;
+  readonly description?: string;
+  readonly environment: SourceAdapterEnvironment;
+  readonly configSchema: TConfig;
+  readonly actions: TActions & TypedSourceAdapterActions<TConfig, TActions>;
+}): SourceAdapterDefinition<
+  TConfig,
+  TActions & TypedSourceAdapterActions<TConfig, TActions>
+> {
   return definition;
 }
 
-export function sourceAdapterManifest<
-  TConfig extends z.ZodType,
-  TActions extends Readonly<Record<string, SourceAdapterActionShape>> & {
-    readonly check: SourceAdapterActionShape;
-    readonly collect: SourceAdapterActionShape;
-  },
->(
-  definition: SourceAdapterDefinition<
-    TConfig,
-    TypedSourceAdapterActions<TActions>
-  >,
+export function sourceAdapterManifest(
+  definition: SourceAdapterDefinition,
 ): SourceAdapterManifest {
   const manifestAction = (action: SourceAdapterActionShape) => ({
     description: action.description,
     params: z.toJSONSchema(action.params, { io: "input" }),
+    output: z.toJSONSchema(action.output, { io: "output" }),
   });
   const actions = Object.fromEntries(
     Object.entries(definition.actions).map(([name, action]) => [

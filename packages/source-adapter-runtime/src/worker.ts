@@ -2,13 +2,12 @@ import { pathToFileURL } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  manualRunCheckInputSchema,
+  archiveJsonValueSchema,
   manualRunExecutionSchema,
   type ManualRunCompletion,
   type ManualRunExecution,
 } from "@binny/contracts";
 import {
-  sourceAdapterActionResultSchema,
   createSourceAdapterContext,
   sourceAdapterManifest,
   isSourceAdapterActionError,
@@ -89,6 +88,28 @@ async function executeRun(
     };
   }
 
+  const configured = activeSourceAdapter.configSchema.safeParse(run.config);
+  if (!configured.success) {
+    const issue = configured.error.issues[0];
+    return {
+      status: "failed",
+      completedScopes: [],
+      error: {
+        code: "invalid_configuration",
+        message: "本次运行配置不符合当前信源适配器声明。",
+        impact: "本次运行未执行。",
+        ...(issue === undefined
+          ? {}
+          : {
+              path: issue.path.map((part) =>
+                typeof part === "symbol" ? String(part) : part,
+              ),
+            }),
+        requiresHuman: false,
+      },
+    };
+  }
+
   const parsed = action.params.safeParse(run.params);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -119,45 +140,41 @@ async function executeRun(
       identityId: run.identityId,
       runId: run.runId,
       sourceAdapterVersion: run.sourceAdapterVersion,
-      config: run.config,
-      targets: run.targets,
+      config: configured.data,
       signal: actionAbort.signal,
       ...(browser === undefined ? {} : { browser }),
     };
-    if (run.action === "check") {
-      const result = await activeSourceAdapter.actions.check.execute(
-        context,
-        parsed.data,
-      );
-      const checked = manualRunCheckInputSchema.safeParse(result);
-      if (!checked.success) {
-        return {
-          status: "failed",
-          completedScopes: [],
-          error: {
-            code: "check_result_invalid",
-            message: "可用性检查没有返回有效诊断结果。",
-            impact: "本次检查没有完成。",
-            suggestion: "修正检查结果后重新触发 check。",
-            requiresHuman: false,
-          },
-        };
-      }
-      return {
-        status: "completed",
-        completedScopes: [],
-        check: checked.data,
-      };
-    }
     const result = await action.execute(
       createSourceAdapterContext(client, context),
       parsed.data,
     );
-    const checked = sourceAdapterActionResultSchema.safeParse(result);
-    return {
-      status: "completed",
-      completedScopes: checked.success ? checked.data.completedScopes : [],
-    };
+    const checked = action.output.safeParse(result);
+    if (!checked.success) {
+      return {
+        status: "failed",
+        completedScopes: [],
+        error: {
+          code: "invalid_action_output",
+          message: "信源适配器动作输出不符合声明。",
+          impact: "本次运行失败；已提交的归档资料仍然保留。",
+          requiresHuman: false,
+        },
+      };
+    }
+    const jsonOutput = archiveJsonValueSchema.safeParse(checked.data);
+    if (!jsonOutput.success) {
+      return {
+        status: "failed",
+        completedScopes: [],
+        error: {
+          code: "invalid_action_output",
+          message: "信源适配器动作输出不能通过 JSON 接口传递。",
+          impact: "本次运行失败；已提交的归档资料仍然保留。",
+          requiresHuman: false,
+        },
+      };
+    }
+    return { status: "completed", output: jsonOutput.data };
   } catch (error) {
     const completedScopes =
       isSourceAdapterActionError(error) && Array.isArray(error.completedScopes)
