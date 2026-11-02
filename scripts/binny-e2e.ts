@@ -5153,7 +5153,14 @@ async function manualRunControllerPartitionStep(): Promise<void> {
 
     const attached = await run(
       "docker",
-      ["network", "connect", networkName, containerId],
+      [
+        "network",
+        "connect",
+        "--alias",
+        "runtime-fifteen-two",
+        networkName,
+        containerId,
+      ],
       { env: composeEnvironment() },
     );
     assert.equal(attached.code, 0, attached.stderr);
@@ -5192,7 +5199,14 @@ async function manualRunControllerPartitionStep(): Promise<void> {
     if (!reconnected) {
       const attached = await run(
         "docker",
-        ["network", "connect", networkName, containerId],
+        [
+          "network",
+          "connect",
+          "--alias",
+          "runtime-fifteen-two",
+          networkName,
+          containerId,
+        ],
         { env: composeEnvironment() },
       );
       if (attached.code !== 0 && !attached.stderr.includes("already exists"))
