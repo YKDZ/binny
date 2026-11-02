@@ -477,6 +477,15 @@ async function loadManifest(
 
 type QueryMeasurement = CapacityReport["measurements"][number];
 
+function capacityNamespaceFilter(): NonNullable<ArchiveSearchRequest["where"]> {
+  return {
+    type: "field",
+    field: "sourceKey.namespace",
+    operator: "eq",
+    value: sourceNamespace,
+  };
+}
+
 async function measureSearch(
   client: ArchiveClient,
   name: string,
@@ -523,12 +532,7 @@ function itemKeyFilter(ordinal: number) {
   return {
     type: "and" as const,
     conditions: [
-      {
-        type: "field" as const,
-        field: "sourceKey.namespace" as const,
-        operator: "eq" as const,
-        value: sourceNamespace,
-      },
+      capacityNamespaceFilter(),
       {
         type: "field" as const,
         field: "sourceKey.key" as const,
@@ -558,6 +562,7 @@ async function runSearchMatrix(
   const chinese = await measureSearch(client, "中文短串", {
     scope: { kind: "current", binId },
     text: { kind: "literal", value: "容量命中" },
+    where: capacityNamespaceFilter(),
     select: ["sourceKey"],
     orderBy: [{ field: "sourceKey.key", direction: "asc" }],
     limit,
@@ -573,6 +578,7 @@ async function runSearchMatrix(
   const broadRegexInput: ArchiveSearchRequest = {
     scope: { kind: "current", binId },
     text: { kind: "regex", pattern: ".*" },
+    where: capacityNamespaceFilter(),
     select: ["sourceKey"],
     orderBy: [{ field: "sourceKey.key", direction: "asc" }],
     limit,
@@ -585,13 +591,19 @@ async function runSearchMatrix(
   const jsonRange = await measureSearch(client, "JSON 数值范围与排序", {
     scope: { kind: "current", binId },
     where: {
-      type: "json",
-      field: "properties",
-      path: ["capacityOrdinal"],
-      valueType: "number",
-      operator: "between",
-      lower: Math.floor(shape.itemCount / 4),
-      upper: Math.floor((shape.itemCount * 3) / 4),
+      type: "and",
+      conditions: [
+        capacityNamespaceFilter(),
+        {
+          type: "json",
+          field: "properties",
+          path: ["capacityOrdinal"],
+          valueType: "number",
+          operator: "between",
+          lower: Math.floor(shape.itemCount / 4),
+          upper: Math.floor((shape.itemCount * 3) / 4),
+        },
+      ],
     },
     select: ["sourceKey"],
     orderBy: [
@@ -677,6 +689,7 @@ async function measureHistoricalAggregation(
       binId,
       asOf: manifest.historicalAsOf,
     },
+    where: capacityNamespaceFilter(),
     unit: "observation",
     groupBy: [
       {
