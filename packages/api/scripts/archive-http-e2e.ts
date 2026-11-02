@@ -2784,7 +2784,7 @@ async function verifySearchRoute(
         },
       },
       message: "字段值不符合要求。",
-      issuePath: ["where"],
+      issuePath: ["where", "valueType"],
     },
     {
       path: "/archives/search",
