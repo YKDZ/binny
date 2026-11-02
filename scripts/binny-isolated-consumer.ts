@@ -216,6 +216,45 @@ export async function createIsolatedCliConsumer({
       }
     }
 
+    await runChecked(
+      "pnpm",
+      [
+        "--filter",
+        "@binny/api",
+        "run",
+        "prepare:client-consumer",
+        consumerDirectory,
+      ],
+      repositoryRoot,
+    );
+    await writeFile(
+      path.join(consumerDirectory, "tsconfig.json"),
+      JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            strict: true,
+            // 类型检查只走已安装包的类型与默认导出，不启用工作区 source 条件。
+            customConditions: [],
+            rootDir: ".",
+            outDir: "dist-consumer",
+            skipLibCheck: false,
+            types: [],
+          },
+          include: ["client-types.ts"],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    await runChecked(
+      path.join(repositoryRoot, "node_modules/.bin/tsc"),
+      ["-p", "tsconfig.json", "--noEmit", "--pretty", "false"],
+      consumerDirectory,
+    );
+
     const offlineEnvironment = consumerEnvironment("http://127.0.0.1:1");
     const version = await runChecked(
       binary,

@@ -70,6 +70,7 @@
         "packages/api/package.json",
         "packages/api/src/**",
         "packages/api/scripts/**",
+        "packages/api/test-consumer/**",
         "packages/binny/package.json",
         "packages/binny/src/**",
         "packages/source-adapter-sdk/scripts/**",

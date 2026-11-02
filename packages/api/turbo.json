@@ -38,6 +38,12 @@
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
+    },
+    "prepare:client-consumer": {
+      "inputs": ["test-consumer/**", "scripts/prepare-client-consumer.ts"],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
     }
   }
 }

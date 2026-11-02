@@ -1,0 +1,774 @@
+import { createApiClient } from "@binny/api/client";
+
+async function checkPublicBinContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const createInput = {
+    id: "rss-main",
+    sourceAdapter: {
+      id: "rss",
+      version: "1.0.0",
+      configSchema: { type: "object", properties: {} },
+      actions: {
+        check: {
+          description: "检查订阅源当前是否可用",
+          params: { type: "object", properties: {} },
+        },
+        collect: {
+          description: "轮询订阅源",
+          params: { type: "object", properties: {} },
+        },
+      },
+      environment: {
+        browser: {
+          required: false,
+          profileReuseAfterRestart: false,
+        },
+      },
+    },
+    identityId: "personal-account",
+    config: {},
+    targets: [{ url: "https://example.test/feed.xml" }],
+  };
+  const created = await client.bins.$post({
+    json: createInput,
+  });
+
+  const manifestWithoutCheck = {
+    ...createInput,
+    sourceAdapter: {
+      ...createInput.sourceAdapter,
+      actions: { collect: createInput.sourceAdapter.actions.collect },
+    },
+  };
+  // @ts-expect-error 信源适配器清单必须声明独立的 check 动作。
+  void client.bins.$post({ json: manifestWithoutCheck });
+
+  const manifestWithoutCollect = {
+    ...createInput,
+    sourceAdapter: {
+      ...createInput.sourceAdapter,
+      actions: { check: createInput.sourceAdapter.actions.check },
+    },
+  };
+  // @ts-expect-error 信源适配器清单必须声明独立的 collect 动作。
+  void client.bins.$post({ json: manifestWithoutCollect });
+
+  if (created.status === 201) {
+    const bin = await created.json();
+    void bin.sourceAdapter.actions.collect?.params.type;
+    void bin.execution.status;
+    // @ts-expect-error 执行器尚未连接，响应不会伪称在线。
+    void bin.execution.isOnline;
+    // @ts-expect-error 标识响应字段的类型是字符串。
+    const invalidBinId: number = bin.id;
+    void invalidBinId;
+  } else if (created.status === 400 || created.status === 409) {
+    const failure = await created.json();
+    void failure.error.code;
+    void failure.error.message;
+    // @ts-expect-error 错误响应不包含未声明字段。
+    void failure.error.detail;
+    // @ts-expect-error 错误代码使用字符串字面量，不是数字。
+    const invalidErrorCode: number = failure.error.code;
+    void invalidErrorCode;
+  }
+
+  const lookup = await client.bins[":binId"].$get({
+    param: { binId: "rss-main" },
+  });
+  if (lookup.status === 200) {
+    void (await lookup.json()).targets;
+  } else if (lookup.status === 404) {
+    void (await lookup.json()).error.path;
+  }
+
+  // @ts-expect-error 未知路由不能被客户端接受。
+  void client.unknown.$get();
+  // @ts-expect-error 此路由没有 DELETE 方法。
+  void client.bins.$delete();
+  // @ts-expect-error binId 是必填路径参数。
+  void client.bins[":binId"].$get({ param: {} });
+  // @ts-expect-error 请求字段必须符合公开创建契约。
+  void client.bins.$post({ json: { id: 42 } });
+  // @ts-expect-error 已声明字段类型错误，即使其他字段都合法也不能通过。
+  void client.bins.$post({ json: { ...createInput, id: 42 } });
+}
+
+void checkPublicBinContract;
+
+async function checkPublicManualRunContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "rss-main";
+  const runId = "750e8400-e29b-41d4-a716-446655440000";
+
+  const triggered = await client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: { action: "collect", params: { limit: 20 } },
+  });
+  if (triggered.status === 202) {
+    const run = await triggered.json();
+    const returnedRunId: string = run.runId;
+    const status = run.status;
+    if (status === "cancelling") void run.cancellationRequestedAt;
+    if (status === "cancelled") void run.stopConfirmedAt;
+    void returnedRunId;
+    void status;
+    if (run.result?.check !== undefined) {
+      const availability: "available" | "unavailable" | "unknown" =
+        run.result.check.availability;
+      void availability;
+      // @ts-expect-error 诊断结果只能使用公开的三类可用性。
+      void (run.result.check.availability satisfies "ready");
+    }
+    // @ts-expect-error 触发成功响应不包含错误封装。
+    void run.error;
+  } else if (
+    triggered.status === 400 ||
+    triggered.status === 404 ||
+    triggered.status === 409
+  ) {
+    const failure = await triggered.json();
+    void failure.error.code;
+    // @ts-expect-error 错误响应不包含运行标识。
+    void failure.runId;
+  }
+
+  const claimed = await client.bins[":binId"].runtime.runs.claim.$post({
+    param: { binId },
+    json: { runtimeId: "runtime-one" },
+  });
+  if (claimed.status === 200) {
+    const result = await claimed.json();
+    if (result.run !== null) {
+      const claimedRunId: string = result.run.runId;
+      const params: object = result.run.params;
+      void claimedRunId;
+      void params;
+    }
+  } else if (
+    claimed.status === 400 ||
+    claimed.status === 404 ||
+    claimed.status === 409
+  ) {
+    const failure = await claimed.json();
+    void failure.error.message;
+  }
+
+  void client.bins[":binId"].runtime.runs.claim.$post({
+    param: { binId },
+    // @ts-expect-error 其他字段合法时，领取请求仍必须提供 runtimeId。
+    json: {},
+  });
+  void client.bins[":binId"].runs.$post({
+    param: { binId },
+    // @ts-expect-error 动作合法时，params 仍必须为 JSON 对象。
+    json: { action: "collect", params: ["invalid"] },
+  });
+  void client.bins[":binId"].runs.$post({
+    // @ts-expect-error 触发运行必须提供 binId 路径参数。
+    param: {},
+    json: { action: "collect", params: { limit: 20 } },
+  });
+
+  const completed = await client.bins[":binId"].runtime.runs[
+    ":runId"
+  ].complete.$post({
+    param: { binId, runId },
+    json: {
+      runtimeId: "runtime-one",
+      completion: { status: "completed", completedScopes: ["main"] },
+    },
+  });
+  if (completed.status === 200) {
+    const run = await completed.json();
+    const completedRunId: string = run.runId;
+    void completedRunId;
+  } else if (
+    completed.status === 400 ||
+    completed.status === 404 ||
+    completed.status === 409
+  ) {
+    void (await completed.json()).error.code;
+  }
+}
+
+async function checkPublicManualRunCancellationContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const response = await client.bins[":binId"].runs[":runId"].cancel.$post({
+    param: {
+      binId: "rss-main",
+      runId: "750e8400-e29b-41d4-a716-446655440000",
+    },
+  });
+  if (response.status === 200) {
+    const run = await response.json();
+    if (run.status === "cancelling") void run.cancellationRequestedAt;
+    if (run.status === "cancelled") void run.stopConfirmedAt;
+  } else if (
+    response.status === 400 ||
+    response.status === 404 ||
+    response.status === 409
+  ) {
+    const error = await response.json();
+    void error.error.code;
+    // @ts-expect-error 取消失败响应不能读取运行数据。
+    void error.runId;
+  }
+}
+
+void checkPublicManualRunCancellationContract;
+
+void checkPublicManualRunContract;
+
+async function checkPublicScheduleContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "rss-main";
+  const scheduleId = "650e8400-e29b-41d4-a716-446655440000";
+  const createInput = {
+    expression: "0 */15 * * * *",
+    timeZone: "Europe/London",
+    action: "collect",
+    params: { feedIds: ["rss-main"] },
+  };
+
+  const created = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: createInput,
+  });
+  if (created.status === 201) {
+    const schedule = await created.json();
+    const timezone: string = schedule.timeZone;
+    const nextDueAt: string = schedule.nextDueAt;
+    void timezone;
+    void nextDueAt;
+    // @ts-expect-error schedule output has no undeclared action alias.
+    void schedule.operation;
+  } else if (
+    created.status === 400 ||
+    created.status === 404 ||
+    created.status === 409
+  ) {
+    const error = await created.json();
+    void error.error.code;
+    // @ts-expect-error schedule errors do not expose a created schedule.
+    void error.scheduleId;
+  }
+
+  void client.bins[":binId"].schedules.$post({
+    param: { binId },
+    // @ts-expect-error schedule parameters must be a JSON object.
+    json: { ...createInput, params: ["invalid"] },
+  });
+
+  const listed = await client.bins[":binId"].schedules.$get({
+    param: { binId },
+  });
+  if (listed.status === 200) {
+    void (await listed.json()).schedules;
+  } else if (listed.status === 404) {
+    void (await listed.json()).error.code;
+  }
+
+  const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
+    param: { binId, scheduleId },
+    json: { expression: "0 30 2 * * *", timeZone: "Europe/London" },
+  });
+  if (updated.status === 200) {
+    void (await updated.json()).nextDueAt;
+  } else if (
+    updated.status === 400 ||
+    updated.status === 404 ||
+    updated.status === 409
+  ) {
+    void (await updated.json()).error.message;
+  }
+
+  const disabled = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].disable.$post({
+    param: { binId, scheduleId },
+  });
+  if (disabled.status === 200) void (await disabled.json()).enabled;
+  else if (disabled.status === 404) void (await disabled.json()).error.code;
+
+  const removed = await client.bins[":binId"].schedules[":scheduleId"].$delete({
+    param: { binId, scheduleId },
+  });
+  if (removed.status === 200) void (await removed.json()).scheduleId;
+  else if (removed.status === 404) void (await removed.json()).error.code;
+}
+
+void checkPublicScheduleContract;
+
+async function checkPublicArchiveContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+
+  const revisionDiffResponse = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: "650e8400-e29b-41d4-a716-446655440000",
+      secondRevisionId: "750e8400-e29b-41d4-a716-446655440000",
+    },
+  });
+  if (revisionDiffResponse.status === 200) {
+    const revisionDiff = await revisionDiffResponse.json();
+    void (revisionDiff.fields.body.status satisfies "unchanged" | "changed");
+    void (revisionDiff.fields.properties.status satisfies
+      | "unchanged"
+      | "changed");
+    void (revisionDiff.resources.added satisfies readonly string[]);
+    void (revisionDiff.hasChanges satisfies boolean);
+    // @ts-expect-error hasChanges 不能当作文本输出。
+    void (revisionDiff.hasChanges satisfies string);
+    // @ts-expect-error 差异响应不暴露任意 JSON Patch 操作。
+    void revisionDiff.operations;
+  } else if (
+    revisionDiffResponse.status === 400 ||
+    revisionDiffResponse.status === 404 ||
+    revisionDiffResponse.status === 409
+  ) {
+    const revisionDiffError = await revisionDiffResponse.json();
+    void (revisionDiffError.error.code satisfies string);
+    // @ts-expect-error 错误代码不是任意类型或数字。
+    void (revisionDiffError.error.code satisfies number);
+    // @ts-expect-error 归档差异错误不包含成功响应的字段集合。
+    void revisionDiffError.fields;
+  }
+
+  void client.archives.revisions[":firstRevisionId"].diff[
+    ":secondRevisionId"
+  ].$get({
+    // @ts-expect-error 两个版本标识都是必填路径参数。
+    param: { firstRevisionId: "650e8400-e29b-41d4-a716-446655440000" },
+  });
+
+  const submission = await client.archives.$post({
+    json: {
+      requestId: "rss:request-7",
+      binId: "rss-main",
+      items: [
+        {
+          sourceKey: { namespace: "rss.example", key: "entry/7" },
+          body: { text: "正文" },
+          capture: {
+            scope: { feed: "main" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+      relations: [],
+    },
+  });
+
+  if (submission.status === 201) {
+    const commit = await submission.json();
+    void commit.archiveSeq;
+    void commit.items[0]?.revisionId;
+    void commit.relations[0]?.relationId;
+  } else if (
+    submission.status === 400 ||
+    submission.status === 404 ||
+    submission.status === 409
+  ) {
+    const failure = await submission.json();
+    void failure.error.code;
+    void failure.error.path;
+  }
+
+  const item = await client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: {},
+  });
+  if (item.status === 200) {
+    void (await item.json()).views[0]?.state.body?.text;
+  } else if (
+    item.status === 400 ||
+    item.status === 404 ||
+    item.status === 409
+  ) {
+    void (await item.json()).error.code;
+  }
+
+  const deletion = await client.archives.items[":itemId"].$delete({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (deletion.status === 200) {
+    const deletionResult = await deletion.json();
+    void (deletionResult.deletedItemIds satisfies readonly string[]);
+    // @ts-expect-error 删除结果中的条目标识为字符串。
+    void (deletionResult.deletedItemIds satisfies readonly number[]);
+  }
+
+  const historicalItem = await client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", asOf: "12" },
+  });
+  if (historicalItem.status === 200) {
+    const snapshotSequence: string = (await historicalItem.json()).snapshot
+      .asOf;
+    void snapshotSequence;
+  }
+
+  const timeline = await client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { binId: "rss-main", limit: "20" },
+  });
+  if (timeline.status === 200) {
+    const page = await timeline.json();
+    void page.nextCursor;
+    const event = page.events[0];
+    if (event?.kind === "item") void event.sourceModifiedAt;
+    if (event?.kind === "relation" && event.status === "observed")
+      void event.state.cascade;
+    // @ts-expect-error 时间线事件不提供状态哈希字段。
+    void event?.stateHash;
+  } else if (
+    timeline.status === 400 ||
+    timeline.status === 404 ||
+    timeline.status === 409
+  ) {
+    void (await timeline.json()).error.path;
+  }
+
+  const commitRead = await client.archives.commits[":commitId"].$get({
+    param: { commitId: "750e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (commitRead.status === 200) {
+    const commit = await commitRead.json();
+    void commit.recordedAt;
+    void commit.items[0]?.revisionId;
+    void commit.relations[0]?.status;
+  } else if (
+    commitRead.status === 400 ||
+    commitRead.status === 404 ||
+    commitRead.status === 409
+  ) {
+    void (await commitRead.json()).error.code;
+  }
+
+  const revision = await client.archives.revisions[":revisionId"].$get({
+    param: { revisionId: "750e8400-e29b-41d4-a716-446655440000" },
+  });
+  if (revision.status === 200) {
+    void (await revision.json()).state.capture.completeness;
+  } else if (
+    revision.status === 400 ||
+    revision.status === 404 ||
+    revision.status === 409
+  ) {
+    void (await revision.json()).error.message;
+  }
+
+  const relations = await client.archives.items[":itemId"].relations.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    query: { direction: "outgoing", binId: "rss-main", limit: "20" },
+  });
+  if (relations.status === 200) {
+    const page = await relations.json();
+    void page.snapshot.asOf;
+    const relation = page.relations[0];
+    if (relation?.status === "observed") {
+      void relation.state.name;
+      void relation.observation.recordedAt;
+    }
+    if (relation?.status === "withdrawn") void relation.observation.commitId;
+    if (relation?.status === "unknown") void relation.from.status;
+    if (relation !== undefined && relation.status !== "deleted") {
+      if (relation.to.kind === "sourceRef") void relation.to.sourceRef;
+    }
+  } else if (
+    relations.status === 400 ||
+    relations.status === 404 ||
+    relations.status === 409
+  ) {
+    void (await relations.json()).error.code;
+  }
+
+  const relatedSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "asOf", binId: "rss-main", asOf: "12" },
+      where: {
+        type: "relation",
+        direction: "outgoing",
+        name: "reply",
+        properties: {
+          type: "json",
+          field: "properties",
+          path: ["rank"],
+          valueType: "number",
+          operator: "gte",
+          value: 1,
+        },
+        target: {
+          type: "and",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "entry/8",
+            },
+            {
+              type: "text",
+              text: { kind: "literal", value: "归档正文" },
+            },
+          ],
+        },
+        operator: "count",
+        count: { operator: "gte", value: 2 },
+      },
+      expand: [
+        { key: "replies", direction: "outgoing", name: "reply", limit: 2 },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  if (relatedSearch.status === 200) {
+    const relatedPage = await relatedSearch.json();
+    const relatedMatch = relatedPage.results[0]?.matches[0];
+    if (relatedMatch !== undefined) {
+      void relatedMatch.binId;
+      const expansion = relatedMatch.expansions?.[0];
+      if (expansion !== undefined) {
+        void expansion.hasMore;
+        const relation = expansion.relations[0];
+        if (relation?.status === "observed") {
+          void relation.direction;
+          void relation.state.properties?.rank;
+        }
+      }
+    }
+  } else if (relatedSearch.status === 400 || relatedSearch.status === 422) {
+    void (await relatedSearch.json()).error.code;
+  }
+
+  const relatedPathSearch = await client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [
+          {
+            direction: "outgoing",
+            name: "reply",
+            target: {
+              type: "field",
+              field: "sourceKey.key",
+              operator: "eq",
+              value: "entry/8",
+            },
+          },
+          {
+            direction: "incoming",
+            name: "mentions",
+            target: {
+              type: "text",
+              text: { kind: "literal", value: "归档正文" },
+            },
+          },
+        ],
+        operator: "count",
+        count: { operator: "gte", value: 1 },
+      },
+      expandPaths: [
+        {
+          key: "replies-and-mentions",
+          steps: [
+            { direction: "outgoing", name: "reply" },
+            { direction: "either", name: "mentions" },
+          ],
+          limit: 2,
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  if (relatedPathSearch.status === 200) {
+    const pathPage = await relatedPathSearch.json();
+    const pathExpansion = pathPage.results[0]?.matches[0]?.pathExpansions?.[0];
+    if (pathExpansion !== undefined) {
+      void pathExpansion.hasMore;
+      const firstPath = pathExpansion.paths[0];
+      if (firstPath !== undefined) {
+        void firstPath.steps[0]?.observation.archiveSeq;
+        void firstPath.steps[0]?.state.name;
+        void firstPath.steps[1]?.direction;
+      }
+    }
+  } else if (
+    relatedPathSearch.status === 400 ||
+    relatedPathSearch.status === 422
+  ) {
+    void (await relatedPathSearch.json()).error.code;
+  }
+
+  const invalidPathFilter = {
+    type: "path",
+    steps: [{ direction: "outgoing" }],
+    operator: "count",
+    // @ts-expect-error count 路径必须声明最终目标数量比较。
+  } satisfies NonNullable<
+    Parameters<typeof client.archives.search.$post>[0]["json"]["where"]
+  >;
+  void invalidPathFilter;
+
+  void client.archives.search.$post({
+    json: {
+      scope: { kind: "current", binId: "rss-main" },
+      where: {
+        type: "path",
+        steps: [{ direction: "outgoing" }],
+        operator: "exists",
+        // @ts-expect-error exists 路径不能声明 count 比较。
+        count: { operator: "eq", value: 0 },
+      },
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+
+  const relationOnly = await client.archives.$post({
+    json: {
+      requestId: "rss:relation-only",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "rss:relation:entry-7-reply-8",
+          value: {
+            from: { namespace: "rss.example", key: "entry/7" },
+            to: { sourceRef: "https://example.test/entry/8" },
+            name: "reply",
+            properties: { rank: 1 },
+            cascade: false,
+          },
+        },
+      ],
+    },
+  });
+  if (relationOnly.status === 201) {
+    const commit = await relationOnly.json();
+    void commit.items.length;
+    const relation = commit.relations[0];
+    if (relation?.status === "observed") void relation.state.properties?.rank;
+  }
+
+  // @ts-expect-error 未知归档路由不能由正式客户端调用。
+  void client.archives.unknown.$get();
+  // @ts-expect-error 归档提交只接受正式契约声明的请求字段。
+  void client.archives.$post({ json: { requestId: 7 } });
+  // @ts-expect-error itemId 是必填路径参数。
+  void client.archives.items[":itemId"].$get({ param: {} });
+  // @ts-expect-error revision 路由没有 POST 方法。
+  void client.archives.revisions[":revisionId"].$post();
+  void client.archives.items[":itemId"].$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error asOf 使用十进制文本，不能由 JavaScript number 传输。
+    query: { asOf: 12 },
+  });
+  void client.archives.items[":itemId"].timeline.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error 页大小也是传输查询字符串。
+    query: { limit: 20 },
+  });
+  void client.archives.items[":itemId"].relations.$get({
+    param: { itemId: "650e8400-e29b-41d4-a716-446655440000" },
+    // @ts-expect-error 关系方向与页大小必须使用声明的查询字符串。
+    query: { direction: "outgoing", binId: "rss-main", limit: 20 },
+  });
+  void client.archives.$post({
+    json: {
+      requestId: "rss:bad-relation-target",
+      binId: "rss-main",
+      items: [],
+      relations: [
+        {
+          relationId: "rss:bad-relation",
+          value: {
+            from: { namespace: "rss.example", key: "entry/7" },
+            // @ts-expect-error 端点必须为信源键或显式源引用。
+            to: "entry/8",
+            name: "reply",
+            cascade: false,
+          },
+        },
+      ],
+    },
+  });
+  // @ts-expect-error commit 路由没有 POST 方法。
+  void client.archives.commits[":commitId"].$post();
+}
+
+void checkPublicArchiveContract;
+
+async function checkPublicArchiveAggregationContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const input = {
+    scope: { kind: "current" as const },
+    unit: "item" as const,
+    groupBy: [],
+    metrics: [{ key: "items", op: "count" as const }],
+  };
+  const response = await client.archives.aggregate.$post({ json: input });
+  if (response.status === 200) {
+    const result = await response.json();
+    const unit: "item" | "revision" | "observation" | "relation" = result.unit;
+    const metric: string | null | undefined =
+      result.groups[0]?.metrics[0]?.value;
+    void unit;
+    void metric;
+    // @ts-expect-error 聚合响应只包含契约声明的字段。
+    void result.queryHash;
+  } else if (response.status === 400 || response.status === 422) {
+    const failure = await response.json();
+    const code: string = failure.error.code;
+    void code;
+  }
+
+  // @ts-expect-error 聚合请求必须符合公开契约，不能附加未声明字段。
+  void client.archives.aggregate.$post({ json: { ...input, invented: true } });
+}
+
+void checkPublicArchiveAggregationContract;
+
+async function checkPublicServiceDiscoveryContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const metadataResponse = await client.meta.$get();
+  if (metadataResponse.status === 200) {
+    const metadata = await metadataResponse.json();
+    const productVersion: string = metadata.product.version;
+    const protocolVersion: number = metadata.protocols.httpApi;
+    const queryContractPath: string = metadata.contracts.archiveQuery.path;
+    const capabilities: readonly string[] = metadata.capabilities;
+    void productVersion;
+    void protocolVersion;
+    void queryContractPath;
+    void capabilities;
+  }
+
+  const queryContractResponse = await client.meta.query.$get();
+  if (queryContractResponse.status === 200) {
+    const queryContract = await queryContractResponse.json();
+    const version: number = queryContract.version;
+    const searchPath: string = queryContract.operations.search.path;
+    const searchSchema: Record<string, unknown> =
+      queryContract.operations.search.requestSchema;
+    const aggregatePath: string = queryContract.operations.aggregate.path;
+    void version;
+    void searchPath;
+    void searchSchema;
+    void aggregatePath;
+  }
+
+  // @ts-expect-error 未声明的服务发现路由不能由正式客户端调用。
+  void client.meta.unknown.$get();
+}
+
+void checkPublicServiceDiscoveryContract;
