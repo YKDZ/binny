@@ -1670,6 +1670,12 @@ type ManualActionOutput = {
   readonly scope?: readonly string[];
   readonly basis?: string;
   readonly completedScopes?: readonly string[];
+  readonly collectionCompleteness?: "complete" | "partial";
+  readonly incompleteScopes?: readonly {
+    readonly scope: string;
+    readonly reasonCode: string;
+    readonly message: string;
+  }[];
   readonly problems?: readonly {
     readonly code: string;
     readonly message?: string;
@@ -1854,7 +1860,11 @@ async function collectLinuxdoOnSchedule(
       "--action",
       "collect",
       "--params",
-      JSON.stringify({ topicId: 2401 }),
+      JSON.stringify({
+        topicId: 2401,
+        date: "2026-10-28",
+        timeZone: "UTC",
+      }),
     ]),
     "created",
   );
@@ -2162,20 +2172,24 @@ async function verifyLinuxdoArchiveJourney(
     cliForLinuxdo,
     binId,
     "collect",
-    { targets: linuxdoTargets("latest"), maxTopics: 1 },
+    {
+      targets: linuxdoTargets("latest"),
+      maxTopics: 1,
+      date: "2026-10-28",
+      timeZone: "UTC",
+    },
   );
   assert.equal(discoveryCollection.status, "completed");
+  const discoveryOutput = runOutput(discoveryCollection);
+  assert.equal(discoveryOutput?.collectionCompleteness, "partial");
   assert.ok(
-    runOutput(discoveryCollection)?.completedScopes?.some((scope) =>
-      scope.startsWith("target:latest"),
+    discoveryOutput?.incompleteScopes?.some(
+      ({ scope, reasonCode }) =>
+        scope === "target:latest" && reasonCode === "topic_limit_reached",
     ),
   );
-  assert.ok(
-    runOutput(discoveryCollection)?.completedScopes?.includes("topic:2401"),
-  );
-  assert.ok(
-    runOutput(discoveryCollection)?.completedScopes?.includes("post:240001"),
-  );
+  assert.ok(discoveryOutput?.completedScopes?.includes("topic:2401"));
+  assert.ok(discoveryOutput?.completedScopes?.includes("post:240001"));
   const discoveryCommitLocator = discoveryCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
   );
@@ -2259,7 +2273,7 @@ async function verifyLinuxdoArchiveJourney(
     cliForLinuxdo,
     binId,
     "collect",
-    { topicId: 2401 },
+    { topicId: 2401, date: "2026-10-28", timeZone: "UTC" },
   );
   assert.equal(partialCollection.status, "completed");
   assert.equal(
