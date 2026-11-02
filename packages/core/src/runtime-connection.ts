@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import {
   sourceAdapterManifestStoredSchema,
   jsonObjectSchema,
@@ -6,7 +8,6 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
-  legacyRuntimeProtocolVersion,
   runtimeProtocolVersion,
   type BinError,
   type BinOperation,
@@ -34,11 +35,13 @@ import {
   interruptExpiredManualRuns,
   interruptReplacedManualRuns,
 } from "./manual-run-fencing.ts";
+import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
 
 const runtimeSelection = {
   binId: binConfigurations.id,
   configuredSourceAdapter: binConfigurations.sourceAdapter,
   config: binConfigurations.config,
+  configNativeValid: binConfigurations.configNativeValid,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
   runtimeSourceAdapter: runtimeConnections.sourceAdapter,
@@ -47,6 +50,8 @@ const runtimeSelection = {
   disconnected: runtimeConnections.disconnected,
   ownerState: runtimeConnections.ownerState,
   ownerGeneration: runtimeConnections.ownerGeneration,
+  protocolVersion: runtimeConnections.protocolVersion,
+  runtimeControlUrl: runtimeConnections.runtimeControlUrl,
 };
 
 type RuntimeCompatibilityError = {
@@ -113,9 +118,17 @@ function differencePath(
 function compatibilityError(
   configuredSourceAdapter: SourceAdapterManifest,
   config: JsonObject,
+  configNativeValid: boolean,
   runtimeSourceAdapter: SourceAdapterManifest,
   environment: RuntimeEnvironment,
 ): RuntimeCompatibilityError | undefined {
+  if (!configNativeValid) {
+    return {
+      code: "runtime_configuration_incompatible",
+      message: "首次原生配置不完整；请先在核心中填写并验证长期配置。",
+      path: ["config"],
+    };
+  }
   const checkedRuntimeManifest =
     sourceAdapterManifestStoredSchema.safeParse(runtimeSourceAdapter);
   if (!checkedRuntimeManifest.success) {
@@ -215,6 +228,10 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     return offline("runtime_not_connected", row);
   }
 
+  if (row.protocolVersion !== runtimeProtocolVersion) {
+    return offline("runtime_protocol_outdated", row);
+  }
+
   const configuredSourceAdapter = sourceAdapterManifestStoredSchema.parse(
     row.configuredSourceAdapter,
   );
@@ -236,6 +253,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   const error = compatibilityError(
     configuredSourceAdapter,
     config,
+    row.configNativeValid,
     runtimeSourceAdapter,
     environment,
   );
@@ -311,18 +329,186 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
+
+      const incoming = checked.data;
+      const before = await selectRuntimeConnection(database, binId);
+      let registration:
+        | {
+            readonly kind: "create";
+            readonly config: JsonObject;
+            readonly nativeValid: boolean;
+          }
+        | {
+            readonly kind: "manifest-update";
+            readonly sourceAdapter: SourceAdapterManifest;
+            readonly config: JsonObject;
+            readonly configNativeValid: boolean;
+            readonly runtimeId: string | null;
+            readonly ownerGeneration: bigint | null;
+            readonly protocolVersion: number | null;
+            readonly runtimeControlUrl: string | null;
+            readonly runtimeSourceAdapter: unknown;
+          }
+        | undefined;
+
+      if (before === undefined) {
+        if (incoming.protocolVersion !== runtimeProtocolVersion) {
+          return failure(409, {
+            code: "runtime_configuration_validation_unavailable",
+            message: "首次登记必须使用支持内部原生配置校验的运行器协议。",
+            path: ["protocolVersion"],
+          });
+        }
+        const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+          incoming.sourceAdapter,
+        );
+        const validation = await validateConfigurationAtRuntime(
+          incoming.runtimeControlUrl,
+          sourceAdapter,
+          jsonObjectSchema.parse({}),
+        );
+        if (!validation.ok && validation.kind === "unavailable") {
+          return failure(409, validation.error);
+        }
+        registration = {
+          kind: "create",
+          config: jsonObjectSchema.parse({}),
+          nativeValid: validation.ok,
+        };
+      } else if (
+        !isDeepStrictEqual(
+          before.configuredSourceAdapter,
+          incoming.sourceAdapter,
+        )
+      ) {
+        if (incoming.protocolVersion !== runtimeProtocolVersion) {
+          return failure(409, {
+            code: "runtime_configuration_validation_unavailable",
+            message: "旧版运行器不能更新已登记的源码声明。",
+            path: ["protocolVersion"],
+          });
+        }
+        const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+          incoming.sourceAdapter,
+        );
+        const config = jsonObjectSchema.parse(before.config);
+        const validation = await validateConfigurationAtRuntime(
+          incoming.runtimeControlUrl,
+          sourceAdapter,
+          config,
+        );
+        if (!validation.ok && validation.kind === "unavailable") {
+          return failure(409, validation.error);
+        }
+        registration = {
+          kind: "manifest-update",
+          sourceAdapter,
+          config,
+          configNativeValid: validation.ok,
+          runtimeId: before.runtimeId,
+          ownerGeneration: before.ownerGeneration,
+          protocolVersion: before.protocolVersion,
+          runtimeControlUrl: before.runtimeControlUrl,
+          runtimeSourceAdapter: before.runtimeSourceAdapter,
+        };
+      }
+
       return await database.transaction(async (transaction) => {
-        const [bin] = await transaction
-          .select({ id: binConfigurations.id })
+        let [bin] = await transaction
+          .select({
+            id: binConfigurations.id,
+            sourceAdapter: binConfigurations.sourceAdapter,
+            config: binConfigurations.config,
+          })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
           .for("update");
         if (bin === undefined) {
-          return failure(404, {
-            code: "bin_not_found",
-            message: "没有找到这个 bin。",
-            path: ["binId"],
-          });
+          if (registration?.kind !== "create") {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "bin 在心跳准备期间发生变化，请重试。",
+              path: ["binId"],
+            });
+          }
+          const [created] = await transaction
+            .insert(binConfigurations)
+            .values({
+              id: binId,
+              sourceAdapter: incoming.sourceAdapter,
+              identityId: binId,
+              config: registration.config,
+              configNativeValid: registration.nativeValid,
+              browserIdleTimeoutSeconds: 300,
+              status: "active",
+            })
+            .onConflictDoNothing({ target: binConfigurations.id })
+            .returning({
+              id: binConfigurations.id,
+              sourceAdapter: binConfigurations.sourceAdapter,
+              config: binConfigurations.config,
+            });
+          [bin] =
+            created === undefined
+              ? await transaction
+                  .select({
+                    id: binConfigurations.id,
+                    sourceAdapter: binConfigurations.sourceAdapter,
+                    config: binConfigurations.config,
+                  })
+                  .from(binConfigurations)
+                  .where(eq(binConfigurations.id, binId))
+                  .for("update")
+              : [created];
+          if (bin === undefined) throw new Error("自注册后没有找到 bin。");
+          if (
+            !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
+            !isDeepStrictEqual(bin.config, registration.config)
+          ) {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "另一个运行器已使用相同 bin 身份完成注册。",
+              path: ["binId"],
+            });
+          }
+        } else if (registration?.kind === "create") {
+          if (
+            !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
+            !isDeepStrictEqual(bin.config, registration.config)
+          ) {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "bin 在首次原生校验期间已被其他操作改变。",
+              path: ["binId"],
+            });
+          }
+        } else if (registration?.kind === "manifest-update") {
+          if (
+            !isDeepStrictEqual(bin.sourceAdapter, registration.sourceAdapter) &&
+            !isDeepStrictEqual(
+              bin.sourceAdapter,
+              before?.configuredSourceAdapter,
+            )
+          ) {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "源码声明在原生校验期间发生变化，请重试。",
+              path: ["sourceAdapter"],
+            });
+          }
+          if (
+            !isDeepStrictEqual(bin.config, registration.config) ||
+            !isDeepStrictEqual(
+              bin.sourceAdapter,
+              before?.configuredSourceAdapter,
+            )
+          ) {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "配置或源码声明在原生校验期间发生变化，请重试。",
+              path: ["config"],
+            });
+          }
         }
 
         const [current] = await transaction
@@ -331,6 +517,9 @@ export function createRuntimeConnectionStore(
             ownerState: runtimeConnections.ownerState,
             ownerGeneration: runtimeConnections.ownerGeneration,
             environment: runtimeConnections.environment,
+            sourceAdapter: runtimeConnections.sourceAdapter,
+            runtimeControlUrl: runtimeConnections.runtimeControlUrl,
+            protocolVersion: runtimeConnections.protocolVersion,
           })
           .from(runtimeConnections)
           .where(eq(runtimeConnections.binId, binId));
@@ -422,6 +611,44 @@ export function createRuntimeConnectionStore(
           if (stopped) ownerState = "confirmed";
         }
 
+        if (registration?.kind === "manifest-update") {
+          const runtimeUnchanged =
+            current?.runtimeId === registration.runtimeId &&
+            current?.ownerGeneration === registration.ownerGeneration &&
+            current?.protocolVersion === registration.protocolVersion &&
+            current?.runtimeControlUrl === registration.runtimeControlUrl &&
+            isDeepStrictEqual(
+              current?.sourceAdapter,
+              registration.runtimeSourceAdapter,
+            );
+          if (!runtimeUnchanged) {
+            return failure(409, {
+              code: "configuration_changed",
+              message: "运行器所有者在原生校验期间发生变化，请重试。",
+              path: ["runtimeId"],
+            });
+          }
+          if (
+            ownerState !== "confirmed" ||
+            checked.data.activeRunId !== null ||
+            checked.data.claimInFlight
+          ) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "更新源码声明前必须确认旧动作已停止。",
+              path: ["activeRunId"],
+            });
+          }
+          await transaction
+            .update(binConfigurations)
+            .set({
+              sourceAdapter: registration.sourceAdapter,
+              configNativeValid: registration.configNativeValid,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(binConfigurations.id, binId));
+        }
+
         await transaction
           .insert(runtimeConnections)
           .values({
@@ -430,6 +657,7 @@ export function createRuntimeConnectionStore(
             sourceAdapter: checked.data.sourceAdapter,
             environment: checked.data.environment,
             protocolVersion: checked.data.protocolVersion,
+            runtimeControlUrl: checked.data.runtimeControlUrl,
             disconnected: false,
             ownerState,
             ownerGeneration: incomingGeneration,
@@ -441,6 +669,7 @@ export function createRuntimeConnectionStore(
               sourceAdapter: checked.data.sourceAdapter,
               environment: checked.data.environment,
               protocolVersion: checked.data.protocolVersion,
+              runtimeControlUrl: checked.data.runtimeControlUrl,
               // 保持 PostgreSQL 服务端时钟语义。
               lastHeartbeatAt: sql`clock_timestamp()`,
               disconnected: false,
@@ -452,60 +681,38 @@ export function createRuntimeConnectionStore(
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
-        if (execution.status === "online") {
-          if (checked.data.protocolVersion === legacyRuntimeProtocolVersion) {
-            const previousEnvironment =
-              runtimeEnvironmentStoredSchema.safeParse(current?.environment);
-            const status = checked.data.environment.browser.power.status;
-            if (status !== "unavailable") {
-              await browserCapacity.reportLegacyPower(
-                transaction,
-                {
-                  binId,
-                  runtimeId: checked.data.runtimeId,
-                  ownerGeneration: checked.data.ownerGeneration,
-                },
-                status,
-                previousEnvironment.success
-                  ? previousEnvironment.data.browser.power?.status
-                  : undefined,
-              );
-            }
-          } else if (
-            "browserPowerEvent" in checked.data &&
-            checked.data.browserPowerEvent !== undefined
-          ) {
-            const owner = {
-              binId,
-              runtimeId: checked.data.runtimeId,
-              ownerGeneration: checked.data.ownerGeneration,
-            };
-            const event = checked.data.browserPowerEvent;
-            const accepted =
-              event.event === "not_started"
-                ? await browserCapacity.confirmNotStarted(
-                    transaction,
-                    owner,
-                    event.reservationId,
-                  )
-                : await browserCapacity.reportPower(
-                    transaction,
-                    owner,
-                    event.reservationId,
-                    event.event,
-                  );
-            if (!accepted) {
-              return failure(409, {
-                code: "browser_reservation_mismatch",
-                message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
-                path: ["browserPowerEvent"],
-              });
-            }
+        if (
+          execution.status === "online" &&
+          checked.data.browserPowerEvent !== undefined
+        ) {
+          const owner = {
+            binId,
+            runtimeId: checked.data.runtimeId,
+            ownerGeneration: checked.data.ownerGeneration,
+          };
+          const event = checked.data.browserPowerEvent;
+          const accepted =
+            event.event === "not_started"
+              ? await browserCapacity.confirmNotStarted(
+                  transaction,
+                  owner,
+                  event.reservationId,
+                )
+              : await browserCapacity.reportPower(
+                  transaction,
+                  owner,
+                  event.reservationId,
+                  event.event,
+                );
+          if (!accepted) {
+            return failure(409, {
+              code: "browser_reservation_mismatch",
+              message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
+              path: ["browserPowerEvent"],
+            });
           }
         }
         const humanSession =
-          checked.data.protocolVersion === runtimeProtocolVersion &&
-          "browserPowerEvent" in checked.data &&
           checked.data.browserPowerEvent !== undefined
             ? undefined
             : await applyRuntimeHumanSessionHeartbeat(
@@ -516,8 +723,7 @@ export function createRuntimeConnectionStore(
                   ownerGeneration: checked.data.ownerGeneration,
                   ownerConfirmed:
                     ownerState === "confirmed" && execution.status === "online",
-                  supportsReservationId:
-                    checked.data.protocolVersion >= runtimeProtocolVersion,
+                  supportsReservationId: true,
                   ...(checked.data.humanSessionEvent === undefined
                     ? {}
                     : { event: checked.data.humanSessionEvent }),

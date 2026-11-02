@@ -1,6 +1,5 @@
 import {
   binConfigurationSchema,
-  binCreateInputSchema,
   binErrorSchema,
   binIdSchema,
   binUpdateInputSchema,
@@ -106,28 +105,6 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       const bins = await operations.bins.listBins();
       return c.json({ bins: await Promise.all(bins.map(withExecution)) }, 200);
     })
-    .post(
-      "/bins",
-      zValidator("json", binCreateInputSchema, (result, c) => {
-        if (!result.success)
-          return c.json(validationFailure(result.error.issues), 400);
-        return undefined;
-      }),
-      async (c) => {
-        const result = await operations.bins.createBin(c.req.valid("json"));
-        if (!result.ok) {
-          switch (result.status) {
-            case 400:
-              return c.json({ error: result.error }, 400);
-            case 404:
-              return c.json({ error: result.error }, 404);
-            case 409:
-              return c.json({ error: result.error }, 409);
-          }
-        }
-        return c.json(await withExecution(result.value), 201);
-      },
-    )
     .get(
       "/bins/:binId",
       zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
@@ -598,7 +575,6 @@ export type ApiRoutes = ReturnType<typeof makeApp>;
 
 /** 对外暴露 Zod 4 契约的 JSON Schema 投影，避免维护平行的手写描述。 */
 export const binApiSchemas = {
-  create: toInputJsonSchema(binCreateInputSchema),
   update: toInputJsonSchema(binUpdateInputSchema),
   runtimeHeartbeat: toInputJsonSchema(runtimeHeartbeatInputSchema),
   runtimeDisconnect: toInputJsonSchema(runtimeDisconnectInputSchema),

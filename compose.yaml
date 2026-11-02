@@ -60,6 +60,7 @@ services:
         condition: service_healthy
     environment:
       BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-rss:8080
       BINNY_BIN_ID: ${BINNY_RSS_BIN_ID:-rss}
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_PORT: 8080
@@ -85,6 +86,7 @@ services:
         condition: service_healthy
     environment:
       BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-linuxdo:8080
       BINNY_BIN_ID: ${BINNY_LINUXDO_BIN_ID:-linuxdo}
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_RUNTIME_PORT: 8080

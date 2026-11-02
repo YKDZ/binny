@@ -410,6 +410,48 @@ async function runtimeManifest(): Promise<Record<string, unknown>> {
   return payload.sourceAdapter;
 }
 
+async function waitForBinRegistration(
+  expectedManifest: Record<string, unknown>,
+): Promise<void> {
+  const deadline = Date.now() + 45_000;
+  let latest = "运行器还没有完成自注册。";
+  while (Date.now() < deadline) {
+    const result = await cli(["bin", "get", "binny-discovery-topic"]);
+    if (result.code === 0) {
+      const bin = cliData<{
+        readonly id: string;
+        readonly sourceAdapter: Record<string, unknown>;
+        readonly identityId: string;
+        readonly config: Record<string, unknown>;
+        readonly execution: {
+          readonly status: string;
+          readonly error?: { readonly code: string };
+        };
+      }>(result, "found");
+      if (
+        bin.sourceAdapter.id === expectedManifest.id &&
+        bin.sourceAdapter.version === expectedManifest.version
+      ) {
+        assert.equal(bin.id, "binny-discovery-topic");
+        assert.deepEqual(bin.sourceAdapter, expectedManifest);
+        assert.equal(bin.identityId, bin.id);
+        assert.deepEqual(bin.config, {});
+        assert.equal(bin.execution.status, "incompatible");
+        assert.equal(
+          bin.execution.error?.code,
+          "runtime_configuration_incompatible",
+        );
+        return;
+      }
+      latest = JSON.stringify(bin);
+    } else {
+      latest = result.stderr;
+    }
+    await delay(250);
+  }
+  throw new Error(`等待 Linux.do bin 自注册超时：${latest}`);
+}
+
 async function waitForRuntime(): Promise<void> {
   const deadline = Date.now() + 45_000;
   let latest = "运行器还没有上线。";
@@ -1643,21 +1685,20 @@ async function main(): Promise<void> {
     browser = await startOuterBrowser();
 
     const manifest = await runtimeManifest();
-    const created = cliData<{ readonly id: string }>(
+    await waitForBinRegistration(manifest);
+    const configured = cliData<{ readonly id: string }>(
       await cli([
         "bin",
-        "create",
+        "update",
         "binny-discovery-topic",
-        "--source-adapter",
-        JSON.stringify(manifest),
         "--identity",
         "binny-discovery-profile",
         "--config",
         JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
       ]),
-      "created",
+      "updated",
     );
-    assert.equal(created.id, "binny-discovery-topic");
+    assert.equal(configured.id, "binny-discovery-topic");
     await waitForRuntime();
     await verifyCategoryActionDiscovery();
     process.stdout.write("list-categories 的正式动作声明发现通过。\n");

@@ -1,0 +1,1 @@
+ALTER TABLE "browser_capacity_reservation" DROP COLUMN "requires_reservation_id";
