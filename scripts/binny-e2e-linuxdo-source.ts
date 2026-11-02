@@ -11,8 +11,15 @@ type SourceState = {
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
   readonly targetInvalidResponsePage: number | null;
+  readonly targetPaginationLoopPage: number | null;
+  readonly targetInvalidPaginationUrlPage: number | null;
+  readonly targetEarlyEndPage: number | null;
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
+  readonly dailyCollectionEnabled: boolean;
+  readonly dailyTopicOverlapCount: number;
+  readonly paginationOrderMutationEnabled: boolean;
+  readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -29,6 +36,8 @@ type SourceEvent = {
   readonly action: string;
   readonly path: string;
   readonly authenticated?: boolean;
+  readonly topicIds?: readonly number[];
+  readonly moreTopicsUrl?: string | null;
 };
 
 const rootPostId = 240_001;
@@ -64,8 +73,15 @@ let activeState: SourceState = {
   targetUnavailablePage: null,
   targetChallengePage: null,
   targetInvalidResponsePage: null,
+  targetPaginationLoopPage: null,
+  targetInvalidPaginationUrlPage: null,
+  targetEarlyEndPage: null,
   categoriesUnavailable: false,
   categoriesInvalidResponse: false,
+  dailyCollectionEnabled: false,
+  dailyTopicOverlapCount: 1,
+  paginationOrderMutationEnabled: false,
+  invalidCreatedAtTopicIds: [],
   topicVersion: 1,
   replyVersion: 1,
   addedReply: false,
@@ -107,13 +123,22 @@ function isAuthenticated(
     .some((value) => value.trim() === "binny-discovery_session=fixture");
 }
 
-function record(action: string, path: string, authenticated?: boolean): void {
+function record(
+  action: string,
+  path: string,
+  authenticated?: boolean,
+  pagination?: {
+    readonly topicIds: readonly number[];
+    readonly moreTopicsUrl: string | null;
+  },
+): void {
   events.push({
     action,
     path,
     ...(authenticated === undefined ? {} : { authenticated }),
+    ...(pagination === undefined ? {} : pagination),
   });
-  if (events.length > 500) events.shift();
+  if (events.length > 10_000) events.shift();
 }
 
 function post(
@@ -190,10 +215,87 @@ function posts(): readonly Record<string, unknown>[] {
   );
 }
 
+function legacyTopicCreatedAt(topicId: number): string {
+  const minuteByTopicId = new Map([
+    [2401, 10],
+    [2403, 9],
+    [2402, 8],
+    [2404, 7],
+    [2405, 6],
+    [2406, 5],
+    [2407, 4],
+    [2408, 3],
+    [2409, 2],
+    [2410, 1],
+    [2499, 0],
+  ]);
+  const minute = minuteByTopicId.get(topicId) ?? 0;
+  return `2026-10-28T00:${String(minute).padStart(2, "0")}:00.000Z`;
+}
+
 function discoveredTopic(topicId: number): Record<string, unknown> {
+  const paginationTopic = paginationOrderTopicDetails(topicId);
+  if (paginationTopic !== undefined) {
+    const postId = topicId * 100;
+    const topicName = "排序变更前受控主题 " + String(topicId);
+    return {
+      id: topicId,
+      title: topicName,
+      slug: "pagination-order-topic-" + String(topicId),
+      created_at: paginationTopic.createdAt,
+      category_id: 42,
+      post_stream: {
+        posts: [
+          {
+            id: postId,
+            topic_id: topicId,
+            post_number: 1,
+            username: "fixture-pagination-author",
+            name: "分页排序示例作者",
+            created_at: paginationTopic.createdAt,
+            updated_at: paginationTopic.createdAt,
+            cooked: "<p>" + topicName + " 的正文。</p>",
+          },
+        ],
+        stream: [postId],
+      },
+    };
+  }
+
+  const dailyTopic = dailyTopicDetails(topicId);
+  if (dailyTopic !== undefined) {
+    const postId = topicId * 100;
+    const topicName = `全日受控主题 ${String(topicId)}`;
+    return {
+      id: topicId,
+      title: topicName,
+      slug: `daily-controlled-topic-${String(topicId)}`,
+      ...(activeState.invalidCreatedAtTopicIds.includes(topicId)
+        ? { created_at: "not-a-date" }
+        : { created_at: dailyTopic.createdAt }),
+      category_id: dailyTopic.categoryId,
+      post_stream: {
+        posts: [
+          {
+            id: postId,
+            topic_id: topicId,
+            post_number: 1,
+            username: "fixture-daily-author",
+            name: "日采示例作者",
+            created_at: dailyTopic.createdAt,
+            updated_at: dailyTopic.createdAt,
+            cooked: `<p>${topicName} 的正文。</p>`,
+          },
+        ],
+        stream: [postId],
+      },
+    };
+  }
+
   const defaultCreatedAt = "2026-10-28T00:00:00.000Z";
   const createdAt =
-    activeState.topicCreatedAtOverrides?.[topicId] ?? defaultCreatedAt;
+    activeState.topicCreatedAtOverrides?.[topicId] ??
+    (topicId === 2401 ? defaultCreatedAt : legacyTopicCreatedAt(topicId));
   if (topicId === 2401) {
     const availablePosts = posts();
     return {
@@ -249,35 +351,196 @@ function discoveredTopicList(
   page: number,
   perPage: number,
   childCategory = false,
+  categoryId?: number,
 ): Record<string, unknown> {
-  const topicIds = childCategory
-    ? page === 0
-      ? [2499].slice(0, perPage)
-      : []
-    : page === 0
-      ? (category
-          ? [2402, 2403, 2401, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
-          : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
-        ).slice(0, perPage)
-      : category
-        ? [2403, 2401].slice(0, perPage)
-        : [2402, 2403].slice(0, perPage);
+  if (activeState.paginationOrderMutationEnabled && !category) {
+    const rows = [
+      { id: 800_001, createdAt: "2026-11-01T09:00:00.000Z" },
+      { id: 800_002, createdAt: "2026-10-31T23:00:00.000Z" },
+      { id: 800_003, createdAt: "2026-11-01T08:00:00.000Z" },
+    ];
+    const row = rows[page];
+    const moreTopicsUrl =
+      page < rows.length - 1
+        ? "/latest.json?page=" +
+          String(page + 1) +
+          "&order=activity&ascending=false"
+        : undefined;
+    return {
+      topic_list: {
+        topics:
+          row === undefined ? [] : [{ id: row.id, created_at: row.createdAt }],
+        more_topics_url: moreTopicsUrl,
+      },
+    };
+  }
+
+  if (activeState.dailyCollectionEnabled) {
+    const pathname =
+      categoryId === 45
+        ? "/c/daily/45/l/latest.json"
+        : categoryId === 46
+          ? "/c/daily/daily-child/46/l/latest.json"
+          : categoryId === 47
+            ? "/c/another/47/l/latest.json"
+            : categoryId === 44
+              ? "/c/other/44/l/latest.json"
+              : pathnameForLegacyTarget(category, childCategory);
+    let rows =
+      categoryId === 45 || categoryId === 46 || categoryId === 47
+        ? dailyTopicsForCategory(categoryId)
+        : categoryId === undefined
+          ? dailyTopicsForAllVisibleCategories()
+          : [];
+    const overlapCount = perPage === 1 ? 0 : activeState.dailyTopicOverlapCount;
+    const offset = page === 0 ? 0 : page * (perPage - overlapCount);
+    const pageRows = rows.slice(offset, offset + perPage);
+    const hasMore = offset + perPage < rows.length;
+    return topicListResponse(
+      pathname,
+      page,
+      pageRows.map(({ id, createdAt }) => ({ id, createdAt })),
+      hasMore,
+    );
+  }
+
   const pathname = childCategory
     ? "/c/controlled/child/43/l/latest.json"
     : category
       ? "/c/controlled/42/l/latest.json"
       : "/latest.json";
+  const topicRows = (
+    childCategory
+      ? [2499]
+      : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410, 2410]
+  )
+    .map((id) => ({
+      id,
+      createdAt:
+        activeState.topicCreatedAtOverrides?.[id] ?? legacyTopicCreatedAt(id),
+    }))
+    .toSorted((first, second) =>
+      second.createdAt.localeCompare(first.createdAt),
+    );
+  const pageRows = topicRows.slice(page * perPage, (page + 1) * perPage);
+  return topicListResponse(
+    pathname,
+    page,
+    pageRows,
+    (page + 1) * perPage < topicRows.length,
+  );
+}
+
+function pathnameForLegacyTarget(category: boolean, childCategory: boolean) {
+  return childCategory
+    ? "/c/controlled/child/43/l/latest.json"
+    : category
+      ? "/c/controlled/42/l/latest.json"
+      : "/latest.json";
+}
+
+function dailyTopicDetails(topicId: number):
+  | {
+      readonly id: number;
+      readonly categoryId: number;
+      readonly createdAt: string;
+    }
+  | undefined {
+  if (topicId === 700502) {
+    return {
+      id: topicId,
+      categoryId: 45,
+      createdAt: "2026-11-02T00:00:00.000Z",
+    };
+  }
+  if (topicId === 699999) {
+    return {
+      id: topicId,
+      categoryId: 45,
+      createdAt: "2026-10-31T23:59:59.999Z",
+    };
+  }
+  if (topicId < 700001 || topicId > 700501) return undefined;
+  const categoryId = topicId <= 700200 ? 45 : topicId <= 700400 ? 46 : 47;
+  const offset = topicId - 700001;
+  const createdAt = new Date(
+    Date.parse("2026-11-01T00:00:00.000Z") + offset * 160_000,
+  ).toISOString();
+  return { id: topicId, categoryId, createdAt };
+}
+
+function dailyTopicsForCategory(categoryId: number) {
+  if (categoryId === 45) {
+    return [
+      dailyTopicDetails(700502)!,
+      ...Array.from({ length: 200 }, (_, index) =>
+        dailyTopicDetails(700200 - index)!,
+      ),
+      dailyTopicDetails(699999)!,
+    ];
+  }
+  if (categoryId === 46) {
+    return Array.from({ length: 200 }, (_, index) =>
+      dailyTopicDetails(700400 - index)!,
+    );
+  }
+  if (categoryId === 47) {
+    return Array.from({ length: 101 }, (_, index) =>
+      dailyTopicDetails(700501 - index)!,
+    );
+  }
+  return [];
+}
+
+function paginationOrderTopicDetails(
+  topicId: number,
+): { readonly id: number; readonly createdAt: string } | undefined {
+  const topics = new Map([
+    [800_001, "2026-11-01T09:00:00.000Z"],
+    [800_002, "2026-10-31T23:00:00.000Z"],
+    [800_003, "2026-11-01T08:00:00.000Z"],
+  ]);
+  const createdAt = topics.get(topicId);
+  return createdAt === undefined ? undefined : { id: topicId, createdAt };
+}
+
+function dailyTopicsForAllVisibleCategories() {
+  return [
+    ...dailyTopicsForCategory(45),
+    ...dailyTopicsForCategory(46),
+    ...dailyTopicsForCategory(47),
+  ].toSorted((first, second) =>
+    second.createdAt.localeCompare(first.createdAt),
+  );
+}
+
+function topicListResponse(
+  pathname: string,
+  page: number,
+  topics: readonly { readonly id: number; readonly createdAt: string }[],
+  hasMore: boolean,
+) {
+  const moreTopicsUrl =
+    activeState.targetPaginationLoopPage === page
+      ? `${pathname.replace(/\.json$/u, "")}?page=${String(page)}`
+      : activeState.targetEarlyEndPage === page
+        ? `${pathname.replace(/\.json$/u, "")}?page=${String(page + 1)}`
+        : activeState.targetInvalidPaginationUrlPage === page
+          ? `https://example.invalid${pathname}?page=${String(page + 1)}`
+          : hasMore
+            ? `${pathname.replace(/\.json$/u, "")}?page=${String(page + 1)}`
+            : null;
   return {
     topic_list: {
-      topics: topicIds.map((id) => {
-        const defaultCreatedAt = "2026-10-28T00:00:00.000Z";
-        const createdAt =
-          activeState.topicCreatedAtOverrides?.[id] ?? defaultCreatedAt;
-        return { id, created_at: createdAt };
-      }),
-      ...(page === 0 && topicIds.length === perPage
-        ? { more_topics_url: `${pathname.replace(/\.json$/u, "")}?page=1` }
-        : {}),
+      topics: (activeState.targetEarlyEndPage === page ? [] : topics).map(
+        ({ id, createdAt }) => ({
+          id,
+          created_at: activeState.invalidCreatedAtTopicIds.includes(id)
+            ? "not-a-date"
+            : createdAt,
+        }),
+      ),
+      ...(moreTopicsUrl === null ? {} : { more_topics_url: moreTopicsUrl }),
     },
   };
 }
@@ -299,6 +562,9 @@ function updateState(value: unknown): boolean {
     "targetUnavailablePage",
     "targetChallengePage",
     "targetInvalidResponsePage",
+    "targetPaginationLoopPage",
+    "targetInvalidPaginationUrlPage",
+    "targetEarlyEndPage",
   ] as const) {
     if (
       key in updates &&
@@ -319,8 +585,18 @@ function updateState(value: unknown): boolean {
     "discoveryAddedReply",
     "categoriesUnavailable",
     "categoriesInvalidResponse",
+    "dailyCollectionEnabled",
+    "paginationOrderMutationEnabled",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
+  }
+  if (
+    "dailyTopicOverlapCount" in updates &&
+    (!Number.isSafeInteger(updates.dailyTopicOverlapCount) ||
+      Number(updates.dailyTopicOverlapCount) < 1 ||
+      Number(updates.dailyTopicOverlapCount) > 99)
+  ) {
+    return false;
   }
   if (
     "topicCreatedAtOverrides" in updates &&
@@ -344,13 +620,19 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
-  for (const key of ["omittedPostIds", "unavailableMedia"] as const) {
+  for (const key of [
+    "omittedPostIds",
+    "unavailableMedia",
+    "invalidCreatedAtTopicIds",
+  ] as const) {
+    const entriesMustBeNumbers =
+      key === "omittedPostIds" || key === "invalidCreatedAtTopicIds";
     if (
       key in updates &&
       (!Array.isArray(updates[key]) ||
         updates[key].some(
           (entry) =>
-            typeof entry !== (key === "omittedPostIds" ? "number" : "string"),
+            typeof entry !== (entriesMustBeNumbers ? "number" : "string"),
         ))
     ) {
       return false;
@@ -383,6 +665,12 @@ const server = createServer((request, response) => {
     }
     if (request.method === "GET" && pathname === "/__control/state") {
       sendJson(response, 200, { state: activeState, events: [...events] });
+      return;
+    }
+    if (request.method === "POST" && pathname === "/__control/clear-events") {
+      events.length = 0;
+      response.writeHead(204);
+      response.end();
       return;
     }
     if (request.method === "POST" && pathname === "/__control/state") {
@@ -500,13 +788,31 @@ const server = createServer((request, response) => {
               parent_category_id: null,
               position: 2,
             },
-            {
-              id: 43,
-              name: "可见子板块",
-              slug: "child",
-              parent_category_id: 42,
-              position: 1,
-            },
+            ...(activeState.dailyCollectionEnabled
+              ? [
+                  {
+                    id: 45,
+                    name: "全日父板块",
+                    slug: "daily",
+                    parent_category_id: null,
+                    position: 3,
+                  },
+                  {
+                    id: 46,
+                    name: "全日子板块",
+                    slug: "daily-child",
+                    parent_category_id: 45,
+                    position: 1,
+                  },
+                  {
+                    id: 47,
+                    name: "全日另一板块",
+                    slug: "another",
+                    parent_category_id: null,
+                    position: 4,
+                  },
+                ]
+              : []),
           ],
         },
       });
@@ -538,12 +844,20 @@ const server = createServer((request, response) => {
     }
     const topicListMatch =
       pathname === "/latest.json"
-        ? { category: false, childCategory: false }
+        ? { category: false, childCategory: false, categoryId: undefined }
         : pathname === "/c/controlled/42/l/latest.json"
-          ? { category: true, childCategory: false }
+          ? { category: true, childCategory: false, categoryId: 42 }
           : pathname === "/c/controlled/child/43/l/latest.json"
-            ? { category: true, childCategory: true }
-            : undefined;
+            ? { category: true, childCategory: true, categoryId: 43 }
+            : pathname === "/c/daily/45/l/latest.json"
+              ? { category: true, childCategory: false, categoryId: 45 }
+              : pathname === "/c/daily/daily-child/46/l/latest.json"
+                ? { category: true, childCategory: false, categoryId: 46 }
+                : pathname === "/c/another/47/l/latest.json"
+                  ? { category: true, childCategory: false, categoryId: 47 }
+                  : pathname === "/c/other/44/l/latest.json"
+                    ? { category: true, childCategory: false, categoryId: 44 }
+                    : undefined;
     if (topicListMatch !== undefined && request.method === "GET") {
       record(
         "topic-list",
@@ -571,16 +885,29 @@ const server = createServer((request, response) => {
         sendJson(response, 200, {});
         return;
       }
-      sendJson(
-        response,
-        200,
-        discoveredTopicList(
-          topicListMatch.category,
-          listPage,
-          Number(url.searchParams.get("per_page") ?? "30"),
-          topicListMatch.childCategory,
-        ),
+      const responseBody = discoveredTopicList(
+        topicListMatch.category,
+        listPage,
+        Number(url.searchParams.get("per_page") ?? "30"),
+        topicListMatch.childCategory,
+        topicListMatch.categoryId,
       );
+      const listedTopics = responseBody as {
+        readonly topic_list: {
+          readonly topics: readonly { readonly id: number }[];
+          readonly more_topics_url?: string | null;
+        };
+      };
+      record(
+        "topic-list-payload",
+        pathname + "?" + url.searchParams.toString(),
+        authenticated,
+        {
+          topicIds: listedTopics.topic_list.topics.map(({ id }) => id),
+          moreTopicsUrl: listedTopics.topic_list.more_topics_url ?? null,
+        },
+      );
+      sendJson(response, 200, responseBody);
       return;
     }
     const postsMatch = /^\/t\/(\d+)\/posts\.json$/u.exec(pathname);

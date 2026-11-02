@@ -35,6 +35,12 @@ export type LinuxdoManualRun = {
   readonly result?: {
     readonly output?: {
       readonly completedScopes?: readonly string[];
+      readonly collectionCompleteness?: "complete" | "partial";
+      readonly incompleteScopes?: readonly {
+        readonly scope: string;
+        readonly reasonCode: string;
+        readonly message: string;
+      }[];
       readonly availability?: "available" | "unavailable" | "unknown";
       readonly scope?: readonly string[];
       readonly problems?: readonly {
@@ -47,6 +53,8 @@ export type LinuxdoManualRun = {
       readonly code: string;
       readonly requiresHuman: boolean;
       readonly path?: readonly (string | number)[];
+      readonly impact?: string;
+      readonly message?: string;
     };
     readonly completedScopes?: readonly string[];
     readonly commits?: readonly {
@@ -191,6 +199,7 @@ export async function triggerLinuxdoRun(
   binId: string,
   action: LinuxdoAction,
   params: Readonly<Record<string, unknown>>,
+  timeoutMs = 90_000,
 ): Promise<LinuxdoManualRun> {
   const queued = cliData<LinuxdoManualRun>(
     await cli([
@@ -204,7 +213,7 @@ export async function triggerLinuxdoRun(
     "triggered",
   );
   assert.equal(queued.status, "queued");
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + timeoutMs;
   let latest = queued;
   while (Date.now() < deadline) {
     latest = cliData<LinuxdoManualRun>(
@@ -348,6 +357,11 @@ export async function linuxdoUserJourney(input: {
 }): Promise<LinuxdoUserJourney> {
   const { binId, topicId, cli, browser, publishedHost, serverPort } = input;
   const topicScope = `topic:${String(topicId)}`;
+  const collectParams = {
+    topicId,
+    date: "2026-10-28",
+    timeZone: "UTC",
+  };
   const unavailableCheck = await triggerLinuxdoRun(cli, binId, "check", {
     topicId,
   });
@@ -371,7 +385,7 @@ export async function linuxdoUserJourney(input: {
     cli,
     binId,
     "collect",
-    { topicId, date: "2026-10-28", timeZone: "UTC" },
+    collectParams,
   );
   assert.equal(loginRequiredCollection.status, "failed");
   assert.equal(loginRequiredCollection.result?.error?.code, "login_required");
@@ -498,11 +512,12 @@ export async function linuxdoUserJourney(input: {
   );
   assert.equal(beforeCollection.results.length, 0);
 
-  const firstCollection = await triggerLinuxdoRun(cli, binId, "collect", {
-    topicId,
-    date: "2026-10-28",
-    timeZone: "UTC",
-  });
+  const firstCollection = await triggerLinuxdoRun(
+    cli,
+    binId,
+    "collect",
+    collectParams,
+  );
   assert.equal(
     firstCollection.status,
     "completed",
