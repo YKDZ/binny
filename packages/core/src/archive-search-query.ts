@@ -14,7 +14,6 @@ import {
   archiveCommits,
   archiveItems,
   archiveObservations,
-  archiveRelationObservations,
   archiveRelationRevisions,
   archiveRelations,
   archiveRevisions,
@@ -48,6 +47,11 @@ import { alias } from "drizzle-orm/pg-core";
 
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import type { ResolvedSnapshot } from "./archive-read.ts";
+import {
+  latestArchiveItemObservation,
+  latestArchiveRelationObservation,
+  latestCurrentRelationObservationGap,
+} from "./archive-relation-view.ts";
 
 type ArchiveMatchedInput = Pick<
   ArchiveSearchRequest,
@@ -397,49 +401,25 @@ export function buildArchiveMatchedQuery(
     const suffix = relationAliasIndex.toString(10);
     relationAliasIndex += 1;
     const relation = alias(archiveRelations, `search_relation_${suffix}`);
-    const relationObservation = alias(
-      archiveRelationObservations,
-      `search_relation_observation_${suffix}`,
-    );
-    const relationCommit = alias(
-      archiveCommits,
-      `search_relation_commit_${suffix}`,
-    );
     const relationRevision = alias(
       archiveRelationRevisions,
       `search_relation_revision_${suffix}`,
     );
     const relationLatestName = `search_relation_latest_${suffix}`;
-    const latestRelation = transaction
-      .select({
-        relationRevisionId: relationObservation.relationRevisionId,
-        commitId: relationObservation.commitId,
-        archiveSequence: relationObservation.archiveSequence,
-        ordinal: relationObservation.ordinal,
-        observedAt: relationCommit.observedAt,
-        recordedAt: relationCommit.recordedAt,
-        runId: relationCommit.runId,
-        collectorVersion: relationCommit.collectorVersion,
-      })
-      .from(relationObservation)
-      .innerJoin(
-        relationCommit,
-        eq(relationCommit.commitId, relationObservation.commitId),
-      )
-      .where(
-        and(
-          eq(relationObservation.relationId, relation.relationId),
-          eq(relationObservation.binId, binId),
-          lte(relationObservation.archiveSequence, asOf),
-        ),
-      )
-      .orderBy(
-        desc(relationObservation.archiveSequence),
-        desc(relationObservation.ordinal),
-        desc(relationObservation.commitId),
-      )
-      .limit(1)
-      .as(relationLatestName);
+    const latestRelation = latestArchiveRelationObservation(
+      transaction,
+      relation.relationId,
+      binId,
+      asOf,
+      relationLatestName,
+    );
+    const currentGap = latestCurrentRelationObservationGap(
+      transaction,
+      relation.relationId,
+      binId,
+      asOf,
+      `search_relation_gap_${suffix}`,
+    );
     // CASE 与 COALESCE 是局部方向和身份表达式；关系和观察列仍来自 schema。
     const relatedItemId: SQLWrapper =
       step.direction === "outgoing"
@@ -466,6 +446,7 @@ export function buildArchiveMatchedQuery(
     const conditions: SQL[] = [
       endpointCondition!,
       lte(relation.createdSequence, asOf),
+      isNull(currentGap.commitId)!,
     ];
     if (step.name !== undefined) {
       conditions.push(
@@ -478,47 +459,18 @@ export function buildArchiveMatchedQuery(
       );
     }
 
-    const targetObservation = alias(
-      archiveObservations,
-      `search_target_observation_${suffix}`,
-    );
-    const targetCommit = alias(
-      archiveCommits,
-      `search_target_commit_${suffix}`,
-    );
     const targetItem = alias(archiveItems, `search_target_item_${suffix}`);
     const targetRevision = alias(
       archiveRevisions,
       `search_target_revision_${suffix}`,
     );
-    const targetLatest = transaction
-      .select({
-        revisionId: targetObservation.revisionId,
-        binId: targetCommit.binId,
-        runId: targetCommit.runId,
-        collectorVersion: targetCommit.collectorVersion,
-        observedAt: targetCommit.observedAt,
-        recordedAt: targetCommit.recordedAt,
-      })
-      .from(targetObservation)
-      .innerJoin(
-        targetCommit,
-        eq(targetCommit.commitId, targetObservation.commitId),
-      )
-      .where(
-        and(
-          eq(targetObservation.itemId, relatedItemId),
-          eq(targetCommit.binId, binId),
-          lte(targetCommit.archiveSequence, asOf),
-        ),
-      )
-      .orderBy(
-        desc(targetCommit.archiveSequence),
-        desc(targetObservation.ordinal),
-        desc(targetCommit.commitId),
-      )
-      .limit(1)
-      .as(`search_target_latest_${suffix}`);
+    const targetLatest = latestArchiveItemObservation(
+      transaction,
+      relatedItemId,
+      binId,
+      asOf,
+      `search_target_latest_${suffix}`,
+    );
     const targetFields: SearchFields = {
       item: {
         itemId: targetItem.itemId,
@@ -535,68 +487,24 @@ export function buildArchiveMatchedQuery(
       },
     };
     const sourceItem = alias(archiveItems, `search_source_item_${suffix}`);
-    const sourceObservation = alias(
-      archiveObservations,
-      `search_source_observation_${suffix}`,
-    );
-    const sourceCommit = alias(
-      archiveCommits,
-      `search_source_commit_${suffix}`,
-    );
-    const sourceLatest = transaction
-      .select({ revisionId: sourceObservation.revisionId })
-      .from(sourceObservation)
-      .innerJoin(
-        sourceCommit,
-        eq(sourceCommit.commitId, sourceObservation.commitId),
-      )
-      .where(
-        and(
-          eq(sourceObservation.itemId, relation.fromItemId),
-          eq(sourceCommit.binId, binId),
-          lte(sourceCommit.archiveSequence, asOf),
-        ),
-      )
-      .orderBy(
-        desc(sourceCommit.archiveSequence),
-        desc(sourceObservation.ordinal),
-        desc(sourceCommit.commitId),
-      )
-      .limit(1)
-      .as(`search_source_latest_${suffix}`);
-    const endpointTargetObservation = alias(
-      archiveObservations,
-      `search_endpoint_target_observation_${suffix}`,
-    );
-    const endpointTargetCommit = alias(
-      archiveCommits,
-      `search_endpoint_target_commit_${suffix}`,
+    const sourceLatest = latestArchiveItemObservation(
+      transaction,
+      relation.fromItemId,
+      binId,
+      asOf,
+      `search_source_latest_${suffix}`,
     );
     const endpointTargetItem = alias(
       archiveItems,
       `search_endpoint_target_item_${suffix}`,
     );
-    const endpointTargetLatest = transaction
-      .select({ revisionId: endpointTargetObservation.revisionId })
-      .from(endpointTargetObservation)
-      .innerJoin(
-        endpointTargetCommit,
-        eq(endpointTargetCommit.commitId, endpointTargetObservation.commitId),
-      )
-      .where(
-        and(
-          eq(endpointTargetObservation.itemId, relation.targetItemId),
-          eq(endpointTargetCommit.binId, binId),
-          lte(endpointTargetCommit.archiveSequence, asOf),
-        ),
-      )
-      .orderBy(
-        desc(endpointTargetCommit.archiveSequence),
-        desc(endpointTargetObservation.ordinal),
-        desc(endpointTargetCommit.commitId),
-      )
-      .limit(1)
-      .as(`search_endpoint_target_latest_${suffix}`);
+    const endpointTargetLatest = latestArchiveItemObservation(
+      transaction,
+      relation.targetItemId,
+      binId,
+      asOf,
+      `search_endpoint_target_latest_${suffix}`,
+    );
     const relationDirection =
       step.direction === "either"
         ? sql`CASE WHEN ${relation.fromItemId} = ${currentItemId} THEN 'outgoing' ELSE 'incoming' END`
@@ -665,6 +573,7 @@ export function buildArchiveMatchedQuery(
       })
       .from(relation)
       .innerJoinLateral(latestRelation, sql`true`)
+      .leftJoinLateral(currentGap, sql`true`)
       .innerJoin(
         relationRevision,
         and(
