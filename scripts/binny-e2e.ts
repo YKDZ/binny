@@ -19,7 +19,10 @@ import {
   copyImageBuildContext,
   setBuildContextSourceAdapterVersion,
 } from "./binny-image-update-context.ts";
-import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
+import {
+  createIsolatedCliConsumer,
+  type IsolatedCliConsumer,
+} from "./binny-isolated-consumer.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -120,6 +123,7 @@ let composePort = 0;
 let manualRunSourcePort = 0;
 let linuxdoSourcePort = 0;
 let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
+let installedCliConsumer: IsolatedCliConsumer | undefined;
 
 function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
   const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
@@ -356,22 +360,14 @@ function startManagedProcess(
 }
 
 async function cli(
-  _baseUrl: string,
+  baseUrl: string,
   args: readonly string[],
 ): Promise<ProcessResult> {
-  return await run(
-    "docker",
-    [
-      ...composePrefix(),
-      "exec",
-      "--no-TTY",
-      "server",
-      "node",
-      "packages/binny/dist/cli.js",
-      ...args,
-    ],
-    { env: composeEnvironment() },
-  );
+  assert.ok(installedCliConsumer !== undefined, "未安装独立 CLI 消费者。");
+  return await installedCliConsumer.run(args, {
+    apiUrl: baseUrl,
+    environmentApiUrl: "http://127.0.0.1:1",
+  });
 }
 
 async function publishedPort(
@@ -456,6 +452,7 @@ async function archiveHttpStep(
 async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
   const request = {
     scope: { kind: "current" },
+    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
     unit: "item",
     where: {
       type: "and",
@@ -472,9 +469,48 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
           operator: "in",
           values: ["aggregation-shared-p", "aggregation-distinct-q"],
         },
+        {
+          type: "or",
+          conditions: [
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "x",
+            },
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "y",
+            },
+          ],
+        },
+        {
+          type: "not",
+          condition: {
+            type: "json",
+            field: "properties",
+            path: ["category"],
+            operator: "eq",
+            valueType: "string",
+            value: "y",
+          },
+        },
       ],
     },
-    groupBy: [],
+    groupBy: [
+      {
+        key: "category",
+        type: "json",
+        field: "properties",
+        path: ["category"],
+      },
+    ],
     metrics: [
       { key: "items", op: "count" },
       {
@@ -488,10 +524,18 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
         },
       },
     ],
+    orderBy: [{ key: "category", direction: "asc" }],
   };
   const result = cliData<{
     readonly unit: string;
     readonly groups: readonly {
+      readonly keys: readonly {
+        readonly key: string;
+        readonly result: {
+          readonly status: string;
+          readonly value?: unknown;
+        };
+      }[];
       readonly metrics: readonly {
         readonly key: string;
         readonly value: string | null;
@@ -511,6 +555,9 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
     { key: "items", op: "count", value: "2" },
     { key: "priceSum", op: "sum", value: "20" },
   ]);
+  assert.deepEqual(result.groups[0]?.keys, [
+    { key: "category", result: { status: "value", value: "x" } },
+  ]);
 
   const invalidRequest = { ...request, unit: "unknown" };
   const failure = cliFailure<{
@@ -526,6 +573,111 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
     "invalid_input",
   );
   assert.deepEqual(failure.path, ["unit"]);
+}
+
+async function archiveSearchPaginationCliStep(baseUrl: string): Promise<void> {
+  const query = {
+    scope: { kind: "current", binId: "rss-main" },
+    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.namespace",
+          operator: "eq",
+          value: "e2e",
+        },
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["aggregation-shared-p", "aggregation-distinct-q"],
+        },
+        {
+          type: "or",
+          conditions: [
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "x",
+            },
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "y",
+            },
+          ],
+        },
+        {
+          type: "not",
+          condition: {
+            type: "json",
+            field: "properties",
+            path: ["category"],
+            operator: "eq",
+            valueType: "string",
+            value: "y",
+          },
+        },
+      ],
+    },
+    select: [
+      "sourceKey",
+      { type: "json", field: "properties", path: ["category"] },
+    ],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 1,
+  };
+  const firstPage = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly json?: readonly {
+          readonly path: readonly (string | number)[];
+          readonly value?: unknown;
+        }[];
+      }[];
+    }[];
+    readonly nextCursor?: string;
+  }>(
+    await cli(baseUrl, ["archive", "search", "--query", JSON.stringify(query)]),
+    "found",
+  );
+  assert.deepEqual(
+    firstPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["aggregation-distinct-q"],
+  );
+  assert.equal(typeof firstPage.nextCursor, "string");
+  assert.ok(
+    firstPage.results[0]?.matches[0]?.json?.some(
+      ({ path, value }) => path.join(".") === "category" && value === "x",
+    ),
+  );
+
+  const secondPage = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({ ...query, cursor: firstPage.nextCursor }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    secondPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["aggregation-shared-p"],
+  );
 }
 
 async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
@@ -8528,14 +8680,10 @@ async function main(): Promise<void> {
     await waitForApiAndDatabase(baseUrl);
     if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
-      const isolatedClient = await verifyIsolatedApiConsumer({
+      installedCliConsumer = await createIsolatedCliConsumer({
         repositoryRoot,
-        projectName,
       });
-      assert.deepEqual(isolatedClient, {
-        health: "ok",
-        binIds: [],
-      });
+      await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
       await verifyConfigurationJourney(baseUrl);
       const manualRunManifest = await createRuntimeFixtureManifest();
       await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
@@ -8562,6 +8710,7 @@ async function main(): Promise<void> {
       const archive = await archiveHttpStep("submit", baseUrl);
       await archiveQueryValidationCliStep(baseUrl);
       await archiveAggregationCliStep(baseUrl);
+      await archiveSearchPaginationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
       baseUrl = await verifyRestartAndRemoval(
@@ -8636,6 +8785,15 @@ async function main(): Promise<void> {
       "Compose 验收失败日志：\n" + logs.stdout + logs.stderr,
     );
   } finally {
+    if (installedCliConsumer !== undefined) {
+      try {
+        await installedCliConsumer.close();
+        installedCliConsumer = undefined;
+      } catch (error) {
+        cleanupError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
     if (linuxdoViewerBrowser !== undefined) {
       try {
         await linuxdoViewerBrowser.close();

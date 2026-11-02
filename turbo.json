@@ -56,6 +56,8 @@
         "BINNY_E2E_LINUXDO_SUBNET"
       ],
       "inputs": [
+        "package.json",
+        "pnpm-workspace.yaml",
         "compose.acceptance.yaml",
         "Dockerfile",
         "scripts/binny-isolated-consumer.ts",
@@ -68,7 +70,7 @@
         "packages/api/package.json",
         "packages/api/src/**",
         "packages/api/scripts/**",
-        "packages/api/test-consumer/**",
+        "packages/binny/package.json",
         "packages/binny/src/**",
         "packages/source-adapter-sdk/scripts/**",
         "packages/source-adapter-sdk/src/**",
@@ -77,6 +79,7 @@
         "packages/source-adapter-runtime/test/fixtures/**",
         "source-adapters/rss/package.json",
         "source-adapters/rss/src/**",
+        "packages/contracts/package.json",
         "packages/contracts/src/**",
         "packages/core/package.json",
         "packages/core/src/**",
