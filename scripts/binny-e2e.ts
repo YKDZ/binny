@@ -5305,6 +5305,8 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server=2",
     "server",
   ]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
   const collectSchedule = cliData<{
@@ -5407,6 +5409,12 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   await compose(["stop", "server"]);
   await wait(65_000);
   await compose(["start", "server"]);
+  const apiUrlBeforeRestart = baseUrl;
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  process.stdout.write(
+    `计划服务端点重启后刷新：${apiUrlBeforeRestart} -> ${baseUrl}\n`,
+  );
   await waitForApiAndDatabase(baseUrl);
   await waitForRuntime(baseUrl, binId);
 
@@ -5638,10 +5646,11 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server",
   ]);
   composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   process.stdout.write(
     "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
-  return apiBaseUrl();
+  return baseUrl;
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
