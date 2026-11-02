@@ -37,16 +37,22 @@ const categorySlugPathSchema = z
   .min(1)
   .max(512)
   .regex(/^[^/?#]+(?:\/[^/?#]+)*$/u);
+const categorySlugSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[^/?#]+$/u);
+const categoryReferenceSchema = z
+  .object({
+    id: targetIdSchema,
+    kind: z.literal("category"),
+    categoryId: topicIdSchema,
+    categorySlugPath: categorySlugPathSchema,
+  })
+  .strict();
 const configuredTargetSchema = z.discriminatedUnion("kind", [
   z.object({ id: targetIdSchema, kind: z.literal("latest") }).strict(),
-  z
-    .object({
-      id: targetIdSchema,
-      kind: z.literal("category"),
-      categoryId: topicIdSchema,
-      categorySlugPath: categorySlugPathSchema,
-    })
-    .strict(),
+  categoryReferenceSchema,
   z
     .object({
       id: targetIdSchema,
@@ -112,6 +118,50 @@ const collectParamsSchema = z
       });
     }
   });
+const listCategoriesParamsSchema = z.object({}).strict();
+type CategoryReference = z.infer<typeof categoryReferenceSchema>;
+type DiscoveredCategory = {
+  id: number;
+  name: string;
+  parentId: number | null;
+  collectTarget: CategoryReference;
+  children: DiscoveredCategory[];
+};
+const discoveredCategorySchema: z.ZodType<DiscoveredCategory> = z.lazy(() =>
+  z
+    .object({
+      id: topicIdSchema,
+      name: z.string().min(1),
+      parentId: topicIdSchema.nullable(),
+      collectTarget: categoryReferenceSchema,
+      children: z.array(discoveredCategorySchema),
+    })
+    .strict(),
+);
+const listCategoriesOutputSchema = z
+  .object({ categories: z.array(discoveredCategorySchema) })
+  .strict();
+const discourseCategorySchema = z
+  .object({
+    id: topicIdSchema,
+    name: z.string().min(1),
+    slug: categorySlugSchema,
+    parent_category_id: z
+      .number()
+      .int()
+      .safe()
+      .nonnegative()
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
+const discourseCategoryListSchema = z
+  .object({
+    category_list: z
+      .object({ categories: z.array(discourseCategorySchema) })
+      .passthrough(),
+  })
+  .passthrough();
 const discoveredTopicSchema = z
   .object({ id: topicIdSchema, created_at: z.string().optional() })
   .passthrough();
@@ -931,6 +981,171 @@ async function checkTopic(
       }
     }
     return targetCheckResult(scopes, availability, problems);
+  });
+}
+
+function categoryListFailure(
+  code: string,
+  message: string,
+  requiresHuman = false,
+) {
+  return sourceAdapterActionError({
+    code,
+    message,
+    impact: "本次没有确认当前账号可见的 Linux.do 板块，也没有提交归档。",
+    suggestion: requiresHuman
+      ? "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新发现板块。"
+      : "检查当前账号的站点响应与板块访问权限后，重新运行 list-categories。",
+    requiresHuman,
+  });
+}
+
+function buildDiscoveredCategories(
+  sourceCategories: readonly z.infer<typeof discourseCategorySchema>[],
+): DiscoveredCategory[] {
+  const categoriesById = new Map<
+    number,
+    z.infer<typeof discourseCategorySchema>
+  >();
+  for (const category of sourceCategories) {
+    if (!categoriesById.has(category.id)) {
+      categoriesById.set(category.id, category);
+    }
+  }
+
+  const slugPathById = new Map<number, string>();
+  const resolveSlugPath = (
+    categoryId: number,
+    visiting: ReadonlySet<number> = new Set(),
+  ): string => {
+    const cached = slugPathById.get(categoryId);
+    if (cached !== undefined) return cached;
+    if (visiting.has(categoryId)) {
+      throw categoryListFailure(
+        "discourse_category_list_response_invalid",
+        "Linux.do 板块响应包含循环的父子关系。",
+      );
+    }
+    const category = categoriesById.get(categoryId);
+    if (category === undefined) {
+      throw categoryListFailure(
+        "discourse_category_list_response_invalid",
+        "Linux.do 板块响应缺少用于生成采集引用的板块。",
+      );
+    }
+    const nextVisiting = new Set(visiting);
+    nextVisiting.add(categoryId);
+    const parentId = category.parent_category_id;
+    const parent =
+      parentId === undefined || parentId === null || parentId === 0
+        ? undefined
+        : categoriesById.get(parentId);
+    const path =
+      parent === undefined
+        ? category.slug
+        : `${resolveSlugPath(parent.id, nextVisiting)}/${category.slug}`;
+    slugPathById.set(categoryId, path);
+    return path;
+  };
+
+  const nodesById = new Map<number, DiscoveredCategory>();
+  for (const category of categoriesById.values()) {
+    nodesById.set(category.id, {
+      id: category.id,
+      name: category.name,
+      parentId:
+        category.parent_category_id === undefined ||
+        category.parent_category_id === null ||
+        category.parent_category_id === 0
+          ? null
+          : category.parent_category_id,
+      collectTarget: {
+        id: `category-${String(category.id)}`,
+        kind: "category",
+        categoryId: category.id,
+        categorySlugPath: resolveSlugPath(category.id),
+      },
+      children: [],
+    });
+  }
+
+  const roots: DiscoveredCategory[] = [];
+  for (const category of categoriesById.values()) {
+    const node = nodesById.get(category.id);
+    if (node === undefined) continue;
+    const parentId = node.parentId;
+    const parent = parentId === null ? undefined : nodesById.get(parentId);
+    if (parent === undefined || parent === node) {
+      roots.push(node);
+    } else {
+      parent.children.push(node);
+    }
+  }
+  return roots;
+}
+
+async function listCategories(
+  context: SourceAdapterContext<SourceAdapterConfig>,
+) {
+  const site = siteFromConfig(context.config);
+  return await withSharedBrowser(context, async ({ page }) => {
+    const session = await readSessionAccess(page, site, context.signal);
+    if (session.kind === "unavailable") {
+      throw sourceAdapterActionError({
+        code: session.problem.code,
+        message: session.problem.message,
+        impact:
+          "本次没有确认当前登录账号可见的 Linux.do 板块，也没有提交归档。",
+        suggestion: session.problem.requiresHuman
+          ? "使用 human open 在持久浏览器中登录或完成人工挑战，再重新运行 list-categories。"
+          : "检查站点地址与当前会话后，重新运行 list-categories。",
+        requiresHuman: session.problem.requiresHuman,
+      });
+    }
+
+    const categoriesUrl = new URL("/categories.json", site.origin);
+    categoriesUrl.searchParams.set("include_subcategories", "true");
+    const response = await readJson(page, categoriesUrl, context.signal);
+    if (response.kind === "networkError") {
+      throw categoryListFailure(
+        "linuxdo_source_unreachable",
+        `无法读取 Linux.do 板块列表：${response.message}`,
+      );
+    }
+    if (response.kind !== "json") {
+      throw categoryListFailure(
+        response.status === 200 || response.status === 403
+          ? "discourse_category_list_challenge_response"
+          : "discourse_category_list_response_invalid",
+        "Linux.do 板块列表没有返回有效 JSON。",
+        response.status === 200 || response.status === 403,
+      );
+    }
+    if (response.status === 403 || response.status === 404) {
+      throw categoryListFailure(
+        "discourse_category_list_unavailable",
+        "当前登录账号不能读取 Linux.do 板块列表。",
+      );
+    }
+    if (response.status !== 200) {
+      throw categoryListFailure(
+        "discourse_category_list_request_failed",
+        `Linux.do 板块列表端点返回 HTTP ${String(response.status)}。`,
+      );
+    }
+
+    const parsed = discourseCategoryListSchema.safeParse(response.value);
+    if (!parsed.success) {
+      throw categoryListFailure(
+        "discourse_category_list_response_invalid",
+        "Linux.do 板块列表缺少有效的标识、名称或 slug。",
+      );
+    }
+    return {
+      categories: buildDiscoveredCategories(
+        parsed.data.category_list.categories,
+      ),
+    };
   });
 }
 
@@ -1828,6 +2043,12 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema: sourceAdapterConfigSchema,
   actions: {
+    "list-categories": defineSourceAdapterAction(sourceAdapterConfigSchema, {
+      description: "发现当前 Linux.do 登录账号可见的板块及其采集引用。",
+      params: listCategoriesParamsSchema,
+      output: listCategoriesOutputSchema,
+      execute: listCategories,
+    }),
     check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "检查登录状态以及所选 Linux.do 目标的可见范围。",
       params: checkParamsSchema,
