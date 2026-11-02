@@ -36,6 +36,7 @@ type ScheduleStore = ScheduleOperations & {
 
 export type ScheduleDispatcher = {
   readonly close: () => Promise<void>;
+  readonly ensureActiveSession: () => Promise<void>;
 };
 
 const scheduleAdvisoryNamespace = 0x4249_4e59;
@@ -214,12 +215,60 @@ async function unlockScheduleAdvisoryLock(
     );
 }
 
+type ScheduleSessionMarker = {
+  readonly pid: number;
+  readonly backendStart: string;
+};
+
+async function readScheduleSessionMarker(
+  session: ReservedDatabaseConnection,
+): Promise<ScheduleSessionMarker> {
+  const rows = await session.database.execute<{
+    readonly pid: number;
+    readonly backendStart: string;
+  }>(
+    // backend_start 转成文本可保留 PostgreSQL 的微秒精度。
+    sql`select pid, backend_start::text as "backendStart" from pg_stat_activity where pid = pg_backend_pid()`,
+    "objects",
+  );
+  const marker = rows[0];
+  if (marker === undefined)
+    throw new Error("无法读取采集计划 dispatcher 的 PostgreSQL session 标记。");
+  return { pid: Number(marker.pid), backendStart: marker.backendStart };
+}
+
+async function hasSharedScheduleSessionMarker(
+  database: Database,
+  marker: ScheduleSessionMarker,
+): Promise<boolean> {
+  // PostgreSQL 重启后旧 reservation 可能失效，只能通过普通池查询目录。
+  const rows = await database.execute<{ readonly active: boolean }>(
+    sql`select exists (
+      select 1
+      from pg_stat_activity as activity
+      join pg_locks as locks on locks.pid = activity.pid
+      where activity.pid = ${marker.pid}
+        and activity.backend_start = ${marker.backendStart}::timestamptz
+        and locks.locktype = 'advisory'
+        and locks.classid = ${scheduleAdvisoryNamespace}::oid
+        and locks.objid = ${scheduleLifecycleLockKey}::oid
+        and locks.objsubid = 2
+        and locks.mode = 'ShareLock'
+        and locks.granted
+    ) as active`,
+    "objects",
+  );
+  return rows[0]?.active === true;
+}
+
 /** 通过保留的同池 PostgreSQL session 判断其他 core 是否仍在运行。 */
 export async function startScheduleDispatcher(
   schedulesStore: Pick<ScheduleStore, "skipOverdueSchedules">,
+  database: Database,
   reserveSession: () => Promise<ReservedDatabaseConnection>,
 ): Promise<ScheduleDispatcher> {
-  const session = await reserveSession();
+  let session = await reserveSession();
+  let sessionMarker: ScheduleSessionMarker | undefined;
   let hasExclusiveLifecycleLock = false;
   let hasSharedLifecycleLock = false;
   let closed = false;
@@ -250,30 +299,51 @@ export async function startScheduleDispatcher(
       );
       hasExclusiveLifecycleLock = false;
     }
+    sessionMarker = await readScheduleSessionMarker(session);
     await unlockScheduleAdvisoryLock(session, scheduleBootstrapLockKey, false);
 
     return {
+      ensureActiveSession: async () => {
+        if (closed) throw new Error("采集计划 dispatcher 已关闭。");
+        if (
+          sessionMarker !== undefined &&
+          (await hasSharedScheduleSessionMarker(database, sessionMarker))
+        )
+          return;
+
+        // 当前 core 仍在轮询；恢复时只重建 shared 标记，不跳过到期计划。
+        hasSharedLifecycleLock = false;
+        const replacement = await reserveSession();
+        try {
+          await replacement.database.execute(
+            sql`select pg_advisory_lock_shared(${scheduleAdvisoryNamespace}, ${scheduleLifecycleLockKey})`,
+          );
+          const replacementMarker =
+            await readScheduleSessionMarker(replacement);
+          session = replacement;
+          sessionMarker = replacementMarker;
+          hasSharedLifecycleLock = true;
+        } catch (error) {
+          replacement.release();
+          throw error;
+        }
+      },
       close: async () => {
         if (closed) return;
         closed = true;
-        try {
-          if (hasSharedLifecycleLock) {
-            await unlockScheduleAdvisoryLock(
-              session,
-              scheduleLifecycleLockKey,
-              true,
-            );
-            hasSharedLifecycleLock = false;
-          }
-        } finally {
-          if (hasSharedLifecycleLock) {
-            await session.database
-              .execute(sql`select pg_advisory_unlock_all()`)
-              .catch(() => undefined);
-            hasSharedLifecycleLock = false;
-          }
-          session.release();
-        }
+        if (
+          !hasSharedLifecycleLock ||
+          sessionMarker === undefined ||
+          !(await hasSharedScheduleSessionMarker(database, sessionMarker))
+        )
+          return;
+        await unlockScheduleAdvisoryLock(
+          session,
+          scheduleLifecycleLockKey,
+          true,
+        );
+        hasSharedLifecycleLock = false;
+        session.release();
       },
     };
   } catch (error) {

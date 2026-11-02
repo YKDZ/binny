@@ -374,9 +374,15 @@ async function cli(
 async function publishedPort(
   service: string,
   containerPort: number,
+  replicaIndex?: number,
 ): Promise<number> {
   const mapping = (
-    await compose(["port", service, String(containerPort)])
+    await compose([
+      "port",
+      ...(replicaIndex === undefined ? [] : ["--index", String(replicaIndex)]),
+      service,
+      String(containerPort),
+    ])
   ).stdout.trim();
   const portText = /:(\d+)$/u.exec(mapping)?.[1];
   const port = Number(portText);
@@ -5029,6 +5035,306 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     if (retained.trigger.kind === "schedule")
       assert.equal(retained.trigger.scheduleId, scheduleId);
   }
+
+  const inspectServer = async (containerId: string) => {
+    const result = await run(
+      "docker",
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}|{{.Id}}|{{.State.Pid}}|{{.State.StartedAt}}|{{.State.Status}}",
+        containerId,
+      ],
+      { env: composeEnvironment() },
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const [name, id, pidText, startedAt, status] = result.stdout
+      .trim()
+      .split("|");
+    assert.ok(name !== undefined && id !== undefined);
+    assert.ok(pidText !== undefined && startedAt !== undefined);
+    const replicaNumber = /-server-(\d+)$/u.exec(name)?.[1];
+    assert.ok(replicaNumber !== undefined);
+    return {
+      containerId,
+      id,
+      name,
+      pid: Number(pidText),
+      replicaNumber: Number(replicaNumber),
+      startedAt,
+      status,
+    };
+  };
+  const serverReplicas = await Promise.all(
+    serverInstances.map((containerId) => inspectServer(containerId)),
+  );
+  const serverA = serverReplicas.find(
+    ({ replicaNumber }) => replicaNumber === 1,
+  );
+  const serverB = serverReplicas.find(
+    ({ replicaNumber }) => replicaNumber === 2,
+  );
+  assert.ok(serverA !== undefined && serverB !== undefined);
+  const serverABeforePostgresRestart = await inspectServer(serverA.containerId);
+  const serverBBeforePostgresRestart = await inspectServer(serverB.containerId);
+  assert.equal(serverABeforePostgresRestart.status, "running");
+  assert.equal(serverBBeforePostgresRestart.status, "running");
+
+  composePort = await publishedPort("server", 3000, 1);
+  baseUrl = apiBaseUrl();
+  await compose(["restart", "postgres"]);
+  await waitForApiAndDatabase(baseUrl);
+  await wait(1_500);
+  const serverAAfterPostgresRestart = await inspectServer(serverA.containerId);
+  const serverBAfterPostgresRestart = await inspectServer(serverB.containerId);
+  assert.deepEqual(
+    {
+      id: serverAAfterPostgresRestart.id,
+      pid: serverAAfterPostgresRestart.pid,
+      startedAt: serverAAfterPostgresRestart.startedAt,
+      status: serverAAfterPostgresRestart.status,
+    },
+    {
+      id: serverABeforePostgresRestart.id,
+      pid: serverABeforePostgresRestart.pid,
+      startedAt: serverABeforePostgresRestart.startedAt,
+      status: "running",
+    },
+  );
+  assert.deepEqual(
+    {
+      id: serverBAfterPostgresRestart.id,
+      pid: serverBAfterPostgresRestart.pid,
+      startedAt: serverBAfterPostgresRestart.startedAt,
+      status: serverBAfterPostgresRestart.status,
+    },
+    {
+      id: serverBBeforePostgresRestart.id,
+      pid: serverBBeforePostgresRestart.pid,
+      startedAt: serverBBeforePostgresRestart.startedAt,
+      status: "running",
+    },
+  );
+
+  const stoppedRecoveryServer = await run(
+    "docker",
+    ["stop", serverB.containerId],
+    { env: composeEnvironment() },
+  );
+  assert.equal(stoppedRecoveryServer.code, 0, stoppedRecoveryServer.stderr);
+  await compose(["create", "--no-recreate", "--scale", "server=2", "server"]);
+  const serverAAfterReplicaPrepare = await inspectServer(serverA.containerId);
+  assert.equal(serverAAfterReplicaPrepare.status, "running");
+  assert.equal(serverAAfterReplicaPrepare.id, serverABeforePostgresRestart.id);
+  assert.equal(
+    serverAAfterReplicaPrepare.pid,
+    serverABeforePostgresRestart.pid,
+  );
+  assert.equal(
+    serverAAfterReplicaPrepare.startedAt,
+    serverABeforePostgresRestart.startedAt,
+  );
+  const preparedServerB = await inspectServer(serverB.containerId);
+  if (preparedServerB.status === "running") {
+    const stoppedPreparedServerB = await run(
+      "docker",
+      ["stop", serverB.containerId],
+      { env: composeEnvironment() },
+    );
+    assert.equal(stoppedPreparedServerB.code, 0, stoppedPreparedServerB.stderr);
+  }
+  composePort = await publishedPort("server", 3000, 1);
+  baseUrl = apiBaseUrl();
+  const postgresRecoveryGateKey = "schedule-postgres-recovery-" + randomUUID();
+  const recoverySchedule = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      binId,
+      "--expression",
+      "*/30 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: postgresRecoveryGateKey,
+        sourceKey: postgresRecoveryGateKey,
+      }),
+      "--disabled",
+    ]),
+    "created",
+  );
+  let recoveryScheduleId: string | undefined = recoverySchedule.scheduleId;
+  let recoveryScheduleRemoved = false;
+  let serverAPaused = false;
+  let recoveryRunnerStopped = false;
+  try {
+    assert.equal(recoverySchedule.enabled, false);
+    const recoveryFirstDueAt = Date.parse(recoverySchedule.nextDueAt);
+    if (recoveryFirstDueAt - Date.now() < 20_000)
+      await wait(recoveryFirstDueAt - Date.now() + 100);
+    const enabledRecoverySchedule = cliData<{
+      readonly nextDueAt: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        recoverySchedule.scheduleId,
+      ]),
+      "enabled",
+    );
+    const recoveryScheduledFor = enabledRecoverySchedule.nextDueAt;
+    const recoveryScheduledAt = Date.parse(recoveryScheduledFor);
+    assert.ok(recoveryScheduledAt - Date.now() > 15_000);
+    const recoveryScheduleBeforePause = cliData<{
+      readonly nextDueAt: string;
+      readonly lastRunId?: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "get",
+        binId,
+        recoverySchedule.scheduleId,
+      ]),
+      "found",
+    );
+    assert.equal(recoveryScheduleBeforePause.lastRunId, undefined);
+    assert.ok(Date.parse(recoveryScheduleBeforePause.nextDueAt) > Date.now());
+
+    await compose(["stop", "runtime-fifteen-one"]);
+    recoveryRunnerStopped = true;
+    await waitFor(
+      async () =>
+        cliData<{ readonly execution: { readonly status: string } }>(
+          await cli(baseUrl, ["bin", "get", binId]),
+          "found",
+        ),
+      (bin) => bin.execution.status !== "online",
+      "PostgreSQL 恢复验收在计划到期前停止运行器",
+    );
+    await wait(Math.max(0, recoveryScheduledAt - Date.now() - 4_000));
+    assert.ok(recoveryScheduledAt > Date.now());
+
+    const pausedServer = await run("docker", ["pause", serverA.containerId], {
+      env: composeEnvironment(),
+    });
+    assert.equal(pausedServer.code, 0, pausedServer.stderr);
+    serverAPaused = true;
+    const serverABeforeReplicaStart = await inspectServer(serverA.containerId);
+    assert.equal(serverABeforeReplicaStart.status, "paused");
+    assert.equal(serverABeforeReplicaStart.id, serverABeforePostgresRestart.id);
+    assert.equal(
+      serverABeforeReplicaStart.pid,
+      serverABeforePostgresRestart.pid,
+    );
+    assert.equal(
+      serverABeforeReplicaStart.startedAt,
+      serverABeforePostgresRestart.startedAt,
+    );
+    await wait(recoveryScheduledAt - Date.now() + 250);
+
+    const startedRecoveryServer = await run(
+      "docker",
+      ["start", serverB.containerId],
+      { env: composeEnvironment() },
+    );
+    assert.equal(startedRecoveryServer.code, 0, startedRecoveryServer.stderr);
+    composePort = await publishedPort("server", 3000, 2);
+    baseUrl = apiBaseUrl();
+    await waitForApiAndDatabase(baseUrl);
+    const serverAAfterReplicaStart = await inspectServer(serverA.containerId);
+    assert.equal(serverAAfterReplicaStart.status, "paused");
+    assert.equal(serverAAfterReplicaStart.id, serverABeforePostgresRestart.id);
+    assert.equal(
+      serverAAfterReplicaStart.pid,
+      serverABeforePostgresRestart.pid,
+    );
+    assert.equal(
+      serverAAfterReplicaStart.startedAt,
+      serverABeforePostgresRestart.startedAt,
+    );
+
+    const recoveryScheduleAfterStart = await waitFor(
+      async () =>
+        cliData<{
+          readonly nextDueAt: string;
+          readonly lastRunId?: string;
+        }>(
+          await cli(baseUrl, [
+            "schedule",
+            "get",
+            binId,
+            recoverySchedule.scheduleId,
+          ]),
+          "found",
+        ),
+      (schedule) => schedule.lastRunId !== undefined,
+      "PostgreSQL reserved session 恢复后 B 应触发计划 D",
+    );
+    assert.ok(recoveryScheduleAfterStart.lastRunId !== undefined);
+    const recoveryRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, [
+        "run",
+        "get",
+        binId,
+        recoveryScheduleAfterStart.lastRunId,
+      ]),
+      "found",
+    );
+    assert.equal(recoveryRun.status, "queued");
+    assert.equal(recoveryRun.queueReason, "runtime_offline");
+    assert.equal(recoveryRun.action, "collect");
+    assert.equal(recoveryRun.trigger.kind, "schedule");
+    if (recoveryRun.trigger.kind === "schedule") {
+      assert.equal(recoveryRun.trigger.scheduleId, recoverySchedule.scheduleId);
+      assert.equal(recoveryRun.trigger.scheduledFor, recoveryScheduledFor);
+      assert.equal(recoveryRun.referenceTime, recoveryRun.trigger.scheduledFor);
+    }
+
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "remove",
+        binId,
+        recoverySchedule.scheduleId,
+      ]),
+      "removed",
+    );
+    recoveryScheduleRemoved = true;
+  } finally {
+    if (serverAPaused) {
+      const unpausedServer = await run(
+        "docker",
+        ["unpause", serverA.containerId],
+        { env: composeEnvironment() },
+      );
+      if (unpausedServer.code !== 0)
+        process.stderr.write(unpausedServer.stderr);
+      else serverAPaused = false;
+    }
+    composePort = await publishedPort("server", 3000, 1);
+    baseUrl = apiBaseUrl();
+    if (!recoveryScheduleRemoved && recoveryScheduleId !== undefined) {
+      const removed = await cli(baseUrl, [
+        "schedule",
+        "remove",
+        binId,
+        recoveryScheduleId,
+      ]);
+      if (removed.code === 0) recoveryScheduleRemoved = true;
+      else process.stderr.write(removed.stderr);
+    }
+    if (recoveryRunnerStopped) await compose(["start", "runtime-fifteen-one"]);
+  }
+
   await compose([
     "up",
     "--detach",
