@@ -16,6 +16,7 @@ import {
   createManualRunStore,
   createRuntimeConnectionStore,
   createScheduleStore,
+  startScheduleDispatcher,
 } from "@binny/core";
 import { connectDatabase, migrateDatabase } from "@binny/db";
 // 核心与 HTTP 的组装、配置及服务启动。
@@ -104,11 +105,18 @@ export async function createServerRuntime(options: {
     },
   });
   let pendingTimeout: NodeJS.Timeout | undefined;
+  let scheduleDispatcher:
+    | Awaited<ReturnType<typeof startScheduleDispatcher>>
+    | undefined;
   try {
     await migrateDatabase(database);
     await browserCapacity.initialize(database);
     await archives.initializeResourceStorage();
     await humanSessions.reconcileHumanSessionsAfterGatewayRestart();
+    scheduleDispatcher = await startScheduleDispatcher(
+      schedules,
+      connection.reserveSession,
+    );
     pendingTimeout = setInterval(
       () => {
         void humanSessions
@@ -124,9 +132,13 @@ export async function createServerRuntime(options: {
     pendingTimeout.unref();
   } catch (error) {
     try {
-      await archives.close();
+      if (scheduleDispatcher !== undefined) await scheduleDispatcher.close();
     } finally {
-      await connection.close();
+      try {
+        await archives.close();
+      } finally {
+        await connection.close();
+      }
     }
     throw error;
   }
@@ -243,15 +255,19 @@ export async function createServerRuntime(options: {
       if (schedulePoll !== undefined) clearInterval(schedulePoll);
       schedulePoll = undefined;
       await scheduleWork;
-      if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
-      await humanSessions.beginHumanGatewayShutdown();
       try {
-        await gateway.close();
+        await scheduleDispatcher?.close();
       } finally {
+        if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
+        await humanSessions.beginHumanGatewayShutdown();
         try {
-          await archives.close();
+          await gateway.close();
         } finally {
-          await connection.close();
+          try {
+            await archives.close();
+          } finally {
+            await connection.close();
+          }
         }
       }
     },
