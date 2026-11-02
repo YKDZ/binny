@@ -63,6 +63,7 @@ function fakeService(options: {
         results: [],
       });
     }
+    if (url.pathname === "/bins") return Response.json({ bins: [] });
     return new Response("Not found", { status: 404 });
   };
   return { fetch, requests };
@@ -222,6 +223,56 @@ void describe("查询服务发现", () => {
     assert.equal(
       service.requests.some(({ path }) => path === "/archives/search"),
       false,
+    );
+  });
+
+  void it("不兼容的公开 HTTP 协议会阻止普通读取", async () => {
+    const listService = fakeService({ httpApiVersion: 99 });
+    const listed = await run(["bin", "list"], listService.fetch);
+
+    assert.equal(listed.exitCode, 1);
+    assert.match(listed.output, /HTTP API 协议/u);
+    assert.deepEqual(
+      listService.requests.map(({ method, path }) => [method, path]),
+      [["GET", "/meta"]],
+    );
+  });
+
+  void it("不兼容的公开 HTTP 协议会阻止普通写入", async () => {
+    const updateService = fakeService({ httpApiVersion: 99 });
+    const updated = await run(
+      ["bin", "update", "rss-main", "--identity", "account-primary"],
+      updateService.fetch,
+    );
+
+    assert.equal(updated.exitCode, 1);
+    assert.match(updated.output, /HTTP API 协议/u);
+    assert.deepEqual(
+      updateService.requests.map(({ method, path }) => [method, path]),
+      [["GET", "/meta"]],
+    );
+  });
+
+  void it("兼容协议的普通命令按选定服务地址读取", async () => {
+    const service = fakeService({});
+    const result = await run(
+      ["bin", "list", "--url", "http://selected.test"],
+      service.fetch,
+      "9.8.7",
+      "http://from-environment.test",
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(
+      service.requests.map(({ method, path, origin }) => [
+        method,
+        path,
+        origin,
+      ]),
+      [
+        ["GET", "/meta", "http://selected.test"],
+        ["GET", "/bins", "http://selected.test"],
+      ],
     );
   });
 

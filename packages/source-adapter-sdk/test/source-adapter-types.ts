@@ -19,7 +19,7 @@ const sourceAdapter = defineSourceAdapter({
   },
   actions: {
     check: defineSourceAdapterAction(basicConfigSchema, {
-      description: "Check the feed.",
+      description: "检查 RSS 信源是否可用。",
       params: z.object({}),
       output: z.object({ available: z.boolean() }),
       async execute() {
@@ -27,7 +27,7 @@ const sourceAdapter = defineSourceAdapter({
       },
     }),
     collect: defineSourceAdapterAction(basicConfigSchema, {
-      description: "Collect selected feed entries.",
+      description: "采集选定的信源条目。",
       params: z.object({ scope: z.enum(["all", "recent"]) }),
       output: z.object({ completedScopes: z.array(z.string()) }),
       async execute(_context, params) {
@@ -36,7 +36,7 @@ const sourceAdapter = defineSourceAdapter({
       },
     }),
     discover: defineSourceAdapterAction(basicConfigSchema, {
-      description: "Discover available feeds.",
+      description: "发现可用的信源。",
       params: z.object({}),
       output: z.object({ feeds: z.array(z.string()) }),
       async execute() {
@@ -76,7 +76,7 @@ const typedActionAdapter = defineSourceAdapter({
   },
   actions: {
     check: defineSourceAdapterAction(transformedConfigSchema, {
-      description: "Return the typed configuration summary.",
+      description: "返回配置摘要。",
       params: transformedParamsSchema,
       output: z.object({ enabled: z.boolean(), total: z.number() }),
       async execute(context, params) {
@@ -87,7 +87,7 @@ const typedActionAdapter = defineSourceAdapter({
       },
     }),
     collect: defineSourceAdapterAction(transformedConfigSchema, {
-      description: "Return a typed collection result.",
+      description: "返回采集结果。",
       params: z.object({}),
       output: z.object({ accepted: z.boolean() }),
       async execute(_context, _params) {
@@ -95,10 +95,10 @@ const typedActionAdapter = defineSourceAdapter({
       },
     }),
     discover: defineSourceAdapterAction(transformedConfigSchema, {
-      description: "Return a typed discovery result.",
+      description: "返回发现结果。",
       params: z.object({}),
       output: z.object({ feeds: z.array(z.string()) }),
-      // @ts-expect-error The declared output requires string feed IDs.
+      // @ts-expect-error 输出声明要求订阅源标识为字符串。
       async execute() {
         return { feeds: [1] };
       },
@@ -118,7 +118,7 @@ defineSourceAdapter({
   // @ts-expect-error 声明的动作中必须包含 check。
   actions: {
     collect: defineSourceAdapterAction(z.object({}), {
-      description: "Collect entries.",
+      description: "采集条目。",
       params: z.object({}),
       output: z.object({ completedScopes: z.array(z.string()) }),
       async execute() {
@@ -138,7 +138,7 @@ defineSourceAdapter({
   // @ts-expect-error 声明的动作中必须包含 collect。
   actions: {
     check: defineSourceAdapterAction(z.object({}), {
-      description: "Check the endpoint.",
+      description: "检查信源端点。",
       params: z.object({}),
       output: z.object({ available: z.boolean() }),
       async execute() {

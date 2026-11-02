@@ -5070,6 +5070,29 @@ async function manualRunControllerPartitionStep(): Promise<void> {
   }>(await cli(baseUrl, ["bin", "get", binId]), "found");
   assert.ok(bin.execution.runtimeId);
 
+  const nextGateKey = "lifecycle-after-controller-link-loss";
+  const next = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: nextGateKey,
+        sourceKey: "after-interruption",
+      }),
+    ]),
+    "triggered",
+  );
+  const queuedBeforeDisconnect = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", binId, next.runId]),
+    "found",
+  );
+  assert.equal(queuedBeforeDisconnect.status, "queued");
+  assert.equal(queuedBeforeDisconnect.queueReason, "earlier_run_active");
+
   const containers = await compose(["ps", "-q", "runtime-fifteen-two"]);
   const containerId = containers.stdout.trim().split("\n")[0];
   assert.ok(containerId);
@@ -5082,8 +5105,7 @@ async function manualRunControllerPartitionStep(): Promise<void> {
   assert.equal(detached.code, 0, detached.stderr);
   let reconnected = false;
   try {
-    const nextGateKey = "lifecycle-after-controller-link-loss";
-    const next = cliData<ManualRunCliState>(
+    cliFailure<{ readonly code: string }>(
       await cli(baseUrl, [
         "run",
         "trigger",
@@ -5092,11 +5114,11 @@ async function manualRunControllerPartitionStep(): Promise<void> {
         "--params",
         JSON.stringify({
           sourceUrl: manualRunSourceRuntimeUrl(),
-          gateKey: nextGateKey,
-          sourceKey: "after-interruption",
+          gateKey: "lifecycle-action-while-controller-offline",
+          sourceKey: "offline-input",
         }),
       ]),
-      "triggered",
+      "runtime_action_validation_unavailable",
     );
     const stale = await waitForCliManualRunState(
       baseUrl,

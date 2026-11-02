@@ -673,7 +673,7 @@ export function createScheduleStore(database: Database): ScheduleStore {
             return;
           }
 
-          // The due point has no run: advancing this row skips it without touching any queued runs.
+          // 该到期点没有对应运行，因此推进计划以跳过它，并保留已有排队运行。
           await transaction
             .update(schedules)
             .set({

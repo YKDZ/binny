@@ -178,7 +178,12 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
           return;
         }
 
-        const action = options.sourceAdapter.actions[checked.data.action];
+        const action = Object.hasOwn(
+          options.sourceAdapter.actions,
+          checked.data.action,
+        )
+          ? options.sourceAdapter.actions[checked.data.action]
+          : undefined;
         if (action === undefined) {
           sendJson(response, 422, {
             valid: false,

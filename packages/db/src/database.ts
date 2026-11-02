@@ -33,8 +33,7 @@ export function connectDatabase(connectionString: string): DatabaseConnection {
     database: drizzle({ client }),
     reserveSession: async () => {
       const reservedClient = await client.reserve();
-      // postgres.js 3.4.9 omits Sql.options on its ReservedSql runtime value,
-      // while Drizzle's postgres-js driver reads the public options property.
+      // postgres.js 3.4.9 的 ReservedSql 运行时对象不包含 Sql.options，Drizzle 的 postgres-js 驱动会读取该公开属性。
       reservedClient.options = client.options;
       return {
         database: drizzle({ client: reservedClient }),
