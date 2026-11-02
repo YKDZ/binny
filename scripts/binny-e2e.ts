@@ -753,29 +753,64 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
     );
     assert.equal(unknownKey.message, "请求包含未支持的字段。");
     assert.equal(unknownKey.path, undefined);
-  }
 
-  const customIssueRequest = JSON.stringify({
-    scope: { kind: "current", binId: "rss-main" },
-    where: {
-      type: "json",
-      field: "properties",
-      path: ["x"],
-      operator: "eq",
-      value: 1,
-    },
-  });
-  for (const command of ["search", "aggregate"] as const) {
-    const customIssue = cliFailure<{
+    const missingValueType = cliFailure<{
       readonly code: string;
       readonly message: string;
       readonly path?: readonly (string | number)[];
     }>(
-      await cli(baseUrl, ["archive", command, "--query", customIssueRequest]),
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+          where: {
+            type: "json",
+            field: "properties",
+            path: ["x"],
+            operator: "eq",
+            value: 1,
+          },
+        }),
+      ]),
       "invalid_input",
     );
-    assert.equal(customIssue.message, "JSON 路径比较必须声明预期 JSON 类型。");
-    assert.deepEqual(customIssue.path, ["where", "valueType"]);
+    assert.equal(missingValueType.message, "字段值不符合要求。");
+    assert.deepEqual(missingValueType.path, ["where", "valueType"]);
+
+    const reversedRange = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+          where: {
+            type: "json",
+            field: "properties",
+            path: ["x"],
+            valueType: "number",
+            operator: "between",
+            lower: 2,
+            upper: 1,
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.equal(reversedRange.message, "JSON 数值范围上界不能早于下界。");
+    assert.deepEqual(reversedRange.path, ["where", "upper"]);
   }
 }
 
@@ -5258,6 +5293,8 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server=2",
     "server",
   ]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
   const collectSchedule = cliData<{
@@ -5360,6 +5397,12 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   await compose(["stop", "server"]);
   await wait(65_000);
   await compose(["start", "server"]);
+  const apiUrlBeforeRestart = baseUrl;
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  process.stdout.write(
+    `计划服务端点重启后刷新：${apiUrlBeforeRestart} -> ${baseUrl}\n`,
+  );
   await waitForApiAndDatabase(baseUrl);
   await waitForRuntime(baseUrl, binId);
 
@@ -5591,10 +5634,11 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server",
   ]);
   composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   process.stdout.write(
     "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
-  return apiBaseUrl();
+  return baseUrl;
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -6419,7 +6463,6 @@ async function verifyRestartAndRemoval(
     path.join(tmpdir(), "binny-relations-resource-cli-"),
   );
   const localResourcePath = path.join(downloadDirectory, "resource.bin");
-  const containerResourcePath = `/tmp/binny-relations-resource-${process.pid}.bin`;
   try {
     const downloaded = cliData<{
       readonly resourceId: string;
@@ -6433,7 +6476,7 @@ async function verifyRestartAndRemoval(
         "resource",
         expectedArchive.sdkResourceMetadata.resourceId,
         "--output",
-        containerResourcePath,
+        localResourcePath,
       ]),
       "downloaded",
     );
@@ -6443,7 +6486,7 @@ async function verifyRestartAndRemoval(
     );
     assert.equal(downloaded.mediaType, "image/svg+xml");
     assert.equal(downloaded.sha256, expectedArchive.sdkResourceMetadata.sha256);
-    await compose(["cp", `server:${containerResourcePath}`, localResourcePath]);
+    assert.equal(downloaded.savedTo, localResourcePath);
     assert.deepEqual(
       await readFile(localResourcePath),
       Buffer.from("sourceAdapter sdk image v1"),
@@ -6451,14 +6494,6 @@ async function verifyRestartAndRemoval(
   } finally {
     await rm(downloadDirectory, { recursive: true, force: true });
   }
-  await compose([
-    "exec",
-    "--no-TTY",
-    "server",
-    "rm",
-    "-f",
-    containerResourcePath,
-  ]);
 
   const cliFirstTimelinePage = cliData<{ readonly nextCursor?: string }>(
     await cli(baseUrl, [
