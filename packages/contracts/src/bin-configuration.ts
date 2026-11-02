@@ -207,18 +207,6 @@ export const browserPowerSchema = withPostgresJsonSchemaProjection(
 
 export type BrowserPower = z.infer<typeof browserPowerSchema>;
 
-export const binCreateInputSchema = withPostgresJsonSchemaProjection(
-  z.object({
-    id: binIdSchema,
-    sourceAdapter: sourceAdapterManifestSchema,
-    identityId: identityIdSchema,
-    config: jsonObjectSchema,
-    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
-      .nullable()
-      .optional(),
-  }),
-);
-
 /** 持久化 bin 的运行配置切片，不将旧清单误当作新建输入重新校验。 */
 export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
   z.object({
@@ -232,7 +220,6 @@ export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
 export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
-      sourceAdapter: sourceAdapterManifestSchema.optional(),
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
       browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
@@ -250,7 +237,46 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
 export const legacyRuntimeProtocolVersion = 4;
-export const runtimeProtocolVersion = 5;
+export const runtimeProtocolVersion = 6;
+export const runtimeConfigurationValidationPath =
+  "/internal/configuration/validate";
+export const runtimeControlUrlSchema = z
+  .url("运行器内部控制地址必须是 HTTP URL。")
+  .refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "运行器内部控制地址必须使用 HTTP 或 HTTPS。");
+
+export const runtimeConfigurationValidationInputSchema = z
+  .object({
+    sourceAdapterId: sourceAdapterIdSchema,
+    sourceAdapterVersion: postgresTextSchema.min(1),
+    config: jsonObjectSchema,
+  })
+  .strict();
+
+export const runtimeConfigurationValidationResultSchema = z.discriminatedUnion(
+  "valid",
+  [
+    z.object({ valid: z.literal(true) }).strict(),
+    z
+      .object({
+        valid: z.literal(false),
+        error: z
+          .object({
+            code: z.enum([
+              "invalid_configuration",
+              "source_adapter_version_mismatch",
+            ]),
+            message: postgresTextSchema,
+            path: z.array(z.union([z.string(), z.number()])).optional(),
+          })
+          .strict(),
+      })
+      .strict(),
+  ],
+);
+
 export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
 export type RuntimeEnvironmentKind = z.infer<
   typeof runtimeEnvironmentKindSchema
@@ -315,9 +341,10 @@ const legacyRuntimeHeartbeatSchema = runtimeHeartbeatFieldsSchema.extend({
   protocolVersion: z.literal(legacyRuntimeProtocolVersion),
 });
 
-const runtimeHeartbeatV5Schema = runtimeHeartbeatFieldsSchema
+const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema
   .extend({
     protocolVersion: z.literal(runtimeProtocolVersion),
+    runtimeControlUrl: runtimeControlUrlSchema,
     browserPowerEvent: runtimeBrowserPowerEventSchema.optional(),
   })
   .superRefine((input, context) => {
@@ -337,7 +364,7 @@ const runtimeHeartbeatV5Schema = runtimeHeartbeatFieldsSchema
 export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
   z.discriminatedUnion("protocolVersion", [
     legacyRuntimeHeartbeatSchema,
-    runtimeHeartbeatV5Schema,
+    runtimeHeartbeatCurrentSchema,
   ]),
 );
 
@@ -408,6 +435,8 @@ export const binErrorSchema = z.object({
       "runtime_configuration_incompatible",
       "runtime_environment_incompatible",
       "runtime_owner_mismatch",
+      "runtime_configuration_validation_unavailable",
+      "configuration_changed",
       "browser_capacity_active",
       "browser_reservation_mismatch",
     ]),
@@ -419,7 +448,6 @@ export const binErrorSchema = z.object({
 export type JsonObject = z.infer<typeof jsonObjectSchema>;
 export type JsonSchema = z.infer<typeof jsonSchemaDocumentSchema>;
 export type SourceAdapterManifest = z.infer<typeof sourceAdapterManifestSchema>;
-export type BinCreateInput = z.infer<typeof binCreateInputSchema>;
 export type BinUpdateInput = z.infer<typeof binUpdateInputSchema>;
 export type BinConfiguration = z.infer<typeof binConfigurationSchema>;
 export type RuntimeEnvironment = z.infer<typeof runtimeEnvironmentSchema>;
@@ -427,6 +455,12 @@ export type RuntimeEnvironmentStored = z.infer<
   typeof runtimeEnvironmentStoredSchema
 >;
 export type RuntimeHeartbeatInput = z.infer<typeof runtimeHeartbeatInputSchema>;
+export type RuntimeConfigurationValidationInput = z.infer<
+  typeof runtimeConfigurationValidationInputSchema
+>;
+export type RuntimeConfigurationValidationResult = z.infer<
+  typeof runtimeConfigurationValidationResultSchema
+>;
 export type RuntimeDisconnectInput = z.infer<
   typeof runtimeDisconnectInputSchema
 >;
@@ -442,7 +476,6 @@ export type BinOperation<T> =
 export type BinConfigurationOperations = {
   listBins(): Promise<readonly BinConfiguration[]>;
   getBin(id: string): Promise<BinOperation<BinConfiguration>>;
-  createBin(input: BinCreateInput): Promise<BinOperation<BinConfiguration>>;
   updateBin(
     id: string,
     input: BinUpdateInput,

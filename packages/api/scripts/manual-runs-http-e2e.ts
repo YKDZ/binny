@@ -3,7 +3,6 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  binErrorSchema,
   sourceAdapterManifestSchema,
   type ArchiveSubmissionInput,
   type ManualRun,
@@ -16,6 +15,7 @@ import {
 
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
 const sourceRuntimeUrl = "http://manual-runs-source:8081";
+const runtimeControlUrl = process.env.BINNY_RUNS_RUNTIME_CONTROL_URL;
 const sourceControlUrl = (() => {
   const url = process.env.BINNY_RUNS_SOURCE_CONTROL_URL;
   if (url === undefined)
@@ -27,6 +27,8 @@ const manifestJson = process.env.BINNY_RUNS_SOURCE_ADAPTER_MANIFEST;
 if (baseUrl === undefined) throw new Error("缺少 BINNY_E2E_BASE_URL。");
 if (manifestJson === undefined)
   throw new Error("缺少由 SDK 构造的 BINNY_RUNS_SOURCE_ADAPTER_MANIFEST。");
+if (runtimeControlUrl === undefined)
+  throw new Error("缺少 BINNY_RUNS_RUNTIME_CONTROL_URL。");
 
 const manifest = sourceAdapterManifestSchema.parse(
   JSON.parse(manifestJson) as unknown,
@@ -98,34 +100,22 @@ async function readRun(binId: string, runId: string): Promise<ManualRun> {
   assert.fail(`运行读取失败：${result.error.code} ${result.error.message}`);
 }
 
-async function createConcurrencyBin(binId: string): Promise<void> {
-  const response = await client.bins.$post({
-    json: {
-      id: binId,
-      sourceAdapter: manifest,
-      identityId: binId + "-identity",
-      config: { section: "concurrency" },
-    },
-  });
-  if (response.status === 201) return;
-  const result = await response.json();
-  assert.fail(`并发验收 bin 创建失败：${result.error.code}`);
-}
-
 async function heartbeat(
   binId: string,
   runtimeId: string,
   stoppedRunId?: string,
+  allowInvalidDefault = false,
 ): Promise<void> {
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
-      protocolVersion: 4,
+      protocolVersion: 6,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
+      runtimeControlUrl: runtimeControlUrl!,
       ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
       sourceAdapter: manifest,
       environment: {
@@ -140,7 +130,57 @@ async function heartbeat(
   });
   if (response.status === 200) return;
   const result = await response.json();
+  if (
+    allowInvalidDefault &&
+    response.status === 409 &&
+    result.error.code === "runtime_configuration_incompatible"
+  )
+    return;
   assert.fail(`并发验收 runtime 注册失败：${result.error.code}`);
+}
+
+async function createConcurrencyBin(
+  binId: string,
+  runtimeId: string,
+): Promise<void> {
+  await heartbeat(binId, runtimeId, undefined, true);
+  const configured = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "concurrency" } },
+  });
+  if (configured.status !== 200) {
+    const result = await configured.json();
+    assert.fail(`并发验收配置失败：${result.error.code}`);
+  }
+  const disconnected = await client.bins[":binId"].runtime.disconnect.$post({
+    param: { binId },
+    json: {
+      runtimeId,
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+    },
+  });
+  if (disconnected.status !== 200) {
+    const result = await disconnected.json();
+    assert.fail(`并发验收 runtime 断开失败：${result.error.code}`);
+  }
+  const rejectedOfflineConfig = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "offline-update" } },
+  });
+  assert.equal(rejectedOfflineConfig.status, 409);
+  if (rejectedOfflineConfig.status === 409)
+    assert.equal(
+      (await rejectedOfflineConfig.json()).error.code,
+      "runtime_configuration_validation_unavailable",
+    );
+  const preserved = await client.bins[":binId"].$get({ param: { binId } });
+  assert.equal(preserved.status, 200);
+  if (preserved.status === 200)
+    assert.deepEqual((await preserved.json()).config, {
+      section: "concurrency",
+    });
 }
 
 async function claimRun(binId: string, runtimeId: string) {
@@ -188,7 +228,7 @@ async function cancelRun(binId: string, runId: string) {
 async function verifyQueuedCancellation(): Promise<void> {
   const binId = "binny-lifecycle-queued-cancel";
   const runtimeId = "binny-lifecycle-queued-cancel-runtime";
-  await createConcurrencyBin(binId);
+  await createConcurrencyBin(binId, runtimeId);
   try {
     const queued = await triggerRun(
       binId,
@@ -219,7 +259,7 @@ async function verifyQueuedCancellation(): Promise<void> {
 async function verifyCancellationFencesLateWrites(): Promise<void> {
   const binId = "binny-lifecycle-fenced-cancel";
   const runtimeId = "binny-lifecycle-fenced-cancel-runtime";
-  await createConcurrencyBin(binId);
+  await createConcurrencyBin(binId, runtimeId);
   try {
     await heartbeat(binId, runtimeId);
     const queued = await triggerRun(
@@ -331,8 +371,8 @@ async function verifyConcurrentRuns(): Promise<void> {
   const secondKey = "runs-pool-two";
 
   await Promise.all([
-    createConcurrencyBin(firstBin),
-    createConcurrencyBin(secondBin),
+    createConcurrencyBin(firstBin, firstRuntime),
+    createConcurrencyBin(secondBin, secondRuntime),
   ]);
   const firstRuns = await Promise.all(
     firstKeys.map((key) => triggerRun(firstBin, sourceRuntimeUrl, key, key)),
@@ -830,68 +870,6 @@ async function verifyArchivedSection(
 }
 
 async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
-  const missingRequiredCheck = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-check-missing-check",
-      sourceAdapter: {
-        id: "binny-check.missing-check",
-        version: "1.0.0",
-        configSchema: { type: "object" },
-        actions: {
-          collect: {
-            description: "仅用于验证必需动作声明。",
-            params: { type: "object" },
-            output: { type: "object" },
-          },
-        },
-        environment: {
-          browser: { required: false, profileReuseAfterRestart: false },
-        },
-      },
-      identityId: "binny-check-missing-check",
-      config: {},
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  assert.equal(missingRequiredCheck.status, 400);
-  const missingCheckBody = binErrorSchema.parse(
-    await missingRequiredCheck.json(),
-  );
-  assert.equal(missingCheckBody.error.code, "invalid_input");
-
-  const missingRequiredCollect = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-check-missing-collect",
-      sourceAdapter: {
-        id: "binny-check.missing-collect",
-        version: "1.0.0",
-        configSchema: { type: "object" },
-        actions: {
-          check: {
-            description: "仅用于验证必需动作声明。",
-            params: { type: "object" },
-            output: { type: "object" },
-          },
-        },
-        environment: {
-          browser: { required: false, profileReuseAfterRestart: false },
-        },
-      },
-      identityId: "binny-check-missing-collect",
-      config: {},
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  assert.equal(missingRequiredCollect.status, 400);
-  const missingCollectBody = binErrorSchema.parse(
-    await missingRequiredCollect.json(),
-  );
-  assert.equal(missingCollectBody.error.code, "invalid_input");
-
   const incompleteCheck = await client.bins[":binId"].runs.$post({
     param: { binId: "binny-runs-one" },
     json: {
@@ -1210,7 +1188,39 @@ async function verifyDisabledQueueBoundary(
   assert.equal(enabled.status, 200);
 }
 
+async function configureRegisteredBin(binId: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await client.bins[":binId"].$get({ param: { binId } });
+    if (response.status === 200) {
+      const current = await response.json();
+      if (Object.keys(current.config).length === 0) {
+        assert.equal(current.execution.status, "incompatible");
+        const configured = await client.bins[":binId"].$patch({
+          param: { binId },
+          json: { config: { section: "initial" } },
+        });
+        assert.equal(configured.status, 200);
+        if (configured.status === 200) {
+          const bin = await configured.json();
+          assert.deepEqual(bin.config, { section: "initial" });
+          assert.equal(bin.execution.status, "online");
+        }
+      } else {
+        assert.deepEqual(current.config, { section: "initial" });
+        assert.equal(current.execution.status, "online");
+      }
+      return;
+    }
+    assert.equal(response.status, 404);
+    await delay(100);
+  }
+  assert.fail(`运行器没有自动登记 bin ${binId}。`);
+}
+
 async function main(): Promise<void> {
+  await configureRegisteredBin("binny-runs-one");
+  await configureRegisteredBin("binny-runs-two");
   await verifyQueuedCancellation();
   await verifyCancellationFencesLateWrites();
   await verifyConcurrentRuns();
