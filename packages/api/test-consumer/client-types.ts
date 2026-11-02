@@ -737,3 +737,38 @@ async function checkPublicArchiveAggregationContract(): Promise<void> {
 }
 
 void checkPublicArchiveAggregationContract;
+
+async function checkPublicServiceDiscoveryContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const metadataResponse = await client.meta.$get();
+  if (metadataResponse.status === 200) {
+    const metadata = await metadataResponse.json();
+    const productVersion: string = metadata.product.version;
+    const protocolVersion: number = metadata.protocols.httpApi;
+    const queryContractPath: string = metadata.contracts.archiveQuery.path;
+    const capabilities: readonly string[] = metadata.capabilities;
+    void productVersion;
+    void protocolVersion;
+    void queryContractPath;
+    void capabilities;
+  }
+
+  const queryContractResponse = await client.meta.query.$get();
+  if (queryContractResponse.status === 200) {
+    const queryContract = await queryContractResponse.json();
+    const version: number = queryContract.version;
+    const searchPath: string = queryContract.operations.search.path;
+    const searchSchema: Record<string, unknown> =
+      queryContract.operations.search.requestSchema;
+    const aggregatePath: string = queryContract.operations.aggregate.path;
+    void version;
+    void searchPath;
+    void searchSchema;
+    void aggregatePath;
+  }
+
+  // @ts-expect-error 未声明的服务发现路由不能由正式客户端调用。
+  void client.meta.unknown.$get();
+}
+
+void checkPublicServiceDiscoveryContract;

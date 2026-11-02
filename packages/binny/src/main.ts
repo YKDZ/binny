@@ -21,6 +21,11 @@ import {
   archiveSearchInputSchema,
   archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
+  archiveQueryContractPath,
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+  serviceCapabilities,
+  serviceMetadataSchema,
   archiveTimelinePageSchema,
   binConfigurationSchema,
   binCreateInputSchema,
@@ -199,7 +204,82 @@ const errorOutputSchema = z.union([
   manualRunErrorSchema.shape.error,
   humanSessionErrorSchema.shape.error,
   scheduleErrorSchema.shape.error,
+  z
+    .object({
+      code: z.enum([
+        "service_metadata_unavailable",
+        "incompatible_http_api_protocol",
+        "incompatible_archive_query_contract",
+        "service_capability_unavailable",
+      ]),
+      message: z.string(),
+    })
+    .strict(),
 ]);
+type CliApiError = z.infer<typeof errorOutputSchema>;
+
+type QueryCompatibilityFailure = {
+  readonly code:
+    | "service_metadata_unavailable"
+    | "incompatible_http_api_protocol"
+    | "incompatible_archive_query_contract"
+    | "service_capability_unavailable";
+  readonly message: string;
+};
+
+async function queryCompatibilityFailure(
+  dependencies: CliDependencies,
+  capability: string,
+): Promise<QueryCompatibilityFailure | undefined> {
+  const response = await dependencies.createClient().meta.$get();
+  if (response.status !== 200) {
+    return {
+      code: "service_metadata_unavailable",
+      message: "服务未提供公开元信息，无法确认查询契约兼容性。",
+    };
+  }
+
+  const metadata = serviceMetadataSchema.safeParse(await response.json());
+  if (!metadata.success) {
+    return {
+      code: "service_metadata_unavailable",
+      message: "服务公开的元信息格式无效，无法确认查询契约兼容性。",
+    };
+  }
+  if (metadata.data.protocols.httpApi !== publicApiProtocolVersion) {
+    return {
+      code: "incompatible_http_api_protocol",
+      message:
+        "服务使用 HTTP API 协议 " +
+        String(metadata.data.protocols.httpApi) +
+        "；当前 CLI 支持协议 " +
+        String(publicApiProtocolVersion) +
+        "。",
+    };
+  }
+  if (
+    metadata.data.contracts.archiveQuery.version !==
+      archiveQueryContractVersion ||
+    metadata.data.contracts.archiveQuery.path !== archiveQueryContractPath
+  ) {
+    return {
+      code: "incompatible_archive_query_contract",
+      message:
+        "服务的归档查询契约版本或入口与当前 CLI 不兼容。服务版本为 " +
+        String(metadata.data.contracts.archiveQuery.version) +
+        "，当前 CLI 支持版本 " +
+        String(archiveQueryContractVersion) +
+        "。",
+    };
+  }
+  if (!metadata.data.capabilities.includes(capability)) {
+    return {
+      code: "service_capability_unavailable",
+      message: "服务未公开当前查询所需的能力：" + capability + "。",
+    };
+  }
+  return undefined;
+}
 
 function createCliContract(identity: CliCommandIdentity) {
   const define = defineCli<CliDependencies>();
@@ -211,8 +291,7 @@ function createCliContract(identity: CliCommandIdentity) {
       description: "请求未能完成",
       exitCode: 1,
       schema: errorOutputSchema,
-      text: ({ message }: { readonly message: string }) =>
-        text.line("操作未完成：" + message),
+      text: ({ message }: CliApiError) => text.line("操作未完成：" + message),
     },
   };
   return define({
@@ -255,6 +334,12 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "archive",
         description: "读取和删除归档资料、对象关系及观察历史。",
       },
+      service: {
+        kind: "commandGroup",
+        parent: "cli",
+        name: "service",
+        description: "发现服务版本、能力和公开查询契约。",
+      },
       run: {
         kind: "commandGroup",
         parent: "cli",
@@ -273,6 +358,59 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "schedule",
         description: "管理定时采集计划。",
       },
+      ...command("serviceInfo")({
+        kind: "command",
+        parent: "service",
+        name: "info",
+        description: "读取服务元信息及搜索和聚合 JSON Schema。",
+        input: z.object({}),
+        fields: {},
+        success: {
+          kind: "data",
+          variants: {
+            discovered: {
+              description: "服务元信息与归档查询契约",
+              exitCode: 0,
+              schema: z.unknown(),
+              text: (result) => outputText("服务元信息与归档查询契约", result),
+            },
+          },
+        },
+        failures,
+        async handler({ dependencies, outcome }) {
+          const metadataResponse = await dependencies
+            .createClient()
+            .meta.$get();
+          if (metadataResponse.status !== 200) {
+            return outcome.failure.apiError({
+              code: "service_metadata_unavailable",
+              message: "服务未提供公开元信息。",
+            });
+          }
+          const metadata = serviceMetadataSchema.safeParse(
+            await metadataResponse.json(),
+          );
+          if (!metadata.success) {
+            return outcome.failure.apiError({
+              code: "service_metadata_unavailable",
+              message: "服务公开的元信息格式无效。",
+            });
+          }
+          const contractResponse = await dependencies
+            .createClient()
+            .meta.query.$get();
+          if (contractResponse.status !== 200) {
+            return outcome.failure.apiError({
+              code: "service_metadata_unavailable",
+              message: "服务没有提供元信息声明的归档查询契约。",
+            });
+          }
+          return outcome.data.discovered({
+            metadata: metadata.data,
+            queryContract: await contractResponse.json(),
+          });
+        },
+      }),
       ...command("archiveSearch")({
         kind: "command",
         parent: "archive",
@@ -304,10 +442,10 @@ function createCliContract(identity: CliCommandIdentity) {
             request = JSON.parse(input.query) as unknown;
           } catch {
             const error = {
-              code: "invalid_input",
+              code: "invalid_input" as const,
               message: "搜索请求必须是有效 JSON。",
               path: ["query"],
-            } as const;
+            };
             return outcome.failure.apiError(error);
           }
           const checked = archiveSearchInputSchema.safeParse(request);
@@ -315,6 +453,13 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.failure.apiError(
               validationFailure(checked.error.issues).error,
             );
+          }
+          const compatibilityFailure = await queryCompatibilityFailure(
+            dependencies,
+            serviceCapabilities.archiveSearch,
+          );
+          if (compatibilityFailure !== undefined) {
+            return outcome.failure.apiError(compatibilityFailure);
           }
           const response = await dependencies
             .createClient()
@@ -357,10 +502,10 @@ function createCliContract(identity: CliCommandIdentity) {
             request = JSON.parse(input.query) as unknown;
           } catch {
             const error = {
-              code: "invalid_input",
+              code: "invalid_input" as const,
               message: "聚合请求必须是有效 JSON。",
               path: ["query"],
-            } as const;
+            };
             return outcome.failure.apiError(error);
           }
           const checked = archiveAggregationInputSchema.safeParse(request);
@@ -368,6 +513,13 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.failure.apiError(
               validationFailure(checked.error.issues).error,
             );
+          }
+          const compatibilityFailure = await queryCompatibilityFailure(
+            dependencies,
+            serviceCapabilities.archiveAggregation,
+          );
+          if (compatibilityFailure !== undefined) {
+            return outcome.failure.apiError(compatibilityFailure);
           }
           const response = await dependencies
             .createClient()

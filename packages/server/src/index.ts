@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -23,6 +24,11 @@ import type { ServerType } from "@hono/node-server";
 
 import { HumanSessionGateway } from "./human-session-gateway.ts";
 import { humanSessionViewerPage } from "./human-session-viewer.ts";
+
+const require = createRequire(import.meta.url);
+const serverPackageVersion = (
+  require("../package.json") as { readonly version?: string }
+).version;
 
 export type ServerRuntime = {
   readonly app: ReturnType<typeof createApiRoutes>;
@@ -177,14 +183,22 @@ export async function createServerRuntime(options: {
       return result;
     },
   };
-  const app = createApiRoutes({
-    bins: createBinConfigurationStore(database, browserCapacity),
-    runtime: runtimeOperations,
-    runs,
-    schedules,
-    archives,
-    humanSessions: humanOperations,
-  });
+  const app = createApiRoutes(
+    {
+      bins: createBinConfigurationStore(database, browserCapacity),
+      runtime: runtimeOperations,
+      runs,
+      schedules,
+      archives,
+      humanSessions: humanOperations,
+    },
+    {
+      productVersion:
+        process.env.BINNY_PRODUCT_VERSION ??
+        serverPackageVersion ??
+        "unpublished",
+    },
+  );
   const viewerBundlePath = fileURLToPath(
     new URL(
       import.meta.url.endsWith(".ts")

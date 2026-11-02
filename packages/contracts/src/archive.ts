@@ -473,7 +473,8 @@ export type ArchiveResourceMetadata = z.infer<
 export const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
 export const archiveSnapshotSequenceSchema = z
   .string()
-  .regex(/^(?:0|[1-9][0-9]{0,18})$/u);
+  .regex(/^(?:0|[1-9][0-9]{0,18})$/u)
+  .describe("已提交观察的十进制序号文本；asOf 使用该序号固定历史截点。");
 /** 读取在此已提交序号内所知的 current 视图或历史视图。 */
 export const archiveSnapshotSchema = z
   .object({
@@ -714,19 +715,23 @@ export type ArchiveRevisionRead = z.infer<typeof archiveRevisionReadSchema>;
 export type ArchiveRevisionDiff = z.infer<typeof archiveRevisionDiffSchema>;
 export type ArchiveError = z.infer<typeof archiveErrorSchema>["error"];
 
-export const archiveSearchFieldSchema = z.enum([
-  "sourceKey.namespace",
-  "sourceKey.key",
-  "sourceRef",
-  "sourceModifiedAt",
-  "capture.completeness",
-  "body.searchText",
-  "binId",
-  "runId",
-  "sourceAdapterVersion",
-  "observedAt",
-  "recordedAt",
-]);
+export const archiveSearchFieldSchema = z
+  .enum([
+    "sourceKey.namespace",
+    "sourceKey.key",
+    "sourceRef",
+    "sourceModifiedAt",
+    "capture.completeness",
+    "body.searchText",
+    "binId",
+    "runId",
+    "sourceAdapterVersion",
+    "observedAt",
+    "recordedAt",
+  ])
+  .describe(
+    "内置信源、归档状态与观察字段；自定义 JSON 字段通过 JSON 路径条件表达。",
+  );
 export type ArchiveSearchField = z.infer<typeof archiveSearchFieldSchema>;
 
 /** 正文条件只匹配信源适配器提供的 searchText；正则使用 PostgreSQL ARE。 */
@@ -761,30 +766,11 @@ export const archiveSearchJsonPathSchema = z
   .describe(
     "JSON 路径使用对象键字符串或数组下标数字；空路径表示整个自定义字段。",
   );
-export const archiveSearchJsonValueTypeSchema = z.enum([
-  "string",
-  "number",
-  "boolean",
-  "null",
-  "array",
-  "object",
-]);
-const archiveSearchJsonOperatorSchema = z.enum([
-  "exists",
-  "eq",
-  "ne",
-  "in",
-  "notIn",
-  "gt",
-  "gte",
-  "lt",
-  "lte",
-  "between",
-]);
-
-type ArchiveSearchJsonValueType = z.infer<
-  typeof archiveSearchJsonValueTypeSchema
->;
+export const archiveSearchJsonValueTypeSchema = z
+  .enum(["string", "number", "boolean", "null", "array", "object"])
+  .describe(
+    "JSON 路径比较值的预期 JSON 类型；每个操作符只接受结构中声明的类型。",
+  );
 type ArchiveSearchJsonPathSegment = z.infer<
   typeof archiveSearchJsonPathSchema
 >[number];
@@ -794,173 +780,189 @@ export type ArchiveSearchJsonProjection = {
   readonly path: ArchiveSearchJsonPathSegment[];
 };
 
-export type ArchiveSearchJsonFilter = {
-  readonly type: "json";
-  readonly field: z.infer<typeof archiveSearchJsonFieldSchema>;
-  readonly path: ArchiveSearchJsonPathSegment[];
-  readonly operator: z.infer<typeof archiveSearchJsonOperatorSchema>;
-  readonly valueType?: ArchiveSearchJsonValueType | undefined;
-  readonly value?: unknown;
-  readonly values?: unknown[] | undefined;
-  readonly lower?: unknown;
-  readonly upper?: unknown;
+const archiveSearchJsonFilterFields = {
+  type: z.literal("json"),
+  field: archiveSearchJsonFieldSchema,
+  path: archiveSearchJsonPathSchema,
 };
 
-function matchesArchiveJsonType(
-  value: unknown,
-  valueType: ArchiveSearchJsonValueType,
-): boolean {
-  switch (valueType) {
-    case "string":
-      return typeof value === "string";
-    case "number":
-      return typeof value === "number";
-    case "boolean":
-      return typeof value === "boolean";
-    case "null":
-      return value === null;
-    case "array":
-      return Array.isArray(value);
-    case "object":
-      return (
-        typeof value === "object" && value !== null && !Array.isArray(value)
-      );
-  }
-}
-
 const archiveSearchJsonFilterSchema = z
-  .object({
-    type: z.literal("json"),
-    field: archiveSearchJsonFieldSchema,
-    path: archiveSearchJsonPathSchema,
-    operator: archiveSearchJsonOperatorSchema,
-    valueType: archiveSearchJsonValueTypeSchema.optional(),
-    value: archiveJsonValueSchema.optional(),
-    values: z.array(archiveJsonValueSchema).min(1).max(100).optional(),
-    lower: archiveJsonValueSchema.optional(),
-    upper: archiveJsonValueSchema.optional(),
-  })
-  .strict()
-  .superRefine((filter, context) => {
-    const hasValue = filter.value !== undefined;
-    const hasValues = filter.values !== undefined;
-    const hasBounds = filter.lower !== undefined || filter.upper !== undefined;
-    if (filter.operator === "exists") {
-      if (
-        typeof filter.value !== "boolean" ||
-        filter.valueType !== undefined ||
-        hasValues ||
-        hasBounds
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["value"],
-          message: "JSON 路径 exists 条件必须用布尔值说明路径是否存在。",
-        });
-      }
-      return;
-    }
-
-    if (filter.valueType === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["valueType"],
-        message: "JSON 路径比较必须声明预期 JSON 类型。",
-      });
-      return;
-    }
-    const valueType = filter.valueType;
-    const requireTypedValue = (
-      value: unknown,
-      path: (string | number)[],
-    ): void => {
-      if (value !== undefined && !matchesArchiveJsonType(value, valueType)) {
-        context.addIssue({
-          code: "custom",
-          path,
-          message: "JSON 路径比较值与声明类型不一致。",
-        });
-      }
-    };
-    const operator = filter.operator;
-    if (operator === "in" || operator === "notIn") {
-      if (!hasValues || hasValue || hasBounds) {
-        context.addIssue({
-          code: "custom",
-          path: ["values"],
-          message: "JSON 路径集合条件必须提供 values 列表。",
-        });
-      } else {
-        for (const [index, value] of (filter.values ?? []).entries()) {
-          requireTypedValue(value, ["values", index]);
-        }
-      }
-      return;
-    }
-
-    if (operator === "between") {
-      if (
-        !hasBounds ||
-        filter.lower === undefined ||
-        filter.upper === undefined ||
-        hasValue ||
-        hasValues
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: ["lower"],
-          message: "JSON 路径范围条件必须同时提供 lower 和 upper。",
-        });
-      } else {
-        if (valueType !== "number" && valueType !== "string") {
-          context.addIssue({
-            code: "custom",
-            path: ["valueType"],
-            message: "JSON 路径范围只支持 string 和 number 类型。",
-          });
-        }
-        requireTypedValue(filter.lower, ["lower"]);
-        requireTypedValue(filter.upper, ["upper"]);
-        if (
-          valueType === "number" &&
-          typeof filter.lower === "number" &&
-          typeof filter.upper === "number" &&
-          filter.lower > filter.upper
-        ) {
+  .union([
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.literal("exists"),
+        value: z.boolean(),
+      })
+      .strict()
+      .describe("按布尔值判断 JSON 路径是否存在；不需要 valueType。"),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("string"),
+        value: postgresTextSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("number"),
+        value: jsonNumberSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("boolean"),
+        value: z.boolean(),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("null"),
+        value: z.null(),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("array"),
+        value: z.array(archiveJsonValueSchema),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z.enum(["eq", "ne"]).describe("按 JSON 值相等或不等比较。"),
+        valueType: z.literal("object"),
+        value: jsonObjectSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("string"),
+        values: z.array(postgresTextSchema).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("number"),
+        values: z.array(jsonNumberSchema).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("boolean"),
+        values: z.array(z.boolean()).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("null"),
+        values: z.array(z.null()).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("array"),
+        values: z.array(z.array(archiveJsonValueSchema)).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["in", "notIn"])
+          .describe("判断 JSON 值是否属于列表。"),
+        valueType: z.literal("object"),
+        values: z.array(jsonObjectSchema).min(1).max(100),
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["gt", "gte", "lt", "lte"])
+          .describe("只对 string 或 number 执行大小比较。"),
+        valueType: z.literal("string"),
+        value: postgresTextSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .enum(["gt", "gte", "lt", "lte"])
+          .describe("只对 string 或 number 执行大小比较。"),
+        valueType: z.literal("number"),
+        value: jsonNumberSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .literal("between")
+          .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
+        valueType: z.literal("string"),
+        lower: postgresTextSchema,
+        upper: postgresTextSchema,
+      })
+      .strict(),
+    z
+      .object({
+        ...archiveSearchJsonFilterFields,
+        operator: z
+          .literal("between")
+          .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
+        valueType: z.literal("number"),
+        lower: jsonNumberSchema,
+        upper: jsonNumberSchema,
+      })
+      .strict()
+      .superRefine((filter, context) => {
+        if (filter.lower > filter.upper) {
           context.addIssue({
             code: "custom",
             path: ["upper"],
             message: "JSON 数值范围上界不能早于下界。",
           });
         }
-      }
-      return;
-    }
+      }),
+  ])
+  .describe(
+    "JSON 路径条件按 operator 与 valueType 的联合结构声明；集合值必须同类型，范围仅支持 string 和 number。",
+  );
 
-    if (!hasValue || hasValues || hasBounds) {
-      context.addIssue({
-        code: "custom",
-        path: ["value"],
-        message: "JSON 路径比较条件必须提供单个 value。",
-      });
-      return;
-    }
-    requireTypedValue(filter.value, ["value"]);
-    if (
-      (operator === "gt" ||
-        operator === "gte" ||
-        operator === "lt" ||
-        operator === "lte") &&
-      valueType !== "number" &&
-      valueType !== "string"
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["valueType"],
-        message: "JSON 路径范围只支持 string 和 number 类型。",
-      });
-    }
-  });
+export type ArchiveSearchJsonFilter = z.infer<
+  typeof archiveSearchJsonFilterSchema
+>;
 
 export type ArchiveSearchFieldFilter = {
   readonly type: "field";
@@ -1286,7 +1288,7 @@ const archiveSearchFieldFilterSchema = z
     }
   });
 
-const archiveSearchScalarFilterSchema = z.discriminatedUnion("type", [
+const archiveSearchScalarFilterSchema = z.union([
   z
     .object({
       type: z.literal("text"),
@@ -1301,7 +1303,7 @@ const archiveSearchTargetFilterNodeSchema: z.ZodType<
   ArchiveSearchTargetFilter,
   ArchiveSearchTargetFilter
 > = z.lazy(() =>
-  z.discriminatedUnion("type", [
+  z.union([
     z
       .object({
         type: z.literal("and"),
@@ -1490,7 +1492,7 @@ const archiveSearchFilterNodeSchema: z.ZodType<
   ArchiveSearchFilter,
   ArchiveSearchFilter
 > = z.lazy(() =>
-  z.discriminatedUnion("type", [
+  z.union([
     z
       .object({
         type: z.literal("and"),
@@ -1656,35 +1658,39 @@ function countArchiveSearchFilterNodes(filter: ArchiveSearchFilter): number {
  * 不借用其他 bin 补资料。游标固定首屏 snapshot 并绑定查询；budgetMs 限制每条
  * PostgreSQL 搜索语句，超时返回 422 且不返回部分结果。无 text 与 where 的空查询无效。
  */
-export const archiveSearchScopeSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("current"),
-      binId: binIdSchema.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("asOf"),
-      binId: binIdSchema.optional(),
-      asOf: archiveSnapshotSequenceSchema,
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("revisions"),
-      binId: binIdSchema.optional(),
-      asOf: archiveSnapshotSequenceSchema.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("observations"),
-      binId: binIdSchema.optional(),
-      asOf: archiveSnapshotSequenceSchema.optional(),
-    })
-    .strict(),
-]);
+export const archiveSearchScopeSchema = z
+  .discriminatedUnion("kind", [
+    z
+      .object({
+        kind: z.literal("current"),
+        binId: binIdSchema.optional(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("asOf"),
+        binId: binIdSchema.optional(),
+        asOf: archiveSnapshotSequenceSchema,
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("revisions"),
+        binId: binIdSchema.optional(),
+        asOf: archiveSnapshotSequenceSchema.optional(),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("observations"),
+        binId: binIdSchema.optional(),
+        asOf: archiveSnapshotSequenceSchema.optional(),
+      })
+      .strict(),
+  ])
+  .describe(
+    "current 查询最新已提交视图；asOf 查询固定观察序号的历史视图；revisions 与 observations 查询历史记录。可选 binId 限定来源视图。",
+  );
 
 export type ArchiveSearchScope = z.infer<typeof archiveSearchScopeSchema>;
 
@@ -1702,8 +1708,18 @@ export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
         .describe("按每个命中来源视图独立返回完整有限路径；不改变根筛选结果。"),
       select: archiveSearchProjectionSchema,
       orderBy: archiveSearchOrderBySchema,
-      limit: z.number().int().min(1).max(100).default(50),
-      cursor: postgresTextSchema.min(1).max(4096).optional(),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(50)
+        .describe("结果页条数，默认 50，最多 100。"),
+      cursor: postgresTextSchema
+        .min(1)
+        .max(4096)
+        .optional()
+        .describe("继续读取上一页的 nextCursor；游标固定首屏快照并绑定查询。"),
       budgetMs: z
         .number()
         .int()
