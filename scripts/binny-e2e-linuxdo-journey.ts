@@ -44,6 +44,8 @@ export type LinuxdoManualRun = {
   };
 };
 
+export type LinuxdoAction = "check" | "collect" | "list-categories";
+
 type LinuxdoCheckOutput = {
   readonly availability: "available" | "unavailable" | "unknown";
   readonly scope: readonly string[];
@@ -175,7 +177,7 @@ export async function startLinuxdoViewerBrowser(input: {
 export async function triggerLinuxdoRun(
   cli: LinuxdoCli,
   binId: string,
-  action: "check" | "collect",
+  action: LinuxdoAction,
   params: Readonly<Record<string, unknown>>,
 ): Promise<LinuxdoManualRun> {
   const queued = cliData<LinuxdoManualRun>(

@@ -18,6 +18,7 @@ import {
   startLinuxdoViewerBrowser,
   triggerLinuxdoRun,
   type LinuxdoBrowserSession,
+  type LinuxdoAction,
   type LinuxdoManualRun,
   type LinuxdoViewerBrowser,
 } from "./binny-e2e-linuxdo-journey.ts";
@@ -46,6 +47,8 @@ type FixtureState = {
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
   readonly targetInvalidResponsePage: number | null;
+  readonly categoriesUnavailable: boolean;
+  readonly categoriesInvalidResponse: boolean;
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -427,7 +430,7 @@ async function waitForRuntime(): Promise<void> {
 }
 
 async function trigger(
-  action: "check" | "collect",
+  action: LinuxdoAction,
   params: Readonly<Record<string, unknown>>,
 ): Promise<ManualRun> {
   return await triggerLinuxdoRun(cli, "binny-discovery-topic", action, params);
@@ -635,6 +638,166 @@ async function verifyActionParameterValidation(): Promise<void> {
     assert.equal(payload.error.code, "invalid_action_parameters");
     assert.deepEqual(payload.error.path, path);
   }
+}
+
+async function verifyCategoryActionDiscovery(): Promise<void> {
+  const actions = cliData<{
+    readonly actions: Record<
+      string,
+      { readonly params?: unknown; readonly output?: unknown }
+    >;
+  }>(await cli(["bin", "actions", "binny-discovery-topic"]), "discovered");
+  const declaration = actions.actions["list-categories"];
+  assert.ok(declaration !== undefined, "动作发现应公开 list-categories。");
+  assert.ok(declaration.params !== undefined);
+  assert.ok(declaration.output !== undefined);
+  const paramsSchema = declaration.params as {
+    readonly type?: string;
+    readonly required?: readonly string[];
+  };
+  assert.equal(paramsSchema.type, "object");
+  assert.deepEqual(paramsSchema.required ?? [], []);
+  const outputSchema = declaration.output as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+  assert.ok(outputSchema.properties?.categories !== undefined);
+}
+
+async function verifyCategoryDiscovery(): Promise<void> {
+  const unscopedCheck = await trigger("check", {});
+  assert.equal(
+    unscopedCheck.status,
+    "completed",
+    JSON.stringify(unscopedCheck),
+  );
+  assert.equal(checkOutput(unscopedCheck).availability, "available");
+  assert.deepEqual(checkOutput(unscopedCheck).scope, []);
+
+  const before = await sourceState();
+  const listed = await trigger("list-categories", {});
+  assert.equal(listed.status, "completed", JSON.stringify(listed));
+  assert.deepEqual(listed.result?.commits ?? [], []);
+  const output = listed.result?.output as
+    | {
+        readonly categories?: readonly {
+          readonly id: number;
+          readonly name: string;
+          readonly parentId: number | null;
+          readonly collectTarget: {
+            readonly id: string;
+            readonly kind: "category";
+            readonly categoryId: number;
+            readonly categorySlugPath: string;
+          };
+          readonly children: readonly {
+            readonly id: number;
+            readonly name: string;
+            readonly parentId: number | null;
+            readonly collectTarget: {
+              readonly id: string;
+              readonly kind: "category";
+              readonly categoryId: number;
+              readonly categorySlugPath: string;
+            };
+            readonly children: readonly unknown[];
+          }[];
+        }[];
+      }
+    | undefined;
+  assert.ok(output !== undefined);
+  assert.deepEqual(
+    output.categories?.map(({ id, name, parentId }) => ({
+      id,
+      name,
+      parentId,
+    })),
+    [
+      { id: 42, name: "受控板块", parentId: null },
+      { id: 44, name: "另一可见板块", parentId: null },
+    ],
+  );
+  const parent = output.categories?.find(({ id }) => id === 42);
+  assert.ok(parent !== undefined);
+  assert.deepEqual(
+    parent.children.map(({ id, name, parentId, collectTarget }) => ({
+      id,
+      name,
+      parentId,
+      collectTarget,
+    })),
+    [
+      {
+        id: 43,
+        name: "可见子板块",
+        parentId: 42,
+        collectTarget: {
+          id: "category-43",
+          kind: "category",
+          categoryId: 43,
+          categorySlugPath: "controlled/child",
+        },
+      },
+    ],
+  );
+  const after = await sourceState();
+  const categoryEvent = after.events
+    .slice(before.events.length)
+    .find(({ action }) => action === "categories");
+  assert.ok(categoryEvent !== undefined);
+  assert.equal(categoryEvent.authenticated, true);
+  assert.ok(categoryEvent.path.includes("include_subcategories=true"));
+  assert.equal(
+    after.events
+      .slice(before.events.length)
+      .some(({ action }) => ["topic-list", "topic", "posts"].includes(action)),
+    false,
+    "板块发现只枚举当前账号可见板块，不读取帖子或归档内容。",
+  );
+
+  await updateFixtureState({ categoriesUnavailable: true });
+  const unavailable = await trigger("list-categories", {});
+  assert.equal(unavailable.status, "failed", JSON.stringify(unavailable));
+  assert.equal(
+    unavailable.result?.error?.code,
+    "discourse_category_list_request_failed",
+  );
+  await updateFixtureState({
+    categoriesUnavailable: false,
+    categoriesInvalidResponse: true,
+  });
+  const invalid = await trigger("list-categories", {});
+  assert.equal(invalid.status, "failed", JSON.stringify(invalid));
+  assert.equal(
+    invalid.result?.error?.code,
+    "discourse_category_list_response_invalid",
+  );
+  await updateFixtureState({ categoriesInvalidResponse: false });
+
+  const child = parent.children[0];
+  assert.ok(child !== undefined);
+  const beforeCollection = await sourceState();
+  const collection = await trigger("collect", {
+    targets: [child.collectTarget],
+    maxTopics: 1,
+  });
+  assert.equal(collection.status, "completed", JSON.stringify(collection));
+  assert.ok(
+    collection.result?.output?.completedScopes?.includes("target:category-43"),
+  );
+  const afterCollection = await sourceState();
+  assert.ok(
+    afterCollection.events
+      .slice(beforeCollection.events.length)
+      .some(
+        ({ action, path, authenticated }) =>
+          action === "topic-list" &&
+          path.startsWith("/c/controlled/child/43/l/latest.json") &&
+          authenticated === true,
+      ),
+  );
+  const archived = await searchArchiveItem("发现主题 2499");
+  assert.equal(archived.sourceKey.key, "topic:2499");
+  assert.equal(binState(archived).capture.scope.topicId, 2499);
 }
 
 async function assertSignedInCheckFailures(): Promise<void> {
@@ -1448,6 +1611,10 @@ async function verifyLogout(): Promise<void> {
   assert.ok(
     checkOutput(check).problems.some(({ code }) => code === "login_required"),
   );
+  const list = await trigger("list-categories", {});
+  assert.equal(list.status, "failed");
+  assert.equal(list.result?.error?.code, "login_required");
+  assert.equal(list.result?.error?.requiresHuman, true);
   const collect = await trigger("collect", { topicId: 2401 });
   assert.equal(collect.status, "failed");
   assert.equal(collect.result?.error?.code, "login_required");
@@ -1492,6 +1659,8 @@ async function main(): Promise<void> {
     );
     assert.equal(created.id, "binny-discovery-topic");
     await waitForRuntime();
+    await verifyCategoryActionDiscovery();
+    process.stdout.write("list-categories 的正式动作声明发现通过。\n");
 
     await verifyActionParameterValidation();
     process.stdout.write("本次动作参数校验定位错误且不改长期配置通过。\n");
@@ -1506,6 +1675,10 @@ async function main(): Promise<void> {
     await verifyDiscovery();
     process.stdout.write(
       "latest/category 分页、去重、时间范围、数量限制和部分失败范围通过。\n",
+    );
+    await verifyCategoryDiscovery();
+    process.stdout.write(
+      "板块动作发现、当前身份可见树、错误诊断和直接引用采集通过。\n",
     );
     await verifyLogout();
     process.stdout.write("退出登录后的全新检查和采集语义通过。\n");
