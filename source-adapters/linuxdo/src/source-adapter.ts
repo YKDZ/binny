@@ -110,7 +110,7 @@ const collectParamsSchema = z
     targets: actionTargetsSchema.optional(),
     date: collectionDateSchema,
     timeZone: collectionTimeZoneSchema,
-    maxTopics: z.number().int().min(1).max(500).optional(),
+    maxTopics: z.number().int().positive().safe().optional(),
   })
   .strict()
   .superRefine((params, context) => {
@@ -120,14 +120,12 @@ const collectParamsSchema = z
         path: ["targets"],
         message: "topicId 与 targets 不能同时使用。",
       });
-    } else if (
-      params.topicId === undefined &&
-      (params.targets === undefined || params.targets.length === 0)
-    ) {
+    } else if (params.topicId === undefined && params.targets?.length === 0) {
       context.addIssue({
         code: "custom",
         path: ["targets"],
-        message: "采集主题列表时必须在本次参数中指定至少一个目标。",
+        message:
+          "目标列表不能为空；省略 targets 可采集当前账号的全部可见板块。",
       });
     }
   });
@@ -292,9 +290,23 @@ const checkOutputSchema = z
     ),
   })
   .strict();
-const collectOutputSchema = z
-  .object({ completedScopes: z.array(z.string()).readonly() })
+const collectionIncompleteScopeSchema = z
+  .object({
+    scope: z.string().min(1),
+    reasonCode: z.string().min(1),
+    message: z.string().min(1),
+  })
   .strict();
+const collectOutputSchema = z
+  .object({
+    completedScopes: z.array(z.string()).readonly(),
+    collectionCompleteness: z.enum(["complete", "partial"]),
+    incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+  })
+  .strict();
+type CollectionIncompleteScope = z.infer<
+  typeof collectionIncompleteScopeSchema
+>;
 type JsonResponse =
   | { readonly kind: "json"; readonly status: number; readonly value: unknown }
   | { readonly kind: "nonJson"; readonly status: number }
@@ -730,7 +742,7 @@ function targetScope(target: ConfiguredTarget): string {
 function targetListUrl(
   site: ReturnType<typeof siteFromConfig>,
   target: Extract<ConfiguredTarget, { kind: "latest" | "category" }>,
-  maxTopics: number,
+  maxTopics: number | undefined,
   dateWindow?: CollectionDateWindow,
 ): URL {
   const pathname =
@@ -741,7 +753,7 @@ function targetListUrl(
           .map(encodeURIComponent)
           .join("/")}/${String(target.categoryId)}/l/latest.json`;
   const url = new URL(pathname, site.origin);
-  url.searchParams.set("per_page", String(Math.min(maxTopics, 100)));
+  url.searchParams.set("per_page", String(Math.min(maxTopics ?? 100, 100)));
   if (dateWindow !== undefined) {
     url.searchParams.set("order", "created");
     url.searchParams.set("ascending", "false");
@@ -1115,50 +1127,118 @@ async function listCategories(
         requiresHuman: session.problem.requiresHuman,
       });
     }
-
-    const categoriesUrl = new URL("/categories.json", site.origin);
-    categoriesUrl.searchParams.set("include_subcategories", "true");
-    const response = await readJson(page, categoriesUrl, context.signal);
-    if (response.kind === "networkError") {
-      throw categoryListFailure(
-        "linuxdo_source_unreachable",
-        `无法读取 Linux.do 板块列表：${response.message}`,
-      );
-    }
-    if (response.kind !== "json") {
-      throw categoryListFailure(
-        response.status === 200 || response.status === 403
-          ? "discourse_category_list_challenge_response"
-          : "discourse_category_list_response_invalid",
-        "Linux.do 板块列表没有返回有效 JSON。",
-        response.status === 200 || response.status === 403,
-      );
-    }
-    if (response.status === 403 || response.status === 404) {
-      throw categoryListFailure(
-        "discourse_category_list_unavailable",
-        "当前登录账号不能读取 Linux.do 板块列表。",
-      );
-    }
-    if (response.status !== 200) {
-      throw categoryListFailure(
-        "discourse_category_list_request_failed",
-        `Linux.do 板块列表端点返回 HTTP ${String(response.status)}。`,
-      );
-    }
-
-    const parsed = discourseCategoryListSchema.safeParse(response.value);
-    if (!parsed.success) {
-      throw categoryListFailure(
-        "discourse_category_list_response_invalid",
-        "Linux.do 板块列表缺少有效的标识、名称或 slug。",
-      );
-    }
     return {
-      categories: buildDiscoveredCategories(
-        parsed.data.category_list.categories,
-      ),
+      categories: await readVisibleCategories(page, site, context.signal),
     };
+  });
+}
+
+async function readVisibleCategories(
+  page: Page,
+  site: ReturnType<typeof siteFromConfig>,
+  signal: AbortSignal,
+): Promise<DiscoveredCategory[]> {
+  const categoriesUrl = new URL("/categories.json", site.origin);
+  categoriesUrl.searchParams.set("include_subcategories", "true");
+  const response = await readJson(page, categoriesUrl, signal);
+  if (response.kind === "networkError") {
+    throw categoryListFailure(
+      "linuxdo_source_unreachable",
+      `无法读取 Linux.do 板块列表：${response.message}`,
+    );
+  }
+  if (response.kind !== "json") {
+    throw categoryListFailure(
+      response.status === 200 || response.status === 403
+        ? "discourse_category_list_challenge_response"
+        : "discourse_category_list_response_invalid",
+      "Linux.do 板块列表没有返回有效 JSON。",
+      response.status === 200 || response.status === 403,
+    );
+  }
+  if (response.status === 403 || response.status === 404) {
+    throw categoryListFailure(
+      "discourse_category_list_unavailable",
+      "当前登录账号不能读取 Linux.do 板块列表。",
+    );
+  }
+  if (response.status !== 200) {
+    throw categoryListFailure(
+      "discourse_category_list_request_failed",
+      `Linux.do 板块列表端点返回 HTTP ${String(response.status)}。`,
+    );
+  }
+
+  const parsed = discourseCategoryListSchema.safeParse(response.value);
+  if (!parsed.success) {
+    throw categoryListFailure(
+      "discourse_category_list_response_invalid",
+      "Linux.do 板块列表缺少有效的标识、名称或 slug。",
+    );
+  }
+  return buildDiscoveredCategories(parsed.data.category_list.categories);
+}
+
+function categorySubtree(root: DiscoveredCategory): CategoryReference[] {
+  const targets = [root.collectTarget];
+  for (const child of root.children) targets.push(...categorySubtree(child));
+  return targets;
+}
+
+function findCategory(
+  categories: readonly DiscoveredCategory[],
+  categoryId: number,
+): DiscoveredCategory | undefined {
+  for (const category of categories) {
+    if (category.id === categoryId) return category;
+    const child = findCategory(category.children, categoryId);
+    if (child !== undefined) return child;
+  }
+  return undefined;
+}
+
+function collectTargets(
+  selectedTargets: readonly ConfiguredTarget[] | undefined,
+  categories: readonly DiscoveredCategory[],
+): ConfiguredTarget[] {
+  const targets: ConfiguredTarget[] = [];
+  if (selectedTargets === undefined) {
+    for (const category of categories)
+      targets.push(...categorySubtree(category));
+  } else {
+    for (const target of selectedTargets) {
+      if (target.kind !== "category") {
+        targets.push(target);
+        continue;
+      }
+      const category = findCategory(categories, target.categoryId);
+      if (
+        category === undefined ||
+        category.collectTarget.categorySlugPath !== target.categorySlugPath
+      ) {
+        throw sourceAdapterActionError({
+          code: "discourse_category_target_unavailable",
+          message: "所选 Linux.do 板块已不在当前账号可见范围内。",
+          impact: `采集范围 ${targetScope(target)} 未开始，板块树已变化。`,
+          suggestion:
+            "重新运行 list-categories 获取当前可见板块引用，再创建新的 collect 运行。",
+          requiresHuman: false,
+        });
+      }
+      targets.push(...categorySubtree(category));
+    }
+  }
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const key =
+      target.kind === "category"
+        ? `category:${String(target.categoryId)}`
+        : target.kind === "topic"
+          ? `topic:${String(target.topicId)}`
+          : "latest";
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -1714,7 +1794,7 @@ async function collectTopicContent(
   topicId: number,
   completedScopes: string[],
   knownAccess?: TopicAccess,
-): Promise<void> {
+): Promise<CollectionIncompleteScope | undefined> {
   const access =
     knownAccess ?? (await readTopic(page, site, topicId, context.signal));
   if (access.kind === "unavailable") throw failureFromAccess(access);
@@ -1745,6 +1825,7 @@ async function collectTopicContent(
     read.scopeIncomplete,
   );
   const mediaCache = new Map<string, MediaDownload>();
+  const incompleteMessages = diagnostics.map(({ message }) => message);
   let allPostsComplete = true;
   for (let offset = 0; offset < read.posts.length; offset += postBatchSize) {
     context.signal.throwIfAborted();
@@ -1764,6 +1845,13 @@ async function collectTopicContent(
       );
       items.push(archived.state);
       allPostsComplete &&= archived.complete;
+      if (!archived.complete) {
+        incompleteMessages.push(
+          ...archived.state.capture.missing.map(
+            ({ path, reason }) => `${path}：${reason}`,
+          ),
+        );
+      }
     }
     const relations = batch
       .filter(({ post_number }) => post_number !== 1)
@@ -1780,7 +1868,16 @@ async function collectTopicContent(
     read.posts.every((post) => post.cooked !== undefined)
   ) {
     completedScopes.push(topicScope(access.topic.id));
+    return undefined;
   }
+  return {
+    scope: topicScope(access.topic.id),
+    reasonCode: diagnostics[0]?.code ?? "linuxdo_topic_archive_partial",
+    message:
+      incompleteMessages.length === 0
+        ? "主题的可见帖子范围没有完整归档。"
+        : incompleteMessages.join("；"),
+  };
 }
 
 type CollectionDateWindow = {
@@ -1915,6 +2012,16 @@ function topicMatchesDateWindow(
   createdAt: string | undefined,
   dateWindow: CollectionDateWindow,
 ): boolean {
+  const created = topicCreatedAt(topicId, createdAt);
+  return (
+    created >= dateWindow.startInclusive && created < dateWindow.endExclusive
+  );
+}
+
+function topicCreatedAt(
+  topicId: number,
+  createdAt: string | undefined,
+): number {
   const created = createdAt === undefined ? Number.NaN : Date.parse(createdAt);
   if (!Number.isFinite(created)) {
     throw sourceAdapterActionError({
@@ -1925,9 +2032,7 @@ function topicMatchesDateWindow(
       requiresHuman: false,
     });
   }
-  return (
-    created >= dateWindow.startInclusive && created < dateWindow.endExclusive
-  );
+  return created;
 }
 
 type DiscoveryProgress = {
@@ -1941,69 +2046,133 @@ async function collectListTarget(
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
   target: Extract<ConfiguredTarget, { kind: "latest" | "category" }>,
-  maxTopics: number,
+  maxTopics: number | undefined,
   dateWindow: CollectionDateWindow,
   progress: DiscoveryProgress,
   completedScopes: string[],
+  incompleteScopes: CollectionIncompleteScope[],
 ): Promise<"complete" | "limited"> {
   const initialUrl = targetListUrl(site, target, maxTopics, dateWindow);
   const visitedPages = new Set<string>();
   let pageUrl: URL | undefined = initialUrl;
-  while (pageUrl !== undefined) {
-    context.signal.throwIfAborted();
-    if (visitedPages.has(pageUrl.href)) {
-      throw sourceAdapterActionError({
-        code: "discourse_topic_list_pagination_loop",
-        message: "Linux.do 列表分页重复返回了已读取页面。",
-        impact: "本次只处理了分页循环前的主题。",
-        suggestion: "检查受控目标的 Discourse 分页响应后重新运行 collect。",
-        requiresHuman: false,
-      });
-    }
-    visitedPages.add(pageUrl.href);
-    const topicList = await readTopicListPage(page, pageUrl, context.signal);
-    for (const listedTopic of topicList.topics) {
-      if (progress.seenTopicIds.has(listedTopic.id)) continue;
-      progress.seenTopicIds.add(listedTopic.id);
-      if (
-        !topicMatchesDateWindow(
-          listedTopic.id,
-          listedTopic.created_at,
-          dateWindow,
-        )
-      ) {
-        continue;
+  let previousCreatedAt: number | undefined;
+  try {
+    while (pageUrl !== undefined) {
+      context.signal.throwIfAborted();
+      if (visitedPages.has(pageUrl.href)) {
+        throw sourceAdapterActionError({
+          code: "discourse_topic_list_pagination_loop",
+          message: "Linux.do 列表分页重复返回了已读取页面。",
+          impact: "本次只处理了分页循环前的主题。",
+          suggestion: "检查受控目标的 Discourse 分页响应后重新运行 collect。",
+          requiresHuman: false,
+        });
       }
-      if (progress.collectedTopics >= maxTopics) return "limited";
-      await collectTopicContent(
-        context,
-        page,
-        request,
-        site,
-        listedTopic.id,
+      visitedPages.add(pageUrl.href);
+      const topicList = await readTopicListPage(page, pageUrl, context.signal);
+      if (
+        topicList.topics.length === 0 &&
+        topicList.more_topics_url !== null &&
+        topicList.more_topics_url !== undefined
+      ) {
+        throw sourceAdapterActionError({
+          code: "discourse_topic_list_ended_early",
+          message: "Linux.do 列表在仍声明下一页时提前返回空主题页。",
+          impact: `采集范围 ${targetScope(target)} 未穷尽，无法确认空页后的主题。`,
+          suggestion:
+            "检查分页响应和账号权限后，以相同固定日期重新运行 collect。",
+          requiresHuman: false,
+        });
+      }
+      const listedTopics = topicList.topics.map((topic) => ({
+        topic,
+        createdAt: topicCreatedAt(topic.id, topic.created_at),
+      }));
+      for (const { createdAt } of listedTopics) {
+        if (previousCreatedAt !== undefined && createdAt > previousCreatedAt) {
+          throw sourceAdapterActionError({
+            code: "discourse_topic_list_order_invalid",
+            message: "Linux.do 创建时间排序在分页中发生倒退。",
+            impact: "本次不能依据日期边界确认剩余主题已穷尽。",
+            suggestion:
+              "检查列表是否支持 order=created 并保持分页顺序后，重新运行 collect。",
+            requiresHuman: false,
+          });
+        }
+        previousCreatedAt = createdAt;
+      }
+      for (const { topic, createdAt } of listedTopics) {
+        if (createdAt < dateWindow.startInclusive) {
+          completedScopes.push(targetScope(target));
+          return "complete";
+        }
+        if (progress.seenTopicIds.has(topic.id)) continue;
+        progress.seenTopicIds.add(topic.id);
+        if (createdAt >= dateWindow.endExclusive) continue;
+        if (maxTopics !== undefined && progress.collectedTopics >= maxTopics) {
+          incompleteScopes.push({
+            scope: targetScope(target),
+            reasonCode: "topic_limit_reached",
+            message: `已达到显式 maxTopics=${String(maxTopics)}，所选主题范围仍有匹配主题。`,
+          });
+          return "limited";
+        }
+        const incomplete = await collectTopicContent(
+          context,
+          page,
+          request,
+          site,
+          topic.id,
+          completedScopes,
+        );
+        if (incomplete !== undefined) incompleteScopes.push(incomplete);
+        progress.collectedTopics += 1;
+      }
+      if (
+        topicList.more_topics_url === null ||
+        topicList.more_topics_url === undefined
+      ) {
+        completedScopes.push(targetScope(target));
+        return "complete";
+      }
+      pageUrl = paginationUrl(topicList.more_topics_url, pageUrl, target);
+    }
+    completedScopes.push(targetScope(target));
+    return "complete";
+  } catch (error) {
+    const scope = targetScope(target);
+    if (isSourceAdapterActionError(error)) {
+      throw sourceAdapterActionError(
+        {
+          ...error.failure,
+          impact: `采集范围 ${scope} 未穷尽：${error.failure.impact}`,
+        },
+        error.completedScopes,
+      );
+    }
+    if (context.signal.aborted) {
+      throw sourceAdapterActionError(
+        {
+          code: "source_adapter_action_cancelled",
+          message: "Linux.do 采集已取消。",
+          impact: `采集范围 ${scope} 未穷尽，已保存此前提交的资料。`,
+          suggestion: "确认取消原因后，使用相同固定日期创建新的采集运行。",
+          requiresHuman: false,
+        },
         completedScopes,
       );
-      progress.collectedTopics += 1;
     }
-    if (
-      topicList.more_topics_url === null ||
-      topicList.more_topics_url === undefined
-    ) {
-      completedScopes.push(targetScope(target));
-      return "complete";
-    }
-    pageUrl = paginationUrl(topicList.more_topics_url, pageUrl, target);
+    throw sourceAdapterActionError(
+      {
+        code: "linuxdo_collection_failed",
+        message: "Linux.do 采集未能完成。",
+        impact: `采集范围 ${scope} 未穷尽，已保存此前提交的资料。`,
+        suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
+        requiresHuman: false,
+      },
+      completedScopes,
+    );
   }
-  completedScopes.push(targetScope(target));
-  return "complete";
-}
-
-function limitedScope(target: ConfiguredTarget, maxTopics: number): string {
-  return `${targetScope(target)}:limited:maxTopics=${String(maxTopics)}`;
-}
-
-function unvisitedScope(target: ConfiguredTarget, maxTopics: number): string {
-  return `${targetScope(target)}:not-visited:maxTopics=${String(maxTopics)}`;
 }
 
 function failureWithProgress(
@@ -2049,10 +2218,18 @@ function failureWithProgress(
 async function collectTopic(
   context: SourceAdapterContext<SourceAdapterConfig>,
   params: CollectParams,
-): Promise<{ readonly completedScopes: readonly string[] }> {
-  const targets = params.targets ?? [];
+): Promise<z.output<typeof collectOutputSchema>> {
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
+  const incompleteScopes: CollectionIncompleteScope[] = [];
+  const output = () => ({
+    completedScopes,
+    collectionCompleteness:
+      incompleteScopes.length === 0
+        ? ("complete" as const)
+        : ("partial" as const),
+    incompleteScopes,
+  });
   try {
     const dateWindow = collectionDateWindow(params, context.referenceTime);
     return await withSharedBrowser(context, async ({ page, request }) => {
@@ -2076,9 +2253,9 @@ async function collectTopic(
           )
         ) {
           completedScopes.push(`${topicScope(params.topicId)}:filtered:date`);
-          return { completedScopes };
+          return output();
         }
-        await collectTopicContent(
+        const incomplete = await collectTopicContent(
           context,
           page,
           request,
@@ -2087,22 +2264,22 @@ async function collectTopic(
           completedScopes,
           access,
         );
-        return { completedScopes };
+        if (incomplete !== undefined) incompleteScopes.push(incomplete);
+        return output();
       }
 
-      const maxTopics = params.maxTopics ?? 30;
+      const categories =
+        params.targets === undefined ||
+        params.targets.some((target) => target.kind === "category")
+          ? await readVisibleCategories(page, site, context.signal)
+          : [];
+      const targets = collectTargets(params.targets, categories);
       const progress: DiscoveryProgress = {
         seenTopicIds: new Set(),
         collectedTopics: 0,
       };
       for (const [index, target] of targets.entries()) {
         context.signal.throwIfAborted();
-        if (progress.collectedTopics >= maxTopics) {
-          for (const remainingTarget of targets.slice(index)) {
-            completedScopes.push(unvisitedScope(remainingTarget, maxTopics));
-          }
-          break;
-        }
         if (target.kind === "topic") {
           if (progress.seenTopicIds.has(target.topicId)) {
             completedScopes.push(targetScope(target));
@@ -2126,14 +2303,25 @@ async function collectTopic(
             completedScopes.push(`${targetScope(target)}:filtered:date`);
             continue;
           }
-          if (progress.collectedTopics >= maxTopics) {
-            completedScopes.push(limitedScope(target, maxTopics));
+          if (
+            params.maxTopics !== undefined &&
+            progress.collectedTopics >= params.maxTopics
+          ) {
+            incompleteScopes.push({
+              scope: targetScope(target),
+              reasonCode: "topic_limit_reached",
+              message: `已达到显式 maxTopics=${String(params.maxTopics)}，所选主题仍在日期范围内。`,
+            });
             for (const remainingTarget of targets.slice(index + 1)) {
-              completedScopes.push(unvisitedScope(remainingTarget, maxTopics));
+              incompleteScopes.push({
+                scope: targetScope(remainingTarget),
+                reasonCode: "not_scanned_due_to_topic_limit",
+                message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
+              });
             }
             break;
           }
-          await collectTopicContent(
+          const incomplete = await collectTopicContent(
             context,
             page,
             request,
@@ -2142,6 +2330,7 @@ async function collectTopic(
             completedScopes,
             access,
           );
+          if (incomplete !== undefined) incompleteScopes.push(incomplete);
           progress.collectedTopics += 1;
           completedScopes.push(targetScope(target));
           continue;
@@ -2152,20 +2341,24 @@ async function collectTopic(
           request,
           site,
           target,
-          maxTopics,
+          params.maxTopics,
           dateWindow,
           progress,
           completedScopes,
+          incompleteScopes,
         );
         if (result === "limited") {
-          completedScopes.push(limitedScope(target, maxTopics));
           for (const remainingTarget of targets.slice(index + 1)) {
-            completedScopes.push(unvisitedScope(remainingTarget, maxTopics));
+            incompleteScopes.push({
+              scope: targetScope(remainingTarget),
+              reasonCode: "not_scanned_due_to_topic_limit",
+              message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
+            });
           }
           break;
         }
       }
-      return { completedScopes };
+      return output();
     });
   } catch (error) {
     throw failureWithProgress(error, context, completedScopes);

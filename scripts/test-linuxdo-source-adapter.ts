@@ -47,8 +47,13 @@ type FixtureState = {
   readonly targetUnavailablePage: number | null;
   readonly targetChallengePage: number | null;
   readonly targetInvalidResponsePage: number | null;
+  readonly targetPaginationLoopPage: number | null;
+  readonly targetInvalidPaginationUrlPage: number | null;
+  readonly targetEarlyEndPage: number | null;
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
+  readonly dailyCollectionEnabled: boolean;
+  readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
   readonly replyVersion: number;
   readonly addedReply: boolean;
@@ -62,7 +67,7 @@ type FixtureState = {
 const targetDefinitions = {
   latest: { id: "latest", kind: "latest" },
   category: {
-    id: "category",
+    id: "category-42",
     kind: "category",
     categoryId: 42,
     categorySlugPath: "controlled",
@@ -474,8 +479,19 @@ async function waitForRuntime(): Promise<void> {
 async function trigger(
   action: LinuxdoAction,
   params: Readonly<Record<string, unknown>>,
+  timeoutMs?: number,
 ): Promise<ManualRun> {
-  return await triggerLinuxdoRun(cli, "binny-discovery-topic", action, params);
+  const actionParams =
+    action === "collect"
+      ? { date: "2026-10-28", timeZone: "UTC", ...params }
+      : params;
+  return await triggerLinuxdoRun(
+    cli,
+    "binny-discovery-topic",
+    action,
+    actionParams,
+    timeoutMs,
+  );
 }
 
 async function startOuterBrowser(): Promise<Browser> {
@@ -531,6 +547,41 @@ async function searchArchiveItem(text: string): Promise<ArchiveItem> {
     ]),
     "found",
   );
+}
+
+async function searchArchiveSourceKeys(text: string): Promise<string[]> {
+  const query = {
+    scope: { kind: "current", binId: "binny-discovery-topic" },
+    text: { kind: "literal", value: text },
+    select: ["sourceKey"],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 100,
+  };
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = cliData<{
+      readonly results: readonly {
+        readonly sourceKey?: { readonly key: string };
+      }[];
+      readonly nextCursor?: string;
+    }>(
+      await cli([
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify(cursor === undefined ? query : { ...query, cursor }),
+      ]),
+      "found",
+    );
+    keys.push(
+      ...page.results.flatMap(({ sourceKey }) =>
+        sourceKey === undefined ? [] : [sourceKey.key],
+      ),
+    );
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return keys;
 }
 
 async function readArchiveItem(itemId: string): Promise<ArchiveItem> {
@@ -657,9 +708,19 @@ async function verifyLoginRequired(): Promise<
 
 async function verifyActionParameterValidation(): Promise<void> {
   for (const [params, path] of [
-    [{ createdAfter: "yesterday" }, ["params", "createdAfter"]],
-    [{ maxTopics: 501 }, ["params", "maxTopics"]],
-    [{ targets: [1] }, ["params", "targets", "0"]],
+    [{ date: "2026-02-30", timeZone: "UTC" }, ["params", "date"]],
+    [
+      { date: "2026-10-28", timeZone: "Mars/Olympus_Mons" },
+      ["params", "timeZone"],
+    ],
+    [
+      { date: "2026-10-28", timeZone: "UTC", maxTopics: 0 },
+      ["params", "maxTopics"],
+    ],
+    [
+      { date: "2026-10-28", timeZone: "UTC", targets: [1] },
+      ["params", "targets", 0],
+    ],
   ] as const) {
     const response = await fetch(
       `${apiUrl()}/bins/binny-discovery-topic/runs`,
@@ -1356,7 +1417,7 @@ async function verifyDiscovery(): Promise<void> {
     JSON.stringify(categoryCheck),
   );
   assert.equal(checkOutput(categoryCheck).availability, "available");
-  assert.deepEqual(checkOutput(categoryCheck).scope, ["target:category"]);
+  assert.deepEqual(checkOutput(categoryCheck).scope, ["target:category-42"]);
   const afterCategoryCheck = await sourceState();
   const categoryCheckPage = afterCategoryCheck.events
     .filter(
@@ -1378,7 +1439,7 @@ async function verifyDiscovery(): Promise<void> {
     collection.result?.output?.completedScopes?.includes("target:latest"),
   );
   assert.ok(
-    collection.result?.output?.completedScopes?.includes("target:category"),
+    collection.result?.output?.completedScopes?.includes("target:category-42"),
   );
   assert.ok(collection.result?.output?.completedScopes?.includes("topic:2401"));
   assert.ok(
@@ -1401,6 +1462,7 @@ async function verifyDiscovery(): Promise<void> {
     "/t/2408.json",
     "/t/2409.json",
     "/t/2410.json",
+    "/t/2499.json",
   ]);
   assert.ok(
     afterCollection.events.some(
@@ -1469,8 +1531,18 @@ async function verifyDiscovery(): Promise<void> {
   );
   assert.ok(
     categoryPagination.result?.output?.completedScopes?.includes(
-      "target:category",
+      "target:category-42",
     ),
+  );
+  assert.equal(
+    categoryPagination.result?.output?.collectionCompleteness,
+    "partial",
+  );
+  assert.deepEqual(
+    categoryPagination.result?.output?.incompleteScopes?.map(
+      ({ scope, reasonCode }) => ({ scope, reasonCode }),
+    ),
+    [{ scope: "target:category-43", reasonCode: "topic_limit_reached" }],
   );
   const afterCategoryPagination = await sourceState();
   const categoryPaginationEvents = afterCategoryPagination.events.slice(
@@ -1503,6 +1575,64 @@ async function verifyDiscovery(): Promise<void> {
     ],
   );
 
+  await updateFixtureState({ targetInvalidPaginationUrlPage: 0 });
+  const invalidPagination = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    maxTopics: 10,
+  });
+  assert.equal(
+    invalidPagination.status,
+    "failed",
+    JSON.stringify(invalidPagination),
+  );
+  assert.equal(
+    invalidPagination.result?.error?.code,
+    "discourse_topic_list_pagination_invalid",
+  );
+  assert.ok(
+    invalidPagination.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(invalidPagination),
+  );
+  assert.ok(
+    invalidPagination.result?.completedScopes?.includes("post:240001"),
+    JSON.stringify(invalidPagination),
+  );
+
+  await updateFixtureState({
+    targetInvalidPaginationUrlPage: null,
+    targetEarlyEndPage: 1,
+  });
+  const earlyEnd = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    maxTopics: 10,
+  });
+  assert.equal(earlyEnd.status, "failed", JSON.stringify(earlyEnd));
+  assert.equal(
+    earlyEnd.result?.error?.code,
+    "discourse_topic_list_ended_early",
+  );
+  assert.ok(
+    earlyEnd.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(earlyEnd),
+  );
+  await updateFixtureState({ targetEarlyEndPage: null });
+
+  await updateFixtureState({ targetPaginationLoopPage: 1 });
+  const paginationLoop = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    maxTopics: 10,
+  });
+  assert.equal(paginationLoop.status, "failed", JSON.stringify(paginationLoop));
+  assert.equal(
+    paginationLoop.result?.error?.code,
+    "discourse_topic_list_pagination_loop",
+  );
+  assert.ok(
+    paginationLoop.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(paginationLoop),
+  );
+  await updateFixtureState({ targetPaginationLoopPage: null });
+
   await updateFixtureState({ targetUnavailablePage: 1 });
   const unavailableTargetCollection = await trigger("collect", {
     targets: linuxdoTargets("latest"),
@@ -1514,6 +1644,12 @@ async function verifyDiscovery(): Promise<void> {
     "discourse_target_unavailable",
   );
   assert.equal(unavailableTargetCollection.result?.error?.requiresHuman, false);
+  assert.ok(
+    unavailableTargetCollection.result?.error?.impact?.includes(
+      "target:latest",
+    ),
+    JSON.stringify(unavailableTargetCollection),
+  );
   assert.ok(
     unavailableTargetCollection.result?.completedScopes?.includes(
       "post:240001",
@@ -1539,6 +1675,10 @@ async function verifyDiscovery(): Promise<void> {
   );
   assert.equal(challengedTargetCollection.result?.error?.requiresHuman, true);
   assert.ok(
+    challengedTargetCollection.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(challengedTargetCollection),
+  );
+  assert.ok(
     challengedTargetCollection.result?.completedScopes?.includes("post:240001"),
     JSON.stringify(challengedTargetCollection),
   );
@@ -1556,6 +1696,10 @@ async function verifyDiscovery(): Promise<void> {
   assert.equal(
     invalidTargetCollection.result?.error?.code,
     "discourse_topic_list_response_invalid",
+  );
+  assert.ok(
+    invalidTargetCollection.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(invalidTargetCollection),
   );
   assert.ok(
     invalidTargetCollection.result?.completedScopes?.includes("post:240001"),
@@ -1577,32 +1721,28 @@ async function verifyDiscovery(): Promise<void> {
     ),
   );
 
-  const cutoff = await trigger("collect", {
-    targets: linuxdoTargets("latest"),
-    createdAfter: "2026-10-27T00:00:00.000Z",
-    maxTopics: 10,
-  });
-  assert.equal(cutoff.status, "completed", JSON.stringify(cutoff));
-  assert.ok(cutoff.result?.output?.completedScopes?.includes("target:latest"));
-  assert.ok(cutoff.result?.output?.completedScopes?.includes("topic:2402"));
-  assert.ok(cutoff.result?.output?.completedScopes?.includes("post:240200"));
-  assert.ok(!cutoff.result?.output?.completedScopes?.includes("topic:2403"));
-  assert.ok(!cutoff.result?.output?.completedScopes?.includes("post:240300"));
-
   const limited = await trigger("collect", {
     targets: linuxdoTargets("latest", "category"),
     maxTopics: 1,
   });
   assert.equal(limited.status, "completed", JSON.stringify(limited));
-  assert.ok(
-    limited.result?.output?.completedScopes?.includes(
-      "target:latest:limited:maxTopics=1",
-    ),
-  );
-  assert.ok(
-    limited.result?.output?.completedScopes?.includes(
-      "target:category:not-visited:maxTopics=1",
-    ),
+  assert.equal(limited.result?.output?.collectionCompleteness, "partial");
+  assert.deepEqual(
+    limited.result?.output?.incompleteScopes?.map(({ scope, reasonCode }) => ({
+      scope,
+      reasonCode,
+    })),
+    [
+      { scope: "target:latest", reasonCode: "topic_limit_reached" },
+      {
+        scope: "target:category-42",
+        reasonCode: "not_scanned_due_to_topic_limit",
+      },
+      {
+        scope: "target:category-43",
+        reasonCode: "not_scanned_due_to_topic_limit",
+      },
+    ],
   );
 
   await updateFixtureState({ unavailableTopicIds: [2402] });
@@ -1621,6 +1761,187 @@ async function verifyDiscovery(): Promise<void> {
     `失败运行应报告已提交的帖子范围：${JSON.stringify(failed)}`,
   );
   await updateFixtureState({ unavailableTopicIds: [] });
+}
+
+async function verifyDailyCollection(): Promise<void> {
+  await updateFixtureState({ dailyCollectionEnabled: true });
+
+  const limited = await trigger("collect", {
+    date: "2026-11-01",
+    timeZone: "UTC",
+    maxTopics: 1,
+  });
+  assert.equal(limited.status, "completed", JSON.stringify(limited));
+  assert.equal(limited.result?.output?.collectionCompleteness, "partial");
+  assert.deepEqual(
+    limited.result?.output?.incompleteScopes?.map(({ scope, reasonCode }) => ({
+      scope,
+      reasonCode,
+    })),
+    [
+      { scope: "target:category-45", reasonCode: "topic_limit_reached" },
+      {
+        scope: "target:category-46",
+        reasonCode: "not_scanned_due_to_topic_limit",
+      },
+      {
+        scope: "target:category-47",
+        reasonCode: "not_scanned_due_to_topic_limit",
+      },
+    ],
+  );
+  const limitedTopic = await searchArchiveItem("全日受控主题 700200");
+  assert.equal(limitedTopic.sourceKey.key, "post:70020000");
+
+  await updateFixtureState({ invalidCreatedAtTopicIds: [700100] });
+  const invalidDate = await trigger(
+    "collect",
+    {
+      date: "2026-11-01",
+      timeZone: "UTC",
+    },
+    180_000,
+  );
+  assert.equal(invalidDate.status, "failed", JSON.stringify(invalidDate));
+  assert.equal(
+    invalidDate.result?.error?.code,
+    "discourse_topic_created_at_invalid",
+  );
+  assert.ok(
+    invalidDate.result?.error?.impact?.includes("target:category-45"),
+    JSON.stringify(invalidDate),
+  );
+  assert.ok(
+    invalidDate.result?.completedScopes?.includes("post:70019900"),
+    `日期失败前应报告已提交的主题资料：${JSON.stringify(invalidDate)}`,
+  );
+  assert.equal(
+    (await searchArchiveItem("全日受控主题 700199")).sourceKey.key,
+    "post:70019900",
+    "失败运行已采集的资料仍应可通过公开归档查询读取。",
+  );
+  assert.equal(
+    (await searchArchiveItem("全日受控主题 700200")).sourceKey.key,
+    "post:70020000",
+    "日期读取失败后，应保留此前已经提交的主题归档。",
+  );
+  await updateFixtureState({ invalidCreatedAtTopicIds: [] });
+
+  const completeAtLimit = await trigger(
+    "collect",
+    {
+      date: "2026-11-01",
+      timeZone: "UTC",
+      maxTopics: 501,
+    },
+    900_000,
+  );
+  assert.equal(
+    completeAtLimit.status,
+    "completed",
+    JSON.stringify(completeAtLimit),
+  );
+  assert.equal(
+    completeAtLimit.result?.output?.collectionCompleteness,
+    "complete",
+  );
+  assert.deepEqual(completeAtLimit.result?.output?.incompleteScopes, []);
+
+  const beforeFullCollection = await sourceState();
+  const complete = await trigger(
+    "collect",
+    {
+      date: "2026-11-01",
+      timeZone: "UTC",
+    },
+    900_000,
+  );
+  assert.equal(complete.status, "completed", JSON.stringify(complete));
+  assert.equal(complete.result?.output?.collectionCompleteness, "complete");
+  assert.deepEqual(complete.result?.output?.incompleteScopes, []);
+  for (const scope of [
+    "target:category-42",
+    "target:category-43",
+    "target:category-44",
+    "target:category-45",
+    "target:category-46",
+    "target:category-47",
+  ]) {
+    assert.ok(
+      complete.result?.output?.completedScopes?.includes(scope),
+      `默认全可见板块采集应穷尽 ${scope}：${JSON.stringify(complete)}`,
+    );
+  }
+
+  const afterFullCollection = await sourceState();
+  const runEvents = afterFullCollection.events.slice(
+    beforeFullCollection.events.length,
+  );
+  const dailyListPaths = runEvents
+    .filter(({ action }) => action === "topic-list")
+    .map(({ path }) => path);
+  for (const path of [
+    "/c/daily/45/l/latest.json",
+    "/c/daily/daily-child/46/l/latest.json",
+    "/c/another/47/l/latest.json",
+  ]) {
+    assert.ok(
+      dailyListPaths.some((requestPath) => requestPath.startsWith(path)),
+      `应采集当前可见范围 ${path}：${dailyListPaths.join("\n")}`,
+    );
+  }
+  assert.ok(
+    dailyListPaths.some((path) => path.includes("page=1")) &&
+      dailyListPaths.some((path) => path.includes("page=2")),
+    `501 项受控数据应跨多个列表页：${dailyListPaths.join("\n")}`,
+  );
+  assert.ok(
+    dailyListPaths.every(
+      (path) =>
+        path.includes("order=created") && path.includes("ascending=false"),
+    ),
+    "日期范围必须显式使用可验证的 created 降序列表。",
+  );
+
+  const topicRequests = runEvents
+    .filter(
+      ({ action, path }) =>
+        action === "topic" && /\/t\/7\d+\.json$/u.test(path),
+    )
+    .map(({ path }) => Number(/\/t\/(\d+)\.json$/u.exec(path)?.[1]));
+  const expectedTopicIds = Array.from(
+    { length: 501 },
+    (_, index) => 700001 + index,
+  );
+  assert.deepEqual(
+    topicRequests.toSorted((first, second) => first - second),
+    expectedTopicIds,
+  );
+  assert.equal(topicRequests.length, 501);
+  assert.equal(
+    new Set(topicRequests).size,
+    501,
+    "分页重叠不得重复读取主题内容。",
+  );
+  assert.ok(
+    topicRequests.includes(700200),
+    "固定日期重跑应重新发现先前已归档主题。",
+  );
+  assert.equal(
+    topicRequests[0],
+    700200,
+    "固定日期新运行应从所选日范围开头重新发现，而非从旧游标续采。",
+  );
+  assert.ok(!topicRequests.includes(700502), "日期结束上界不包含未来主题。");
+  assert.ok(!topicRequests.includes(699999), "日期开始下界不包含前一日主题。");
+
+  const dailySourceKeys = await searchArchiveSourceKeys("全日受控主题");
+  const expectedSourceKeys = Array.from(
+    { length: 501 },
+    (_, index) => `post:${String(700001 + index)}00`,
+  );
+  assert.deepEqual(dailySourceKeys, expectedSourceKeys);
+  await updateFixtureState({ dailyCollectionEnabled: false });
 }
 
 async function verifyLogout(): Promise<void> {
@@ -1720,6 +2041,10 @@ async function main(): Promise<void> {
     await verifyCategoryDiscovery();
     process.stdout.write(
       "板块动作发现、当前身份可见树、错误诊断和直接引用采集通过。\n",
+    );
+    await verifyDailyCollection();
+    process.stdout.write(
+      "全日跨板块分页、501 个唯一主题、日期边界、限额部分结果和失败保留通过。\n",
     );
     await verifyLogout();
     process.stdout.write("退出登录后的全新检查和采集语义通过。\n");
