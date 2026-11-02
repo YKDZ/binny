@@ -786,16 +786,9 @@ const archiveSearchJsonFilterFields = {
   path: archiveSearchJsonPathSchema,
 };
 
-const archiveSearchJsonFilterSchema = z
-  .union([
-    z
-      .object({
-        ...archiveSearchJsonFilterFields,
-        operator: z.literal("exists"),
-        value: z.boolean(),
-      })
-      .strict()
-      .describe("按布尔值判断 JSON 路径是否存在；不需要 valueType。"),
+const archiveSearchJsonEqualityFilterSchema = z.discriminatedUnion(
+  "valueType",
+  [
     z
       .object({
         ...archiveSearchJsonFilterFields,
@@ -844,6 +837,12 @@ const archiveSearchJsonFilterSchema = z
         value: jsonObjectSchema,
       })
       .strict(),
+  ],
+);
+
+const archiveSearchJsonMembershipFilterSchema = z.discriminatedUnion(
+  "valueType",
+  [
     z
       .object({
         ...archiveSearchJsonFilterFields,
@@ -904,6 +903,12 @@ const archiveSearchJsonFilterSchema = z
         values: z.array(jsonObjectSchema).min(1).max(100),
       })
       .strict(),
+  ],
+);
+
+const archiveSearchJsonComparisonFilterSchema = z.discriminatedUnion(
+  "valueType",
+  [
     z
       .object({
         ...archiveSearchJsonFilterFields,
@@ -924,37 +929,57 @@ const archiveSearchJsonFilterSchema = z
         value: jsonNumberSchema,
       })
       .strict(),
+  ],
+);
+
+const archiveSearchJsonBetweenFilterSchema = z.discriminatedUnion("valueType", [
+  z
+    .object({
+      ...archiveSearchJsonFilterFields,
+      operator: z
+        .literal("between")
+        .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
+      valueType: z.literal("string"),
+      lower: postgresTextSchema,
+      upper: postgresTextSchema,
+    })
+    .strict(),
+  z
+    .object({
+      ...archiveSearchJsonFilterFields,
+      operator: z
+        .literal("between")
+        .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
+      valueType: z.literal("number"),
+      lower: jsonNumberSchema,
+      upper: jsonNumberSchema,
+    })
+    .strict()
+    .superRefine((filter, context) => {
+      if (filter.lower > filter.upper) {
+        context.addIssue({
+          code: "custom",
+          path: ["upper"],
+          message: "JSON 数值范围上界不能早于下界。",
+        });
+      }
+    }),
+]);
+
+const archiveSearchJsonFilterSchema = z
+  .discriminatedUnion("operator", [
     z
       .object({
         ...archiveSearchJsonFilterFields,
-        operator: z
-          .literal("between")
-          .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
-        valueType: z.literal("string"),
-        lower: postgresTextSchema,
-        upper: postgresTextSchema,
-      })
-      .strict(),
-    z
-      .object({
-        ...archiveSearchJsonFilterFields,
-        operator: z
-          .literal("between")
-          .describe("包含下界和上界的范围条件，仅支持 string 或 number。"),
-        valueType: z.literal("number"),
-        lower: jsonNumberSchema,
-        upper: jsonNumberSchema,
+        operator: z.literal("exists"),
+        value: z.boolean(),
       })
       .strict()
-      .superRefine((filter, context) => {
-        if (filter.lower > filter.upper) {
-          context.addIssue({
-            code: "custom",
-            path: ["upper"],
-            message: "JSON 数值范围上界不能早于下界。",
-          });
-        }
-      }),
+      .describe("按布尔值判断 JSON 路径是否存在；不需要 valueType。"),
+    archiveSearchJsonEqualityFilterSchema,
+    archiveSearchJsonMembershipFilterSchema,
+    archiveSearchJsonComparisonFilterSchema,
+    archiveSearchJsonBetweenFilterSchema,
   ])
   .describe(
     "JSON 路径条件按 operator 与 valueType 的联合结构声明；集合值必须同类型，范围仅支持 string 和 number。",
@@ -1288,7 +1313,7 @@ const archiveSearchFieldFilterSchema = z
     }
   });
 
-const archiveSearchScalarFilterSchema = z.union([
+const archiveSearchScalarFilterSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("text"),
@@ -1303,7 +1328,7 @@ const archiveSearchTargetFilterNodeSchema: z.ZodType<
   ArchiveSearchTargetFilter,
   ArchiveSearchTargetFilter
 > = z.lazy(() =>
-  z.union([
+  z.discriminatedUnion("type", [
     z
       .object({
         type: z.literal("and"),
@@ -1492,7 +1517,7 @@ const archiveSearchFilterNodeSchema: z.ZodType<
   ArchiveSearchFilter,
   ArchiveSearchFilter
 > = z.lazy(() =>
-  z.union([
+  z.discriminatedUnion("type", [
     z
       .object({
         type: z.literal("and"),
