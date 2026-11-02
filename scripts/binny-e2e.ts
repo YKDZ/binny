@@ -5893,7 +5893,6 @@ async function verifyRestartAndRemoval(
   baseUrl: string,
   archive: string,
   sdkResource: string,
-  retainedBinIds: readonly string[],
 ): Promise<string> {
   const beforeRestart = cliData<{
     readonly status: string;
@@ -8738,11 +8737,7 @@ async function main(): Promise<void> {
       await archiveSearchPaginationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource, [
-        ...rssAcceptance.binIds,
-        "binny-runs-one",
-        "binny-runs-two",
-      ]);
+      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
       process.stdout.write(
         "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
       );

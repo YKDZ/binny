@@ -16,7 +16,6 @@ import {
 } from "@binny/contracts";
 import {
   binConfigurations,
-  databaseErrorCode,
   manualRuns,
   runtimeConnections,
   type Database,
