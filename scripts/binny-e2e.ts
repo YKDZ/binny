@@ -8640,6 +8640,9 @@ async function main(): Promise<void> {
         process.env.BINNY_E2E_BASELINE_IMAGE.length === 0,
       "容量项目不能与会清空其数据库和资源卷的拆包升级路径并行运行。",
     );
+    installedCliConsumer = await createIsolatedCliConsumer({
+      repositoryRoot,
+    });
     await compose(["build", "server"]);
     builtImages.add(imageName);
     if (upgradeOnly) {
@@ -8715,9 +8718,7 @@ async function main(): Promise<void> {
     await waitForApiAndDatabase(baseUrl);
     if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
-      installedCliConsumer = await createIsolatedCliConsumer({
-        repositoryRoot,
-      });
+      assert.ok(installedCliConsumer !== undefined);
       await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
       await verifyConfigurationJourney(baseUrl);
       const manualRunManifest = await createRuntimeFixtureManifest();

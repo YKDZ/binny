@@ -194,6 +194,17 @@ function parsedApiUrl(invocation: unknown): string | undefined {
   return invocation.input.apiUrl;
 }
 
+function stripApiUrlFromHandlerInput(handler: unknown): unknown {
+  if (typeof handler !== "function") return handler;
+  return async (context: unknown) => {
+    if (!isRecord(context) || !isRecord(context.input)) {
+      throw new Error("CLI handler input 必须是对象。");
+    }
+    const { apiUrl: _apiUrl, ...input } = context.input;
+    return await Reflect.apply(handler, undefined, [{ ...context, input }]);
+  };
+}
+
 function addApiUrlOption<Commands extends Record<string, unknown>>(
   commands: Commands,
 ): { [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]> } {
@@ -213,6 +224,7 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
             ...(isRecord(definition.fields) ? definition.fields : {}),
             apiUrl: apiUrlOptionField,
           },
+          handler: stripApiUrlFromHandlerInput(definition.handler),
           // safeExtend 会创建新对象；重新绑定投影以保留归档自定义 JSON 节点。
           input: withPostgresJsonSchemaProjection(
             definition.input.safeExtend({
