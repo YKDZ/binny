@@ -102,6 +102,7 @@
         "compose.acceptance.yaml",
         "Dockerfile",
         "packages/source-adapter-runtime/Dockerfile.browser",
+        "scripts/binny-e2e-test-clock.ts",
         "scripts/test-linuxdo-source-adapter.ts",
         "scripts/binny-e2e-linuxdo-source.ts",
         "scripts/binny-e2e-linuxdo-journey.ts",

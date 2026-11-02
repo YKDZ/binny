@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 
 type SourceState = {
   readonly challengePage: boolean;
@@ -20,6 +21,8 @@ type SourceState = {
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
+  readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
+  readonly topicListDelayMs?: number;
 };
 
 type SourceEvent = {
@@ -71,6 +74,8 @@ let activeState: SourceState = {
   unavailableTopicIds: [],
   unavailableMedia: [],
   unavailableMediaStatus: 503,
+  topicCreatedAtOverrides: {},
+  topicListDelayMs: 0,
 };
 const events: SourceEvent[] = [];
 
@@ -186,12 +191,9 @@ function posts(): readonly Record<string, unknown>[] {
 }
 
 function discoveredTopic(topicId: number): Record<string, unknown> {
+  const defaultCreatedAt = "2026-10-28T00:00:00.000Z";
   const createdAt =
-    topicId === 2401
-      ? "2026-10-28T00:00:00.000Z"
-      : topicId === 2402
-        ? "2026-10-27T00:00:00.000Z"
-        : "2026-10-26T00:00:00.000Z";
+    activeState.topicCreatedAtOverrides?.[topicId] ?? defaultCreatedAt;
   if (topicId === 2401) {
     const availablePosts = posts();
     return {
@@ -268,12 +270,9 @@ function discoveredTopicList(
   return {
     topic_list: {
       topics: topicIds.map((id) => {
+        const defaultCreatedAt = "2026-10-28T00:00:00.000Z";
         const createdAt =
-          id === 2401
-            ? "2026-10-28T00:00:00.000Z"
-            : id === 2402
-              ? "2026-10-27T00:00:00.000Z"
-              : "2026-10-26T00:00:00.000Z";
+          activeState.topicCreatedAtOverrides?.[id] ?? defaultCreatedAt;
         return { id, created_at: createdAt };
       }),
       ...(page === 0 && topicIds.length === perPage
@@ -322,6 +321,28 @@ function updateState(value: unknown): boolean {
     "categoriesInvalidResponse",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
+  }
+  if (
+    "topicCreatedAtOverrides" in updates &&
+    (typeof updates.topicCreatedAtOverrides !== "object" ||
+      updates.topicCreatedAtOverrides === null ||
+      Array.isArray(updates.topicCreatedAtOverrides) ||
+      Object.entries(updates.topicCreatedAtOverrides).some(
+        ([topicId, createdAt]) =>
+          !/^[1-9]\d*$/u.test(topicId) ||
+          typeof createdAt !== "string" ||
+          !Number.isFinite(Date.parse(createdAt)),
+      ))
+  ) {
+    return false;
+  }
+  if (
+    "topicListDelayMs" in updates &&
+    (!Number.isSafeInteger(updates.topicListDelayMs) ||
+      Number(updates.topicListDelayMs) < 0 ||
+      Number(updates.topicListDelayMs) > 30_000)
+  ) {
+    return false;
   }
   for (const key of ["omittedPostIds", "unavailableMedia"] as const) {
     if (
@@ -534,6 +555,8 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
+      const topicListDelayMs = activeState.topicListDelayMs ?? 0;
+      if (topicListDelayMs > 0) await delay(topicListDelayMs);
       const listPage = Number(url.searchParams.get("page") ?? "0");
       if (activeState.targetUnavailablePage === listPage) {
         sendJson(response, 404, { errors: ["列表目标当前不可见。"] });

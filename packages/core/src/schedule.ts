@@ -220,7 +220,6 @@ export async function startScheduleDispatcher(
   reserveSession: () => Promise<ReservedDatabaseConnection>,
 ): Promise<ScheduleDispatcher> {
   const session = await reserveSession();
-  let hasBootstrapLock = false;
   let hasExclusiveLifecycleLock = false;
   let hasSharedLifecycleLock = false;
   let closed = false;
@@ -229,7 +228,6 @@ export async function startScheduleDispatcher(
     await session.database.execute(
       sql`select pg_advisory_lock(${scheduleAdvisoryNamespace}, ${scheduleBootstrapLockKey})`,
     );
-    hasBootstrapLock = true;
     const lockRows = await session.database.execute<{
       readonly acquired: boolean;
     }>(
@@ -253,7 +251,6 @@ export async function startScheduleDispatcher(
       hasExclusiveLifecycleLock = false;
     }
     await unlockScheduleAdvisoryLock(session, scheduleBootstrapLockKey, false);
-    hasBootstrapLock = false;
 
     return {
       close: async () => {
