@@ -56,6 +56,7 @@ type HumanSessionCreated = HumanSessionStatus & {
 type Run = {
   readonly runId: string;
   readonly action: string;
+  readonly sourceAdapterVersion: string;
   readonly status: string;
   readonly trigger:
     | { readonly kind: "manual" }
@@ -2162,6 +2163,35 @@ async function main(): Promise<void> {
   const archivedBeforeImageUpdate =
     await browserFixtureRunIds("binny-browser-one");
   assert.ok(archivedBeforeImageUpdate.size > 0);
+
+  await updateBin("binny-browser-two", 0);
+  const versionProofSession = await startHumanSession("binny-browser-two");
+  assert.equal(versionProofSession.status, "pending");
+  await waitForHuman(
+    "binny-browser-two",
+    versionProofSession.sessionId,
+    "ready",
+  );
+  const oldVersionRunGateId = randomUUID();
+  const oldVersionRunGate = await createGate(oldVersionRunGateId);
+  const queuedOldVersionRun = await triggerRun("binny-browser-one", "collect", {
+    gateId: oldVersionRunGateId,
+  });
+  assert.equal(queuedOldVersionRun.status, "queued");
+  assert.equal(queuedOldVersionRun.queueReason, "browser_capacity_exhausted");
+  assert.equal(
+    queuedOldVersionRun.sourceAdapterVersion,
+    sourceAdapterVersion(browserImageUpdate.baselineManifest),
+  );
+  const queuedOldVersionRunBeforeUpdate = await readRun(
+    "binny-browser-one",
+    queuedOldVersionRun.runId,
+  );
+  assert.equal(queuedOldVersionRunBeforeUpdate.status, "queued");
+  await refreshGate(oldVersionRunGateId, oldVersionRunGate);
+  assert.equal(oldVersionRunGate.started, false);
+  assert.equal(oldVersionRunGate.touches, 0);
+
   const browserImageB = await replaceBrowserRuntimeImage(
     browserImage,
     browserImageUpdate.candidateImageId,
@@ -2185,6 +2215,40 @@ async function main(): Promise<void> {
   );
   assert.equal(updatedBrowserBin.id, "binny-browser-one");
   await waitForRuntime("binny-browser-one");
+  assert.equal(
+    (await readBin("binny-browser-two")).execution.environment?.browser?.power
+      ?.status,
+    "ready",
+    "另一 bin 的人工会话必须继续持有容量，直到旧版本运行被拒绝。",
+  );
+  const failedOldVersionRun = await waitForRun(
+    "binny-browser-one",
+    queuedOldVersionRun.runId,
+    (run) => run.status === "failed",
+  );
+  assert.equal(
+    failedOldVersionRun.result?.error?.code,
+    "source_adapter_changed_before_execution",
+  );
+  await refreshGate(oldVersionRunGateId, oldVersionRunGate);
+  assert.equal(oldVersionRunGate.started, false);
+  assert.equal(oldVersionRunGate.touches, 0);
+  assert.ok(
+    !(await browserFixtureRunIds("binny-browser-one")).has(
+      queuedOldVersionRun.runId,
+    ),
+    "版本变更拒绝的旧运行不能提交归档。",
+  );
+
+  const closedVersionProofSession = await closeHumanSession(
+    "binny-browser-two",
+    versionProofSession.sessionId,
+  );
+  assert.equal(closedVersionProofSession.status, "closed");
+  await waitForBrowserPower("binny-browser-two", "stopped");
+  await waitForBrowserProcessesStopped("browser-two");
+  await updateBin("binny-browser-two", "disabled");
+
   const imageUpdateCheck = await triggerRun("binny-browser-one", "check");
   const imageUpdateCheckResult = await waitForRun(
     "binny-browser-one",
@@ -2192,6 +2256,10 @@ async function main(): Promise<void> {
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(imageUpdateCheckResult.status, "completed");
+  assert.equal(
+    imageUpdateCheckResult.sourceAdapterVersion,
+    sourceAdapterVersion(browserImageUpdate.candidateManifest),
+  );
   assert.equal(
     imageUpdateCheckResult.result?.output?.availability,
     "available",
@@ -2212,6 +2280,15 @@ async function main(): Promise<void> {
         browserImageUpdate.baselineManifest,
       ),
       candidateVersion: updatedBrowserBin.sourceAdapter.version,
+      queuedOldVersionRun: {
+        runId: failedOldVersionRun.runId,
+        sourceAdapterVersion: failedOldVersionRun.sourceAdapterVersion,
+        status: failedOldVersionRun.status,
+        errorCode: failedOldVersionRun.result?.error?.code,
+        queueReason: queuedOldVersionRun.queueReason,
+        sourceGateStarted: oldVersionRunGate.started,
+        sourceGateTouches: oldVersionRunGate.touches,
+      },
       baselineImageId: browserImageUpdate.baselineImageId,
       candidateImageId: browserImageUpdate.candidateImageId,
       oldContainerId: browserImageB.previous.id,
