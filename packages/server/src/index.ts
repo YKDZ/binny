@@ -115,6 +115,7 @@ export async function createServerRuntime(options: {
     await humanSessions.reconcileHumanSessionsAfterGatewayRestart();
     scheduleDispatcher = await startScheduleDispatcher(
       schedules,
+      database,
       connection.reserveSession,
     );
     pendingTimeout = setInterval(
@@ -145,10 +146,14 @@ export async function createServerRuntime(options: {
   let schedulePoll: ReturnType<typeof setInterval> | undefined;
   let scheduleWork: Promise<void> | undefined;
   let scheduleClosing = false;
+  const activeScheduleDispatcher = scheduleDispatcher;
+  if (activeScheduleDispatcher === undefined)
+    throw new Error("采集计划 dispatcher 尚未启动。");
   const pollSchedules = (): void => {
     if (scheduleClosing || scheduleWork !== undefined) return;
-    scheduleWork = schedules
-      .processDueSchedules()
+    scheduleWork = activeScheduleDispatcher
+      .ensureActiveSession()
+      .then(() => schedules.processDueSchedules())
       .catch((error: unknown) => {
         console.error("采集计划处理失败：", error);
       })
