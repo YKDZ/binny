@@ -267,7 +267,7 @@ export async function readCommit(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
     })
@@ -344,7 +344,7 @@ export async function readCommit(
     archiveSeq: commit.archiveSequence.toString(),
     binId: commit.binId,
     ...optionalText("runId", commit.runId),
-    ...optionalText("collectorVersion", commit.collectorVersion),
+    ...optionalText("sourceAdapterVersion", commit.sourceAdapterVersion),
     observedAt: isoTimestamp(commit.observedAt),
     recordedAt: isoTimestamp(commit.recordedAt),
     items: items.map((item) => ({
@@ -482,7 +482,7 @@ async function readItem(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       revisionId: archiveObservations.revisionId,
@@ -521,7 +521,7 @@ async function readItem(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       revisionId: archiveObservations.revisionId,
@@ -567,7 +567,7 @@ async function readItem(
         observedAt: isoTimestamp(row.observedAt),
         recordedAt: isoTimestamp(row.recordedAt),
         ...optionalText("runId", row.runId),
-        ...optionalText("collectorVersion", row.collectorVersion),
+        ...optionalText("sourceAdapterVersion", row.sourceAdapterVersion),
         state: row.stateData,
         ...optionalDiagnostics(row.diagnostics),
       })),
@@ -587,7 +587,7 @@ async function readItem(
         observedAt: isoTimestamp(row.observedAt),
         recordedAt: isoTimestamp(row.recordedAt),
         ...optionalText("runId", row.runId),
-        ...optionalText("collectorVersion", row.collectorVersion),
+        ...optionalText("sourceAdapterVersion", row.sourceAdapterVersion),
         ...optionalDiagnostics(row.diagnostics),
       })),
     }),
@@ -696,7 +696,7 @@ async function readTimelinePage(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       itemId: nullableColumn(archiveObservations.itemId, "itemId"),
@@ -750,7 +750,7 @@ async function readTimelinePage(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       itemId: nullColumn(archiveItems.itemId, "itemId"),
@@ -821,7 +821,7 @@ async function readTimelinePage(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       itemId: nullableColumn(archiveItemObservationGaps.itemId, "itemId"),
@@ -871,7 +871,7 @@ async function readTimelinePage(
       archiveSequence: archiveCommits.archiveSequence,
       binId: archiveCommits.binId,
       runId: archiveCommits.runId,
-      collectorVersion: archiveCommits.collectorVersion,
+      sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
       observedAt: archiveCommits.observedAt,
       recordedAt: archiveCommits.recordedAt,
       itemId: nullColumn(archiveItems.itemId, "itemId"),
@@ -969,7 +969,7 @@ async function readTimelinePage(
           ordinal: row.ordinal,
           binId: row.binId,
           ...optionalText("runId", row.runId),
-          ...optionalText("collectorVersion", row.collectorVersion),
+          ...optionalText("sourceAdapterVersion", row.sourceAdapterVersion),
           observedAt: isoTimestamp(row.observedAt),
           recordedAt: isoTimestamp(row.recordedAt),
         };
@@ -1081,7 +1081,7 @@ async function readRelationsPage(
       observedAt: latestCommit.observedAt,
       recordedAt: latestCommit.recordedAt,
       runId: latestCommit.runId,
-      collectorVersion: latestCommit.collectorVersion,
+      sourceAdapterVersion: latestCommit.sourceAdapterVersion,
     })
     .from(latestObservation)
     .innerJoin(
@@ -1158,9 +1158,9 @@ async function readRelationsPage(
         "relationRecordedAt",
       ),
       relationRunId: nullableColumn(gapCommit.runId, "relationRunId"),
-      relationCollectorVersion: nullableColumn(
-        gapCommit.collectorVersion,
-        "relationCollectorVersion",
+      relationSourceAdapterVersion: nullableColumn(
+        gapCommit.sourceAdapterVersion,
+        "relationSourceAdapterVersion",
       ),
     })
     .from(gap)
@@ -1219,9 +1219,9 @@ async function readRelationsPage(
         "relationRecordedAt",
       ),
       relationRunId: nullableColumn(latest.runId, "relationRunId"),
-      relationCollectorVersion: nullableColumn(
-        latest.collectorVersion,
-        "relationCollectorVersion",
+      relationSourceAdapterVersion: nullableColumn(
+        latest.sourceAdapterVersion,
+        "relationSourceAdapterVersion",
       ),
     })
     .from(archiveRelations)
@@ -1359,7 +1359,10 @@ async function readRelationsPage(
         observedAt: isoTimestamp(relationObservedAt),
         recordedAt: isoTimestamp(relationRecordedAt),
         ...optionalText("runId", row.relationRunId),
-        ...optionalText("collectorVersion", row.relationCollectorVersion),
+        ...optionalText(
+          "sourceAdapterVersion",
+          row.relationSourceAdapterVersion,
+        ),
       };
     };
     if (stateStatus === "deleted") {

@@ -14,7 +14,7 @@ import {
   archiveItemReadSchema,
   archiveResourceMetadataSchema,
   archiveSearchPageSchema,
-  collectorManifestSchema,
+  sourceAdapterManifestSchema,
   type ArchiveResourceMetadata,
   type ArchiveAggregationRequest,
   type ArchiveSearchRequest,
@@ -102,7 +102,7 @@ const bodyCodePointLength = 512;
 const sharedPayload = new TextEncoder().encode(
   "Binny capacity 26 shared archive resource. 中文媒体引用。🌿",
 );
-const capacityCollector = collectorManifestSchema.parse({
+const capacitySourceAdapter = sourceAdapterManifestSchema.parse({
   id: "archive-capacity",
   version: "1.0.0",
   configSchema: { type: "object", properties: {} },
@@ -203,7 +203,7 @@ async function ensureCapacityBin(
   const created = await client.bins.$post({
     json: {
       id: binId,
-      collector: capacityCollector,
+      sourceAdapter: capacitySourceAdapter,
       identityId: "capacity26-test-identity",
       config: {},
       targets: [],
@@ -216,7 +216,7 @@ async function ensureCapacityBin(
   }
   const bin = await created.json();
   assert.equal(bin.id, binId);
-  assert.equal(bin.collector.id, capacityCollector.id);
+  assert.equal(bin.sourceAdapter.id, capacitySourceAdapter.id);
 }
 
 function createMediaPayload(

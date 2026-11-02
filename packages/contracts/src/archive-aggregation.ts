@@ -44,7 +44,7 @@ const archiveAggregationRelationFieldSchema = z.enum([
   "to.sourceRef",
   "binId",
   "runId",
-  "collectorVersion",
+  "sourceAdapterVersion",
   "observedAt",
   "recordedAt",
 ]);

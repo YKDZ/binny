@@ -1,4 +1,4 @@
-// 共享资料、查询、运行与采集器契约，不依赖 HTTP 或业务实现。
+// 共享资料、查询、运行与信源适配器契约，不依赖 HTTP 或业务实现。
 export * from "./archive.ts";
 export * from "./archive-aggregation.ts";
 export * from "./archive-history.ts";

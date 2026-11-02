@@ -12,7 +12,7 @@
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",
     "test:binny:e2e": "node --conditions=source scripts/binny-e2e.ts",
-    "test:linuxdo-collector": "node --conditions=source scripts/test-linuxdo-collector.ts",
+    "test:linuxdo-source-adapter": "node --conditions=source scripts/test-linuxdo-source-adapter.ts",
     "fix": "node --conditions=source scripts/task-gates.ts fix",
     "boundaries": "turbo boundaries",
     "publication:pack": "turbo run build && changeset pack --out-dir .changeset/packed",

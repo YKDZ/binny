@@ -27,8 +27,8 @@ import {
   binErrorSchema,
   binIdSchema,
   browserIdleTimeoutSecondsSchema,
-  collectorActionNameSchema,
-  collectorManifestSchema,
+  sourceAdapterActionNameSchema,
+  sourceAdapterManifestSchema,
   identityIdSchema,
   humanSessionCreatedSchema,
   humanSessionErrorSchema,
@@ -118,8 +118,8 @@ const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
 const cliArchiveAggregationInputSchema = withArchiveJsonSchemaProjection(
   z.object({ query: postgresTextSchema.min(1) }).strict(),
 );
-const collectorTextSchema = withPostgresJsonSchemaProjection(
-  jsonTextSchema.pipe(collectorManifestSchema),
+const sourceAdapterTextSchema = withPostgresJsonSchemaProjection(
+  jsonTextSchema.pipe(sourceAdapterManifestSchema),
 );
 const browserIdleTimeoutOptionSchema = z.string();
 
@@ -167,7 +167,7 @@ const cliScheduleCreateInputSchema = withPostgresJsonSchemaProjection(
       binId: binIdSchema,
       expression: postgresTextSchema.min(1).max(256),
       timeZone: postgresTextSchema.min(1).max(128),
-      action: collectorActionNameSchema,
+      action: sourceAdapterActionNameSchema,
       params: jsonObjectTextSchema.optional(),
       disabled: z.boolean().optional(),
     })
@@ -180,7 +180,7 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
       scheduleId: z.string().uuid(),
       expression: postgresTextSchema.min(1).max(256).optional(),
       timeZone: postgresTextSchema.min(1).max(128).optional(),
-      action: collectorActionNameSchema.optional(),
+      action: sourceAdapterActionNameSchema.optional(),
       params: jsonObjectTextSchema.optional(),
     })
     .strict()
@@ -408,13 +408,13 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "create",
-        description: "登记采集器、访问身份、配置和目标。",
+        description: "登记信源适配器、访问身份、配置和目标。",
         fields: {
           id: { kind: "positional", description: "稳定的 bin 标识" },
-          collector: {
+          sourceAdapter: {
             kind: "valueOption",
-            longOption: "--collector",
-            description: "采集器清单 JSON",
+            longOption: "--source-adapter",
+            description: "信源适配器清单 JSON",
           },
           identityId: {
             kind: "valueOption",
@@ -442,7 +442,7 @@ function createCliContract(identity: CliCommandIdentity) {
           binCreateInputSchema
             .omit({
               id: true,
-              collector: true,
+              sourceAdapter: true,
               identityId: true,
               config: true,
               targets: true,
@@ -450,7 +450,7 @@ function createCliContract(identity: CliCommandIdentity) {
             })
             .extend({
               id: binIdSchema,
-              collector: collectorTextSchema,
+              sourceAdapter: sourceAdapterTextSchema,
               identityId: identityIdSchema,
               config: jsonObjectTextSchema,
               targets: targetsTextSchema,
@@ -531,7 +531,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "actions",
-        description: "发现采集器声明的动作和环境能力。",
+        description: "发现信源适配器声明的动作和环境能力。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: z.object({ id: binIdSchema }),
         success: {
@@ -542,8 +542,8 @@ function createCliContract(identity: CliCommandIdentity) {
               exitCode: 0,
               schema: withPostgresJsonSchemaProjection(
                 z.object({
-                  actions: collectorManifestSchema.shape.actions,
-                  environment: collectorManifestSchema.shape.environment,
+                  actions: sourceAdapterManifestSchema.shape.actions,
+                  environment: sourceAdapterManifestSchema.shape.environment,
                   execution: binConfigurationSchema.shape.execution,
                 }),
               ),
@@ -567,13 +567,14 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "update",
-        description: "修改访问身份、采集器版本、配置、目标或浏览器空闲策略。",
+        description:
+          "修改访问身份、信源适配器版本、配置、目标或浏览器空闲策略。",
         fields: {
           id: { kind: "positional", description: "bin 标识" },
-          collector: {
+          sourceAdapter: {
             kind: "valueOption",
-            longOption: "--collector",
-            description: "采集器清单 JSON",
+            longOption: "--source-adapter",
+            description: "信源适配器清单 JSON",
           },
           identityId: {
             kind: "valueOption",
@@ -601,7 +602,7 @@ function createCliContract(identity: CliCommandIdentity) {
           z
             .object({
               id: binIdSchema,
-              collector: collectorTextSchema.optional(),
+              sourceAdapter: sourceAdapterTextSchema.optional(),
               identityId: identityIdSchema.optional(),
               config: jsonObjectTextSchema.optional(),
               targets: targetsTextSchema.optional(),
@@ -610,13 +611,13 @@ function createCliContract(identity: CliCommandIdentity) {
             })
             .refine(
               ({
-                collector,
+                sourceAdapter,
                 identityId,
                 config,
                 targets,
                 browserIdleTimeoutSeconds,
               }) =>
-                collector !== undefined ||
+                sourceAdapter !== undefined ||
                 identityId !== undefined ||
                 config !== undefined ||
                 targets !== undefined ||
@@ -779,7 +780,7 @@ function createCliContract(identity: CliCommandIdentity) {
         input: withPostgresJsonSchemaProjection(
           z.object({
             binId: binIdSchema,
-            action: collectorActionNameSchema,
+            action: sourceAdapterActionNameSchema,
             params: jsonObjectTextSchema.optional(),
           }),
         ),
@@ -1030,7 +1031,7 @@ function createCliContract(identity: CliCommandIdentity) {
           action: {
             kind: "valueOption",
             longOption: "--action",
-            description: "已声明的采集器动作",
+            description: "已声明的信源适配器动作",
           },
           params: {
             kind: "valueOption",
@@ -1167,7 +1168,7 @@ function createCliContract(identity: CliCommandIdentity) {
           action: {
             kind: "valueOption",
             longOption: "--action",
-            description: "已声明的采集器动作",
+            description: "已声明的信源适配器动作",
           },
           params: {
             kind: "valueOption",

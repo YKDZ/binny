@@ -37,24 +37,24 @@ export async function copyImageBuildContext(
   });
 }
 
-/** 只改临时构建上下文中的采集器版本，用正式 CLI 做镜像 A/B。 */
-export async function setBuildContextCollectorVersion(
+/** 只改临时构建上下文中的信源适配器版本，用正式 CLI 做镜像 A/B。 */
+export async function setBuildContextSourceAdapterVersion(
   buildContextDirectory: string,
   sourceFile: string,
-  collectorId: string,
+  sourceAdapterId: string,
   version: string,
 ): Promise<void> {
-  assert.ok(collectorId.length > 0);
+  assert.ok(sourceAdapterId.length > 0);
   assert.ok(version.length > 0);
   const sourcePath = path.join(buildContextDirectory, sourceFile);
   const source = await readFile(sourcePath, "utf8");
-  const escapedId = collectorId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const escapedId = sourceAdapterId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   const versionPattern = new RegExp(
     `(id: "${escapedId}",\\n  version: ")[^"]+("[,])`,
     "u",
   );
-  assert.match(source, versionPattern, "构建上下文应包含目标采集器清单。");
+  assert.match(source, versionPattern, "构建上下文应包含目标信源适配器清单。");
   const updated = source.replace(versionPattern, `$1${version}$2`);
-  assert.notEqual(updated, source, "临时采集器清单版本应发生变化。");
+  assert.notEqual(updated, source, "临时信源适配器清单版本应发生变化。");
   await writeFile(sourcePath, updated);
 }

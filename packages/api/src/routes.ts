@@ -131,8 +131,8 @@ function makeApp(operations: ApiOperations) {
         const configuration = await withExecution(result.value);
         return c.json(
           {
-            actions: configuration.collector.actions,
-            environment: configuration.collector.environment,
+            actions: configuration.sourceAdapter.actions,
+            environment: configuration.sourceAdapter.environment,
             execution: configuration.execution,
           },
           200,

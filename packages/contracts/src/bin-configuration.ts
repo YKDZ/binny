@@ -1,4 +1,4 @@
-// 共享资料、查询、运行与采集器契约，不依赖 HTTP 或业务实现。
+// 共享资料、查询、运行与信源适配器契约，不依赖 HTTP 或业务实现。
 import * as z from "zod";
 
 import {
@@ -21,9 +21,9 @@ export const binIdSchema = postgresTextSchema
     "bin 标识只能包含字母、数字、点、下划线和连字符。",
   );
 
-export const collectorIdSchema = postgresTextSchema
-  .min(1, "采集器标识不能为空。")
-  .max(128, "采集器标识不能超过 128 个字符。");
+export const sourceAdapterIdSchema = postgresTextSchema
+  .min(1, "信源适配器标识不能为空。")
+  .max(128, "信源适配器标识不能超过 128 个字符。");
 
 export const identityIdSchema = postgresTextSchema
   .min(1, "访问身份标识不能为空。")
@@ -42,7 +42,7 @@ const jsonObjectBaseSchema = z.custom<Record<string, unknown>>(
   { message: "字段必须是 JSON 对象。" },
 );
 
-/** 线上 JSON 对象；配置本身由对应采集器声明的动态 JSON Schema 校验。 */
+/** 线上 JSON 对象；配置本身由对应信源适配器声明的动态 JSON Schema 校验。 */
 export const jsonObjectSchema = withPostgresJsonSchemaProjection(
   jsonObjectBaseSchema.superRefine((object, context) => {
     validatePostgresJsonText(object, context);
@@ -55,7 +55,7 @@ registerPostgresJsonSchemaProjection(
   z.record(postgresTextSchema, z.unknown()),
 );
 
-/** 采集器以 JSON Schema 声明运行时才知道的配置、目标和动作参数。 */
+/** 信源适配器以 JSON Schema 声明运行时才知道的配置、目标和动作参数。 */
 export const jsonSchemaDocumentSchema = jsonObjectSchema;
 
 const targetsBaseSchema = z.custom<unknown[]>(Array.isArray, {
@@ -70,28 +70,33 @@ registerPostgresJsonSchemaProjection(
   z.array(z.unknown()),
 );
 
-export const collectorActionNameSchema = postgresTextSchema.regex(
+export const sourceAdapterActionNameSchema = postgresTextSchema.regex(
   /^[a-z][a-z0-9-]*$/u,
   "动作名称必须使用小写字母、数字和连字符。",
 );
 
-export const collectorActionSchema = withPostgresJsonSchemaProjection(
+export const sourceAdapterActionSchema = withPostgresJsonSchemaProjection(
   z.object({
     description: postgresTextSchema.min(1, "动作说明不能为空。"),
     params: jsonSchemaDocumentSchema,
   }),
 );
 
-const collectorActionsSchema = z
-  .record(collectorActionNameSchema, collectorActionSchema)
-  .and(z.object({ check: collectorActionSchema }));
+const sourceAdapterActionsSchema = z
+  .record(sourceAdapterActionNameSchema, sourceAdapterActionSchema)
+  .and(
+    z.object({
+      check: sourceAdapterActionSchema,
+      collect: sourceAdapterActionSchema,
+    }),
+  );
 
-const collectorManifestStoredFieldsSchema = z.object({
-  id: collectorIdSchema,
-  version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+const sourceAdapterManifestStoredFieldsSchema = z.object({
+  id: sourceAdapterIdSchema,
+  version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: collectorActionsSchema,
+  actions: sourceAdapterActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),
@@ -101,12 +106,12 @@ const collectorManifestStoredFieldsSchema = z.object({
   }),
 });
 
-const collectorManifestInputFieldsSchema = z.object({
-  id: collectorIdSchema,
-  version: postgresTextSchema.min(1, "采集器版本不能为空。"),
+const sourceAdapterManifestInputFieldsSchema = z.object({
+  id: sourceAdapterIdSchema,
+  version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: collectorActionsSchema,
+  actions: sourceAdapterActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),
@@ -118,35 +123,37 @@ const collectorManifestInputFieldsSchema = z.object({
   }),
 });
 
-const collectorManifestCheckedSchema =
-  collectorManifestInputFieldsSchema.superRefine((collector, context) => {
-    if (
-      collector.environment.browser.required &&
-      !collector.environment.browser.profileReuseAfterRestart &&
-      collector.environment.browser.profileReuseUnavailableReason === undefined
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["environment", "browser", "profileReuseUnavailableReason"],
-        message: "不支持关闭后复用浏览器配置文件时必须说明原因。",
-      });
-    }
-  });
+const sourceAdapterManifestCheckedSchema =
+  sourceAdapterManifestInputFieldsSchema.superRefine(
+    (sourceAdapter, context) => {
+      if (
+        sourceAdapter.environment.browser.required &&
+        !sourceAdapter.environment.browser.profileReuseAfterRestart &&
+        sourceAdapter.environment.browser.profileReuseUnavailableReason ===
+          undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["environment", "browser", "profileReuseUnavailableReason"],
+          message: "不支持关闭后复用浏览器配置文件时必须说明原因。",
+        });
+      }
+    },
+  );
 
 registerPostgresJsonSchemaProjection(
-  collectorManifestInputFieldsSchema,
-  collectorManifestCheckedSchema,
-  collectorManifestInputFieldsSchema,
+  sourceAdapterManifestInputFieldsSchema,
+  sourceAdapterManifestCheckedSchema,
+  sourceAdapterManifestInputFieldsSchema,
 );
 
 /** 持久化清单解析器保留旧版允许为空或缺失的复用原因。 */
-export const collectorManifestStoredSchema = withPostgresJsonSchemaProjection(
-  collectorManifestStoredFieldsSchema,
-);
+export const sourceAdapterManifestStoredSchema =
+  withPostgresJsonSchemaProjection(sourceAdapterManifestStoredFieldsSchema);
 
 /** 新建或更新清单时使用；必需浏览器不支持复用 profile 时必须给出原因。 */
-export const collectorManifestSchema = withPostgresJsonSchemaProjection(
-  collectorManifestCheckedSchema,
+export const sourceAdapterManifestSchema = withPostgresJsonSchemaProjection(
+  sourceAdapterManifestCheckedSchema,
 );
 
 export const browserIdleTimeoutSecondsSchema = z
@@ -214,7 +221,7 @@ export type BrowserPower = z.infer<typeof browserPowerSchema>;
 export const binCreateInputSchema = withPostgresJsonSchemaProjection(
   z.object({
     id: binIdSchema,
-    collector: collectorManifestSchema,
+    sourceAdapter: sourceAdapterManifestSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,
@@ -228,7 +235,7 @@ export const binCreateInputSchema = withPostgresJsonSchemaProjection(
 export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
   z.object({
     id: binIdSchema,
-    collector: collectorManifestStoredSchema,
+    sourceAdapter: sourceAdapterManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,
@@ -238,7 +245,7 @@ export const binConfigurationSettingsSchema = withPostgresJsonSchemaProjection(
 export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
-      collector: collectorManifestSchema.optional(),
+      sourceAdapter: sourceAdapterManifestSchema.optional(),
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
       targets: targetsSchema.optional(),
@@ -314,7 +321,7 @@ const runtimeHeartbeatFieldsSchema = z.object({
   claimInFlight: z.boolean(),
   stoppedRunId: z.string().uuid().optional(),
   humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
-  collector: collectorManifestStoredSchema,
+  sourceAdapter: sourceAdapterManifestStoredSchema,
   environment: runtimeEnvironmentSchema,
 });
 
@@ -392,7 +399,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
 export const binConfigurationSchema = withPostgresJsonSchemaProjection(
   z.object({
     id: binIdSchema,
-    collector: collectorManifestStoredSchema,
+    sourceAdapter: sourceAdapterManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     targets: targetsSchema,
@@ -426,7 +433,7 @@ export const binErrorSchema = z.object({
 
 export type JsonObject = z.infer<typeof jsonObjectSchema>;
 export type JsonSchema = z.infer<typeof jsonSchemaDocumentSchema>;
-export type CollectorManifest = z.infer<typeof collectorManifestSchema>;
+export type SourceAdapterManifest = z.infer<typeof sourceAdapterManifestSchema>;
 export type BinCreateInput = z.infer<typeof binCreateInputSchema>;
 export type BinUpdateInput = z.infer<typeof binUpdateInputSchema>;
 export type BinConfiguration = z.infer<typeof binConfigurationSchema>;

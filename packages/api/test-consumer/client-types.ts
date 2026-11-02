@@ -4,7 +4,7 @@ async function checkPublicBinContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
   const createInput = {
     id: "rss-main",
-    collector: {
+    sourceAdapter: {
       id: "rss",
       version: "1.0.0",
       configSchema: { type: "object", properties: {} },
@@ -35,17 +35,27 @@ async function checkPublicBinContract(): Promise<void> {
 
   const manifestWithoutCheck = {
     ...createInput,
-    collector: {
-      ...createInput.collector,
-      actions: { collect: createInput.collector.actions.collect },
+    sourceAdapter: {
+      ...createInput.sourceAdapter,
+      actions: { collect: createInput.sourceAdapter.actions.collect },
     },
   };
-  // @ts-expect-error 采集器清单必须声明独立的 check 动作。
+  // @ts-expect-error 信源适配器清单必须声明独立的 check 动作。
   void client.bins.$post({ json: manifestWithoutCheck });
+
+  const manifestWithoutCollect = {
+    ...createInput,
+    sourceAdapter: {
+      ...createInput.sourceAdapter,
+      actions: { check: createInput.sourceAdapter.actions.check },
+    },
+  };
+  // @ts-expect-error 信源适配器清单必须声明独立的 collect 动作。
+  void client.bins.$post({ json: manifestWithoutCollect });
 
   if (created.status === 201) {
     const bin = await created.json();
-    void bin.collector.actions.collect?.params.type;
+    void bin.sourceAdapter.actions.collect?.params.type;
     void bin.execution.status;
     // @ts-expect-error 执行器尚未连接，响应不会伪称在线。
     void bin.execution.isOnline;

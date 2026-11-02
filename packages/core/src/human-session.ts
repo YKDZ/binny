@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 
 import {
-  collectorManifestStoredSchema,
+  sourceAdapterManifestStoredSchema,
   humanSessionFailureSchema,
   humanSessionSchema,
   runtimeHeartbeatTimeoutMs,
@@ -430,7 +430,7 @@ export function createHumanSessionStore(
         const [bin] = await transaction
           .select({
             id: binConfigurations.id,
-            collector: binConfigurations.collector,
+            sourceAdapter: binConfigurations.sourceAdapter,
           })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
@@ -438,12 +438,14 @@ export function createHumanSessionStore(
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
 
-        const manifest = collectorManifestStoredSchema.parse(bin.collector);
+        const manifest = sourceAdapterManifestStoredSchema.parse(
+          bin.sourceAdapter,
+        );
         if (!manifest.environment.browser.required)
           return failure(
             409,
             "browser_not_required",
-            "这个采集器没有声明需要浏览器环境。",
+            "这个信源适配器没有声明需要浏览器环境。",
             ["binId"],
           );
 

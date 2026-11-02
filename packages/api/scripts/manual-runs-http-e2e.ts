@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createApiClient } from "@binny/api/client";
 import {
   binErrorSchema,
-  collectorManifestSchema,
+  sourceAdapterManifestSchema,
   type ArchiveSubmissionInput,
   type ManualRun,
 } from "@binny/contracts";
@@ -22,13 +22,13 @@ const sourceControlUrl = (() => {
     throw new Error("缺少 BINNY_RUNS_SOURCE_CONTROL_URL。");
   return url;
 })();
-const manifestJson = process.env.BINNY_RUNS_COLLECTOR_MANIFEST;
+const manifestJson = process.env.BINNY_RUNS_SOURCE_ADAPTER_MANIFEST;
 
 if (baseUrl === undefined) throw new Error("缺少 BINNY_E2E_BASE_URL。");
 if (manifestJson === undefined)
-  throw new Error("缺少由 SDK 构造的 BINNY_RUNS_COLLECTOR_MANIFEST。");
+  throw new Error("缺少由 SDK 构造的 BINNY_RUNS_SOURCE_ADAPTER_MANIFEST。");
 
-const manifest = collectorManifestSchema.parse(
+const manifest = sourceAdapterManifestSchema.parse(
   JSON.parse(manifestJson) as unknown,
 );
 const requestTimeoutMs = 10_000;
@@ -90,7 +90,7 @@ async function createConcurrencyBin(binId: string): Promise<void> {
   const response = await client.bins.$post({
     json: {
       id: binId,
-      collector: manifest,
+      sourceAdapter: manifest,
       identityId: binId + "-identity",
       config: { section: "concurrency" },
       targets: [],
@@ -116,7 +116,7 @@ async function heartbeat(
       activeRunId: null,
       claimInFlight: false,
       ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
-      collector: manifest,
+      sourceAdapter: manifest,
       environment: {
         kind: "lightweight",
         browser: {
@@ -224,7 +224,7 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
       requestId: "binny-lifecycle-replay:" + queued.runId,
       binId,
       runId: queued.runId,
-      collectorVersion: manifest.version,
+      sourceAdapterVersion: manifest.version,
       items: [
         {
           sourceKey: {
@@ -521,7 +521,7 @@ async function verifyAvailabilityChecks(): Promise<void> {
       requestId: "binny-check-check-archive-" + completedCheck.runId,
       binId: "binny-runs-one",
       runId: completedCheck.runId,
-      collectorVersion: manifest.version,
+      sourceAdapterVersion: manifest.version,
       items: [
         {
           sourceKey: {
@@ -777,7 +777,7 @@ async function verifyRunCommit(run: ManualRun): Promise<{
   const commit = await response.json();
   assert.equal(commit.runId, run.runId);
   assert.equal(commit.binId, run.binId);
-  assert.equal(commit.collectorVersion, manifest.version);
+  assert.equal(commit.sourceAdapterVersion, manifest.version);
   return { itemId: item.itemId, commitId: locator.commitId };
 }
 
@@ -800,7 +800,7 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       id: "binny-check-missing-check",
-      collector: {
+      sourceAdapter: {
         id: "binny-check.missing-check",
         version: "1.0.0",
         configSchema: { type: "object" },
@@ -825,6 +825,37 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
     await missingRequiredCheck.json(),
   );
   assert.equal(missingCheckBody.error.code, "invalid_input");
+
+  const missingRequiredCollect = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: "binny-check-missing-collect",
+      sourceAdapter: {
+        id: "binny-check.missing-collect",
+        version: "1.0.0",
+        configSchema: { type: "object" },
+        actions: {
+          check: {
+            description: "仅用于验证必需动作声明。",
+            params: { type: "object" },
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+      },
+      identityId: "binny-check-missing-collect",
+      config: {},
+      targets: [],
+    }),
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  assert.equal(missingRequiredCollect.status, 400);
+  const missingCollectBody = binErrorSchema.parse(
+    await missingRequiredCollect.json(),
+  );
+  assert.equal(missingCollectBody.error.code, "invalid_input");
 
   const incompleteCheck = await client.bins[":binId"].runs.$post({
     param: { binId: "binny-runs-one" },
@@ -1035,7 +1066,7 @@ async function verifyActionFailures(
     const archivedCommit = await savedCommitResponse.json();
     assert.equal(archivedCommit.runId, partial.runId);
     assert.equal(archivedCommit.binId, "binny-runs-one");
-    assert.equal(archivedCommit.collectorVersion, manifest.version);
+    assert.equal(archivedCommit.sourceAdapterVersion, manifest.version);
   }
   const savedItemResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: savedItem.itemId },

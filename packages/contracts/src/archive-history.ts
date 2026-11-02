@@ -42,7 +42,7 @@ const archiveTimelineMetadata = {
   ordinal: z.number().int().nonnegative(),
   binId: binIdSchema,
   runId: nonEmptyText.max(128).optional(),
-  collectorVersion: nonEmptyText.max(256).optional(),
+  sourceAdapterVersion: nonEmptyText.max(256).optional(),
   observedAt: timestampSchema,
   recordedAt: timestampSchema,
 };

@@ -21,7 +21,7 @@ import {
 import { CronExpressionParser } from "cron-parser";
 import { and, eq, lte, sql } from "drizzle-orm";
 
-import { validateCollectorActionParameters } from "./bin-configuration.ts";
+import { validateSourceAdapterActionParameters } from "./bin-configuration.ts";
 import { createQueuedRunInTransaction } from "./manual-run.ts";
 
 type ScheduleStore = ScheduleOperations & {
@@ -132,7 +132,7 @@ function toSchedule(row: typeof schedules.$inferSelect): Schedule {
 function scheduleActionError(
   bin: {
     readonly id: string;
-    readonly collector: unknown;
+    readonly sourceAdapter: unknown;
     readonly identityId: string;
     readonly config: unknown;
     readonly targets: unknown;
@@ -149,8 +149,8 @@ function scheduleActionError(
       path: ["params"],
     };
   }
-  const result = validateCollectorActionParameters(
-    configuredBin.collector,
+  const result = validateSourceAdapterActionParameters(
+    configuredBin.sourceAdapter,
     action,
     checkedParams.data,
   );
@@ -176,7 +176,7 @@ function readBinForRun(transaction: Transaction, binId: string) {
   return transaction
     .select({
       id: binConfigurations.id,
-      collector: binConfigurations.collector,
+      sourceAdapter: binConfigurations.sourceAdapter,
       identityId: binConfigurations.identityId,
       config: binConfigurations.config,
       targets: binConfigurations.targets,

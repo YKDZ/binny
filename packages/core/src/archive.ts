@@ -745,7 +745,7 @@ export function createArchiveStore(
             archiveSequence,
             binId: submission.binId,
             runId: submission.runId ?? null,
-            collectorVersion: submission.collectorVersion ?? null,
+            sourceAdapterVersion: submission.sourceAdapterVersion ?? null,
             observedAt: new Date(observedAt),
             recordedAt,
           });

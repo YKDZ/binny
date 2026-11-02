@@ -17,7 +17,7 @@ import {
 } from "./binny-e2e-linuxdo-journey.ts";
 import {
   copyImageBuildContext,
-  setBuildContextCollectorVersion,
+  setBuildContextSourceAdapterVersion,
 } from "./binny-image-update-context.ts";
 import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
 
@@ -656,7 +656,7 @@ async function sdkResourceStep(baseUrl: string): Promise<string> {
   const result = await run("pnpm", [
     "--silent",
     "--filter",
-    "@binny/collector-sdk",
+    "@binny/source-adapter-sdk",
     "exec",
     "node",
     "--conditions=source",
@@ -746,7 +746,7 @@ async function seedUpgradeRun(
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
-      collector: manifest,
+      sourceAdapter: manifest,
       environment: {
         kind: "lightweight",
         browser: {
@@ -942,6 +942,10 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     configSchema: { type: "object" },
     actions: {
       check: { description: "检查旧浏览器配置。", params: { type: "object" } },
+      collect: {
+        description: "读取旧浏览器配置。",
+        params: { type: "object" },
+      },
     },
     environment: {
       browser: {
@@ -955,14 +959,14 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   });
   const createLegacyBrowserBin = async (
     binId: string,
-    collector: ReturnType<typeof legacyBrowserManifest>,
+    sourceAdapter: ReturnType<typeof legacyBrowserManifest>,
   ) => {
     const response = await fetch(`${baseUrl}/bins`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         id: binId,
-        collector,
+        sourceAdapter,
         identityId: `identity-${binId}`,
         config: {},
         targets: [],
@@ -995,7 +999,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        collector: legacyBrowserWithEmptyReason,
+        sourceAdapter: legacyBrowserWithEmptyReason,
         environment: {
           kind: "browser",
           browser: {
@@ -1142,7 +1146,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
   const oldEmptyReason = (await oldEmptyReasonResponse.json()) as {
     readonly browserIdleTimeoutSeconds: number | null;
-    readonly collector: {
+    readonly sourceAdapter: {
       readonly environment: {
         readonly browser: { readonly profileReuseUnavailableReason?: string };
       };
@@ -1156,7 +1160,8 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   assert.equal(oldEmptyReason.browserIdleTimeoutSeconds, null);
   assert.equal(
-    oldEmptyReason.collector.environment.browser.profileReuseUnavailableReason,
+    oldEmptyReason.sourceAdapter.environment.browser
+      .profileReuseUnavailableReason,
     "",
   );
   assert.equal(oldEmptyReason.execution.status, "offline");
@@ -1178,7 +1183,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
       readonly bins: readonly {
         readonly id: string;
         readonly browserIdleTimeoutSeconds: number | null;
-        readonly collector: {
+        readonly sourceAdapter: {
           readonly environment: {
             readonly browser: {
               readonly profileReuseUnavailableReason?: string;
@@ -1197,7 +1202,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.ok(oldEmptyReasonInList);
   assert.equal(oldEmptyReasonInList.browserIdleTimeoutSeconds, null);
   assert.equal(
-    oldEmptyReasonInList.collector.environment.browser
+    oldEmptyReasonInList.sourceAdapter.environment.browser
       .profileReuseUnavailableReason,
     "",
   );
@@ -1225,7 +1230,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        collector: legacyBrowserWithEmptyReason,
+        sourceAdapter: legacyBrowserWithEmptyReason,
         environment: {
           kind: "browser",
           browser: {
@@ -1271,7 +1276,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   assert.equal(oldWithReasonResponse.status, 200);
   const oldWithReason = (await oldWithReasonResponse.json()) as {
     readonly browserIdleTimeoutSeconds: number | null;
-    readonly collector: {
+    readonly sourceAdapter: {
       readonly environment: {
         readonly browser: { readonly profileReuseUnavailableReason?: string };
       };
@@ -1279,7 +1284,8 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   assert.equal(oldWithReason.browserIdleTimeoutSeconds, null);
   assert.equal(
-    oldWithReason.collector.environment.browser.profileReuseUnavailableReason,
+    oldWithReason.sourceAdapter.environment.browser
+      .profileReuseUnavailableReason,
     "旧浏览器不能复用配置文件。",
   );
 
@@ -1306,7 +1312,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       id: "binny-database-upgrade-new-empty-reason",
-      collector: legacyBrowserWithEmptyReason,
+      sourceAdapter: legacyBrowserWithEmptyReason,
       identityId: "identity-binny-database-upgrade-new-empty-reason",
       config: {},
       targets: [],
@@ -1321,7 +1327,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   assert.equal(newEmptyReasonCreateError.error.code, "invalid_input");
   assert.deepEqual(newEmptyReasonCreateError.error.path, [
-    "collector",
+    "sourceAdapter",
     "environment",
     "browser",
     "profileReuseUnavailableReason",
@@ -1332,7 +1338,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ collector: legacyBrowserWithEmptyReason }),
+      body: JSON.stringify({ sourceAdapter: legacyBrowserWithEmptyReason }),
     },
   );
   assert.equal(emptyReasonUpdate.status, 400);
@@ -1344,7 +1350,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   assert.equal(emptyReasonUpdateError.error.code, "invalid_input");
   assert.deepEqual(emptyReasonUpdateError.error.path, [
-    "collector",
+    "sourceAdapter",
     "environment",
     "browser",
     "profileReuseUnavailableReason",
@@ -1364,7 +1370,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ collector: repairedEmptyReasonManifest }),
+      body: JSON.stringify({ sourceAdapter: repairedEmptyReasonManifest }),
     },
   );
   assert.equal(
@@ -1374,7 +1380,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
   const repairedEmptyReasonBin = (await repairedEmptyReasonResponse.json()) as {
     readonly browserIdleTimeoutSeconds: number | null;
-    readonly collector: {
+    readonly sourceAdapter: {
       readonly environment: {
         readonly browser: { readonly profileReuseUnavailableReason?: string };
       };
@@ -1382,7 +1388,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   };
   assert.equal(repairedEmptyReasonBin.browserIdleTimeoutSeconds, null);
   assert.equal(
-    repairedEmptyReasonBin.collector.environment.browser
+    repairedEmptyReasonBin.sourceAdapter.environment.browser
       .profileReuseUnavailableReason,
     "经公开配置修正后的兼容原因。",
   );
@@ -1399,7 +1405,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        collector: repairedEmptyReasonManifest,
+        sourceAdapter: repairedEmptyReasonManifest,
         environment: {
           kind: "browser",
           browser: {
@@ -1459,7 +1465,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        collector: legacyBrowserWithoutReason,
+        sourceAdapter: legacyBrowserWithoutReason,
         environment: {
           kind: "browser",
           browser: {
@@ -1495,7 +1501,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ collector: repairedLegacyManifest }),
+      body: JSON.stringify({ sourceAdapter: repairedLegacyManifest }),
     },
   );
   assert.equal(
@@ -2215,8 +2221,8 @@ async function validateApiInput(): Promise<void> {
 async function createSdkManifest(): Promise<unknown> {
   const program = [
     'import { z } from "zod";',
-    'import { collectorManifest, defineCollector, defineCollectorCheckAction } from "./dist/index.js";',
-    "const collector = defineCollector({",
+    'import { sourceAdapterManifest, defineSourceAdapter, defineSourceAdapterCheckAction } from "./dist/index.js";',
+    "const sourceAdapter = defineSourceAdapter({",
     '  id: "rss",',
     '  version: "1.0.0",',
     "  configSchema: z.object({",
@@ -2224,16 +2230,16 @@ async function createSdkManifest(): Promise<unknown> {
     "    key: z.string().regex(/^a/).regex(/z$/),",
     "  }),",
     "  actions: {",
-    '    check: defineCollectorCheckAction({ description: "检查测试信源配置。", params: z.object({}), execute: async () => ({ availability: "unknown", scope: ["test-source"], basis: "验收用 RSS 清单没有连接真实信源。", problems: [{ code: "test_source_unconfigured", message: "验收用 RSS 清单没有连接真实信源。", impact: "无法判断真实订阅源是否可用。", suggestion: "配置真实订阅源后重新触发 check。", requiresHuman: false }] }) }),',
+    '    check: defineSourceAdapterCheckAction({ description: "检查测试信源配置。", params: z.object({}), execute: async () => ({ availability: "unknown", scope: ["test-source"], basis: "验收用 RSS 清单没有连接真实信源。", problems: [{ code: "test_source_unconfigured", message: "验收用 RSS 清单没有连接真实信源。", impact: "无法判断真实订阅源是否可用。", suggestion: "配置真实订阅源后重新触发 check。", requiresHuman: false }] }) }),',
     '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
     "  },",
     "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
     "});",
-    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+    "process.stdout.write(JSON.stringify(sourceAdapterManifest(sourceAdapter)));",
   ].join("\n");
   const result = await run("pnpm", [
     "--filter",
-    "@binny/collector-sdk",
+    "@binny/source-adapter-sdk",
     "exec",
     "node",
     "--input-type=module",
@@ -2246,14 +2252,14 @@ async function createSdkManifest(): Promise<unknown> {
 
 async function createRuntimeFixtureManifest(): Promise<unknown> {
   const program = [
-    'import { collectorManifest } from "@binny/collector-sdk";',
-    'import collector from "./test/fixtures/manual-runs-collector.ts";',
-    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+    'import { sourceAdapterManifest } from "@binny/source-adapter-sdk";',
+    'import sourceAdapter from "./test/fixtures/manual-runs-source-adapter.ts";',
+    "process.stdout.write(JSON.stringify(sourceAdapterManifest(sourceAdapter)));",
   ].join("\n");
   const result = await run("pnpm", [
     "--silent",
     "--filter",
-    "@binny/collector-runtime",
+    "@binny/source-adapter-runtime",
     "exec",
     "node",
     "--conditions=source",
@@ -2450,14 +2456,14 @@ type RssManualRun = {
 
 async function createRssManifest(): Promise<unknown> {
   const program = [
-    'import { collectorManifest } from "@binny/collector-sdk";',
-    'import collector from "@binny/collector-rss";',
-    "process.stdout.write(JSON.stringify(collectorManifest(collector)));",
+    'import { sourceAdapterManifest } from "@binny/source-adapter-sdk";',
+    'import sourceAdapter from "@binny/source-adapter-rss";',
+    "process.stdout.write(JSON.stringify(sourceAdapterManifest(sourceAdapter)));",
   ].join("\n");
   const result = await run("pnpm", [
     "--silent",
     "--filter",
-    "@binny/collector-rss",
+    "@binny/source-adapter-rss",
     "exec",
     "node",
     "--conditions=source",
@@ -2480,7 +2486,7 @@ async function linuxdoRuntimeManifest(
     "node",
     "--input-type=module",
     "-e",
-    'const response=await fetch("http://127.0.0.1:8080/manifest"); if(!response.ok)process.exit(1); const payload=await response.json(); if(!payload.collector)process.exit(1); console.log(JSON.stringify(payload.collector));',
+    'const response=await fetch("http://127.0.0.1:8080/manifest"); if(!response.ok)process.exit(1); const payload=await response.json(); if(!payload.sourceAdapter)process.exit(1); console.log(JSON.stringify(payload.sourceAdapter));',
   ]);
   return JSON.parse(result.stdout) as unknown;
 }
@@ -2523,7 +2529,7 @@ async function createLinuxdoBin(
       "bin",
       "create",
       binId,
-      "--collector",
+      "--source-adapter",
       JSON.stringify(await linuxdoRuntimeManifest(service)),
       "--identity",
       identityId,
@@ -2836,7 +2842,7 @@ async function verifyLinuxdoArchiveJourney(
     readonly archiveSeq: string;
     readonly binId: string;
     readonly runId: string;
-    readonly collectorVersion: string;
+    readonly sourceAdapterVersion: string;
     readonly items: readonly {
       readonly itemId: string;
       readonly revisionId: string;
@@ -2848,7 +2854,7 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.equal(firstCommit.binId, binId);
   assert.equal(firstCommit.runId, journey.firstCollection.runId);
-  assert.ok(firstCommit.collectorVersion.length > 0);
+  assert.ok(firstCommit.sourceAdapterVersion.length > 0);
   assert.ok(firstCommit.items.some(({ itemId }) => itemId === rootItemId));
   const firstCommitItem = firstCommit.items.find(
     ({ itemId }) => itemId === rootItemId,
@@ -3535,9 +3541,9 @@ async function buildRssImageUpdate(
     baselineVersion,
   );
   await copyImageBuildContext(repositoryRoot, buildContextDirectory);
-  await setBuildContextCollectorVersion(
+  await setBuildContextSourceAdapterVersion(
     buildContextDirectory,
-    "collectors/rss/src/collector.ts",
+    "source-adapters/rss/src/source-adapter.ts",
     "rss-atom",
     baselineVersion,
   );
@@ -3561,9 +3567,9 @@ async function buildRssImageUpdate(
     baselineImageId,
     "RSS A/B 应由不同源码构建出不同镜像制品。",
   );
-  await setBuildContextCollectorVersion(
+  await setBuildContextSourceAdapterVersion(
     buildContextDirectory,
-    "collectors/rss/src/collector.ts",
+    "source-adapters/rss/src/source-adapter.ts",
     "rss-atom",
     candidateVersion,
   );
@@ -3590,7 +3596,7 @@ async function createRssBin(
       "bin",
       "create",
       binId,
-      "--collector",
+      "--source-adapter",
       manifestJson,
       "--identity",
       binId + "-identity",
@@ -3604,26 +3610,26 @@ async function createRssBin(
   assert.equal(created.id, binId);
 }
 
-async function updateRssBinCollector(
+async function updateRssBinSourceAdapter(
   baseUrl: string,
   binId: string,
   manifest: unknown,
 ): Promise<void> {
   const updated = cliData<{
     readonly id: string;
-    readonly collector: { readonly version: string };
+    readonly sourceAdapter: { readonly version: string };
   }>(
     await cli(baseUrl, [
       "bin",
       "update",
       binId,
-      "--collector",
+      "--source-adapter",
       JSON.stringify(manifest),
     ]),
     "updated",
   );
   assert.equal(updated.id, binId);
-  assert.equal(updated.collector.version, rssManifestVersion(manifest));
+  assert.equal(updated.sourceAdapter.version, rssManifestVersion(manifest));
 }
 
 async function rebuildRssRuntimeWithComposeWatch(
@@ -3650,9 +3656,9 @@ async function rebuildRssRuntimeWithComposeWatch(
       "runtime-rss",
     ]);
     await watcher.waitForMarker("Watch enabled");
-    await setBuildContextCollectorVersion(
+    await setBuildContextSourceAdapterVersion(
       imageUpdate.buildContextDirectory,
-      "collectors/rss/src/collector.ts",
+      "source-adapters/rss/src/source-adapter.ts",
       "rss-atom",
       version,
     );
@@ -4513,7 +4519,7 @@ async function manualRunsCliStep(
         "bin",
         "create",
         binId,
-        "--collector",
+        "--source-adapter",
         manifestJson,
         "--identity",
         binId + "-identity",
@@ -4593,11 +4599,11 @@ async function manualRunsCliStep(
   const commit = cliData<{
     readonly binId: string;
     readonly runId?: string;
-    readonly collectorVersion?: string;
+    readonly sourceAdapterVersion?: string;
   }>(await cli(baseUrl, ["archive", "commit", savedCommit.commitId]), "found");
   assert.equal(commit.binId, "binny-runs-one");
   assert.equal(commit.runId, triggered.runId);
-  assert.equal(commit.collectorVersion, "1.0.0");
+  assert.equal(commit.sourceAdapterVersion, "1.0.0");
 
   const item = cliData<{
     readonly views: readonly {
@@ -5073,7 +5079,7 @@ async function manualRunsHttpStep(
       env: {
         BINNY_E2E_BASE_URL: baseUrl,
         BINNY_RUNS_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
-        BINNY_RUNS_COLLECTOR_MANIFEST: JSON.stringify(manifest),
+        BINNY_RUNS_SOURCE_ADAPTER_MANIFEST: JSON.stringify(manifest),
       },
     },
   );
@@ -5608,7 +5614,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "bin",
       "create",
       "rss-main",
-      "--collector",
+      "--source-adapter",
       manifestJson,
       "--identity",
       "account-one",
@@ -5638,7 +5644,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "bin",
       "create",
       "rss-main",
-      "--collector",
+      "--source-adapter",
       manifestJson,
       "--identity",
       "duplicate-account",
@@ -5659,7 +5665,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "bin",
       "create",
       "rss-invalid-config",
-      "--collector",
+      "--source-adapter",
       manifestJson,
       "--identity",
       "account-invalid-config",
@@ -5678,7 +5684,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       id: "rss-regex-invalid",
-      collector: manifest,
+      sourceAdapter: manifest,
       identityId: "account-regex-invalid",
       config: { userAgent: "Binny E2E", key: "ab" },
       targets: [],
@@ -5701,7 +5707,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       id: "rss-regex",
-      collector: manifest,
+      sourceAdapter: manifest,
       identityId: "account-regex",
       config: { userAgent: "Binny E2E", key: "az" },
       targets: [],
@@ -5759,7 +5765,7 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "bin",
       "create",
       "rss-secondary",
-      "--collector",
+      "--source-adapter",
       manifestJson,
       "--identity",
       "account-two",
@@ -6310,7 +6316,7 @@ async function verifyRestartAndRemoval(
     await compose(["cp", `server:${containerResourcePath}`, localResourcePath]);
     assert.deepEqual(
       await readFile(localResourcePath),
-      Buffer.from("collector sdk image v1"),
+      Buffer.from("sourceAdapter sdk image v1"),
     );
   } finally {
     await rm(downloadDirectory, { recursive: true, force: true });
@@ -7114,7 +7120,7 @@ async function runRssAcceptance(
 
   await compose(["stop", "--timeout", "30", "runtime-rss"]);
   assert.equal(await containerStatus(oldRuntimeContainerId), "exited");
-  await updateRssBinCollector(baseUrl, "binny-rss-one", activeManifest);
+  await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", activeManifest);
   const interruptedResult = await waitFor(
     async () =>
       cliData<RssManualRun>(
@@ -7164,10 +7170,10 @@ async function runRssAcceptance(
   );
   assert.ok(persistedInterruptedRun.stopConfirmedAt);
   const configuredUpdatedBin = cliData<{
-    readonly collector: { readonly version: string };
+    readonly sourceAdapter: { readonly version: string };
   }>(await cli(baseUrl, ["bin", "get", "binny-rss-one"]), "found");
   assert.equal(
-    configuredUpdatedBin.collector.version,
+    configuredUpdatedBin.sourceAdapter.version,
     rssManifestVersion(activeManifest),
   );
   process.stdout.write(
@@ -7556,7 +7562,7 @@ async function runRssAcceptance(
   if (!preserveCapacityProject) {
     const watchVersion = rssManifestVersion(activeManifest) + "-watch";
     const watchManifest = rssManifestWithVersion(activeManifest, watchVersion);
-    await updateRssBinCollector(baseUrl, "binny-rss-one", watchManifest);
+    await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", watchManifest);
     activeManifest = watchManifest;
     const watchedUpdate = await rebuildRssRuntimeWithComposeWatch(
       baseUrl,
@@ -7621,7 +7627,7 @@ async function runRssAcceptance(
   assert.deepEqual(secondBinItemV5.sourceKey, rssItemV1.sourceKey);
 
   await source.setRssVersion(6);
-  await updateRssBinCollector(baseUrl, "binny-rss-two", activeManifest);
+  await updateRssBinSourceAdapter(baseUrl, "binny-rss-two", activeManifest);
   const secondOldImageId = await containerImageId("runtime-rss-two");
   await compose([
     "up",
