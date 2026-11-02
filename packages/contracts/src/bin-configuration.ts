@@ -240,6 +240,8 @@ export const legacyRuntimeProtocolVersion = 4;
 export const runtimeProtocolVersion = 6;
 export const runtimeConfigurationValidationPath =
   "/internal/configuration/validate";
+export const runtimeActionParametersValidationPath =
+  "/internal/action-params/validate";
 export const runtimeControlUrlSchema = z
   .url("运行器内部控制地址必须是 HTTP URL。")
   .refine((value) => {
@@ -276,6 +278,36 @@ export const runtimeConfigurationValidationResultSchema = z.discriminatedUnion(
       .strict(),
   ],
 );
+
+export const runtimeActionParametersValidationInputSchema = z
+  .object({
+    sourceAdapterId: sourceAdapterIdSchema,
+    sourceAdapterVersion: postgresTextSchema.min(1),
+    action: sourceAdapterActionNameSchema,
+    params: jsonObjectSchema,
+  })
+  .strict();
+
+export const runtimeActionParametersValidationResultSchema =
+  z.discriminatedUnion("valid", [
+    z.object({ valid: z.literal(true) }).strict(),
+    z
+      .object({
+        valid: z.literal(false),
+        error: z
+          .object({
+            code: z.enum([
+              "action_not_found",
+              "invalid_action_parameters",
+              "source_adapter_version_mismatch",
+            ]),
+            message: postgresTextSchema,
+            path: z.array(z.union([z.string(), z.number()])).optional(),
+          })
+          .strict(),
+      })
+      .strict(),
+  ]);
 
 export const runtimeEnvironmentKindSchema = z.enum(["lightweight", "browser"]);
 export type RuntimeEnvironmentKind = z.infer<
@@ -460,6 +492,12 @@ export type RuntimeConfigurationValidationInput = z.infer<
 >;
 export type RuntimeConfigurationValidationResult = z.infer<
   typeof runtimeConfigurationValidationResultSchema
+>;
+export type RuntimeActionParametersValidationInput = z.infer<
+  typeof runtimeActionParametersValidationInputSchema
+>;
+export type RuntimeActionParametersValidationResult = z.infer<
+  typeof runtimeActionParametersValidationResultSchema
 >;
 export type RuntimeDisconnectInput = z.infer<
   typeof runtimeDisconnectInputSchema

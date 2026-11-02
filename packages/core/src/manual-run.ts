@@ -44,6 +44,10 @@ import {
   interruptExpiredManualRuns,
   isRuntimeOwnerWritable,
 } from "./manual-run-fencing.ts";
+import {
+  actionInputSnapshotStillCurrent,
+  preflightActionInput,
+} from "./runtime-action-validation.ts";
 import { readRuntimeExecution } from "./runtime-connection.ts";
 
 const runSelection = {
@@ -59,6 +63,7 @@ const runSelection = {
   cancelRequestedAt: manualRuns.cancelRequestedAt,
   stopConfirmedAt: manualRuns.stopConfirmedAt,
   createdAt: manualRuns.createdAt,
+  referenceTime: manualRuns.referenceTime,
   startedAt: manualRuns.startedAt,
   finishedAt: manualRuns.finishedAt,
   completedScopes: manualRuns.completedScopes,
@@ -323,6 +328,7 @@ async function rowToRun(
       ? {}
       : { stopConfirmedAt: row.stopConfirmedAt.toISOString() }),
     createdAt: row.createdAt.toISOString(),
+    referenceTime: row.referenceTime.toISOString(),
     ...(row.startedAt === null
       ? {}
       : { startedAt: row.startedAt.toISOString() }),
@@ -436,6 +442,13 @@ export async function createQueuedRunInTransaction(
         triggerSource.kind === "schedule"
           ? new Date(triggerSource.scheduledFor)
           : null,
+      referenceTime:
+        triggerSource.kind === "schedule"
+          ? new Date(triggerSource.scheduledFor)
+          : sql`statement_timestamp()`,
+      ...(triggerSource.kind === "manual"
+        ? { createdAt: sql`statement_timestamp()` }
+        : {}),
       status: "queued",
     })
     .returning(runSelection);
@@ -463,6 +476,14 @@ export function createManualRunStore(
         );
       }
 
+      const preflight = await preflightActionInput(
+        database,
+        binId,
+        checked.data.action,
+        checked.data.params,
+      );
+      if (!preflight.ok) return preflight;
+
       return await database.transaction(async (transaction) => {
         const [bin] = await transaction
           .select({
@@ -478,6 +499,20 @@ export function createManualRunStore(
           .for("update");
         if (bin === undefined)
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+
+        if (
+          !(await actionInputSnapshotStillCurrent(
+            transaction,
+            preflight.snapshot,
+          ))
+        ) {
+          return failure(
+            409,
+            "action_input_changed",
+            "长期配置或运行器在动作参数原生校验期间发生变化，请重新提交。",
+            ["params"],
+          );
+        }
 
         await interruptExpiredManualRuns(transaction, binId);
         const created = await createQueuedRunInTransaction(
@@ -735,6 +770,7 @@ export function createManualRunStore(
           action: run.action,
           params: run.params,
           config: run.configSnapshot,
+          referenceTime: run.referenceTime.toISOString(),
           ...(browserReservationId === undefined ||
           runtimeConnection.protocolVersion < runtimeProtocolVersion
             ? {}

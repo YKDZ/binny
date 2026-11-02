@@ -627,6 +627,10 @@ export const manualRuns = pgTable(
     action: text("action").notNull(),
     params: jsonb("params").notNull(),
     configSnapshot: jsonb("config_snapshot").notNull(),
+    referenceTime: timestamp("reference_time", {
+      withTimezone: true,
+      mode: "date",
+    }).notNull(),
     triggerType: text("trigger_type", { enum: manualRunTriggerTypes })
       .notNull()
       .default("manual"),

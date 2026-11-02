@@ -114,7 +114,7 @@ async function executeRun(
     };
   }
 
-  const parsed = action.params.safeParse(run.params);
+  const parsed = await parseSourceAdapterInput(action.params, run.params);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     return {
@@ -143,6 +143,7 @@ async function executeRun(
       binId: run.binId,
       identityId: run.identityId,
       runId: run.runId,
+      referenceTime: run.referenceTime,
       sourceAdapterVersion: run.sourceAdapterVersion,
       config: configured.data,
       signal: actionAbort.signal,

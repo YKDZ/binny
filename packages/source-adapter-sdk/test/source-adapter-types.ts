@@ -64,6 +64,8 @@ type TypedReferenceTimeIsString = Expect<
     >["referenceTime"]
   >
 >;
+const referenceTimeTypeAssertion: TypedReferenceTimeIsString = true;
+void referenceTimeTypeAssertion;
 
 const typedActionAdapter = defineSourceAdapter({
   id: "example.typed-actions",

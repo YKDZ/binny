@@ -4213,6 +4213,8 @@ async function runtimeProcessSnapshot(service: string): Promise<
 type ManualRunCliState = {
   readonly runId: string;
   readonly binId: string;
+  readonly createdAt: string;
+  readonly referenceTime: string;
   readonly action: string;
   readonly trigger:
     | { readonly kind: "manual" }
@@ -4634,10 +4636,30 @@ async function manualRunsCliStep(
     gateKey,
     sourceKey: "cli-created-item",
   };
+  const invalidNativeParams = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny-runs-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        ...parameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  assert.deepEqual(invalidNativeParams.path, ["params", "gateKey"]);
   const triggered = cliData<{
     readonly runId: string;
     readonly status: string;
     readonly binId: string;
+    readonly createdAt: string;
+    readonly referenceTime: string;
   }>(
     await cli(baseUrl, [
       "run",
@@ -4651,6 +4673,7 @@ async function manualRunsCliStep(
   );
   assert.equal(triggered.status, "queued");
   assert.equal(triggered.binId, "binny-runs-one");
+  assert.equal(triggered.referenceTime, triggered.createdAt);
   await waitForSourceArrival(
     sourceControlUrl,
     gateKey,
@@ -4695,12 +4718,23 @@ async function manualRunsCliStep(
   const item = cliData<{
     readonly views: readonly {
       readonly state: {
-        readonly metadata?: { readonly section?: unknown };
+        readonly metadata?: {
+          readonly section?: unknown;
+          readonly adapterLabel?: unknown;
+          readonly actionLabel?: unknown;
+          readonly referenceTime?: unknown;
+        };
         readonly body?: { readonly text?: string };
       };
     }[];
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
+  assert.equal(item.views[0]?.state.metadata?.adapterLabel, "runtime!");
+  assert.equal(item.views[0]?.state.metadata?.actionLabel, "collect!");
+  assert.equal(
+    item.views[0]?.state.metadata?.referenceTime,
+    triggered.referenceTime,
+  );
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
 
   const checkGateKey = "check-cli-check-unknown";
@@ -5022,6 +5056,45 @@ async function manualRunsCliStep(
     ownerBeforeStorageFailure.runtimeId,
     "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
   );
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny-runs-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: "cli-offline-action-input",
+        sourceKey: "cli-offline-action-input",
+      }),
+    ]),
+    "runtime_action_validation_unavailable",
+  );
+  const offlineScheduleInput = cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      "binny-runs-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: "cli-offline-schedule-input",
+        sourceKey: "cli-offline-schedule-input",
+      }),
+    ]),
+    "runtime_action_validation_unavailable",
+  );
+  assert.equal(
+    offlineScheduleInput.code,
+    "runtime_action_validation_unavailable",
+  );
   await compose([
     "run",
     "--rm",
@@ -5043,6 +5116,37 @@ async function manualRunsCliStep(
     gateKey: "schedule-cli-schedule",
     sourceKey: "schedule-cli-schedule-item",
   };
+  const schedulesBeforeNativeRejection = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      "binny-runs-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        ...scheduleParameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  const schedulesAfterNativeRejection = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  assert.deepEqual(
+    schedulesAfterNativeRejection.schedules.map(({ scheduleId }) => scheduleId),
+    schedulesBeforeNativeRejection.schedules.map(
+      ({ scheduleId }) => scheduleId,
+    ),
+  );
   const createdSchedule = cliData<{
     readonly scheduleId: string;
     readonly expression: string;
@@ -5077,6 +5181,34 @@ async function manualRunsCliStep(
       ({ scheduleId }) => scheduleId === createdSchedule.scheduleId,
     ),
   );
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "update",
+      "binny-runs-one",
+      createdSchedule.scheduleId,
+      "--params",
+      JSON.stringify({
+        ...scheduleParameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  const preservedSchedule = cliData<{
+    readonly action: string;
+    readonly params: { readonly gateKey: string };
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "get",
+      "binny-runs-one",
+      createdSchedule.scheduleId,
+    ]),
+    "found",
+  );
+  assert.equal(preservedSchedule.action, "collect");
+  assert.equal(preservedSchedule.params.gateKey, "schedule-cli-schedule");
   const updatedSchedule = cliData<{
     readonly expression: string;
     readonly timeZone: string;
@@ -5342,6 +5474,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   if (firstRun.trigger.kind === "schedule") {
     assert.equal(firstRun.trigger.scheduleId, firstScheduleId);
     assert.equal(firstRun.trigger.scheduledFor, scheduledFor);
+    assert.equal(firstRun.referenceTime, firstRun.trigger.scheduledFor);
   }
 
   const resumedCollectSchedule = await waitFor(
@@ -5430,6 +5563,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   if (secondRun.trigger.kind === "schedule") {
     assert.equal(secondRun.trigger.scheduleId, secondScheduleId);
     assert.equal(secondRun.trigger.scheduledFor, scheduledFor);
+    assert.equal(secondRun.referenceTime, secondRun.trigger.scheduledFor);
   }
   const secondDisposition =
     secondGateKey === collectGateKey ? "material" : "available";

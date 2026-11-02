@@ -781,6 +781,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         action: run.action,
         params: run.params,
         config: run.config,
+        referenceTime: run.referenceTime,
       },
       ...(browserConnection === undefined
         ? {}
