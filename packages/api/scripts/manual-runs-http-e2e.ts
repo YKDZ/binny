@@ -3,7 +3,6 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  binErrorSchema,
   sourceAdapterManifestSchema,
   type ArchiveSubmissionInput,
   type ManualRun,
@@ -16,6 +15,7 @@ import {
 
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
 const sourceRuntimeUrl = "http://manual-runs-source:8081";
+const runtimeControlUrl = process.env.BINNY_RUNS_RUNTIME_CONTROL_URL;
 const sourceControlUrl = (() => {
   const url = process.env.BINNY_RUNS_SOURCE_CONTROL_URL;
   if (url === undefined)
@@ -27,6 +27,8 @@ const manifestJson = process.env.BINNY_RUNS_SOURCE_ADAPTER_MANIFEST;
 if (baseUrl === undefined) throw new Error("缺少 BINNY_E2E_BASE_URL。");
 if (manifestJson === undefined)
   throw new Error("缺少由 SDK 构造的 BINNY_RUNS_SOURCE_ADAPTER_MANIFEST。");
+if (runtimeControlUrl === undefined)
+  throw new Error("缺少 BINNY_RUNS_RUNTIME_CONTROL_URL。");
 
 const manifest = sourceAdapterManifestSchema.parse(
   JSON.parse(manifestJson) as unknown,
@@ -47,6 +49,7 @@ async function triggerRun(
   gateKey: string,
   sourceKey: string,
   invalidOutput = false,
+  validationDelayMs?: number,
 ): Promise<ManualRun> {
   const response = await client.bins[":binId"].runs.$post({
     param: { binId },
@@ -57,6 +60,7 @@ async function triggerRun(
         gateKey,
         sourceKey,
         ...(invalidOutput ? { invalidOutput: true } : {}),
+        ...(validationDelayMs === undefined ? {} : { validationDelayMs }),
       },
     },
   });
@@ -98,34 +102,22 @@ async function readRun(binId: string, runId: string): Promise<ManualRun> {
   assert.fail(`运行读取失败：${result.error.code} ${result.error.message}`);
 }
 
-async function createConcurrencyBin(binId: string): Promise<void> {
-  const response = await client.bins.$post({
-    json: {
-      id: binId,
-      sourceAdapter: manifest,
-      identityId: binId + "-identity",
-      config: { section: "concurrency" },
-    },
-  });
-  if (response.status === 201) return;
-  const result = await response.json();
-  assert.fail(`并发验收 bin 创建失败：${result.error.code}`);
-}
-
 async function heartbeat(
   binId: string,
   runtimeId: string,
   stoppedRunId?: string,
+  allowInvalidDefault = false,
 ): Promise<void> {
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
-      protocolVersion: 4,
+      protocolVersion: 6,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
+      runtimeControlUrl: runtimeControlUrl!,
       ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
       sourceAdapter: manifest,
       environment: {
@@ -140,7 +132,105 @@ async function heartbeat(
   });
   if (response.status === 200) return;
   const result = await response.json();
+  if (
+    allowInvalidDefault &&
+    response.status === 409 &&
+    result.error.code === "runtime_configuration_incompatible"
+  )
+    return;
   assert.fail(`并发验收 runtime 注册失败：${result.error.code}`);
+}
+
+async function disconnectRuntime(
+  binId: string,
+  runtimeId: string,
+): Promise<void> {
+  const response = await client.bins[":binId"].runtime.disconnect.$post({
+    param: { binId },
+    json: {
+      runtimeId,
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+    },
+  });
+  if (response.status === 200) return;
+  const result = await response.json();
+  assert.fail(`并发验收 runtime 断开失败：${result.error.code}`);
+}
+
+async function createConcurrencyBin(
+  binId: string,
+  runtimeId: string,
+): Promise<void> {
+  await heartbeat(binId, runtimeId, undefined, true);
+  const configured = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "concurrency" } },
+  });
+  if (configured.status !== 200) {
+    const result = await configured.json();
+    assert.fail(`并发验收配置失败：${result.error.code}`);
+  }
+  await disconnectRuntime(binId, runtimeId);
+  const offlineRun = await client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: {
+      action: "collect",
+      params: {
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: "offline-action-input",
+        sourceKey: "offline-action-input",
+      },
+    },
+  });
+  assert.equal(offlineRun.status, 409);
+  if (offlineRun.status === 409)
+    assert.equal(
+      (await offlineRun.json()).error.code,
+      "runtime_action_validation_unavailable",
+    );
+  const offlineSchedule = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression: "0 0 0 1 1 *",
+      timeZone: "UTC",
+      action: "collect",
+      params: {
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: "offline-schedule-input",
+        sourceKey: "offline-schedule-input",
+      },
+    },
+  });
+  assert.equal(offlineSchedule.status, 409);
+  if (offlineSchedule.status === 409)
+    assert.equal(
+      (await offlineSchedule.json()).error.code,
+      "runtime_action_validation_unavailable",
+    );
+  const schedules = await client.bins[":binId"].schedules.$get({
+    param: { binId },
+  });
+  assert.equal(schedules.status, 200);
+  if (schedules.status === 200)
+    assert.equal((await schedules.json()).schedules.length, 0);
+  const rejectedOfflineConfig = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "offline-update" } },
+  });
+  assert.equal(rejectedOfflineConfig.status, 409);
+  if (rejectedOfflineConfig.status === 409)
+    assert.equal(
+      (await rejectedOfflineConfig.json()).error.code,
+      "runtime_configuration_validation_unavailable",
+    );
+  const preserved = await client.bins[":binId"].$get({ param: { binId } });
+  assert.equal(preserved.status, 200);
+  if (preserved.status === 200)
+    assert.deepEqual((await preserved.json()).config, {
+      section: "concurrency",
+    });
 }
 
 async function claimRun(binId: string, runtimeId: string) {
@@ -188,8 +278,9 @@ async function cancelRun(binId: string, runId: string) {
 async function verifyQueuedCancellation(): Promise<void> {
   const binId = "binny-lifecycle-queued-cancel";
   const runtimeId = "binny-lifecycle-queued-cancel-runtime";
-  await createConcurrencyBin(binId);
+  await createConcurrencyBin(binId, runtimeId);
   try {
+    await heartbeat(binId, runtimeId);
     const queued = await triggerRun(
       binId,
       sourceRuntimeUrl,
@@ -219,7 +310,7 @@ async function verifyQueuedCancellation(): Promise<void> {
 async function verifyCancellationFencesLateWrites(): Promise<void> {
   const binId = "binny-lifecycle-fenced-cancel";
   const runtimeId = "binny-lifecycle-fenced-cancel-runtime";
-  await createConcurrencyBin(binId);
+  await createConcurrencyBin(binId, runtimeId);
   try {
     await heartbeat(binId, runtimeId);
     const queued = await triggerRun(
@@ -331,8 +422,12 @@ async function verifyConcurrentRuns(): Promise<void> {
   const secondKey = "runs-pool-two";
 
   await Promise.all([
-    createConcurrencyBin(firstBin),
-    createConcurrencyBin(secondBin),
+    createConcurrencyBin(firstBin, firstRuntime),
+    createConcurrencyBin(secondBin, secondRuntime),
+  ]);
+  await Promise.all([
+    heartbeat(firstBin, firstRuntime),
+    heartbeat(secondBin, secondRuntime),
   ]);
   const firstRuns = await Promise.all(
     firstKeys.map((key) => triggerRun(firstBin, sourceRuntimeUrl, key, key)),
@@ -343,6 +438,10 @@ async function verifyConcurrentRuns(): Promise<void> {
     secondKey,
     secondKey,
   );
+  await Promise.all([
+    disconnectRuntime(firstBin, firstRuntime),
+    disconnectRuntime(secondBin, secondRuntime),
+  ]);
   const firstRunIds = firstRuns.map((run) => run.runId);
   assert.equal(new Set(firstRunIds).size, 16);
   assert.equal(new Set([...firstRunIds, secondRun.runId]).size, 17);
@@ -651,6 +750,25 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
       "invalid_action_parameters",
     );
 
+  const refinedActionParameters = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression,
+      timeZone: "UTC",
+      action: "collect",
+      params: {
+        ...params,
+        gateKey: "native-refine-reject",
+      },
+    },
+  });
+  assert.equal(refinedActionParameters.status, 400);
+  if (refinedActionParameters.status === 400) {
+    const error = (await refinedActionParameters.json()).error;
+    assert.equal(error.code, "invalid_action_parameters");
+    assert.deepEqual(error.path, ["params", "gateKey"]);
+  }
+
   const created = await client.bins[":binId"].schedules.$post({
     param: { binId },
     json: { expression, timeZone: "UTC", action: "collect", params },
@@ -695,6 +813,21 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
       (await invalidUpdate.json()).error.code,
       "invalid_action_parameters",
     );
+
+  const refinedUpdate = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$patch({
+    param: { binId, scheduleId: schedule.scheduleId },
+    json: {
+      params: { ...params, gateKey: "native-refine-reject" },
+    },
+  });
+  assert.equal(refinedUpdate.status, 400);
+  if (refinedUpdate.status === 400) {
+    const error = (await refinedUpdate.json()).error;
+    assert.equal(error.code, "invalid_action_parameters");
+    assert.deepEqual(error.path, ["params", "gateKey"]);
+  }
 
   const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
     param: { binId, scheduleId: schedule.scheduleId },
@@ -791,6 +924,69 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   }
 }
 
+async function verifyScheduledReferenceTime(
+  runtimeSourceUrl: string,
+  controlSourceUrl: string,
+): Promise<void> {
+  const binId = "binny-runs-one";
+  const gateKey = "schedule-reference-time";
+  const created = await client.bins[":binId"].schedules.$post({
+    param: { binId },
+    json: {
+      expression: "*/1 * * * * *",
+      timeZone: "UTC",
+      action: "collect",
+      params: {
+        sourceUrl: runtimeSourceUrl,
+        gateKey,
+        sourceKey: gateKey,
+      },
+    },
+  });
+  assert.equal(created.status, 201);
+  if (created.status !== 201) return;
+  const schedule = await created.json();
+  let removed = false;
+  try {
+    await waitForArrival(controlSourceUrl, gateKey);
+    const arrival = (await sourceStatus(controlSourceUrl)).arrivals.find(
+      (candidate) => candidate.gateKey === gateKey,
+    );
+    assert.ok(arrival !== undefined);
+    if (arrival === undefined) return;
+    const queued = await readRun(binId, arrival.runId);
+    assert.deepEqual(queued.trigger, {
+      kind: "schedule",
+      scheduleId: schedule.scheduleId,
+      scheduledFor: schedule.nextDueAt,
+    });
+    assert.equal(queued.referenceTime, schedule.nextDueAt);
+
+    const deleted = await client.bins[":binId"].schedules[
+      ":scheduleId"
+    ].$delete({
+      param: { binId, scheduleId: schedule.scheduleId },
+    });
+    assert.equal(deleted.status, 200);
+    removed = deleted.status === 200;
+    await releaseSource(controlSourceUrl, gateKey);
+    const completed = await waitForRun(binId, arrival.runId, "completed");
+    const committed = await verifyRunCommit(completed);
+    await verifyArchivedSection(
+      committed.itemId,
+      "changed-while-queued",
+      schedule.nextDueAt,
+    );
+  } finally {
+    if (!removed) {
+      await client.bins[":binId"].schedules[":scheduleId"].$delete({
+        param: { binId, scheduleId: schedule.scheduleId },
+      });
+    }
+    await releaseSource(controlSourceUrl, gateKey);
+  }
+}
+
 async function verifyRunCommit(run: ManualRun): Promise<{
   readonly itemId: string;
   readonly commitId: string;
@@ -819,6 +1015,7 @@ async function verifyRunCommit(run: ManualRun): Promise<{
 async function verifyArchivedSection(
   itemId: string,
   expectedSection: string,
+  expectedReferenceTime: string,
 ): Promise<void> {
   const response = await client.archives.items[":itemId"].$get({
     param: { itemId },
@@ -826,72 +1023,14 @@ async function verifyArchivedSection(
   });
   assert.equal(response.status, 200);
   const item = await response.json();
-  assert.equal(item.views[0]?.state.metadata?.section, expectedSection);
+  const metadata = item.views[0]?.state.metadata;
+  assert.equal(metadata?.section, expectedSection);
+  assert.equal(metadata?.adapterLabel, "runtime!");
+  assert.equal(metadata?.actionLabel, "collect!");
+  assert.equal(metadata?.referenceTime, expectedReferenceTime);
 }
 
 async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
-  const missingRequiredCheck = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-check-missing-check",
-      sourceAdapter: {
-        id: "binny-check.missing-check",
-        version: "1.0.0",
-        configSchema: { type: "object" },
-        actions: {
-          collect: {
-            description: "仅用于验证必需动作声明。",
-            params: { type: "object" },
-            output: { type: "object" },
-          },
-        },
-        environment: {
-          browser: { required: false, profileReuseAfterRestart: false },
-        },
-      },
-      identityId: "binny-check-missing-check",
-      config: {},
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  assert.equal(missingRequiredCheck.status, 400);
-  const missingCheckBody = binErrorSchema.parse(
-    await missingRequiredCheck.json(),
-  );
-  assert.equal(missingCheckBody.error.code, "invalid_input");
-
-  const missingRequiredCollect = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-check-missing-collect",
-      sourceAdapter: {
-        id: "binny-check.missing-collect",
-        version: "1.0.0",
-        configSchema: { type: "object" },
-        actions: {
-          check: {
-            description: "仅用于验证必需动作声明。",
-            params: { type: "object" },
-            output: { type: "object" },
-          },
-        },
-        environment: {
-          browser: { required: false, profileReuseAfterRestart: false },
-        },
-      },
-      identityId: "binny-check-missing-collect",
-      config: {},
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs),
-  });
-  assert.equal(missingRequiredCollect.status, 400);
-  const missingCollectBody = binErrorSchema.parse(
-    await missingRequiredCollect.json(),
-  );
-  assert.equal(missingCollectBody.error.code, "invalid_input");
-
   const incompleteCheck = await client.bins[":binId"].runs.$post({
     param: { binId: "binny-runs-one" },
     json: {
@@ -919,6 +1058,24 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   assert.equal(invalidParamsError.code, "invalid_action_parameters");
   assert.deepEqual(invalidParamsError.path, ["params", "sourceKey"]);
 
+  const rejectedByNativeRefine = await client.bins[":binId"].runs.$post({
+    param: { binId: "binny-runs-one" },
+    json: {
+      action: "collect",
+      params: {
+        sourceUrl,
+        gateKey: "native-refine-reject",
+        sourceKey: "native-refine-reject",
+      },
+    },
+  });
+  assert.equal(rejectedByNativeRefine.status, 400);
+  if (rejectedByNativeRefine.status === 400) {
+    const error = (await rejectedByNativeRefine.json()).error;
+    assert.equal(error.code, "invalid_action_parameters");
+    assert.deepEqual(error.path, ["params", "gateKey"]);
+  }
+
   const unknownAction = await client.bins[":binId"].runs.$post({
     param: { binId: "binny-runs-one" },
     json: { action: "missing", params: {} },
@@ -938,6 +1095,40 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
   assert.equal((await missingBin.json()).error.code, "bin_not_found");
 }
 
+async function verifyActionValidationSnapshotRace(
+  sourceUrl: string,
+): Promise<void> {
+  const binId = "binny-runs-two";
+  const pending = client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: {
+      action: "collect",
+      params: {
+        sourceUrl,
+        gateKey: "action-validation-race",
+        sourceKey: "action-validation-race",
+        validationDelayMs: 1_000,
+      },
+    },
+  });
+  await delay(150);
+  const changed = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "changed-during-action-validation" } },
+  });
+  assert.equal(changed.status, 200);
+  const result = await pending;
+  assert.equal(result.status, 409);
+  if (result.status === 409)
+    assert.equal((await result.json()).error.code, "action_input_changed");
+
+  const restored = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { section: "initial" } },
+  });
+  assert.equal(restored.status, 200);
+}
+
 async function verifySerialParallelAndSnapshot(
   runtimeSourceUrl: string,
   controlSourceUrl: string,
@@ -951,6 +1142,7 @@ async function verifySerialParallelAndSnapshot(
     firstKey,
     "serial-first",
   );
+  assert.equal(first.referenceTime, first.createdAt);
   await waitForArrival(controlSourceUrl, firstKey);
 
   const second = await triggerRun(
@@ -959,6 +1151,7 @@ async function verifySerialParallelAndSnapshot(
     secondKey,
     "serial-queued",
   );
+  assert.equal(second.referenceTime, second.createdAt);
   const waitingSecond = await readRun("binny-runs-one", second.runId);
   assert.equal(waitingSecond.status, "queued");
   assert.equal(waitingSecond.queueReason, "earlier_run_active");
@@ -998,7 +1191,11 @@ async function verifySerialParallelAndSnapshot(
   });
   const firstArchive = await verifyRunCommit(completedFirst);
   await verifyRunCommit(completedParallel);
-  await verifyArchivedSection(firstArchive.itemId, "initial");
+  await verifyArchivedSection(
+    firstArchive.itemId,
+    "initial",
+    completedFirst.referenceTime,
+  );
 
   await waitForArrival(controlSourceUrl, secondKey);
   await releaseSource(controlSourceUrl, secondKey);
@@ -1008,7 +1205,11 @@ async function verifySerialParallelAndSnapshot(
     "completed",
   );
   const secondArchive = await verifyRunCommit(completedSecond);
-  await verifyArchivedSection(secondArchive.itemId, "initial");
+  await verifyArchivedSection(
+    secondArchive.itemId,
+    "initial",
+    completedSecond.referenceTime,
+  );
   return firstArchive.itemId;
 }
 
@@ -1210,11 +1411,44 @@ async function verifyDisabledQueueBoundary(
   assert.equal(enabled.status, 200);
 }
 
+async function configureRegisteredBin(binId: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await client.bins[":binId"].$get({ param: { binId } });
+    if (response.status === 200) {
+      const current = await response.json();
+      if (Object.keys(current.config).length === 0) {
+        assert.equal(current.execution.status, "incompatible");
+        const configured = await client.bins[":binId"].$patch({
+          param: { binId },
+          json: { config: { section: "initial" } },
+        });
+        assert.equal(configured.status, 200);
+        if (configured.status === 200) {
+          const bin = await configured.json();
+          assert.deepEqual(bin.config, { section: "initial" });
+          assert.equal(bin.execution.status, "online");
+        }
+      } else {
+        assert.deepEqual(current.config, { section: "initial" });
+        assert.equal(current.execution.status, "online");
+      }
+      return;
+    }
+    assert.equal(response.status, 404);
+    await delay(100);
+  }
+  assert.fail(`运行器没有自动登记 bin ${binId}。`);
+}
+
 async function main(): Promise<void> {
+  await configureRegisteredBin("binny-runs-one");
+  await configureRegisteredBin("binny-runs-two");
   await verifyQueuedCancellation();
   await verifyCancellationFencesLateWrites();
   await verifyConcurrentRuns();
   await verifyDynamicValidation(sourceRuntimeUrl);
+  await verifyActionValidationSnapshotRace(sourceRuntimeUrl);
   const existingItemId = await verifySerialParallelAndSnapshot(
     sourceRuntimeUrl,
     sourceControlUrl,
@@ -1228,6 +1462,7 @@ async function main(): Promise<void> {
   await verifyAvailabilityChecks();
   await verifyOrdinaryAction();
   await verifySchedulesCrud(sourceRuntimeUrl);
+  await verifyScheduledReferenceTime(sourceRuntimeUrl, sourceControlUrl);
   process.stdout.write(
     "运行 HTTP 队列、check 诊断、普通动作输出、串行并行、归档约束和错误结果旅程通过。\n",
   );

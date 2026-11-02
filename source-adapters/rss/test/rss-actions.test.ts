@@ -114,6 +114,7 @@ void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", 
     binId: "rss-test-bin",
     identityId: "rss-test-identity",
     runId,
+    referenceTime: "2026-10-28T00:00:00.000Z",
     sourceAdapterVersion: sourceAdapter.version,
     config: {
       feeds: [

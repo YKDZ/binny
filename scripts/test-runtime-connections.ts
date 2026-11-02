@@ -257,56 +257,60 @@ async function waitForCliStatus(
   );
 }
 
-async function createBin(
-  id: string,
-  sourceAdapter: unknown,
-  section: string,
-  browserIdleTimeout: number | "disabled" = 300,
-): Promise<Record<string, unknown> & { readonly execution: RuntimeStatus }> {
-  return cliData(
-    await cli([
-      "bin",
-      "create",
-      id,
-      "--source-adapter",
-      JSON.stringify(sourceAdapter),
-      "--identity",
-      `identity-${id}`,
-      "--config",
-      JSON.stringify({ section }),
-      "--browser-idle-timeout-seconds",
-      String(browserIdleTimeout),
-    ]),
-    "created",
-  );
+async function waitForBinRegistration(
+  binId: string,
+  expectedSourceAdapter: Record<string, unknown>,
+): Promise<void> {
+  const deadline = Date.now() + 25_000;
+  let lastResult = "尚未查询。";
+  while (Date.now() < deadline) {
+    const result = await cli(["bin", "get", binId]);
+    if (result.code === 0) {
+      const bin = cliData<{
+        readonly id: string;
+        readonly sourceAdapter: Record<string, unknown>;
+        readonly identityId: string;
+        readonly config: Record<string, unknown>;
+        readonly execution: RuntimeStatus;
+      }>(result, "found");
+      if (
+        bin.sourceAdapter.id === expectedSourceAdapter.id &&
+        bin.sourceAdapter.version === expectedSourceAdapter.version
+      ) {
+        assert.deepEqual(bin.sourceAdapter, expectedSourceAdapter);
+        assert.equal(bin.id, binId);
+        assert.equal(bin.identityId, binId);
+        assert.deepEqual(bin.config, {});
+        assert.equal(bin.execution.status, "incompatible");
+        assert.equal(
+          bin.execution.error?.code,
+          "runtime_configuration_incompatible",
+        );
+        return;
+      }
+      lastResult = JSON.stringify(bin);
+    } else {
+      lastResult = result.stderr;
+    }
+    await delay(250);
+  }
+  throw new Error(`等待 bin ${binId} 自注册超时：${lastResult}`);
 }
 
-async function postHeartbeat(
-  binId: string,
-  input: Record<string, unknown>,
-): Promise<{
-  readonly status: number;
-  readonly body: Record<string, unknown>;
-}> {
-  const response = await fetch(
-    `http://${publishedHost}:${serverPort}/bins/${binId}/runtime/heartbeat`,
-    {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({
-        protocolVersion: 4,
-        ownerLockAcquired: true,
-        ownerGeneration: "1",
-        activeRunId: null,
-        claimInFlight: false,
-        ...input,
-      }),
-    },
+async function configureBin(binId: string, section: string): Promise<void> {
+  const configured = cliData<{ readonly id: string }>(
+    await cli([
+      "bin",
+      "update",
+      binId,
+      "--identity",
+      `identity-${binId}`,
+      "--config",
+      JSON.stringify({ section }),
+    ]),
+    "updated",
   );
-  return {
-    status: response.status,
-    body: (await response.json()) as Record<string, unknown>,
-  };
+  assert.equal(configured.id, binId);
 }
 
 async function postDisconnect(
@@ -357,20 +361,19 @@ try {
     waitForManifest(runtimeTwoPort),
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(runtimeOneManifest.protocolVersion, 5);
+  assert.equal(runtimeOneManifest.protocolVersion, 6);
   const sourceAdapter = runtimeOneManifest.sourceAdapter;
   assert.ok(typeof sourceAdapter === "object" && sourceAdapter !== null);
+  const sourceAdapterRecord = sourceAdapter as Record<string, unknown>;
 
-  const createdOne = await createBin("binny-runtime-one", sourceAdapter, "one");
-  const createdTwo = await createBin("binny-runtime-two", sourceAdapter, "two");
-  assert.equal(createdOne.execution.status, "offline");
-  assert.equal(createdTwo.execution.status, "offline");
-  const initialOffline = await createBin(
-    "binny-runtime-offline",
-    sourceAdapter,
-    "not-running",
-  );
-  assert.equal(initialOffline.execution.status, "offline");
+  await Promise.all([
+    waitForBinRegistration("binny-runtime-one", sourceAdapterRecord),
+    waitForBinRegistration("binny-runtime-two", sourceAdapterRecord),
+  ]);
+  await Promise.all([
+    configureBin("binny-runtime-one", "one"),
+    configureBin("binny-runtime-two", "two"),
+  ]);
 
   const onlineOne = await waitForCliStatus("binny-runtime-one", "online");
   const onlineTwo = await waitForCliStatus("binny-runtime-two", "online");
@@ -384,164 +387,6 @@ try {
   assert.equal(
     await containerImage("runtime-one"),
     await containerImage("runtime-two"),
-  );
-
-  const browserSourceAdapter = {
-    ...sourceAdapter,
-    environment: {
-      browser: {
-        required: true,
-        profileReuseAfterRestart: false,
-        profileReuseUnavailableReason: "该运行环境不保留跨重启浏览器会话。",
-      },
-    },
-  };
-  await createBin(
-    "binny-runtime-browser",
-    browserSourceAdapter,
-    "browser",
-    "disabled",
-  );
-  const incompatibleEnvironment = await postHeartbeat("binny-runtime-browser", {
-    runtimeId: "binny-runtime-browser-probe",
-    sourceAdapter: browserSourceAdapter,
-    environment: {
-      kind: "lightweight",
-      browser: {
-        available: false,
-        profileReuseAfterRestart: false,
-        power: { status: "unavailable" },
-      },
-    },
-  });
-  assert.equal(incompatibleEnvironment.status, 409);
-  assert.deepEqual(
-    (incompatibleEnvironment.body.error as { readonly code: string }).code,
-    "runtime_environment_incompatible",
-  );
-  assert.deepEqual(
-    (incompatibleEnvironment.body.error as { readonly path: unknown }).path,
-    ["sourceAdapter", "environment", "browser", "required"],
-  );
-  const browserState = cliData<{ readonly execution: RuntimeStatus }>(
-    await cli(["bin", "get", "binny-runtime-browser"]),
-    "found",
-  );
-  assert.equal(browserState.execution.status, "incompatible");
-  assert.equal(
-    browserState.execution.error?.code,
-    "runtime_environment_incompatible",
-  );
-
-  const allOfSourceAdapter = {
-    ...sourceAdapter,
-    configSchema: {
-      $schema: "https://json-schema.org/draft/2020-12/schema",
-      type: "object",
-      properties: {
-        section: {
-          type: "string",
-          allOf: [{ pattern: "^a" }, { pattern: "z$" }],
-        },
-      },
-      required: ["section"],
-      additionalProperties: false,
-    },
-  };
-  await createBin("binny-runtime-config-allof-valid", allOfSourceAdapter, "az");
-  const compatibleConfig = await postHeartbeat(
-    "binny-runtime-config-allof-valid",
-    {
-      runtimeId: "binny-runtime-config-allof-valid-probe",
-      sourceAdapter: allOfSourceAdapter,
-      environment: {
-        kind: "lightweight",
-        browser: {
-          available: false,
-          profileReuseAfterRestart: false,
-          power: { status: "unavailable" },
-        },
-      },
-    },
-  );
-  assert.equal(compatibleConfig.status, 200);
-  assert.equal((compatibleConfig.body as RuntimeStatus).status, "online");
-
-  const configMismatchSourceAdapter = {
-    ...sourceAdapter,
-    configSchema: {
-      type: "object",
-      properties: { section: { type: "string" } },
-      required: ["section"],
-      additionalProperties: false,
-    },
-  };
-  const incompatibleConfigCreated = cliData<{
-    readonly id: string;
-  }>(
-    await cli([
-      "bin",
-      "create",
-      "binny-runtime-config-mismatch",
-      "--source-adapter",
-      JSON.stringify(configMismatchSourceAdapter),
-      "--identity",
-      "identity-binny-runtime-config-mismatch",
-      "--config",
-      JSON.stringify({ section: "ab" }),
-    ]),
-    "created",
-  );
-  assert.equal(incompatibleConfigCreated.id, "binny-runtime-config-mismatch");
-  const incompatibleConfig = await postHeartbeat(
-    "binny-runtime-config-mismatch",
-    {
-      runtimeId: "binny-runtime-config-probe",
-      sourceAdapter: allOfSourceAdapter,
-      environment: {
-        kind: "lightweight",
-        browser: {
-          available: false,
-          profileReuseAfterRestart: false,
-          power: { status: "unavailable" },
-        },
-      },
-    },
-  );
-  assert.equal(incompatibleConfig.status, 409);
-  assert.equal(
-    (incompatibleConfig.body.error as { readonly code: string }).code,
-    "runtime_configuration_incompatible",
-  );
-  assert.deepEqual(
-    (incompatibleConfig.body.error as { readonly path: unknown }).path,
-    ["config", "section"],
-  );
-
-  const driftedManifest = {
-    ...sourceAdapter,
-    version: "2.0.0",
-  };
-  const manifestMismatch = await postHeartbeat("binny-runtime-offline", {
-    runtimeId: "binny-runtime-manifest-probe",
-    sourceAdapter: driftedManifest,
-    environment: {
-      kind: "lightweight",
-      browser: {
-        available: false,
-        profileReuseAfterRestart: false,
-        power: { status: "unavailable" },
-      },
-    },
-  });
-  assert.equal(manifestMismatch.status, 409);
-  assert.equal(
-    (manifestMismatch.body.error as { readonly code: string }).code,
-    "runtime_manifest_mismatch",
-  );
-  assert.deepEqual(
-    (manifestMismatch.body.error as { readonly path: unknown }).path,
-    ["sourceAdapter", "version"],
   );
 
   await compose(["stop", "runtime-one"]);

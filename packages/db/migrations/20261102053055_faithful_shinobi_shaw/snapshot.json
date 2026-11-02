@@ -1,0 +1,30 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "03f25771-1150-4aad-b687-ebc95298ed16",
+  "prevIds": ["81e286ac-a923-47c5-bb5f-bc603f48ea1b"],
+  "footprints": [
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "browser_capacity_reservation",
+        "requires_reservation_id"
+      ],
+      "writes": [
+        "s|col|public.browser_capacity_reservation.requires_reservation_id",
+        "n|col|public.browser_capacity_reservation.requires_reservation_id",
+        "e|col|public.browser_capacity_reservation.requires_reservation_id"
+      ],
+      "reads": ["n|tbl|public.browser_capacity_reservation", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"requires_reservation_id\"]"
+    }
+  ]
+}

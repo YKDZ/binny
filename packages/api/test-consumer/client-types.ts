@@ -2,98 +2,49 @@ import { createApiClient } from "@binny/api/client";
 
 async function checkPublicBinContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
-  const createInput = {
-    id: "rss-main",
-    sourceAdapter: {
-      id: "rss",
-      version: "1.0.0",
-      configSchema: { type: "object", properties: {} },
-      actions: {
-        check: {
-          description: "检查订阅源当前是否可用",
-          params: { type: "object", properties: {} },
-          output: { type: "object", properties: {} },
-        },
-        collect: {
-          description: "轮询订阅源",
-          params: { type: "object", properties: {} },
-          output: { type: "object", properties: {} },
-        },
-      },
-      environment: {
-        browser: {
-          required: false,
-          profileReuseAfterRestart: false,
-        },
-      },
-    },
-    identityId: "personal-account",
-    config: {},
-  };
-  const created = await client.bins.$post({
-    json: createInput,
-  });
+  const binId = "rss-main";
 
-  const manifestWithoutCheck = {
-    ...createInput,
-    sourceAdapter: {
-      ...createInput.sourceAdapter,
-      actions: { collect: createInput.sourceAdapter.actions.collect },
-    },
-  };
-  // @ts-expect-error 信源适配器清单必须声明独立的 check 动作。
-  void client.bins.$post({ json: manifestWithoutCheck });
+  // @ts-expect-error bin 只能由运行器首次心跳自注册。
+  void client.bins.$post({ json: { id: binId } });
 
-  const manifestWithoutCollect = {
-    ...createInput,
-    sourceAdapter: {
-      ...createInput.sourceAdapter,
-      actions: { check: createInput.sourceAdapter.actions.check },
-    },
-  };
-  // @ts-expect-error 信源适配器清单必须声明独立的 collect 动作。
-  void client.bins.$post({ json: manifestWithoutCollect });
-
-  if (created.status === 201) {
-    const bin = await created.json();
-    void bin.sourceAdapter.actions.collect?.params.type;
-    void bin.sourceAdapter.actions.collect?.output.type;
+  const lookup = await client.bins[":binId"].$get({ param: { binId } });
+  if (lookup.status === 200) {
+    const bin = await lookup.json();
+    void bin.sourceAdapter.actions.collect.output;
     void bin.execution.status;
-    // @ts-expect-error 执行器尚未连接，响应不会伪称在线。
+    // @ts-expect-error 执行器状态使用公开的判别联合。
     void bin.execution.isOnline;
-    // @ts-expect-error 标识响应字段的类型是字符串。
+    // @ts-expect-error bin 标识类型为字符串。
     const invalidBinId: number = bin.id;
     void invalidBinId;
-  } else if (created.status === 400 || created.status === 409) {
-    const failure = await created.json();
-    void failure.error.code;
-    void failure.error.message;
-    // @ts-expect-error 错误响应不包含未声明字段。
-    void failure.error.detail;
-    // @ts-expect-error 错误代码使用字符串字面量，不是数字。
-    const invalidErrorCode: number = failure.error.code;
-    void invalidErrorCode;
-  }
-
-  const lookup = await client.bins[":binId"].$get({
-    param: { binId: "rss-main" },
-  });
-  if (lookup.status === 200) {
-    void (await lookup.json()).sourceAdapter.actions.collect.output;
   } else if (lookup.status === 404) {
     void (await lookup.json()).error.path;
   }
 
+  const updated = await client.bins[":binId"].$patch({
+    param: { binId },
+    json: { config: { site: "https://example.test" } },
+  });
+  if (updated.status === 200) {
+    void (await updated.json()).config.site;
+  } else if (updated.status === 400 || updated.status === 409) {
+    const failure = await updated.json();
+    void failure.error.code;
+    // @ts-expect-error 错误响应不包含未声明字段。
+    void failure.error.detail;
+  }
+
+  void client.bins[":binId"].$patch({
+    param: { binId },
+    // @ts-expect-error 普通调用者不能替换运行器登记的适配器声明。
+    json: { sourceAdapter: {} },
+  });
   // @ts-expect-error 未知路由不能被客户端接受。
   void client.unknown.$get();
   // @ts-expect-error 此路由没有 DELETE 方法。
   void client.bins.$delete();
   // @ts-expect-error binId 是必填路径参数。
   void client.bins[":binId"].$get({ param: {} });
-  // @ts-expect-error 请求字段必须符合公开创建契约。
-  void client.bins.$post({ json: { id: 42 } });
-  // @ts-expect-error 已声明字段类型错误，即使其他字段都合法也不能通过。
-  void client.bins.$post({ json: { ...createInput, id: 42 } });
 }
 
 void checkPublicBinContract;

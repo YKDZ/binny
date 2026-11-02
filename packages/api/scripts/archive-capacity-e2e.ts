@@ -14,7 +14,6 @@ import {
   archiveItemReadSchema,
   archiveResourceMetadataSchema,
   archiveSearchPageSchema,
-  sourceAdapterManifestSchema,
   type ArchiveResourceMetadata,
   type ArchiveAggregationRequest,
   type ArchiveSearchRequest,
@@ -96,33 +95,12 @@ type CapacityReport = {
   readonly retainedMediaReferencesVerified: number;
 };
 
-const binId = "capacity26";
+const binId = "binny-runs-one";
 const sourceNamespace = "capacity26";
 const bodyCodePointLength = 512;
 const sharedPayload = new TextEncoder().encode(
   "Binny capacity 26 shared archive resource. 中文媒体引用。🌿",
 );
-const capacitySourceAdapter = sourceAdapterManifestSchema.parse({
-  id: "archive-capacity",
-  version: "1.0.0",
-  configSchema: { type: "object", properties: {} },
-  actions: {
-    check: {
-      description: "检查容量验收配置。",
-      params: { type: "object" },
-      output: { type: "object" },
-    },
-    collect: {
-      description: "提交容量验收资料。",
-      params: { type: "object" },
-      output: { type: "object" },
-    },
-  },
-  environment: {
-    browser: { required: false, profileReuseAfterRestart: false },
-  },
-});
-
 function shapeFor(profile: CapacityProfile): CapacityShape {
   return profile === "full"
     ? {
@@ -204,26 +182,7 @@ async function ensureCapacityBin(
 ): Promise<void> {
   const existing = await client.bins[":binId"].$get({ param: { binId } });
   if (existing.status === 200) return;
-  assert.equal(existing.status, 404, "容量验收 bin 读取失败。");
-  assert.notEqual(phase, "verify", "最终容量验证需要保留的容量验收 bin。");
-  assert.notEqual(phase, "delete", "最终容量验证需要保留的容量验收 bin。");
-
-  const created = await client.bins.$post({
-    json: {
-      id: binId,
-      sourceAdapter: capacitySourceAdapter,
-      identityId: "capacity26-test-identity",
-      config: {},
-    },
-  });
-  if (created.status !== 201) {
-    throw new Error(
-      "容量验收 bin 创建失败：" + JSON.stringify(await created.json()),
-    );
-  }
-  const bin = await created.json();
-  assert.equal(bin.id, binId);
-  assert.equal(bin.sourceAdapter.id, capacitySourceAdapter.id);
+  throw new Error(`容量阶段 ${phase} 需要运行器自动登记 bin ${binId}。`);
 }
 
 function createMediaPayload(
