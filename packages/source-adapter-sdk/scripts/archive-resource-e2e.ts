@@ -50,7 +50,7 @@ assert.deepEqual(
 const submission = await client.archives.$post({
   json: {
     requestId: "e2e:archive:sdk-resource",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "sdk-resource" },
