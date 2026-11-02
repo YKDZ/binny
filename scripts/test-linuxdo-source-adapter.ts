@@ -60,7 +60,11 @@ type ArchiveItemState = {
   readonly sourceKey: { readonly namespace: string; readonly key: string };
   readonly sourceRef?: string;
   readonly metadata?: Record<string, unknown>;
-  readonly body?: { readonly html?: string; readonly text?: string };
+  readonly body?: {
+    readonly html?: string;
+    readonly text?: string;
+    readonly searchText?: string;
+  };
   readonly resources?: readonly { readonly resourceId: string }[];
   readonly capture: {
     readonly scope: Record<string, unknown>;
@@ -704,6 +708,9 @@ async function verifyTopicArchive(
 ): Promise<void> {
   const root = await searchArchiveItem("主题正文版本 1");
   assert.ok(firstItemIds.includes(root.itemId));
+  const titleOnlySearch = await searchArchiveItem("受控主题标题版本 1");
+  assert.equal(titleOnlySearch.itemId, root.itemId);
+  assert.equal(titleOnlySearch.sourceKey.key, "post:240001");
   const firstReply = await searchArchiveItem("回复正文版本 1");
   const unchangedReply = await searchArchiveItem("保持不变的另一条回复");
   const rootState = binState(root);
