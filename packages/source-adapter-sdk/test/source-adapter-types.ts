@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  type SourceAdapterContext,
 } from "../src/index.ts";
 
 const basicConfigSchema = z.object({ feedUrl: z.url() });
@@ -54,6 +55,15 @@ const transformedConfigSchema = z.object({
 const transformedParamsSchema = z.object({
   limit: z.string().transform(Number),
 });
+type IsString<T> = [T] extends [string] ? true : false;
+type Expect<T extends true> = T;
+type TypedReferenceTimeIsString = Expect<
+  IsString<
+    SourceAdapterContext<
+      z.output<typeof transformedConfigSchema>
+    >["referenceTime"]
+  >
+>;
 
 const typedActionAdapter = defineSourceAdapter({
   id: "example.typed-actions",
