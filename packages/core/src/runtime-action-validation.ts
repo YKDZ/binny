@@ -90,7 +90,7 @@ function unavailable(message: string): RuntimeActionValidationResult {
   };
 }
 
-/** Ask the current runtime to parse raw action parameters through the SDK schema. */
+/** 请当前运行器按 SDK 声明解析原始动作参数。 */
 export async function validateActionParametersAtRuntime(
   controlUrl: string,
   sourceAdapter: SourceAdapterManifest,
@@ -217,7 +217,7 @@ function failure(
   };
 }
 
-/** Native-check newly accepted parameters before opening the write transaction. */
+/** 新参数写入事务前，先由运行器执行完整原生校验。 */
 export async function preflightActionInput(
   database: Database,
   binId: string,
@@ -285,7 +285,7 @@ export async function preflightActionInput(
   return { ok: true, snapshot };
 }
 
-/** Recheck the exact config/manifest/runtime used by preflight before saving. */
+/** 保存前重新确认预检使用的配置、清单和运行器仍未变化。 */
 export async function actionInputSnapshotStillCurrent(
   transaction: Transaction,
   previous: ActionInputSnapshot,

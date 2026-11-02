@@ -76,7 +76,15 @@ export type CliRuntime = {
 type CliDependencies = {
   readonly createClient: () => ReturnType<typeof createApiClient>;
   readonly apiUrl: string;
+  readonly getServiceMetadata: () => Promise<ServiceMetadataDocument>;
 };
+
+type ServiceMetadataDocument =
+  | {
+      readonly ok: true;
+      readonly metadata: z.infer<typeof serviceMetadataSchema>;
+    }
+  | { readonly ok: false; readonly error: ServiceCompatibilityFailure };
 
 async function saveResourceBody(
   response: Response,
@@ -194,20 +202,40 @@ function parsedApiUrl(invocation: unknown): string | undefined {
   return invocation.input.apiUrl;
 }
 
-function stripApiUrlFromHandlerInput(handler: unknown): unknown {
+function stripApiUrlFromHandlerInput(
+  handler: unknown,
+  checkHttpApiCompatibility: boolean,
+): unknown {
   if (typeof handler !== "function") return handler;
   return async (context: unknown) => {
     if (!isRecord(context) || !isRecord(context.input)) {
       throw new Error("CLI handler input 必须是对象。");
     }
     const { apiUrl: _apiUrl, ...input } = context.input;
-    return await Reflect.apply(handler, undefined, [{ ...context, input }]);
+    const handlerContext = context as unknown as CliHandlerContext;
+    if (checkHttpApiCompatibility) {
+      const compatibilityFailure = await httpApiCompatibilityFailure(
+        handlerContext.dependencies,
+      );
+      if (compatibilityFailure !== undefined) {
+        return handlerContext.outcome.failure.apiError(compatibilityFailure);
+      }
+    }
+    return await Reflect.apply(handler, undefined, [
+      { ...handlerContext, input },
+    ]);
   };
 }
 
 function addApiUrlOption<Commands extends Record<string, unknown>>(
   commands: Commands,
 ): { [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]> } {
+  // 查询命令先校验专用契约；服务信息命令用于查看不兼容服务。
+  const commandsWithoutAutomaticProtocolCheck = new Set([
+    "serviceInfo",
+    "archiveSearch",
+    "archiveAggregate",
+  ]);
   const extendedCommands = Object.fromEntries(
     Object.entries(commands).map(([name, definition]) => {
       if (!isRecord(definition) || definition.kind !== "command") {
@@ -224,7 +252,10 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
             ...(isRecord(definition.fields) ? definition.fields : {}),
             apiUrl: apiUrlOptionField,
           },
-          handler: stripApiUrlFromHandlerInput(definition.handler),
+          handler: stripApiUrlFromHandlerInput(
+            definition.handler,
+            !commandsWithoutAutomaticProtocolCheck.has(name),
+          ),
           // safeExtend 会创建新对象；重新绑定投影以保留归档自定义 JSON 节点。
           input: withPostgresJsonSchemaProjection(
             definition.input.safeExtend({
@@ -302,7 +333,7 @@ const errorOutputSchema = z.union([
 ]);
 type CliApiError = z.infer<typeof errorOutputSchema>;
 
-type QueryCompatibilityFailure = {
+type ServiceCompatibilityFailure = {
   readonly code:
     | "service_metadata_unavailable"
     | "incompatible_http_api_protocol"
@@ -311,52 +342,64 @@ type QueryCompatibilityFailure = {
   readonly message: string;
 };
 
-async function queryCompatibilityFailure(
-  dependencies: CliDependencies,
-  capability: string,
-): Promise<QueryCompatibilityFailure | undefined> {
-  const response = await dependencies.createClient().meta.$get();
-  if (response.status !== 200) {
-    return {
-      code: "service_metadata_unavailable",
-      message: "服务未提供公开元信息，无法确认查询契约兼容性。",
+type CliHandlerContext = {
+  readonly input: Record<string, unknown>;
+  readonly dependencies: CliDependencies;
+  readonly outcome: {
+    readonly failure: {
+      readonly apiError: (failure: ServiceCompatibilityFailure) => unknown;
     };
-  }
+  };
+};
 
-  const metadata = serviceMetadataSchema.safeParse(await response.json());
-  if (!metadata.success) {
-    return {
-      code: "service_metadata_unavailable",
-      message: "服务公开的元信息格式无效，无法确认查询契约兼容性。",
-    };
-  }
-  if (metadata.data.protocols.httpApi !== publicApiProtocolVersion) {
+async function httpApiCompatibilityFailure(
+  dependencies: CliDependencies,
+): Promise<ServiceCompatibilityFailure | undefined> {
+  const result = await dependencies.getServiceMetadata();
+  if (!result.ok) return result.error;
+
+  if (result.metadata.protocols.httpApi !== publicApiProtocolVersion) {
     return {
       code: "incompatible_http_api_protocol",
       message:
         "服务使用 HTTP API 协议 " +
-        String(metadata.data.protocols.httpApi) +
+        String(result.metadata.protocols.httpApi) +
         "；当前 CLI 支持协议 " +
         String(publicApiProtocolVersion) +
         "。",
     };
   }
+  return undefined;
+}
+
+async function queryCompatibilityFailure(
+  dependencies: CliDependencies,
+  capability: string,
+): Promise<ServiceCompatibilityFailure | undefined> {
+  const protocolFailure = await httpApiCompatibilityFailure(dependencies);
+  if (protocolFailure !== undefined) return protocolFailure;
+
+  const result = await dependencies.getServiceMetadata();
+  if (!result.ok) {
+    return result.error;
+  }
+
   if (
-    metadata.data.contracts.archiveQuery.version !==
+    result.metadata.contracts.archiveQuery.version !==
       archiveQueryContractVersion ||
-    metadata.data.contracts.archiveQuery.path !== archiveQueryContractPath
+    result.metadata.contracts.archiveQuery.path !== archiveQueryContractPath
   ) {
     return {
       code: "incompatible_archive_query_contract",
       message:
         "服务的归档查询契约版本或入口与当前 CLI 不兼容。服务版本为 " +
-        String(metadata.data.contracts.archiveQuery.version) +
+        String(result.metadata.contracts.archiveQuery.version) +
         "，当前 CLI 支持版本 " +
         String(archiveQueryContractVersion) +
         "。",
     };
   }
-  if (!metadata.data.capabilities.includes(capability)) {
+  if (!result.metadata.capabilities.includes(capability)) {
     return {
       code: "service_capability_unavailable",
       message: "服务未公开当前查询所需的能力：" + capability + "。",
@@ -465,24 +508,8 @@ function createCliContract(identity: CliCommandIdentity) {
         },
         failures,
         async handler({ dependencies, outcome }) {
-          const metadataResponse = await dependencies
-            .createClient()
-            .meta.$get();
-          if (metadataResponse.status !== 200) {
-            return outcome.failure.apiError({
-              code: "service_metadata_unavailable",
-              message: "服务未提供公开元信息。",
-            });
-          }
-          const metadata = serviceMetadataSchema.safeParse(
-            await metadataResponse.json(),
-          );
-          if (!metadata.success) {
-            return outcome.failure.apiError({
-              code: "service_metadata_unavailable",
-              message: "服务公开的元信息格式无效。",
-            });
-          }
+          const metadata = await dependencies.getServiceMetadata();
+          if (!metadata.ok) return outcome.failure.apiError(metadata.error);
           const contractResponse = await dependencies
             .createClient()
             .meta.query.$get();
@@ -493,7 +520,7 @@ function createCliContract(identity: CliCommandIdentity) {
             });
           }
           return outcome.data.discovered({
-            metadata: metadata.data,
+            metadata: metadata.metadata,
             queryContract: await contractResponse.json(),
           });
         },
@@ -1904,15 +1931,44 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
     const invocation = parseCliInvocation(contract, runtime.argv.slice(2));
     const apiUrl =
       parsedApiUrl(invocation) ?? runtime.apiUrl ?? "http://localhost:3000";
+    const createClient = () =>
+      createApiClient(
+        apiUrl,
+        runtime.fetch === undefined ? {} : { fetch: runtime.fetch },
+      );
+    let serviceMetadataRequest: Promise<ServiceMetadataDocument> | undefined;
+    const getServiceMetadata = (): Promise<ServiceMetadataDocument> => {
+      serviceMetadataRequest ??= (async () => {
+        const response = await createClient().meta.$get();
+        if (response.status !== 200) {
+          return {
+            ok: false,
+            error: {
+              code: "service_metadata_unavailable",
+              message: "服务未提供公开元信息。",
+            },
+          };
+        }
+        const metadata = serviceMetadataSchema.safeParse(await response.json());
+        if (!metadata.success) {
+          return {
+            ok: false,
+            error: {
+              code: "service_metadata_unavailable",
+              message: "服务公开的元信息格式无效。",
+            },
+          };
+        }
+        return { ok: true, metadata: metadata.data };
+      })();
+      return serviceMetadataRequest;
+    };
     const result = await executeCli(contract, {
       invocation,
       dependencies: {
         apiUrl,
-        createClient: () =>
-          createApiClient(
-            apiUrl,
-            runtime.fetch === undefined ? {} : { fetch: runtime.fetch },
-          ),
+        createClient,
+        getServiceMetadata,
       },
       write: runtime.write,
     });

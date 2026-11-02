@@ -17,7 +17,7 @@ export type RuntimeConfigurationValidation =
       readonly error: BinError;
     };
 
-/** Ask the active runtime to run the adapter's complete native config parser. */
+/** 请当前运行器执行适配器完整的原生配置解析。 */
 export async function validateConfigurationAtRuntime(
   controlUrl: string,
   sourceAdapter: SourceAdapterManifest,

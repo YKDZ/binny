@@ -1076,6 +1076,17 @@ async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
     assert.deepEqual(error.path, ["params", "gateKey"]);
   }
 
+  const inheritedAction = await client.bins[":binId"].runs.$post({
+    param: { binId: "binny-runs-one" },
+    json: { action: "constructor", params: {} },
+  });
+  assert.equal(inheritedAction.status, 400);
+  if (inheritedAction.status === 400) {
+    const error = (await inheritedAction.json()).error;
+    assert.equal(error.code, "action_not_found");
+    assert.deepEqual(error.path, ["action"]);
+  }
+
   const unknownAction = await client.bins[":binId"].runs.$post({
     param: { binId: "binny-runs-one" },
     json: { action: "missing", params: {} },
