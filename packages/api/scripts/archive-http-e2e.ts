@@ -7777,6 +7777,105 @@ async function verifyHardDeleteEntryPoint(
     );
     assert.equal(deletedRelation?.status, "deleted");
   }
+  const ownerFilter: ArchiveSearchFilter = {
+    type: "field",
+    field: "sourceKey.key",
+    operator: "eq",
+    value: ownerKey.key,
+  };
+  const deletedOwnerRelation: ArchiveSearchFilter = {
+    type: "and",
+    conditions: [
+      ownerFilter,
+      {
+        type: "relation",
+        direction: "outgoing",
+        name: "ordinary-owner-target",
+        operator: "exists",
+      },
+    ],
+  };
+  const deletedOwnerPath: ArchiveSearchFilter = {
+    type: "and",
+    conditions: [
+      ownerFilter,
+      {
+        type: "path",
+        steps: [{ direction: "outgoing", name: "ordinary-owner-target" }],
+        operator: "exists",
+      },
+    ],
+  };
+  const matchingOwnerKeys = async (
+    scope: ArchiveSearchRequest["scope"],
+    where: ArchiveSearchFilter,
+  ) => {
+    const response = await client.archives.search.$post({
+      json: {
+        scope,
+        where,
+        select: ["sourceKey"],
+        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+        limit: 10,
+      },
+    });
+    assert.equal(response.status, 200);
+    if (response.status !== 200) {
+      throw new Error("关系视图搜索失败。");
+    }
+    return (await response.json()).results.map(
+      ({ sourceKey }) => sourceKey?.key,
+    );
+  };
+  const currentMainScope = { kind: "current", binId: "rss-main" } as const;
+  assert.deepEqual(
+    await matchingOwnerKeys(currentMainScope, deletedOwnerRelation),
+    [],
+  );
+  assert.deepEqual(
+    await matchingOwnerKeys(currentMainScope, deletedOwnerPath),
+    [],
+  );
+  assert.deepEqual(
+    await matchingOwnerKeys(
+      {
+        kind: "asOf",
+        binId: "rss-main",
+        asOf: firstCommit.archiveSeq,
+      },
+      deletedOwnerRelation,
+    ),
+    [],
+  );
+  const deletedRelationExpansion = await client.archives.search.$post({
+    json: {
+      scope: currentMainScope,
+      where: ownerFilter,
+      expand: [
+        {
+          key: "all",
+          direction: "outgoing",
+        },
+      ],
+      select: ["sourceKey"],
+      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+      limit: 10,
+    },
+  });
+  assert.equal(deletedRelationExpansion.status, 200);
+  if (deletedRelationExpansion.status === 200) {
+    assert.deepEqual(
+      (
+        await deletedRelationExpansion.json()
+      ).results[0]?.matches[0]?.expansions?.[0]?.relations.map(
+        ({ relationId, status }) => ({
+          relationId,
+          status,
+        }),
+      ),
+      [{ relationId: relationIds[1], status: "deleted" }],
+    );
+  }
   const unrelatedRead = await client.archives.items[":itemId"].$get({
     param: { itemId: unrelated.itemId },
     query: {},
@@ -8000,6 +8099,14 @@ async function verifyHardDeleteEntryPoint(
       assert.equal(restoredMainRelation.to.status, "observed");
     }
   }
+  assert.deepEqual(
+    await matchingOwnerKeys(currentMainScope, deletedOwnerRelation),
+    [ownerKey.key],
+  );
+  assert.deepEqual(
+    await matchingOwnerKeys(currentMainScope, deletedOwnerPath),
+    [ownerKey.key],
+  );
   const gapAfterMainReobservation = await readArchiveRelations(
     client,
     owner.itemId,
