@@ -1,0 +1,144 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "6b8138dc-8fc2-47e0-9b17-e2a8216f5364",
+  "prevIds": ["83bfd479-fa6e-4180-927c-69695347fbdc"],
+  "footprints": [
+    {
+      "statementType": "rename_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "archive_commit",
+        "collector_version"
+      ],
+      "writes": [
+        "s|col|public.archive_commit.collector_version",
+        "n|col|public.archive_commit.collector_version",
+        "s|col|public.archive_commit.source_adapter_version",
+        "n|col|public.archive_commit.source_adapter_version"
+      ],
+      "reads": ["n|tbl|public.archive_commit", "n|sch|public"]
+    },
+    {
+      "statementType": "rename_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "collector"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.collector",
+        "n|col|public.bin_configurations.collector",
+        "s|col|public.bin_configurations.source_adapter",
+        "n|col|public.bin_configurations.source_adapter"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "rename_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "manual_runs",
+        "collector_snapshot"
+      ],
+      "writes": [
+        "s|col|public.manual_runs.collector_snapshot",
+        "n|col|public.manual_runs.collector_snapshot",
+        "s|col|public.manual_runs.source_adapter_snapshot",
+        "n|col|public.manual_runs.source_adapter_snapshot"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "rename_column",
+      "statementTarget": ["column", "public", "manual_runs", "collector_id"],
+      "writes": [
+        "s|col|public.manual_runs.collector_id",
+        "n|col|public.manual_runs.collector_id",
+        "s|col|public.manual_runs.source_adapter_id",
+        "n|col|public.manual_runs.source_adapter_id"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "rename_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "manual_runs",
+        "collector_version"
+      ],
+      "writes": [
+        "s|col|public.manual_runs.collector_version",
+        "n|col|public.manual_runs.collector_version",
+        "s|col|public.manual_runs.source_adapter_version",
+        "n|col|public.manual_runs.source_adapter_version"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    },
+    {
+      "statementType": "rename_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "collector"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.collector",
+        "n|col|public.runtime_connections.collector",
+        "s|col|public.runtime_connections.source_adapter",
+        "n|col|public.runtime_connections.source_adapter"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"archive_commit\",\"collector_version\"]",
+      "set": {
+        "name": "source_adapter_version"
+      }
+    },
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"bin_configurations\",\"collector\"]",
+      "set": {
+        "name": "source_adapter"
+      }
+    },
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"manual_runs\",\"collector_snapshot\"]",
+      "set": {
+        "name": "source_adapter_snapshot"
+      }
+    },
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"manual_runs\",\"collector_id\"]",
+      "set": {
+        "name": "source_adapter_id"
+      }
+    },
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"manual_runs\",\"collector_version\"]",
+      "set": {
+        "name": "source_adapter_version"
+      }
+    },
+    {
+      "op": "rename",
+      "key": "columns\u0000[\"public\",\"runtime_connections\",\"collector\"]",
+      "set": {
+        "name": "source_adapter"
+      }
+    }
+  ]
+}
