@@ -1291,7 +1291,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     "升级没有应用浏览器空闲策略迁移。",
   );
 
-  // 先通过公开读取验证旧持久行；后续才发送新协议心跳或 PATCH 修复配置。
+  // 先通过公开读取验证旧持久行，再确认不兼容的旧运行器仍保持离线。
   const oldEmptyReasonResponse = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
   );
@@ -1463,91 +1463,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     assert.equal(oldBin.browserIdleTimeoutSeconds, null);
   }
 
-  const newEmptyReasonCreate = await fetch(`${baseUrl}/bins`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-database-upgrade-new-empty-reason",
-      sourceAdapter: legacyBrowserWithEmptyReason,
-      identityId: "identity-binny-database-upgrade-new-empty-reason",
-      config: {},
-    }),
-  });
-  assert.equal(newEmptyReasonCreate.status, 400);
-  const newEmptyReasonCreateError = (await newEmptyReasonCreate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(newEmptyReasonCreateError.error.code, "invalid_input");
-  assert.deepEqual(newEmptyReasonCreateError.error.path, [
-    "sourceAdapter",
-    "environment",
-    "browser",
-    "profileReuseUnavailableReason",
-  ]);
-
-  const emptyReasonUpdate = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: legacyBrowserWithEmptyReason }),
-    },
-  );
-  assert.equal(emptyReasonUpdate.status, 400);
-  const emptyReasonUpdateError = (await emptyReasonUpdate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(emptyReasonUpdateError.error.code, "invalid_input");
-  assert.deepEqual(emptyReasonUpdateError.error.path, [
-    "sourceAdapter",
-    "environment",
-    "browser",
-    "profileReuseUnavailableReason",
-  ]);
-
-  const repairedEmptyReasonManifest = {
-    ...legacyBrowserWithEmptyReason,
-    environment: {
-      browser: {
-        ...legacyBrowserWithEmptyReason.environment.browser,
-        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
-      },
-    },
-  };
-  const repairedEmptyReasonResponse = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: repairedEmptyReasonManifest }),
-    },
-  );
-  assert.equal(
-    repairedEmptyReasonResponse.status,
-    200,
-    await repairedEmptyReasonResponse.clone().text(),
-  );
-  const repairedEmptyReasonBin = (await repairedEmptyReasonResponse.json()) as {
-    readonly browserIdleTimeoutSeconds: number | null;
-    readonly sourceAdapter: {
-      readonly environment: {
-        readonly browser: { readonly profileReuseUnavailableReason?: string };
-      };
-    };
-  };
-  assert.equal(repairedEmptyReasonBin.browserIdleTimeoutSeconds, null);
-  assert.equal(
-    repairedEmptyReasonBin.sourceAdapter.environment.browser
-      .profileReuseUnavailableReason,
-    "经公开配置修正后的兼容原因。",
-  );
-
   const upgradedRuntimeHeartbeat = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
@@ -1560,7 +1475,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        sourceAdapter: repairedEmptyReasonManifest,
+        sourceAdapter: legacyBrowserWithEmptyReason,
         environment: {
           kind: "browser",
           browser: {
@@ -1641,33 +1556,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     readonly browserIdleTimeoutSeconds: number | null;
   };
   assert.equal(oldRuntimePolicy.browserIdleTimeoutSeconds, null);
-
-  const repairedLegacyManifest = {
-    ...legacyBrowserWithoutReason,
-    environment: {
-      browser: {
-        ...legacyBrowserWithoutReason.environment.browser,
-        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
-      },
-    },
-  };
-  const repairedLegacyResponse = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: repairedLegacyManifest }),
-    },
-  );
-  assert.equal(
-    repairedLegacyResponse.status,
-    200,
-    await repairedLegacyResponse.clone().text(),
-  );
-  const repairedLegacyBin = (await repairedLegacyResponse.json()) as {
-    readonly browserIdleTimeoutSeconds: number | null;
-  };
-  assert.equal(repairedLegacyBin.browserIdleTimeoutSeconds, null);
 
   const incompatibleLegacyUpdate = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,

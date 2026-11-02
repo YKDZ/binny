@@ -87,9 +87,14 @@ type BrowserPower = {
 };
 
 type Bin = {
+  readonly id: string;
+  readonly sourceAdapter: Record<string, unknown>;
+  readonly identityId: string;
+  readonly config: Record<string, unknown>;
   readonly browserIdleTimeoutSeconds: number | null;
   readonly execution: {
     readonly status: string;
+    readonly error?: { readonly code: string };
     readonly environment?: {
       readonly kind?: string;
       readonly browser?: {
@@ -276,31 +281,6 @@ function cliFailure<T extends { readonly code: string }>(
   assert.equal(wire.variant, "apiError");
   assert.equal(wire.data.code, code);
   return wire.data;
-}
-
-function cliInputFailure(
-  result: ProcessResult,
-  path: readonly (string | number)[],
-): void {
-  assert.equal(result.code, 2, result.stdout);
-  const wire = JSON.parse(result.stderr) as {
-    readonly kind: string;
-    readonly issues: readonly {
-      readonly evidence: readonly {
-        readonly path: readonly (string | number)[];
-      }[];
-    }[];
-  };
-  assert.equal(wire.kind, "usageFailure");
-  assert.ok(
-    wire.issues.some((issue) =>
-      issue.evidence.some(
-        (evidence) =>
-          evidence.path.length === path.length &&
-          evidence.path.every((part, index) => part === path[index]),
-      ),
-    ),
-  );
 }
 
 function ipv4Number(value: string): number {
@@ -600,6 +580,45 @@ async function protocol4WaitForRuntime(
     await delay(250);
   }
   throw new Error(`等待旧运行器 ${binId} 在线超时：${lastState}`);
+}
+
+async function protocol4WaitForBinRegistration(
+  binId: string,
+  expectedManifest: Record<string, unknown>,
+  serverImageForProject: string,
+  browserImageForProject: string,
+): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const result = await protocol4Cli(
+      ["bin", "get", binId],
+      serverImageForProject,
+      browserImageForProject,
+    );
+    if (result.code === 0) {
+      const bin = cliData<Bin>(result, "found");
+      if (
+        bin.sourceAdapter.id === expectedManifest.id &&
+        bin.sourceAdapter.version === expectedManifest.version
+      ) {
+        assert.deepEqual(bin.sourceAdapter, expectedManifest);
+        assert.equal(bin.identityId, binId);
+        assert.deepEqual(bin.config, {});
+        assert.equal(bin.execution.status, "incompatible");
+        assert.equal(
+          bin.execution.error?.code,
+          "runtime_configuration_incompatible",
+        );
+        return;
+      }
+      lastState = JSON.stringify(bin);
+    } else {
+      lastState = result.stderr;
+    }
+    await delay(250);
+  }
+  throw new Error(`等待候选运行器 ${binId} 自注册超时：${lastState}`);
 }
 
 async function protocol4ReadRun(
@@ -1260,26 +1279,73 @@ async function waitForSource(): Promise<void> {
   throw new Error(`Compose 受控信源宿主入口不可达：${String(lastError)}`);
 }
 
-async function createBin(
+async function waitForBinRegistration(
   binId: string,
-  manifest: Record<string, unknown>,
-  idleTimeout: number | "disabled" = 300,
+  expectedManifest: Record<string, unknown>,
 ): Promise<void> {
-  const config = { baseUrl: "http://browser-session-source:8081/" };
-  const args = [
-    "bin",
-    "create",
-    binId,
-    "--source-adapter",
-    JSON.stringify(manifest),
-    "--identity",
-    `identity-${binId}`,
-    "--config",
-    JSON.stringify(config),
-    "--browser-idle-timeout-seconds",
-    String(idleTimeout),
-  ];
-  cliData(await cli(args), "created");
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const result = await cli(["bin", "get", binId]);
+    if (result.code === 0) {
+      const bin = cliData<Bin>(result, "found");
+      if (
+        bin.sourceAdapter.id === expectedManifest.id &&
+        bin.sourceAdapter.version === expectedManifest.version
+      ) {
+        assert.deepEqual(bin.sourceAdapter, expectedManifest);
+        assert.equal(bin.id, binId);
+        assert.equal(bin.identityId, binId);
+        assert.deepEqual(bin.config, {});
+        assert.equal(bin.execution.status, "incompatible");
+        assert.equal(
+          bin.execution.error?.code,
+          "runtime_configuration_incompatible",
+        );
+        return;
+      }
+      lastState = JSON.stringify(bin);
+    } else {
+      lastState = result.stderr;
+    }
+    await delay(250);
+  }
+  throw new Error(`等待 bin ${binId} 自注册超时：${lastState}`);
+}
+
+async function waitForSourceAdapterVersion(
+  binId: string,
+  version: string,
+): Promise<Bin> {
+  const deadline = Date.now() + 60_000;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const bin = await readBin(binId);
+    if (bin.sourceAdapter.version === version) return bin;
+    lastState = JSON.stringify(bin.sourceAdapter);
+    await delay(250);
+  }
+  throw new Error(`等待 bin ${binId} 源码版本 ${version} 超时：${lastState}`);
+}
+
+async function configureRegisteredBin(
+  binId: string,
+  idleTimeout: number | "disabled",
+): Promise<Bin> {
+  return cliData(
+    await cli([
+      "bin",
+      "update",
+      binId,
+      "--identity",
+      `identity-${binId}`,
+      "--config",
+      JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
+      "--browser-idle-timeout-seconds",
+      String(idleTimeout),
+    ]),
+    "updated",
+  );
 }
 
 async function updateBin(
@@ -1296,26 +1362,6 @@ async function updateBin(
     ]),
     "updated",
   );
-}
-
-async function updateSourceAdapterManifest(
-  binId: string,
-  manifest: Record<string, unknown>,
-): Promise<{ readonly id: string; readonly version: string }> {
-  const updated = cliData<{
-    readonly id: string;
-    readonly sourceAdapter: { readonly version: string };
-  }>(
-    await cli([
-      "bin",
-      "update",
-      binId,
-      "--source-adapter",
-      JSON.stringify(manifest),
-    ]),
-    "updated",
-  );
-  return { id: updated.id, version: updated.sourceAdapter.version };
 }
 
 async function readBin(binId: string): Promise<Bin> {
@@ -2157,6 +2203,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
   const legacyConfiguration = {
     baseUrl: "http://browser-session-source:8081/",
   };
+  // Populate a historical row while the frozen legacy core still exposes its old CLI.
   cliData(
     await protocol4Cli(
       [
@@ -2236,26 +2283,29 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
     currentImages.server,
     currentImages.browser,
   );
-  cliData(
-    await protocol4Cli(
-      [
-        "bin",
-        "create",
-        "binny-browser-two",
-        "--source-adapter",
-        JSON.stringify(currentManifest),
-        "--identity",
-        "identity-binny-capacity-current",
-        "--config",
-        JSON.stringify(legacyConfiguration),
-        "--browser-idle-timeout-seconds",
-        "disabled",
-      ],
-      currentImages.server,
-      currentImages.browser,
-    ),
-    "created",
+  await protocol4WaitForBinRegistration(
+    "binny-browser-two",
+    currentManifest,
+    currentImages.server,
+    currentImages.browser,
   );
+  const currentBin = await protocol4CliData<Bin>(
+    [
+      "bin",
+      "update",
+      "binny-browser-two",
+      "--identity",
+      "identity-binny-capacity-current",
+      "--config",
+      JSON.stringify(legacyConfiguration),
+      "--browser-idle-timeout-seconds",
+      "disabled",
+    ],
+    currentImages.server,
+    currentImages.browser,
+    "updated",
+  );
+  assert.equal(currentBin.id, "binny-browser-two");
   await protocol4WaitForRuntime(
     "binny-browser-two",
     currentImages.server,
@@ -2468,63 +2518,31 @@ async function main(): Promise<void> {
   assert.deepEqual(manifest, browserImageUpdate.baselineManifest);
   const candidateManifest = await runtimeManifest("browser-two");
   assert.deepEqual(candidateManifest, browserImageUpdate.candidateManifest);
-  await createBin("binny-browser-one", manifest, 4);
-  await createBin("binny-browser-two", candidateManifest, "disabled");
+  await Promise.all([
+    waitForBinRegistration("binny-browser-one", manifest),
+    waitForBinRegistration("binny-browser-two", candidateManifest),
+  ]);
+  await Promise.all([
+    configureRegisteredBin("binny-browser-one", 4),
+    configureRegisteredBin("binny-browser-two", "disabled"),
+  ]);
 
-  const unsupported = structuredClone(manifest);
-  const unsupportedEnvironment = unsupported.environment as {
-    browser: Record<string, unknown>;
-  };
-  unsupportedEnvironment.browser = {
-    ...unsupportedEnvironment.browser,
-    profileReuseAfterRestart: false,
-    profileReuseUnavailableReason: "此信源适配器依赖无法跨重启保存的会话状态。",
-  };
-  const createWithoutReason = structuredClone(unsupported);
-  delete (
-    createWithoutReason.environment as {
-      browser: Record<string, unknown>;
-    }
-  ).browser.profileReuseUnavailableReason;
-  cliInputFailure(
-    await cli([
-      "bin",
-      "create",
-      "binny-idle-no-reason",
-      "--source-adapter",
-      JSON.stringify(createWithoutReason),
-      "--identity",
-      "identity-binny-idle-no-reason",
-      "--config",
-      JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
-    ]),
-    [
-      "sourceAdapter",
-      "environment",
-      "browser",
-      "profileReuseUnavailableReason",
-    ],
-  );
-  const incompatiblePolicy = cliFailure<{
+  const originalConfig = (await readBin("binny-browser-one")).config;
+  const invalidConfig = cliFailure<{
     readonly code: string;
     readonly path?: readonly (string | number)[];
   }>(
     await cli([
       "bin",
-      "create",
-      "binny-idle-incompatible",
-      "--source-adapter",
-      JSON.stringify(unsupported),
-      "--identity",
-      "identity-binny-idle-incompatible",
+      "update",
+      "binny-browser-one",
       "--config",
-      JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
-      "--browser-idle-timeout-seconds",
-      "4",
+      JSON.stringify({ baseUrl: "not a URL" }),
     ]),
     "invalid_configuration",
   );
-  assert.deepEqual(incompatiblePolicy.path, ["browserIdleTimeoutSeconds"]);
+  assert.deepEqual(invalidConfig.path, ["config", "baseUrl"]);
+  assert.deepEqual((await readBin("binny-browser-one")).config, originalConfig);
 
   assert.equal(
     (await updateBin("binny-browser-one", "disabled"))
@@ -2548,21 +2566,6 @@ async function main(): Promise<void> {
       .browserIdleTimeoutSeconds,
     null,
   );
-  const incompatibleUpdate = cliFailure<{
-    readonly code: string;
-    readonly path?: readonly (string | number)[];
-  }>(
-    await cli([
-      "bin",
-      "update",
-      "binny-browser-one",
-      "--source-adapter",
-      JSON.stringify(unsupported),
-    ]),
-    "invalid_configuration",
-  );
-  assert.deepEqual(incompatibleUpdate.path, ["browserIdleTimeoutSeconds"]);
-
   await Promise.all([
     waitForRuntime("binny-browser-one"),
     waitForRuntime("binny-browser-two"),
@@ -2873,25 +2876,10 @@ async function main(): Promise<void> {
   const archivedBeforeImageUpdate =
     await browserFixtureRunIds("binny-browser-one");
   assert.ok(archivedBeforeImageUpdate.size > 0);
-  let updatedBrowserBin:
-    | { readonly id: string; readonly version: string }
-    | undefined;
   const browserImageB = await replaceBrowserRuntimeImage(
     browserImage,
     browserImageUpdate.candidateImageId,
-    async () => {
-      updatedBrowserBin = await updateSourceAdapterManifest(
-        "binny-browser-one",
-        browserImageUpdate.candidateManifest,
-      );
-      assert.equal(updatedBrowserBin.id, "binny-browser-one");
-      assert.equal(
-        updatedBrowserBin.version,
-        sourceAdapterVersion(browserImageUpdate.candidateManifest),
-      );
-    },
   );
-  assert.ok(updatedBrowserBin !== undefined);
   assert.equal(
     browserImageB.previous.imageId,
     browserImageUpdate.baselineImageId,
@@ -2905,6 +2893,11 @@ async function main(): Promise<void> {
     await runtimeManifest("browser-one"),
     browserImageUpdate.candidateManifest,
   );
+  const updatedBrowserBin = await waitForSourceAdapterVersion(
+    "binny-browser-one",
+    sourceAdapterVersion(browserImageUpdate.candidateManifest),
+  );
+  assert.equal(updatedBrowserBin.id, "binny-browser-one");
   await waitForRuntime("binny-browser-one");
   const imageUpdateCheck = await triggerRun("binny-browser-one", "check");
   const imageUpdateCheckResult = await waitForRun(
@@ -2932,7 +2925,7 @@ async function main(): Promise<void> {
       baselineVersion: sourceAdapterVersion(
         browserImageUpdate.baselineManifest,
       ),
-      candidateVersion: updatedBrowserBin.version,
+      candidateVersion: updatedBrowserBin.sourceAdapter.version,
       baselineImageId: browserImageUpdate.baselineImageId,
       candidateImageId: browserImageUpdate.candidateImageId,
       oldContainerId: browserImageB.previous.id,
