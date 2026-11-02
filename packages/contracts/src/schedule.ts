@@ -61,6 +61,9 @@ export const scheduleSchema = withPostgresJsonSchemaProjection(
       params: jsonObjectSchema,
       enabled: z.boolean(),
       nextDueAt: z.iso.datetime(),
+      lastRunId: scheduleIdSchema
+        .optional()
+        .describe("该计划最近创建的运行 ID；运行可以仍在排队。"),
       lastError: scheduleLastErrorSchema.optional(),
       createdAt: z.iso.datetime(),
       updatedAt: z.iso.datetime(),

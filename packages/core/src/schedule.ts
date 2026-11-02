@@ -14,12 +14,13 @@ import {
 } from "@binny/contracts";
 import {
   binConfigurations,
+  manualRuns,
   schedules,
   type Database,
   type Transaction,
 } from "@binny/db";
 import { CronExpressionParser } from "cron-parser";
-import { and, eq, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 
 import { createQueuedRunInTransaction } from "./manual-run.ts";
 import {
@@ -114,7 +115,42 @@ function computeNextDue(
   }
 }
 
-function toSchedule(row: typeof schedules.$inferSelect): Schedule {
+async function latestScheduleRunIds(
+  database: Database | Transaction,
+  binId: string,
+  scheduleIds: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  if (scheduleIds.length === 0) return new Map();
+  const rows = await database
+    .select({
+      scheduleId: manualRuns.scheduleId,
+      runId: manualRuns.runId,
+    })
+    .from(manualRuns)
+    .where(
+      and(
+        eq(manualRuns.binId, binId),
+        inArray(manualRuns.scheduleId, scheduleIds),
+      ),
+    )
+    .orderBy(
+      asc(manualRuns.scheduleId),
+      desc(manualRuns.createdAt),
+      desc(manualRuns.runId),
+    );
+  const latest = new Map<string, string>();
+  for (const row of rows) {
+    if (row.scheduleId !== null && !latest.has(row.scheduleId)) {
+      latest.set(row.scheduleId, row.runId);
+    }
+  }
+  return latest;
+}
+
+function toSchedule(
+  row: typeof schedules.$inferSelect,
+  lastRunId?: string,
+): Schedule {
   return scheduleSchema.parse({
     scheduleId: row.scheduleId,
     binId: row.binId,
@@ -124,6 +160,7 @@ function toSchedule(row: typeof schedules.$inferSelect): Schedule {
     params: row.params,
     enabled: row.enabled,
     nextDueAt: row.nextDueAt.toISOString(),
+    ...(lastRunId === undefined ? {} : { lastRunId }),
     ...(row.lastError === null
       ? {}
       : { lastError: scheduleLastErrorSchema.parse(row.lastError) }),
@@ -163,7 +200,17 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .from(schedules)
           .where(eq(schedules.binId, binId))
           .orderBy(schedules.createdAt, schedules.scheduleId);
-        return { ok: true, value: rows.map(toSchedule) };
+        const lastRunIds = await latestScheduleRunIds(
+          transaction,
+          binId,
+          rows.map(({ scheduleId }) => scheduleId),
+        );
+        return {
+          ok: true,
+          value: rows.map((row) =>
+            toSchedule(row, lastRunIds.get(row.scheduleId)),
+          ),
+        };
       });
     },
 
@@ -187,11 +234,18 @@ export function createScheduleStore(database: Database): ScheduleStore {
           )
           .limit(1);
         const row = rows[0];
-        return row === undefined
-          ? failure(404, "schedule_not_found", "没有找到这个采集计划。", [
-              "scheduleId",
-            ])
-          : { ok: true, value: toSchedule(row) };
+        if (row === undefined) {
+          return failure(404, "schedule_not_found", "没有找到这个采集计划。", [
+            "scheduleId",
+          ]);
+        }
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          row.scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(row.scheduleId)),
+        };
       });
     },
 
@@ -378,7 +432,13 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .where(eq(schedules.scheduleId, scheduleId))
           .returning();
         if (row === undefined) throw new Error("采集计划修改后没有返回记录。");
-        return { ok: true, value: toSchedule(row) };
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(scheduleId)),
+        };
       });
     },
 
@@ -425,7 +485,13 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .returning();
         if (row === undefined)
           throw new Error("采集计划状态修改后没有返回记录。");
-        return { ok: true, value: toSchedule(row) };
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(scheduleId)),
+        };
       });
     },
 
