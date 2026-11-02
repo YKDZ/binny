@@ -5,13 +5,13 @@ x-binny-image: &binny-image
     dockerfile: Dockerfile
 
 x-binny-runtime-watch: &binny-runtime-watch
-  - path: ./collectors/rss/src
+  - path: ./source-adapters/rss/src
     action: rebuild
-  - path: ./collectors/rss/package.json
+  - path: ./source-adapters/rss/package.json
     action: rebuild
-  - path: ./packages/collector-runtime
+  - path: ./packages/source-adapter-runtime
     action: rebuild
-  - path: ./packages/collector-sdk/src
+  - path: ./packages/source-adapter-sdk/src
     action: rebuild
   - path: ./packages/api/src
     action: rebuild
@@ -23,9 +23,9 @@ x-binny-runtime-watch: &binny-runtime-watch
     action: rebuild
   - path: ./packages/server/src
     action: rebuild
-  - path: ./packages/collector-runtime/package.json
+  - path: ./packages/source-adapter-runtime/package.json
     action: rebuild
-  - path: ./packages/collector-sdk/package.json
+  - path: ./packages/source-adapter-sdk/package.json
     action: rebuild
   - path: ./packages/api/package.json
     action: rebuild
@@ -127,10 +127,10 @@ services:
     profiles: [binny-runtime]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/collector.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/source-adapter.js
         BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
@@ -168,10 +168,10 @@ services:
     profiles: [binny-runs]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-source-adapter.js
         BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
@@ -193,10 +193,10 @@ services:
     profiles: [binny-runs]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/manual-runs-collector.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-source-adapter.js
         BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
@@ -218,10 +218,10 @@ services:
     profiles: [binny-rss]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
-        BINNY_COLLECTOR_ENTRY: dist/index.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-rss"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -230,9 +230,9 @@ services:
       BINNY_BIN_ID: binny-rss-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
     volumes:
-      - rss-one-collector-state:/var/lib/binny/collector-state
+      - rss-one-source-adapter-state:/var/lib/binny/source-adapter-state
       - rss-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -245,10 +245,10 @@ services:
     profiles: [binny-rss]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.lightweight
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-rss"
-        BINNY_COLLECTOR_ENTRY: dist/index.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-rss"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -257,9 +257,9 @@ services:
       BINNY_BIN_ID: binny-rss-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
     volumes:
-      - rss-two-collector-state:/var/lib/binny/collector-state
+      - rss-two-source-adapter-state:/var/lib/binny/source-adapter-state
       - rss-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -272,10 +272,10 @@ services:
     profiles: [binny-browser]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.browser
+      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/browser-session-source-adapter.js
     depends_on:
       server:
         condition: service_started
@@ -296,10 +296,10 @@ services:
     profiles: [binny-browser]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.browser
+      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-runtime"
-        BINNY_COLLECTOR_ENTRY: fixture-dist/browser-session-collector.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/browser-session-source-adapter.js
     depends_on:
       server:
         condition: service_started
@@ -336,10 +336,10 @@ services:
     profiles: [binny-linuxdo]
     build:
       context: .
-      dockerfile: packages/collector-runtime/Dockerfile.browser
+      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
       args:
-        BINNY_COLLECTOR_PACKAGE: "@binny/collector-linuxdo"
-        BINNY_COLLECTOR_ENTRY: dist/index.js
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-linuxdo"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -393,9 +393,9 @@ volumes:
   runtime-fifteen-one-owner:
   runtime-fifteen-two-owner:
   rss-one-owner:
-  rss-one-collector-state:
+  rss-one-source-adapter-state:
   rss-two-owner:
-  rss-two-collector-state:
+  rss-two-source-adapter-state:
   browser-one-owner:
   browser-two-owner:
   linuxdo-runtime-owner:

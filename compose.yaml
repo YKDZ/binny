@@ -63,7 +63,7 @@ services:
       BINNY_BIN_ID: ${BINNY_RSS_BIN_ID:-rss}
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_PORT: 8080
-      BINNY_COLLECTOR_STATE_DIRECTORY: /var/lib/binny/collector-state
+      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
     volumes:
       - type: bind
         source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/runtime/rss
@@ -71,8 +71,8 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/collectors/rss
-        target: /var/lib/binny/collector-state
+        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/source-adapters/rss
+        target: /var/lib/binny/source-adapter-state
         bind:
           create_host_path: false
     stop_grace_period: 30s

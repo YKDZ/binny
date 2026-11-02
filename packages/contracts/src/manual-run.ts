@@ -2,7 +2,7 @@ import * as z from "zod";
 
 import {
   binIdSchema,
-  collectorActionNameSchema,
+  sourceAdapterActionNameSchema,
   identityIdSchema,
   jsonObjectSchema,
 } from "./bin-configuration.ts";
@@ -50,7 +50,7 @@ export const manualRunQueueReasonSchema = z.enum([
 export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
-      action: collectorActionNameSchema,
+      action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
     })
     .strict(),
@@ -179,9 +179,9 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
     .object({
       runId: runIdSchema,
       binId: binIdSchema,
-      action: collectorActionNameSchema,
-      collectorId: postgresTextSchema.min(1),
-      collectorVersion: postgresTextSchema.min(1),
+      action: sourceAdapterActionNameSchema,
+      sourceAdapterId: postgresTextSchema.min(1),
+      sourceAdapterVersion: postgresTextSchema.min(1),
       status: manualRunStatusSchema,
       trigger: manualRunTriggerSchema,
       queueReason: manualRunQueueReasonSchema.optional(),
@@ -201,9 +201,9 @@ export const manualRunExecutionSchema = withPostgresJsonSchemaProjection(
       runId: runIdSchema,
       binId: binIdSchema,
       identityId: identityIdSchema,
-      collectorId: postgresTextSchema.min(1),
-      collectorVersion: postgresTextSchema.min(1),
-      action: collectorActionNameSchema,
+      sourceAdapterId: postgresTextSchema.min(1),
+      sourceAdapterVersion: postgresTextSchema.min(1),
+      action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
       config: jsonObjectSchema,
       targets: z.array(z.unknown()),

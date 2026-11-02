@@ -55,11 +55,11 @@ try {
   await run("docker", [
     "build",
     "--file",
-    "packages/collector-runtime/Dockerfile.lightweight",
+    "packages/source-adapter-runtime/Dockerfile.lightweight",
     "--build-arg",
-    "BINNY_COLLECTOR_PACKAGE=@binny/collector-runtime",
+    "BINNY_SOURCE_ADAPTER_PACKAGE=@binny/source-adapter-runtime",
     "--build-arg",
-    "BINNY_COLLECTOR_ENTRY=fixture-dist/collector.js",
+    "BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/source-adapter.js",
     "--build-arg",
     "BINNY_BUILD_FIXTURE=1",
     "--tag",
@@ -97,7 +97,7 @@ try {
   }
   assert.deepStrictEqual(manifest, {
     protocolVersion: 5,
-    collector: {
+    sourceAdapter: {
       id: "binny-runtime.protocol-fixture",
       version: "1.0.0",
       environment: {
@@ -112,6 +112,14 @@ try {
       actions: {
         check: {
           description: "说明轻量测试环境未配置真实信源。",
+          params: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            properties: {},
+            type: "object",
+          },
+        },
+        collect: {
+          description: "运行轻量测试采集动作。",
           params: {
             $schema: "https://json-schema.org/draft/2020-12/schema",
             properties: {},

@@ -452,9 +452,9 @@ async function readCurrentSearchPage(
           expression: aggregateByView(contextual.runId),
           kind: "text",
         };
-      case "collectorVersion":
+      case "sourceAdapterVersion":
         return {
-          expression: aggregateByView(contextual.collectorVersion),
+          expression: aggregateByView(contextual.sourceAdapterVersion),
           kind: "text",
         };
       case "observedAt":
@@ -676,7 +676,7 @@ async function readCurrentSearchPage(
       revisionId: contextual.revisionId,
       archiveSequence: contextual.archiveSequence,
       runId: contextual.runId,
-      collectorVersion: contextual.collectorVersion,
+      sourceAdapterVersion: contextual.sourceAdapterVersion,
       sourceRef: contextual.sourceRef,
       sourceModifiedAt: contextual.sourceModifiedAt,
       completeness: contextual.completeness,
@@ -728,8 +728,8 @@ async function readCurrentSearchPage(
         ? { recordedAt: isoTimestamp(row.recordedAt) }
         : {}),
       ...(selectedFields.has("runId") ? optionalText("runId", row.runId) : {}),
-      ...(selectedFields.has("collectorVersion")
-        ? optionalText("collectorVersion", row.collectorVersion)
+      ...(selectedFields.has("sourceAdapterVersion")
+        ? optionalText("sourceAdapterVersion", row.sourceAdapterVersion)
         : {}),
       ...(row.hitStart === null || row.hitEnd === null
         ? {}
@@ -896,7 +896,7 @@ async function readCurrentSearchPage(
                 observedAt: gapCommit.observedAt,
                 recordedAt: gapCommit.recordedAt,
                 runId: gapCommit.runId,
-                collectorVersion: gapCommit.collectorVersion,
+                sourceAdapterVersion: gapCommit.sourceAdapterVersion,
               },
             )
             .from(viewsCte)
@@ -992,7 +992,7 @@ async function readCurrentSearchPage(
               observedAt: relationLatest.observedAt,
               recordedAt: relationLatest.recordedAt,
               runId: relationLatest.runId,
-              collectorVersion: relationLatest.collectorVersion,
+              sourceAdapterVersion: relationLatest.sourceAdapterVersion,
             })
             .from(viewsCte)
             .innerJoin(relation, relationEndpoint!)
@@ -1041,7 +1041,7 @@ async function readCurrentSearchPage(
             observedAt: activeRelations.observedAt,
             recordedAt: activeRelations.recordedAt,
             runId: activeRelations.runId,
-            collectorVersion: activeRelations.collectorVersion,
+            sourceAdapterVersion: activeRelations.sourceAdapterVersion,
           })
           .from(activeRelations);
         const includeGaps =
@@ -1081,7 +1081,7 @@ async function readCurrentSearchPage(
                   observedAt: latestGaps.observedAt,
                   recordedAt: latestGaps.recordedAt,
                   runId: latestGaps.runId,
-                  collectorVersion: latestGaps.collectorVersion,
+                  sourceAdapterVersion: latestGaps.sourceAdapterVersion,
                 })
                 .from(latestGaps),
             )
@@ -1154,7 +1154,7 @@ async function readCurrentSearchPage(
             relationObservedAt: limited.observedAt,
             relationRecordedAt: limited.recordedAt,
             relationRunId: limited.runId,
-            relationCollectorVersion: limited.collectorVersion,
+            relationSourceAdapterVersion: limited.sourceAdapterVersion,
           })
           .from(limited)
           .leftJoin(fromItem, eq(fromItem.itemId, limited.fromItemId))
@@ -1183,7 +1183,10 @@ async function readCurrentSearchPage(
             observedAt: isoTimestamp(row.relationObservedAt),
             recordedAt: isoTimestamp(row.relationRecordedAt),
             ...optionalText("runId", row.relationRunId),
-            ...optionalText("collectorVersion", row.relationCollectorVersion),
+            ...optionalText(
+              "sourceAdapterVersion",
+              row.relationSourceAdapterVersion,
+            ),
           };
           if (row.status === "deleted") {
             return {

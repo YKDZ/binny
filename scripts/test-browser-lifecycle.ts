@@ -11,7 +11,7 @@ import type { Browser as PlaywrightBrowser, Page } from "playwright-core";
 
 import {
   copyImageBuildContext,
-  setBuildContextCollectorVersion,
+  setBuildContextSourceAdapterVersion,
 } from "./binny-image-update-context.ts";
 
 type ProcessResult = {
@@ -547,10 +547,10 @@ async function protocol4RuntimeManifest(
         },
       );
       const result = JSON.parse(payload.stdout) as {
-        readonly collector?: Record<string, unknown>;
+        readonly sourceAdapter?: Record<string, unknown>;
       };
-      assert.ok(result.collector !== undefined);
-      return result.collector;
+      assert.ok(result.sourceAdapter !== undefined);
+      return result.sourceAdapter;
     } catch (error) {
       lastError = String(error);
       await delay(250);
@@ -752,12 +752,12 @@ async function buildAcceptedProtocol4Images(): Promise<void> {
     "--file",
     path.join(
       protocol4Worktree,
-      "packages/collector-runtime/Dockerfile.browser",
+      "packages/source-adapter-runtime/Dockerfile.browser",
     ),
     "--build-arg",
-    "BINNY_COLLECTOR_PACKAGE=@binny/collector-runtime",
+    "BINNY_SOURCE_ADAPTER_PACKAGE=@binny/source-adapter-runtime",
     "--build-arg",
-    "BINNY_COLLECTOR_ENTRY=fixture-dist/browser-session-collector.js",
+    "BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/browser-session-source-adapter.js",
     protocol4Worktree,
   ]);
   assert.equal(
@@ -958,10 +958,10 @@ async function runtimeManifest(
     ]);
     if (result.code === 0) {
       const payload = JSON.parse(result.stdout) as {
-        readonly collector?: Record<string, unknown>;
+        readonly sourceAdapter?: Record<string, unknown>;
       };
-      assert.ok(payload.collector !== undefined);
-      return payload.collector;
+      assert.ok(payload.sourceAdapter !== undefined);
+      return payload.sourceAdapter;
     }
     lastError = result.stderr;
     await delay(250);
@@ -969,13 +969,13 @@ async function runtimeManifest(
   throw new Error(`正式浏览器运行器没有发布清单：${lastError}`);
 }
 
-function collectorVersion(manifest: Record<string, unknown>): string {
+function sourceAdapterVersion(manifest: Record<string, unknown>): string {
   const version = manifest.version;
   assert.ok(typeof version === "string" && version.length > 0);
   return version;
 }
 
-function collectorManifestWithVersion(
+function sourceAdapterManifestWithVersion(
   manifest: Record<string, unknown>,
   version: string,
 ): Record<string, unknown> {
@@ -1064,16 +1064,16 @@ async function buildBrowserImageUpdate(
   candidateManifest: Record<string, unknown>,
   buildContextDirectory: string,
 ): Promise<BrowserImageUpdate> {
-  const candidateVersion = collectorVersion(candidateManifest);
+  const candidateVersion = sourceAdapterVersion(candidateManifest);
   const baselineVersion = candidateVersion + "-image-a";
-  const baselineManifest = collectorManifestWithVersion(
+  const baselineManifest = sourceAdapterManifestWithVersion(
     candidateManifest,
     baselineVersion,
   );
   await copyImageBuildContext(repositoryRoot, buildContextDirectory);
-  await setBuildContextCollectorVersion(
+  await setBuildContextSourceAdapterVersion(
     buildContextDirectory,
-    "packages/collector-runtime/test/fixtures/browser-session-collector.ts",
+    "packages/source-adapter-runtime/test/fixtures/browser-session-source-adapter.ts",
     "binny-browser.browser-session-fixture",
     baselineVersion,
   );
@@ -1270,7 +1270,7 @@ async function createBin(
     "bin",
     "create",
     binId,
-    "--collector",
+    "--source-adapter",
     JSON.stringify(manifest),
     "--identity",
     `identity-${binId}`,
@@ -1300,24 +1300,24 @@ async function updateBin(
   );
 }
 
-async function updateCollectorManifest(
+async function updateSourceAdapterManifest(
   binId: string,
   manifest: Record<string, unknown>,
 ): Promise<{ readonly id: string; readonly version: string }> {
   const updated = cliData<{
     readonly id: string;
-    readonly collector: { readonly version: string };
+    readonly sourceAdapter: { readonly version: string };
   }>(
     await cli([
       "bin",
       "update",
       binId,
-      "--collector",
+      "--source-adapter",
       JSON.stringify(manifest),
     ]),
     "updated",
   );
-  return { id: updated.id, version: updated.collector.version };
+  return { id: updated.id, version: updated.sourceAdapter.version };
 }
 
 async function readBin(binId: string): Promise<Bin> {
@@ -2165,7 +2165,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
         "bin",
         "create",
         "binny-browser-one",
-        "--collector",
+        "--source-adapter",
         JSON.stringify(legacyManifest),
         "--identity",
         "identity-binny-capacity-legacy",
@@ -2246,7 +2246,7 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
         "bin",
         "create",
         "binny-browser-two",
-        "--collector",
+        "--source-adapter",
         JSON.stringify(currentManifest),
         "--identity",
         "identity-binny-capacity-current",
@@ -2484,7 +2484,7 @@ async function main(): Promise<void> {
   unsupportedEnvironment.browser = {
     ...unsupportedEnvironment.browser,
     profileReuseAfterRestart: false,
-    profileReuseUnavailableReason: "此采集器依赖无法跨重启保存的会话状态。",
+    profileReuseUnavailableReason: "此信源适配器依赖无法跨重启保存的会话状态。",
   };
   const createWithoutReason = structuredClone(unsupported);
   delete (
@@ -2497,7 +2497,7 @@ async function main(): Promise<void> {
       "bin",
       "create",
       "binny-idle-no-reason",
-      "--collector",
+      "--source-adapter",
       JSON.stringify(createWithoutReason),
       "--identity",
       "identity-binny-idle-no-reason",
@@ -2506,7 +2506,12 @@ async function main(): Promise<void> {
       "--targets",
       "[]",
     ]),
-    ["collector", "environment", "browser", "profileReuseUnavailableReason"],
+    [
+      "sourceAdapter",
+      "environment",
+      "browser",
+      "profileReuseUnavailableReason",
+    ],
   );
   const incompatiblePolicy = cliFailure<{
     readonly code: string;
@@ -2516,7 +2521,7 @@ async function main(): Promise<void> {
       "bin",
       "create",
       "binny-idle-incompatible",
-      "--collector",
+      "--source-adapter",
       JSON.stringify(unsupported),
       "--identity",
       "identity-binny-idle-incompatible",
@@ -2561,7 +2566,7 @@ async function main(): Promise<void> {
       "bin",
       "update",
       "binny-browser-one",
-      "--collector",
+      "--source-adapter",
       JSON.stringify(unsupported),
     ]),
     "invalid_configuration",
@@ -2885,14 +2890,14 @@ async function main(): Promise<void> {
     browserImage,
     browserImageUpdate.candidateImageId,
     async () => {
-      updatedBrowserBin = await updateCollectorManifest(
+      updatedBrowserBin = await updateSourceAdapterManifest(
         "binny-browser-one",
         browserImageUpdate.candidateManifest,
       );
       assert.equal(updatedBrowserBin.id, "binny-browser-one");
       assert.equal(
         updatedBrowserBin.version,
-        collectorVersion(browserImageUpdate.candidateManifest),
+        sourceAdapterVersion(browserImageUpdate.candidateManifest),
       );
     },
   );
@@ -2934,7 +2939,9 @@ async function main(): Promise<void> {
   process.stdout.write(
     `浏览器镜像更新实测：${JSON.stringify({
       binId: updatedBrowserBin.id,
-      baselineVersion: collectorVersion(browserImageUpdate.baselineManifest),
+      baselineVersion: sourceAdapterVersion(
+        browserImageUpdate.baselineManifest,
+      ),
       candidateVersion: updatedBrowserBin.version,
       baselineImageId: browserImageUpdate.baselineImageId,
       candidateImageId: browserImageUpdate.candidateImageId,

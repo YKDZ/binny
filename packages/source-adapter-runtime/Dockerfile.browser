@@ -1,0 +1,99 @@
+ARG BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/browser-session-source-adapter.js
+
+FROM node:24.21.0-bookworm-slim AS browser-base
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends \
+    fonts-freefont-ttf \
+    fonts-ipafont-gothic \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-tlwg-loma-otf \
+    fonts-unifont \
+    fonts-wqy-zenhei \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libatspi2.0-0 \
+    libcairo2 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgbm1 \
+    libglib2.0-0 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    util-linux \
+    x11vnc \
+    xfonts-scalable \
+    xvfb \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable \
+  && corepack prepare pnpm@12.9.1 --activate
+
+FROM browser-base AS build
+
+WORKDIR /workspace
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/api/package.json packages/api/
+COPY packages/binny/package.json packages/binny/
+COPY packages/source-adapter-runtime/package.json packages/source-adapter-runtime/
+COPY packages/source-adapter-sdk/package.json packages/source-adapter-sdk/
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
+COPY packages/server/package.json packages/server/
+COPY packages/tooling-config/package.json packages/tooling-config/
+COPY source-adapters/linuxdo/package.json source-adapters/linuxdo/
+COPY source-adapters/rss/package.json source-adapters/rss/
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @binny/source-adapter-runtime exec playwright-core install chromium --no-shell
+COPY . .
+
+ARG BINNY_SOURCE_ADAPTER_PACKAGE
+ARG BINNY_SOURCE_ADAPTER_ENTRY
+
+RUN test -n "$BINNY_SOURCE_ADAPTER_PACKAGE" \
+  && test -n "$BINNY_SOURCE_ADAPTER_ENTRY" \
+  && pnpm --filter "${BINNY_SOURCE_ADAPTER_PACKAGE}..." build \
+  && pnpm --filter @binny/source-adapter-runtime build \
+  && pnpm --filter @binny/source-adapter-runtime build:fixture \
+  && pnpm --filter @binny/source-adapter-runtime --prod deploy --legacy /runtime-deploy \
+  && pnpm --filter "$BINNY_SOURCE_ADAPTER_PACKAGE" --prod deploy --legacy /deploy \
+  && cp -r packages/source-adapter-runtime/fixture-dist /deploy/fixture-dist \
+  && test -f "/deploy/${BINNY_SOURCE_ADAPTER_ENTRY}" \
+  && cp -r /runtime-deploy /deploy/binny-runtime
+
+FROM browser-base AS browser
+
+ARG BINNY_SOURCE_ADAPTER_ENTRY
+ENV NODE_ENV=production
+ENV BINNY_SOURCE_ADAPTER_ENTRY="/app/${BINNY_SOURCE_ADAPTER_ENTRY}"
+ENV BINNY_RUNTIME_OWNER_LOCK_PATH=/var/lib/binny/runtime/owner.lock
+ENV BINNY_RUNTIME_ENVIRONMENT=browser
+ENV BINNY_BROWSER_PROFILE_REUSE=true
+ENV BINNY_BROWSER_PROFILE_DIRECTORY=/var/lib/binny/runtime/browser-profile
+ENV DISPLAY=:99
+WORKDIR /app
+COPY --from=build --chown=node:node /deploy /app
+COPY --from=build --chown=node:node /ms-playwright /ms-playwright
+RUN command -v flock \
+  && command -v Xvfb \
+  && command -v x11vnc \
+  && mkdir -p /var/lib/binny/runtime /var/lib/binny/source-adapter-state \
+  && chown -R node:node /var/lib/binny/runtime /var/lib/binny/source-adapter-state
+USER node
+EXPOSE 8080
+ENTRYPOINT ["flock", "--exclusive", "--nonblock", "--no-fork", "/var/lib/binny/runtime/owner.lock", "node", "/app/binny-runtime/dist/entry.js"]

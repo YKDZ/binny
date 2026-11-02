@@ -93,7 +93,7 @@ type AggregateUnitColumns = {
   readonly sourceKey: SQLWrapper;
   readonly binId: SQLWrapper;
   readonly runId: SQLWrapper;
-  readonly collectorVersion: SQLWrapper;
+  readonly sourceAdapterVersion: SQLWrapper;
   readonly observedAt: SQLWrapper;
   readonly recordedAt: SQLWrapper;
   readonly archiveSequence: SQLWrapper;
@@ -246,8 +246,8 @@ function contentFieldValue(
       return units.binId;
     case "runId":
       return units.runId;
-    case "collectorVersion":
-      return units.collectorVersion;
+    case "sourceAdapterVersion":
+      return units.sourceAdapterVersion;
     case "observedAt":
       return sql`to_char(${units.observedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     case "recordedAt":
@@ -278,8 +278,8 @@ function relationFieldValue(
       return units.binId;
     case "runId":
       return units.runId;
-    case "collectorVersion":
-      return units.collectorVersion;
+    case "sourceAdapterVersion":
+      return units.sourceAdapterVersion;
     case "observedAt":
       return sql`to_char(${units.observedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     case "recordedAt":
@@ -421,8 +421,8 @@ function createUnitRows(
           sourceKey: sql`NULL::text`.mapWith(String).nullable().as("sourceKey"),
           binId: sql`${relationStep.binId}`.as("binId"),
           runId: sql`${relationStep.runId}`.as("runId"),
-          collectorVersion: sql`${relationStep.collectorVersion}`.as(
-            "collectorVersion",
+          sourceAdapterVersion: sql`${relationStep.sourceAdapterVersion}`.as(
+            "sourceAdapterVersion",
           ),
           observedAt: sql`${relationStep.observedAt}`.as("observedAt"),
           recordedAt: sql`${relationStep.recordedAt}`.as("recordedAt"),
@@ -456,8 +456,8 @@ function createUnitRows(
         sourceKey: sql`${matched.sourceKey}`.as("sourceKey"),
         binId: sql`${matched.binId}`.as("binId"),
         runId: sql`${matched.runId}`.as("runId"),
-        collectorVersion: sql`${matched.collectorVersion}`.as(
-          "collectorVersion",
+        sourceAdapterVersion: sql`${matched.sourceAdapterVersion}`.as(
+          "sourceAdapterVersion",
         ),
         observedAt: sql`${matched.observedAt}`.as("observedAt"),
         recordedAt: sql`${matched.recordedAt}`.as("recordedAt"),
@@ -525,7 +525,9 @@ function prepareAggregationRows(
         sourceKey: sql`${units.sourceKey}`.as("sourceKey"),
         binId: sql`${units.binId}`.as("binId"),
         runId: sql`${units.runId}`.as("runId"),
-        collectorVersion: sql`${units.collectorVersion}`.as("collectorVersion"),
+        sourceAdapterVersion: sql`${units.sourceAdapterVersion}`.as(
+          "sourceAdapterVersion",
+        ),
         observedAt: sql`${units.observedAt}`.as("observedAt"),
         recordedAt: sql`${units.recordedAt}`.as("recordedAt"),
         archiveSequence: sql`${units.archiveSequence}`.as("archiveSequence"),

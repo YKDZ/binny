@@ -398,8 +398,8 @@ export const archiveSubmissionInputSchema = withArchiveJsonSchemaProjection(
       requestId: nonEmptyText.max(256, "请求标识不能超过 256 个字符。"),
       binId: binIdSchema,
       runId: nonEmptyText.max(128, "run 标识不能超过 128 个字符。").optional(),
-      collectorVersion: nonEmptyText
-        .max(256, "采集器版本不能超过 256 个字符。")
+      sourceAdapterVersion: nonEmptyText
+        .max(256, "信源适配器版本不能超过 256 个字符。")
         .optional(),
       observedAt: timestampSchema.optional(),
       items: z.array(archiveItemInputSchema).max(100),
@@ -542,7 +542,7 @@ export const archiveObservationSchema = z
     ordinal: z.number().int().nonnegative(),
     binId: binIdSchema,
     runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    sourceAdapterVersion: nonEmptyText.max(256).optional(),
     revisionId: archiveIdSchema,
     sourceModifiedAt: timestampSchema.optional(),
     observedAt: timestampSchema,
@@ -559,7 +559,7 @@ const archiveViewSchema = z
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    sourceAdapterVersion: nonEmptyText.max(256).optional(),
     state: archiveItemStateSchema,
     diagnostics: z.array(archiveDiagnosticSchema).optional(),
   })
@@ -580,7 +580,7 @@ export const archiveCommitSchema = withArchiveJsonSchemaProjection(
       archiveSeq: archiveSequenceSchema,
       binId: binIdSchema,
       runId: nonEmptyText.max(128).optional(),
-      collectorVersion: nonEmptyText.max(256).optional(),
+      sourceAdapterVersion: nonEmptyText.max(256).optional(),
       observedAt: timestampSchema,
       recordedAt: timestampSchema,
       items: z.array(archiveCommitItemSchema),
@@ -723,13 +723,13 @@ export const archiveSearchFieldSchema = z.enum([
   "body.searchText",
   "binId",
   "runId",
-  "collectorVersion",
+  "sourceAdapterVersion",
   "observedAt",
   "recordedAt",
 ]);
 export type ArchiveSearchField = z.infer<typeof archiveSearchFieldSchema>;
 
-/** 正文条件只匹配采集器提供的 searchText；正则使用 PostgreSQL ARE。 */
+/** 正文条件只匹配信源适配器提供的 searchText；正则使用 PostgreSQL ARE。 */
 export const archiveSearchTextSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -1050,7 +1050,7 @@ export const archiveSearchOrderFieldSchema = z.enum([
   "revisionId",
   "archiveSeq",
   "runId",
-  "collectorVersion",
+  "sourceAdapterVersion",
   "observedAt",
   "recordedAt",
   "metadata",
@@ -1122,7 +1122,7 @@ const archiveSearchProjectionSchema = z
         "sourceModifiedAt",
         "capture.completeness",
         "runId",
-        "collectorVersion",
+        "sourceAdapterVersion",
         "observedAt",
         "recordedAt",
         "hit.context",
@@ -1143,7 +1143,7 @@ const archiveSearchProjectionSchema = z
     "sourceModifiedAt",
     "capture.completeness",
     "runId",
-    "collectorVersion",
+    "sourceAdapterVersion",
     "observedAt",
     "recordedAt",
     "hit.context",
@@ -1833,7 +1833,7 @@ const archiveSearchExpansionObservationSchema = z
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    sourceAdapterVersion: nonEmptyText.max(256).optional(),
   })
   .strict();
 
@@ -1913,7 +1913,7 @@ const archiveSearchMatchSchema = z
     observedAt: timestampSchema.optional(),
     recordedAt: timestampSchema.optional(),
     runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    sourceAdapterVersion: nonEmptyText.max(256).optional(),
     hit: archiveSearchHitSchema.optional(),
     json: z.array(archiveSearchJsonProjectionResultSchema).optional(),
     expansions: z.array(archiveSearchExpansionResultSchema).optional(),

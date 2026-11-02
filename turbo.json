@@ -40,8 +40,8 @@
       "dependsOn": [
         "@binny/api#build",
         "@binny/binny#build",
-        "@binny/collector-sdk#build",
-        "@binny/collector-rss#build"
+        "@binny/source-adapter-sdk#build",
+        "@binny/source-adapter-rss#build"
       ],
       "passThroughEnv": [
         "BINNY_E2E_HOST",
@@ -70,13 +70,13 @@
         "packages/api/scripts/**",
         "packages/api/test-consumer/**",
         "packages/binny/src/**",
-        "packages/collector-sdk/scripts/**",
-        "packages/collector-sdk/src/**",
-        "packages/collector-runtime/Dockerfile.lightweight",
-        "packages/collector-runtime/src/**",
-        "packages/collector-runtime/test/fixtures/**",
-        "collectors/rss/package.json",
-        "collectors/rss/src/**",
+        "packages/source-adapter-sdk/scripts/**",
+        "packages/source-adapter-sdk/src/**",
+        "packages/source-adapter-runtime/Dockerfile.lightweight",
+        "packages/source-adapter-runtime/src/**",
+        "packages/source-adapter-runtime/test/fixtures/**",
+        "source-adapters/rss/package.json",
+        "source-adapters/rss/src/**",
         "packages/contracts/src/**",
         "packages/core/package.json",
         "packages/core/src/**",
@@ -88,7 +88,7 @@
       "cache": false,
       "tags": ["quality:heavy"]
     },
-    "//#test:linuxdo-collector": {
+    "//#test:linuxdo-source-adapter": {
       "passThroughEnv": [
         "BINNY_DISCOVERY_PUBLISHED_HOST",
         "BINNY_DISCOVERY_API_SUBNET",
@@ -99,15 +99,15 @@
       "inputs": [
         "compose.acceptance.yaml",
         "Dockerfile",
-        "packages/collector-runtime/Dockerfile.browser",
-        "scripts/test-linuxdo-collector.ts",
+        "packages/source-adapter-runtime/Dockerfile.browser",
+        "scripts/test-linuxdo-source-adapter.ts",
         "scripts/binny-e2e-linuxdo-source.ts",
         "scripts/binny-e2e-linuxdo-journey.ts",
         "packages/api/src/**",
         "packages/binny/src/**",
-        "packages/collector-runtime/package.json",
-        "packages/collector-runtime/src/**",
-        "packages/collector-sdk/src/**",
+        "packages/source-adapter-runtime/package.json",
+        "packages/source-adapter-runtime/src/**",
+        "packages/source-adapter-sdk/src/**",
         "packages/contracts/src/**",
         "packages/core/package.json",
         "packages/core/src/**",
@@ -115,8 +115,8 @@
         "packages/server/package.json",
         "packages/server/src/**",
         "packages/tooling-config/**",
-        "collectors/linuxdo/package.json",
-        "collectors/linuxdo/src/**",
+        "source-adapters/linuxdo/package.json",
+        "source-adapters/linuxdo/src/**",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
         "package.json"
@@ -137,9 +137,9 @@
       "inputs": [
         "scripts/test-lightweight-image.ts",
         ".dockerignore",
-        "packages/collector-runtime/Dockerfile.lightweight",
-        "packages/collector-runtime/**",
-        "packages/collector-sdk/**",
+        "packages/source-adapter-runtime/Dockerfile.lightweight",
+        "packages/source-adapter-runtime/**",
+        "packages/source-adapter-sdk/**",
         "packages/api/**",
         "packages/contracts/**",
         "packages/core/package.json",
@@ -161,15 +161,15 @@
       "inputs": [
         "compose.acceptance.yaml",
         "Dockerfile",
-        "packages/collector-runtime/Dockerfile.browser",
+        "packages/source-adapter-runtime/Dockerfile.browser",
         "scripts/binny-image-update-context.ts",
         "scripts/test-browser-lifecycle.ts",
         "packages/api/src/**",
         "packages/binny/src/**",
-        "packages/collector-runtime/package.json",
-        "packages/collector-runtime/src/**",
-        "packages/collector-runtime/test/fixtures/browser-session-collector.ts",
-        "packages/collector-sdk/src/**",
+        "packages/source-adapter-runtime/package.json",
+        "packages/source-adapter-runtime/src/**",
+        "packages/source-adapter-runtime/test/fixtures/browser-session-source-adapter.ts",
+        "packages/source-adapter-sdk/src/**",
         "packages/contracts/src/**",
         "packages/core/package.json",
         "packages/core/src/**",
@@ -195,12 +195,12 @@
       "inputs": [
         "compose.acceptance.yaml",
         "Dockerfile",
-        "packages/collector-runtime/Dockerfile.lightweight",
+        "packages/source-adapter-runtime/Dockerfile.lightweight",
         "scripts/test-runtime-connections.ts",
         "packages/api/src/**",
         "packages/binny/src/**",
-        "packages/collector-runtime/src/**",
-        "packages/collector-runtime/test/fixtures/**",
+        "packages/source-adapter-runtime/src/**",
+        "packages/source-adapter-runtime/test/fixtures/**",
         "packages/contracts/src/**",
         "packages/core/src/**",
         "packages/core/package.json",
@@ -266,25 +266,25 @@
           "allow": ["binny:api", "binny:contracts", "binny:tooling"]
         }
       },
-      "binny:collector-sdk": {
+      "binny:source-adapter-sdk": {
         "dependencies": {
           "allow": ["binny:api", "binny:contracts", "binny:tooling"]
         }
       },
-      "binny:collector-runtime": {
+      "binny:source-adapter-runtime": {
         "dependencies": {
           "allow": [
-            "binny:collector-sdk",
+            "binny:source-adapter-sdk",
             "binny:api",
             "binny:contracts",
             "binny:tooling"
           ]
         }
       },
-      "binny:collector": {
+      "binny:source-adapter": {
         "dependencies": {
           "allow": [
-            "binny:collector-sdk",
+            "binny:source-adapter-sdk",
             "binny:api",
             "binny:contracts",
             "binny:tooling"

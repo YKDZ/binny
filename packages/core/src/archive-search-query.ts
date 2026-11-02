@@ -70,7 +70,7 @@ type SearchFields = {
   readonly latest: {
     readonly binId: SQLWrapper;
     readonly runId: SQLWrapper;
-    readonly collectorVersion: SQLWrapper;
+    readonly sourceAdapterVersion: SQLWrapper;
     readonly observedAt: SQLWrapper;
     readonly recordedAt: SQLWrapper;
   };
@@ -143,8 +143,8 @@ function searchFieldExpression(
       return { expression: fields.latest.binId, kind: "text" };
     case "runId":
       return { expression: fields.latest.runId, kind: "text" };
-    case "collectorVersion":
-      return { expression: fields.latest.collectorVersion, kind: "text" };
+    case "sourceAdapterVersion":
+      return { expression: fields.latest.sourceAdapterVersion, kind: "text" };
     case "observedAt":
       return { expression: fields.latest.observedAt, kind: "timestamp" };
     case "recordedAt":
@@ -295,7 +295,7 @@ export function buildArchiveMatchedQuery(
     archiveSequence: archiveCommits.archiveSequence,
     binId: archiveCommits.binId,
     runId: archiveCommits.runId,
-    collectorVersion: archiveCommits.collectorVersion,
+    sourceAdapterVersion: archiveCommits.sourceAdapterVersion,
     observedAt: archiveCommits.observedAt,
     recordedAt: archiveCommits.recordedAt,
     ordinal: archiveObservations.ordinal,
@@ -368,7 +368,7 @@ export function buildArchiveMatchedQuery(
     latest: {
       binId: latest.binId,
       runId: latest.runId,
-      collectorVersion: latest.collectorVersion,
+      sourceAdapterVersion: latest.sourceAdapterVersion,
       observedAt: latest.observedAt,
       recordedAt: latest.recordedAt,
     },
@@ -481,7 +481,7 @@ export function buildArchiveMatchedQuery(
       latest: {
         binId: targetLatest.binId,
         runId: targetLatest.runId,
-        collectorVersion: targetLatest.collectorVersion,
+        sourceAdapterVersion: targetLatest.sourceAdapterVersion,
         observedAt: targetLatest.observedAt,
         recordedAt: targetLatest.recordedAt,
       },
@@ -532,7 +532,7 @@ export function buildArchiveMatchedQuery(
       'observedAt', ${latestRelation.observedAt},
       'recordedAt', ${latestRelation.recordedAt},
       'runId', ${latestRelation.runId},
-      'collectorVersion', ${latestRelation.collectorVersion}
+      'sourceAdapterVersion', ${latestRelation.sourceAdapterVersion}
     ))`;
     // JSON 只作为路径依据的局部投影；archiveSeq 在数据库端转成文本后再序列化。
     const evidence = includeEvidence
@@ -567,7 +567,7 @@ export function buildArchiveMatchedQuery(
         observedAt: latestRelation.observedAt,
         recordedAt: latestRelation.recordedAt,
         runId: latestRelation.runId,
-        collectorVersion: latestRelation.collectorVersion,
+        sourceAdapterVersion: latestRelation.sourceAdapterVersion,
         direction: relationDirection.as("direction"),
         evidence: evidence.mapWith(archiveRevisions.stateData).as("evidence"),
       })

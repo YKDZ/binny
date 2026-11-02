@@ -77,7 +77,7 @@ const archiveRelationObservationProvenanceSchema = z
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     runId: nonEmptyText.max(128).optional(),
-    collectorVersion: nonEmptyText.max(256).optional(),
+    sourceAdapterVersion: nonEmptyText.max(256).optional(),
   })
   .strict();
 

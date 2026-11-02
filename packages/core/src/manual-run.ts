@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   binConfigurationSettingsSchema,
-  collectorManifestStoredSchema,
+  sourceAdapterManifestStoredSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
   manualRunCheckInputSchema,
@@ -39,7 +39,7 @@ import {
 import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
-import { validateCollectorActionParameters } from "./bin-configuration.ts";
+import { validateSourceAdapterActionParameters } from "./bin-configuration.ts";
 import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { hasActiveHumanSession } from "./human-session.ts";
 import {
@@ -51,8 +51,8 @@ import { readRuntimeExecution } from "./runtime-connection.ts";
 const runSelection = {
   runId: manualRuns.runId,
   binId: manualRuns.binId,
-  collectorId: manualRuns.collectorId,
-  collectorVersion: manualRuns.collectorVersion,
+  sourceAdapterId: manualRuns.sourceAdapterId,
+  sourceAdapterVersion: manualRuns.sourceAdapterVersion,
   action: manualRuns.action,
   status: manualRuns.status,
   triggerType: manualRuns.triggerType,
@@ -160,7 +160,7 @@ async function readRun(
   const [row] = await database
     .select({
       ...runSelection,
-      collectorSnapshot: manualRuns.collectorSnapshot,
+      sourceAdapterSnapshot: manualRuns.sourceAdapterSnapshot,
       runtimeOnline: exists(
         database
           .select({ binId: runtimeConnections.binId })
@@ -254,8 +254,8 @@ async function readRun(
                 : null;
   if (
     queueReason === null &&
-    collectorManifestStoredSchema.parse(row.collectorSnapshot).environment
-      .browser.required
+    sourceAdapterManifestStoredSchema.parse(row.sourceAdapterSnapshot)
+      .environment.browser.required
   ) {
     const [owner] = await database
       .select({
@@ -335,8 +335,8 @@ async function rowToRun(
     binId: row.binId,
     action: row.action,
     trigger: runTrigger(row),
-    collectorId: row.collectorId,
-    collectorVersion: row.collectorVersion,
+    sourceAdapterId: row.sourceAdapterId,
+    sourceAdapterVersion: row.sourceAdapterVersion,
     status: row.status,
     ...(row.queueReason === null ? {} : { queueReason: row.queueReason }),
     ...(row.cancelRequestedAt === null
@@ -368,7 +368,7 @@ async function rowToRun(
 
 type RunBinSnapshot = {
   readonly id: string;
-  readonly collector: unknown;
+  readonly sourceAdapter: unknown;
   readonly identityId: string;
   readonly config: unknown;
   readonly targets: unknown;
@@ -410,13 +410,13 @@ export async function createQueuedRunInTransaction(
 
   const configuredBin = binConfigurationSettingsSchema.parse({
     id: bin.id,
-    collector: bin.collector,
+    sourceAdapter: bin.sourceAdapter,
     identityId: bin.identityId,
     config: bin.config,
     targets: bin.targets,
   });
-  const action = validateCollectorActionParameters(
-    configuredBin.collector,
+  const action = validateSourceAdapterActionParameters(
+    configuredBin.sourceAdapter,
     checkedInput.data.action,
     checkedInput.data.params,
   );
@@ -439,9 +439,9 @@ export async function createQueuedRunInTransaction(
       runId: randomUUID(),
       binId: bin.id,
       identityId: configuredBin.identityId,
-      collectorSnapshot: configuredBin.collector,
-      collectorId: configuredBin.collector.id,
-      collectorVersion: configuredBin.collector.version,
+      sourceAdapterSnapshot: configuredBin.sourceAdapter,
+      sourceAdapterId: configuredBin.sourceAdapter.id,
+      sourceAdapterVersion: configuredBin.sourceAdapter.version,
       action: checkedInput.data.action,
       params: checkedInput.data.params,
       configSnapshot: configuredBin.config,
@@ -484,7 +484,7 @@ export function createManualRunStore(
         const [bin] = await transaction
           .select({
             id: binConfigurations.id,
-            collector: binConfigurations.collector,
+            sourceAdapter: binConfigurations.sourceAdapter,
             identityId: binConfigurations.identityId,
             config: binConfigurations.config,
             targets: binConfigurations.targets,
@@ -505,8 +505,8 @@ export function createManualRunStore(
         );
         if (!created.ok) return created;
         if (
-          !collectorManifestStoredSchema.parse(bin.collector).environment
-            .browser.required
+          !sourceAdapterManifestStoredSchema.parse(bin.sourceAdapter)
+            .environment.browser.required
         )
           return created;
         const row = await readRun(
@@ -607,7 +607,7 @@ export function createManualRunStore(
           .select({
             id: binConfigurations.id,
             status: binConfigurations.status,
-            collector: binConfigurations.collector,
+            sourceAdapter: binConfigurations.sourceAdapter,
           })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
@@ -630,7 +630,9 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
-        const collector = collectorManifestStoredSchema.parse(bin.collector);
+        const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+          bin.sourceAdapter,
+        );
         const [active] = await transaction
           .select({ runId: manualRuns.runId })
           .from(manualRuns)
@@ -647,7 +649,7 @@ export function createManualRunStore(
           .select({
             ...runSelection,
             identityId: manualRuns.identityId,
-            collectorSnapshot: manualRuns.collectorSnapshot,
+            sourceAdapterSnapshot: manualRuns.sourceAdapterSnapshot,
             params: manualRuns.params,
             configSnapshot: manualRuns.configSnapshot,
             targetsSnapshot: manualRuns.targetsSnapshot,
@@ -661,17 +663,19 @@ export function createManualRunStore(
           .limit(1);
         if (run === undefined) return { ok: true, value: null };
 
-        // collector 更新后，排队中的旧动作不能被新版本代码误执行。
+        // sourceAdapter 更新后，排队中的旧动作不能被新版本代码误执行。
         const [snapshot] = await transaction
-          .select({ matches: eq(manualRuns.collectorSnapshot, collector) })
+          .select({
+            matches: eq(manualRuns.sourceAdapterSnapshot, sourceAdapter),
+          })
           .from(manualRuns)
           .where(eq(manualRuns.runId, run.runId));
         if (snapshot?.matches !== true) {
           await failOneQueuedRun(transaction, run.runId, {
-            code: "collector_changed_before_execution",
-            message: "采集器清单在运行排队期间发生变化，本次动作没有执行。",
+            code: "source_adapter_changed_before_execution",
+            message: "信源适配器清单在运行排队期间发生变化，本次动作没有执行。",
             impact: "本次运行未执行。",
-            suggestion: "确认采集器版本后重新触发。",
+            suggestion: "确认信源适配器版本后重新触发。",
             requiresHuman: false,
           });
           return { ok: true, value: null };
@@ -686,8 +690,8 @@ export function createManualRunStore(
           return { ok: true, value: null };
         }
 
-        const runCollector = collectorManifestStoredSchema.parse(
-          run.collectorSnapshot,
+        const runSourceAdapter = sourceAdapterManifestStoredSchema.parse(
+          run.sourceAdapterSnapshot,
         );
         const [runtimeConnection] = await transaction
           .select({
@@ -695,7 +699,7 @@ export function createManualRunStore(
             ownerGeneration: runtimeConnections.ownerGeneration,
             protocolVersion: runtimeConnections.protocolVersion,
             ownerState: runtimeConnections.ownerState,
-            matches: eq(runtimeConnections.collector, runCollector),
+            matches: eq(runtimeConnections.sourceAdapter, runSourceAdapter),
           })
           .from(runtimeConnections)
           .where(eq(runtimeConnections.binId, binId));
@@ -709,7 +713,7 @@ export function createManualRunStore(
         }
 
         let browserReservationId: string | undefined;
-        if (runCollector.environment.browser.required) {
+        if (runSourceAdapter.environment.browser.required) {
           const reservation = await browserCapacity.reserve(
             transaction,
             {
@@ -744,8 +748,8 @@ export function createManualRunStore(
           runId: run.runId,
           binId: run.binId,
           identityId: run.identityId,
-          collectorId: run.collectorId,
-          collectorVersion: run.collectorVersion,
+          sourceAdapterId: run.sourceAdapterId,
+          sourceAdapterVersion: run.sourceAdapterVersion,
           action: run.action,
           params: run.params,
           config: run.configSnapshot,

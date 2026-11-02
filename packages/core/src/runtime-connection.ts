@@ -1,5 +1,5 @@
 import {
-  collectorManifestStoredSchema,
+  sourceAdapterManifestStoredSchema,
   jsonObjectSchema,
   runtimeDisconnectInputSchema,
   runtimeEnvironmentSchema,
@@ -10,7 +10,7 @@ import {
   runtimeProtocolVersion,
   type BinError,
   type BinOperation,
-  type CollectorManifest,
+  type SourceAdapterManifest,
   type JsonObject,
   type RuntimeConnectionOperations,
   type RuntimeEnvironment,
@@ -26,7 +26,7 @@ import {
 } from "@binny/db";
 import { and, eq, sql } from "drizzle-orm";
 
-import { validateCollectorConfiguration } from "./bin-configuration.ts";
+import { validateSourceAdapterConfiguration } from "./bin-configuration.ts";
 import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { applyRuntimeHumanSessionHeartbeat } from "./human-session.ts";
 import {
@@ -37,11 +37,11 @@ import {
 
 const runtimeSelection = {
   binId: binConfigurations.id,
-  configuredCollector: binConfigurations.collector,
+  configuredSourceAdapter: binConfigurations.sourceAdapter,
   config: binConfigurations.config,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
-  runtimeCollector: runtimeConnections.collector,
+  runtimeSourceAdapter: runtimeConnections.sourceAdapter,
   environment: runtimeConnections.environment,
   lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
   disconnected: runtimeConnections.disconnected,
@@ -111,71 +111,76 @@ function differencePath(
 }
 
 function compatibilityError(
-  configuredCollector: CollectorManifest,
+  configuredSourceAdapter: SourceAdapterManifest,
   config: JsonObject,
-  runtimeCollector: CollectorManifest,
+  runtimeSourceAdapter: SourceAdapterManifest,
   environment: RuntimeEnvironment,
 ): RuntimeCompatibilityError | undefined {
   const checkedRuntimeManifest =
-    collectorManifestStoredSchema.safeParse(runtimeCollector);
+    sourceAdapterManifestStoredSchema.safeParse(runtimeSourceAdapter);
   if (!checkedRuntimeManifest.success) {
     const issue = checkedRuntimeManifest.error.issues[0];
     return {
       code: "runtime_manifest_mismatch",
-      message: "运行器提供的采集器清单格式无效。",
-      path: ["collector", ...pathParts(issue?.path ?? [])],
+      message: "运行器提供的信源适配器清单格式无效。",
+      path: ["sourceAdapter", ...pathParts(issue?.path ?? [])],
     };
   }
 
-  const configValidation = validateCollectorConfiguration(
-    runtimeCollector,
+  const configValidation = validateSourceAdapterConfiguration(
+    runtimeSourceAdapter,
     config,
   );
   if (configValidation?.code === "invalid_manifest") {
     return {
       code: "runtime_manifest_mismatch",
       message: "运行器提供的配置声明无法验证。",
-      path: configValidation.path ?? ["collector", "configSchema"],
+      path: configValidation.path ?? ["sourceAdapter", "configSchema"],
     };
   }
   if (configValidation !== undefined) {
     return {
       code: "runtime_configuration_incompatible",
-      message: "已配置的长期配置不符合运行器当前采集器声明。",
+      message: "已配置的长期配置不符合运行器当前信源适配器声明。",
       path: configValidation.path ?? ["config"],
     };
   }
 
   if (
-    configuredCollector.environment.browser.required &&
+    configuredSourceAdapter.environment.browser.required &&
     !environment.browser.available
   ) {
     return {
       code: "runtime_environment_incompatible",
-      message: "该采集器需要浏览器，但运行环境没有提供浏览器能力。",
-      path: ["collector", "environment", "browser", "required"],
+      message: "该信源适配器需要浏览器，但运行环境没有提供浏览器能力。",
+      path: ["sourceAdapter", "environment", "browser", "required"],
     };
   }
   if (
-    configuredCollector.environment.browser.profileReuseAfterRestart &&
+    configuredSourceAdapter.environment.browser.profileReuseAfterRestart &&
     !environment.browser.profileReuseAfterRestart
   ) {
     return {
       code: "runtime_environment_incompatible",
-      message: "该采集器需要重启后复用浏览器配置文件，但运行环境不支持。",
-      path: ["collector", "environment", "browser", "profileReuseAfterRestart"],
+      message: "该信源适配器需要重启后复用浏览器配置文件，但运行环境不支持。",
+      path: [
+        "sourceAdapter",
+        "environment",
+        "browser",
+        "profileReuseAfterRestart",
+      ],
     };
   }
 
   const manifestDifference = differencePath(
-    configuredCollector,
-    runtimeCollector,
+    configuredSourceAdapter,
+    runtimeSourceAdapter,
   );
   if (manifestDifference !== undefined) {
     return {
       code: "runtime_manifest_mismatch",
-      message: "运行器采集器清单与已配置版本不一致。",
-      path: ["collector", ...manifestDifference],
+      message: "运行器信源适配器清单与已配置版本不一致。",
+      path: ["sourceAdapter", ...manifestDifference],
     };
   }
   return undefined;
@@ -203,18 +208,18 @@ function offline(
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   if (
     row.runtimeId === null ||
-    row.runtimeCollector === null ||
+    row.runtimeSourceAdapter === null ||
     row.environment === null ||
     row.lastHeartbeatAt === null
   ) {
     return offline("runtime_not_connected", row);
   }
 
-  const configuredCollector = collectorManifestStoredSchema.parse(
-    row.configuredCollector,
+  const configuredSourceAdapter = sourceAdapterManifestStoredSchema.parse(
+    row.configuredSourceAdapter,
   );
-  const runtimeCollector = collectorManifestStoredSchema.parse(
-    row.runtimeCollector,
+  const runtimeSourceAdapter = sourceAdapterManifestStoredSchema.parse(
+    row.runtimeSourceAdapter,
   );
   const config = jsonObjectSchema.parse(row.config);
   const storedEnvironment = runtimeEnvironmentStoredSchema.parse(
@@ -229,9 +234,9 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
 
   const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
   const error = compatibilityError(
-    configuredCollector,
+    configuredSourceAdapter,
     config,
-    runtimeCollector,
+    runtimeSourceAdapter,
     environment,
   );
   if (error !== undefined) {
@@ -422,7 +427,7 @@ export function createRuntimeConnectionStore(
           .values({
             binId,
             runtimeId: checked.data.runtimeId,
-            collector: checked.data.collector,
+            sourceAdapter: checked.data.sourceAdapter,
             environment: checked.data.environment,
             protocolVersion: checked.data.protocolVersion,
             disconnected: false,
@@ -433,7 +438,7 @@ export function createRuntimeConnectionStore(
             target: runtimeConnections.binId,
             set: {
               runtimeId: checked.data.runtimeId,
-              collector: checked.data.collector,
+              sourceAdapter: checked.data.sourceAdapter,
               environment: checked.data.environment,
               protocolVersion: checked.data.protocolVersion,
               // 保持 PostgreSQL 服务端时钟语义。

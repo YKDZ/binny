@@ -59,9 +59,9 @@ export function isoTimestamp(value: Date): string {
 }
 
 export function optionalText(
-  name: "runId" | "collectorVersion",
+  name: "runId" | "sourceAdapterVersion",
   value: string | null,
-): { readonly runId?: string; readonly collectorVersion?: string } {
+): { readonly runId?: string; readonly sourceAdapterVersion?: string } {
   if (value === null) return {};
-  return name === "runId" ? { runId: value } : { collectorVersion: value };
+  return name === "runId" ? { runId: value } : { sourceAdapterVersion: value };
 }

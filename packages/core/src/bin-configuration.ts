@@ -3,12 +3,12 @@ import {
   binConfigurationSettingsSchema,
   binCreateInputSchema,
   binUpdateInputSchema,
-  collectorManifestStoredSchema,
+  sourceAdapterManifestStoredSchema,
   type BinConfiguration,
   type BinConfigurationOperations,
   type BinError,
   type BinOperation,
-  type CollectorManifest,
+  type SourceAdapterManifest,
   type JsonObject,
 } from "@binny/contracts";
 import {
@@ -30,7 +30,7 @@ import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 
 const binSelection = {
   id: binConfigurations.id,
-  collector: binConfigurations.collector,
+  sourceAdapter: binConfigurations.sourceAdapter,
   identityId: binConfigurations.identityId,
   config: binConfigurations.config,
   targets: binConfigurations.targets,
@@ -40,16 +40,19 @@ const binSelection = {
   updatedAt: binConfigurations.updatedAt,
 };
 const addFormats = formats.default.default;
-const collectorValidatorCacheLimit = 32;
+const sourceAdapterValidatorCacheLimit = 32;
 
-type CompiledCollectorValidators = {
+type CompiledSourceAdapterValidators = {
   readonly configuration: ValidateFunction;
   readonly actions: Readonly<Record<string, ValidateFunction>>;
   // Ajv 持有 schema 对象强引用；淘汰条目时一并释放整个编译器。
   readonly compiler: Ajv2020;
 };
 
-const collectorValidatorCache = new Map<string, CompiledCollectorValidators>();
+const sourceAdapterValidatorCache = new Map<
+  string,
+  CompiledSourceAdapterValidators
+>();
 
 function dynamicSchemaPath(issue: ErrorObject): (string | number)[] {
   const path = issue.instancePath
@@ -116,47 +119,47 @@ function createDynamicSchema(
       validator: undefined,
       error: {
         code: "invalid_manifest",
-        message: "采集器声明的 JSON Schema 无效或包含不支持的关键字。",
+        message: "信源适配器声明的 JSON Schema 无效或包含不支持的关键字。",
         path: [...path],
       },
     };
   }
 }
 
-function dynamicSchemaCacheKey(collector: CollectorManifest): string {
-  const actions = Object.entries(collector.actions)
+function dynamicSchemaCacheKey(sourceAdapter: SourceAdapterManifest): string {
+  const actions = Object.entries(sourceAdapter.actions)
     .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([name, action]) => [name, action.params]);
-  return JSON.stringify({ config: collector.configSchema, actions });
+  return JSON.stringify({ config: sourceAdapter.configSchema, actions });
 }
 
-function compileCollectorValidators(collector: CollectorManifest): {
-  readonly validators: CompiledCollectorValidators | undefined;
+function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
+  readonly validators: CompiledSourceAdapterValidators | undefined;
   readonly error: BinError | undefined;
 } {
-  const cacheKey = dynamicSchemaCacheKey(collector);
-  const cached = collectorValidatorCache.get(cacheKey);
+  const cacheKey = dynamicSchemaCacheKey(sourceAdapter);
+  const cached = sourceAdapterValidatorCache.get(cacheKey);
   if (cached !== undefined) {
-    collectorValidatorCache.delete(cacheKey);
-    collectorValidatorCache.set(cacheKey, cached);
+    sourceAdapterValidatorCache.delete(cacheKey);
+    sourceAdapterValidatorCache.set(cacheKey, cached);
     return { validators: cached, error: undefined };
   }
 
   const compiler = new Ajv2020({ strictTypes: false });
   addFormats(compiler);
   const config = createDynamicSchema(
-    collector.configSchema,
-    ["collector", "configSchema"],
+    sourceAdapter.configSchema,
+    ["sourceAdapter", "configSchema"],
     compiler,
   );
   if (config.error !== undefined)
     return { validators: undefined, error: config.error };
 
   const actions: Record<string, ValidateFunction> = {};
-  for (const [name, action] of Object.entries(collector.actions)) {
+  for (const [name, action] of Object.entries(sourceAdapter.actions)) {
     const result = createDynamicSchema(
       action.params,
-      ["collector", "actions", name, "params"],
+      ["sourceAdapter", "actions", name, "params"],
       compiler,
     );
     if (result.error !== undefined)
@@ -169,38 +172,38 @@ function compileCollectorValidators(collector: CollectorManifest): {
     actions,
     compiler,
   };
-  collectorValidatorCache.set(cacheKey, validators);
-  if (collectorValidatorCache.size > collectorValidatorCacheLimit) {
-    const oldestKey = collectorValidatorCache.keys().next();
-    if (!oldestKey.done) collectorValidatorCache.delete(oldestKey.value);
+  sourceAdapterValidatorCache.set(cacheKey, validators);
+  if (sourceAdapterValidatorCache.size > sourceAdapterValidatorCacheLimit) {
+    const oldestKey = sourceAdapterValidatorCache.keys().next();
+    if (!oldestKey.done) sourceAdapterValidatorCache.delete(oldestKey.value);
   }
   return { validators, error: undefined };
 }
 
-export function validateCollectorConfiguration(
-  collector: CollectorManifest,
+export function validateSourceAdapterConfiguration(
+  sourceAdapter: SourceAdapterManifest,
   config: JsonObject,
 ): BinError | undefined {
-  const checked = collectorManifestStoredSchema.safeParse(collector);
+  const checked = sourceAdapterManifestStoredSchema.safeParse(sourceAdapter);
   if (!checked.success) {
     const issue = checked.error.issues[0];
     return {
       code: "invalid_manifest",
-      message: issue?.message ?? "采集器声明格式无效。",
+      message: issue?.message ?? "信源适配器声明格式无效。",
       ...(issue === undefined
         ? {}
-        : { path: schemaIssuePath(["collector"], issue.path) }),
+        : { path: schemaIssuePath(["sourceAdapter"], issue.path) }),
     };
   }
 
-  const built = compileCollectorValidators(collector);
+  const built = compileSourceAdapterValidators(sourceAdapter);
   if (built.error !== undefined) return built.error;
   if (built.validators!.configuration(config)) return undefined;
 
   const issue = built.validators!.configuration.errors?.[0];
   return {
     code: "invalid_configuration",
-    message: "长期配置不符合采集器声明。",
+    message: "长期配置不符合信源适配器声明。",
     ...(issue === undefined
       ? {}
       : { path: ["config", ...dynamicSchemaPath(issue)] }),
@@ -208,10 +211,10 @@ export function validateCollectorConfiguration(
 }
 
 function validateBrowserIdlePolicy(
-  collector: CollectorManifest,
+  sourceAdapter: SourceAdapterManifest,
   browserIdleTimeoutSeconds: number | null,
 ): BinError | undefined {
-  const browser = collector.environment.browser;
+  const browser = sourceAdapter.environment.browser;
   if (
     browserIdleTimeoutSeconds === null ||
     !browser.required ||
@@ -224,13 +227,13 @@ function validateBrowserIdlePolicy(
     code: "invalid_configuration",
     message:
       reason === undefined
-        ? "采集器不支持关闭浏览器后复用持久配置文件。"
-        : `采集器不支持关闭浏览器后复用持久配置文件：${reason}`,
+        ? "信源适配器不支持关闭浏览器后复用持久配置文件。"
+        : `信源适配器不支持关闭浏览器后复用持久配置文件：${reason}`,
     path: ["browserIdleTimeoutSeconds"],
   };
 }
 
-export type CollectorActionValidation =
+export type SourceAdapterActionValidation =
   | { readonly ok: true }
   | {
       readonly ok: false;
@@ -243,21 +246,21 @@ export type CollectorActionValidation =
     };
 
 /** 在创建运行时按已登记清单校验动态动作及本次参数。 */
-export function validateCollectorActionParameters(
-  collector: CollectorManifest,
+export function validateSourceAdapterActionParameters(
+  sourceAdapter: SourceAdapterManifest,
   actionName: string,
   params: JsonObject,
-): CollectorActionValidation {
-  const checked = collectorManifestStoredSchema.safeParse(collector);
+): SourceAdapterActionValidation {
+  const checked = sourceAdapterManifestStoredSchema.safeParse(sourceAdapter);
   if (!checked.success) {
     const issue = checked.error.issues[0];
     return {
       ok: false,
       code: "invalid_manifest",
-      message: issue?.message ?? "采集器声明格式无效。",
+      message: issue?.message ?? "信源适配器声明格式无效。",
       ...(issue === undefined
         ? {}
-        : { path: schemaIssuePath(["collector"], issue.path) }),
+        : { path: schemaIssuePath(["sourceAdapter"], issue.path) }),
     };
   }
 
@@ -265,12 +268,12 @@ export function validateCollectorActionParameters(
     return {
       ok: false,
       code: "action_not_found",
-      message: "采集器没有声明这个动作。",
+      message: "信源适配器没有声明这个动作。",
       path: ["action"],
     };
   }
 
-  const built = compileCollectorValidators(checked.data);
+  const built = compileSourceAdapterValidators(checked.data);
   if (built.error !== undefined) {
     return {
       ok: false,
@@ -286,7 +289,7 @@ export function validateCollectorActionParameters(
   return {
     ok: false,
     code: "invalid_action_parameters",
-    message: "本次动作参数不符合采集器声明。",
+    message: "本次动作参数不符合信源适配器声明。",
     ...(issue === undefined
       ? {}
       : { path: ["params", ...dynamicSchemaPath(issue)] }),
@@ -306,7 +309,7 @@ type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
 function rowToConfiguration(row: BinRow): BinConfiguration {
   return binConfigurationSchema.parse({
     id: row.id,
-    collector: row.collector,
+    sourceAdapter: row.sourceAdapter,
     identityId: row.identityId,
     config: row.config,
     targets: row.targets,
@@ -356,8 +359,8 @@ export function createBinConfigurationStore(
           issue === undefined ? undefined : issue.path.map(String),
         );
       }
-      const invalid = validateCollectorConfiguration(
-        checked.data.collector,
+      const invalid = validateSourceAdapterConfiguration(
+        checked.data.sourceAdapter,
         checked.data.config,
       );
       if (invalid !== undefined)
@@ -367,7 +370,7 @@ export function createBinConfigurationStore(
           ? 300
           : checked.data.browserIdleTimeoutSeconds;
       const invalidIdlePolicy = validateBrowserIdlePolicy(
-        checked.data.collector,
+        checked.data.sourceAdapter,
         browserIdleTimeoutSeconds,
       );
       if (invalidIdlePolicy !== undefined)
@@ -378,7 +381,7 @@ export function createBinConfigurationStore(
           .insert(binConfigurations)
           .values({
             id: checked.data.id,
-            collector: checked.data.collector,
+            sourceAdapter: checked.data.sourceAdapter,
             identityId: checked.data.identityId,
             config: checked.data.config,
             targets: checked.data.targets,
@@ -419,23 +422,27 @@ export function createBinConfigurationStore(
 
         const existing = binConfigurationSettingsSchema.parse({
           id: previous.id,
-          collector: previous.collector,
+          sourceAdapter: previous.sourceAdapter,
           identityId: previous.identityId,
           config: previous.config,
           targets: previous.targets,
         });
-        const collector = checked.data.collector ?? existing.collector;
+        const sourceAdapter =
+          checked.data.sourceAdapter ?? existing.sourceAdapter;
         const config = checked.data.config ?? existing.config;
         const targets = checked.data.targets ?? existing.targets;
         const browserIdleTimeoutSeconds =
           checked.data.browserIdleTimeoutSeconds === undefined
             ? previous.browserIdleTimeoutSeconds
             : checked.data.browserIdleTimeoutSeconds;
-        const invalid = validateCollectorConfiguration(collector, config);
+        const invalid = validateSourceAdapterConfiguration(
+          sourceAdapter,
+          config,
+        );
         if (invalid !== undefined)
           return { ok: false as const, status: 400 as const, error: invalid };
         const invalidIdlePolicy = validateBrowserIdlePolicy(
-          collector,
+          sourceAdapter,
           browserIdleTimeoutSeconds,
         );
         if (invalidIdlePolicy !== undefined)
@@ -449,7 +456,7 @@ export function createBinConfigurationStore(
         const [updated] = await transaction
           .update(binConfigurations)
           .set({
-            collector,
+            sourceAdapter,
             identityId: checked.data.identityId ?? existing.identityId,
             config,
             targets,

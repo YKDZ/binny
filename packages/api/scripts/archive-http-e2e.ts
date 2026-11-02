@@ -1730,7 +1730,7 @@ async function verifyPersistableTextBoundary(
     "键中含空字符的归档属性",
   );
 
-  const collector = {
+  const sourceAdapter = {
     id: "text-boundary",
     version: "1.0.0",
     configSchema: { type: "object" },
@@ -1750,7 +1750,7 @@ async function verifyPersistableTextBoundary(
   };
   const binInput = {
     id: "e2e-text-boundary-invalid",
-    collector,
+    sourceAdapter,
     identityId: "text-boundary",
     config: { value: "正常中文🌿" },
     targets: [{ value: "正常中文🌿" }],
@@ -1794,23 +1794,23 @@ async function verifyPersistableTextBoundary(
       path: ["targets", 0, "value"],
     },
     {
-      label: "采集器版本中的空字符",
+      label: "信源适配器版本中的空字符",
       input: {
         ...binInput,
-        collector: { ...collector, version: "a\u0000b" },
+        sourceAdapter: { ...sourceAdapter, version: "a\u0000b" },
       },
-      path: ["collector", "version"],
+      path: ["sourceAdapter", "version"],
     },
     {
-      label: "采集器 JSON Schema 中的空字符",
+      label: "信源适配器 JSON Schema 中的空字符",
       input: {
         ...binInput,
-        collector: {
-          ...collector,
+        sourceAdapter: {
+          ...sourceAdapter,
           configSchema: { type: "object", description: "a\u0000b" },
         },
       },
-      path: ["collector", "configSchema", "description"],
+      path: ["sourceAdapter", "configSchema", "description"],
     },
   ];
 
@@ -1826,7 +1826,7 @@ async function verifyPersistableTextBoundary(
   const validBinInput = {
     ...binInput,
     id: "e2e-text-boundary-" + process.pid.toString(10),
-    collector: { ...collector, version: "版本 1.0 🌿" },
+    sourceAdapter: { ...sourceAdapter, version: "版本 1.0 🌿" },
     identityId: "身份🌿",
     config: { value: "配置🌿" },
     targets: [{ value: "目标🌿" }],
@@ -1839,7 +1839,10 @@ async function verifyPersistableTextBoundary(
   }
   const validBin = await validBinResponse.json();
   assert.equal(validBin.identityId, validBinInput.identityId);
-  assert.equal(validBin.collector.version, validBinInput.collector.version);
+  assert.equal(
+    validBin.sourceAdapter.version,
+    validBinInput.sourceAdapter.version,
+  );
   assert.deepEqual(validBin.config, validBinInput.config);
   assert.deepEqual(validBin.targets, validBinInput.targets);
   const removed = await client.bins[":binId"].$delete({
@@ -1952,7 +1955,7 @@ async function verifyArchiveABA(
     requestId: "e2e:archive:aba:first",
     binId: "rss-main",
     runId: "run-a1",
-    collectorVersion: "rss@1.0.0",
+    sourceAdapterVersion: "rss@1.0.0",
     observedAt: "2026-10-28T04:01:00.000Z",
     items: [
       {
@@ -1966,7 +1969,7 @@ async function verifyArchiveABA(
     requestId: "e2e:archive:aba:second",
     binId: "rss-main",
     runId: "run-a2",
-    collectorVersion: "rss@1.1.0",
+    sourceAdapterVersion: "rss@1.1.0",
     observedAt: "2026-10-28T04:01:00.000Z",
     items: [
       {
@@ -1983,7 +1986,7 @@ async function verifyArchiveABA(
     requestId: "e2e:archive:aba:third",
     binId: "rss-main",
     runId: "run-a3",
-    collectorVersion: "rss@2.0.0",
+    sourceAdapterVersion: "rss@2.0.0",
     observedAt: "2026-10-28T04:03:00.000Z",
     items: [
       {
@@ -2103,7 +2106,7 @@ async function verifyArchiveABA(
   }
   assert.equal(
     firstHistoricalItemEvent?.kind === "item"
-      ? firstHistoricalItemEvent.collectorVersion
+      ? firstHistoricalItemEvent.sourceAdapterVersion
       : undefined,
     "rss@1.0.0",
   );
@@ -2144,7 +2147,7 @@ async function verifyArchiveABA(
     submitArchive(client, {
       requestId: "e2e:archive:aba:late-repeat",
       binId: "rss-main",
-      collectorVersion: "rss@2.1.0",
+      sourceAdapterVersion: "rss@2.1.0",
       observedAt: "2026-10-28T03:59:00.000Z",
       items: [abaA],
     }),
@@ -2208,7 +2211,7 @@ async function verifyArchiveABA(
   assert.equal(lateCommit.items[0]?.revisionId, abaFirstItem.revisionId);
   const firstCommitRead = await readArchiveCommit(client, abaFirst.commitId);
   assert.equal(firstCommitRead.runId, "run-a1");
-  assert.equal(firstCommitRead.collectorVersion, "rss@1.0.0");
+  assert.equal(firstCommitRead.sourceAdapterVersion, "rss@1.0.0");
   assert.equal(firstCommitRead.items[0]?.itemId, abaFirstItem.itemId);
   assert.equal(
     firstHistoricalItemEvent?.kind === "item"
@@ -2219,7 +2222,7 @@ async function verifyArchiveABA(
   const lateCommitRead = await readArchiveCommit(client, lateCommit.commitId);
   assert.deepEqual(lateCommitRead, lateCommit);
   assert.equal(lateCommitRead.runId, undefined);
-  assert.equal(lateCommitRead.collectorVersion, "rss@2.1.0");
+  assert.equal(lateCommitRead.sourceAdapterVersion, "rss@2.1.0");
 
   const currentAfterLateArrival = await readArchiveItem(
     client,
@@ -8816,7 +8819,7 @@ async function verifyArchivePersistence(
       "SDK 媒体重启后不可读取：" + (await sdkResourceResponse.text()),
     );
   }
-  const sdkBytes = new TextEncoder().encode("collector sdk image v1");
+  const sdkBytes = new TextEncoder().encode("sourceAdapter sdk image v1");
   assert.deepEqual(
     new Uint8Array(await sdkResourceResponse.arrayBuffer()),
     sdkBytes,

@@ -2,7 +2,7 @@ import * as z from "zod";
 
 import {
   binIdSchema,
-  collectorActionNameSchema,
+  sourceAdapterActionNameSchema,
   jsonObjectSchema,
 } from "./bin-configuration.ts";
 import {
@@ -19,7 +19,7 @@ export const scheduleCreateInputSchema = withPostgresJsonSchemaProjection(
     .object({
       expression: postgresTextSchema.min(1).max(256),
       timeZone: postgresTextSchema.min(1).max(128),
-      action: collectorActionNameSchema,
+      action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
       enabled: z.boolean().optional(),
     })
@@ -31,7 +31,7 @@ export const scheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
     .object({
       expression: postgresTextSchema.min(1).max(256).optional(),
       timeZone: postgresTextSchema.min(1).max(128).optional(),
-      action: collectorActionNameSchema.optional(),
+      action: sourceAdapterActionNameSchema.optional(),
       params: jsonObjectSchema.optional(),
     })
     .strict()
@@ -57,7 +57,7 @@ export const scheduleSchema = withPostgresJsonSchemaProjection(
       binId: binIdSchema,
       expression: postgresTextSchema.min(1).max(256),
       timeZone: postgresTextSchema.min(1).max(128),
-      action: collectorActionNameSchema,
+      action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
       enabled: z.boolean(),
       nextDueAt: z.iso.datetime(),

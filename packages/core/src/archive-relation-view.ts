@@ -33,7 +33,7 @@ export function latestArchiveItemObservation(
       revisionId: observation.revisionId,
       binId: commit.binId,
       runId: commit.runId,
-      collectorVersion: commit.collectorVersion,
+      sourceAdapterVersion: commit.sourceAdapterVersion,
       observedAt: commit.observedAt,
       recordedAt: commit.recordedAt,
     })
@@ -77,7 +77,7 @@ export function latestArchiveRelationObservation(
       observedAt: commit.observedAt,
       recordedAt: commit.recordedAt,
       runId: commit.runId,
-      collectorVersion: commit.collectorVersion,
+      sourceAdapterVersion: commit.sourceAdapterVersion,
     })
     .from(observation)
     .innerJoin(commit, eq(commit.commitId, observation.commitId))
@@ -143,7 +143,7 @@ export function latestCurrentRelationObservationGap(
       observedAt: commit.observedAt,
       recordedAt: commit.recordedAt,
       runId: commit.runId,
-      collectorVersion: commit.collectorVersion,
+      sourceAdapterVersion: commit.sourceAdapterVersion,
     })
     .from(gap)
     .innerJoin(commit, eq(commit.commitId, gap.commitId))

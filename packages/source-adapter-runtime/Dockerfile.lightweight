@@ -1,0 +1,50 @@
+ARG BINNY_SOURCE_ADAPTER_ENTRY=dist/index.js
+
+FROM node:24.21.0-bookworm-slim AS build
+
+WORKDIR /workspace
+RUN corepack enable && corepack prepare pnpm@12.9.1 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/api/package.json packages/api/
+COPY packages/binny/package.json packages/binny/
+COPY packages/source-adapter-runtime/package.json packages/source-adapter-runtime/
+COPY packages/source-adapter-sdk/package.json packages/source-adapter-sdk/
+COPY packages/contracts/package.json packages/contracts/
+COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
+COPY packages/server/package.json packages/server/
+COPY packages/tooling-config/package.json packages/tooling-config/
+COPY source-adapters/linuxdo/package.json source-adapters/linuxdo/
+COPY source-adapters/rss/package.json source-adapters/rss/
+RUN pnpm install --frozen-lockfile
+COPY . .
+
+ARG BINNY_SOURCE_ADAPTER_PACKAGE
+ARG BINNY_SOURCE_ADAPTER_ENTRY
+ARG BINNY_BUILD_FIXTURE=0
+
+RUN test -n "$BINNY_SOURCE_ADAPTER_PACKAGE" \
+  && test -n "$BINNY_SOURCE_ADAPTER_ENTRY" \
+  && pnpm --filter "${BINNY_SOURCE_ADAPTER_PACKAGE}..." build \
+  && pnpm --filter @binny/source-adapter-runtime build \
+  && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then pnpm --filter @binny/source-adapter-runtime build:fixture; fi \
+  && pnpm --filter @binny/source-adapter-runtime --prod deploy --legacy /runtime-deploy \
+  && pnpm --filter "$BINNY_SOURCE_ADAPTER_PACKAGE" --prod deploy --legacy /deploy \
+  && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then cp -r packages/source-adapter-runtime/fixture-dist /deploy/fixture-dist; fi \
+  && test -f "/deploy/${BINNY_SOURCE_ADAPTER_ENTRY}" \
+  && cp -r /runtime-deploy /deploy/binny-runtime
+
+FROM node:24.21.0-bookworm-slim AS lightweight
+
+ARG BINNY_SOURCE_ADAPTER_ENTRY
+ENV NODE_ENV=production
+ENV BINNY_SOURCE_ADAPTER_ENTRY="/app/${BINNY_SOURCE_ADAPTER_ENTRY}"
+ENV BINNY_RUNTIME_OWNER_LOCK_PATH=/var/lib/binny/runtime/owner.lock
+WORKDIR /app
+COPY --from=build --chown=node:node /deploy /app
+RUN command -v flock \
+  && mkdir -p /var/lib/binny/runtime /var/lib/binny/source-adapter-state \
+  && chown -R node:node /var/lib/binny/runtime /var/lib/binny/source-adapter-state
+USER node
+EXPOSE 8080
+ENTRYPOINT ["flock", "--exclusive", "--nonblock", "--no-fork", "/var/lib/binny/runtime/owner.lock", "node", "/app/binny-runtime/dist/entry.js"]

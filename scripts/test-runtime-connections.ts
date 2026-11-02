@@ -259,7 +259,7 @@ async function waitForCliStatus(
 
 async function createBin(
   id: string,
-  collector: unknown,
+  sourceAdapter: unknown,
   section: string,
   browserIdleTimeout: number | "disabled" = 300,
 ): Promise<Record<string, unknown> & { readonly execution: RuntimeStatus }> {
@@ -268,8 +268,8 @@ async function createBin(
       "bin",
       "create",
       id,
-      "--collector",
-      JSON.stringify(collector),
+      "--source-adapter",
+      JSON.stringify(sourceAdapter),
       "--identity",
       `identity-${id}`,
       "--config",
@@ -360,16 +360,16 @@ try {
   ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
   assert.equal(runtimeOneManifest.protocolVersion, 5);
-  const collector = runtimeOneManifest.collector;
-  assert.ok(typeof collector === "object" && collector !== null);
+  const sourceAdapter = runtimeOneManifest.sourceAdapter;
+  assert.ok(typeof sourceAdapter === "object" && sourceAdapter !== null);
 
-  const createdOne = await createBin("binny-runtime-one", collector, "one");
-  const createdTwo = await createBin("binny-runtime-two", collector, "two");
+  const createdOne = await createBin("binny-runtime-one", sourceAdapter, "one");
+  const createdTwo = await createBin("binny-runtime-two", sourceAdapter, "two");
   assert.equal(createdOne.execution.status, "offline");
   assert.equal(createdTwo.execution.status, "offline");
   const initialOffline = await createBin(
     "binny-runtime-offline",
-    collector,
+    sourceAdapter,
     "not-running",
   );
   assert.equal(initialOffline.execution.status, "offline");
@@ -388,8 +388,8 @@ try {
     await containerImage("runtime-two"),
   );
 
-  const browserCollector = {
-    ...collector,
+  const browserSourceAdapter = {
+    ...sourceAdapter,
     environment: {
       browser: {
         required: true,
@@ -400,13 +400,13 @@ try {
   };
   await createBin(
     "binny-runtime-browser",
-    browserCollector,
+    browserSourceAdapter,
     "browser",
     "disabled",
   );
   const incompatibleEnvironment = await postHeartbeat("binny-runtime-browser", {
     runtimeId: "binny-runtime-browser-probe",
-    collector: browserCollector,
+    sourceAdapter: browserSourceAdapter,
     environment: {
       kind: "lightweight",
       browser: {
@@ -423,7 +423,7 @@ try {
   );
   assert.deepEqual(
     (incompatibleEnvironment.body.error as { readonly path: unknown }).path,
-    ["collector", "environment", "browser", "required"],
+    ["sourceAdapter", "environment", "browser", "required"],
   );
   const browserState = cliData<{ readonly execution: RuntimeStatus }>(
     await cli(["bin", "get", "binny-runtime-browser"]),
@@ -435,8 +435,8 @@ try {
     "runtime_environment_incompatible",
   );
 
-  const allOfCollector = {
-    ...collector,
+  const allOfSourceAdapter = {
+    ...sourceAdapter,
     configSchema: {
       $schema: "https://json-schema.org/draft/2020-12/schema",
       type: "object",
@@ -450,12 +450,12 @@ try {
       additionalProperties: false,
     },
   };
-  await createBin("binny-runtime-config-allof-valid", allOfCollector, "az");
+  await createBin("binny-runtime-config-allof-valid", allOfSourceAdapter, "az");
   const compatibleConfig = await postHeartbeat(
     "binny-runtime-config-allof-valid",
     {
       runtimeId: "binny-runtime-config-allof-valid-probe",
-      collector: allOfCollector,
+      sourceAdapter: allOfSourceAdapter,
       environment: {
         kind: "lightweight",
         browser: {
@@ -469,8 +469,8 @@ try {
   assert.equal(compatibleConfig.status, 200);
   assert.equal((compatibleConfig.body as RuntimeStatus).status, "online");
 
-  const configMismatchCollector = {
-    ...collector,
+  const configMismatchSourceAdapter = {
+    ...sourceAdapter,
     configSchema: {
       type: "object",
       properties: { section: { type: "string" } },
@@ -485,8 +485,8 @@ try {
       "bin",
       "create",
       "binny-runtime-config-mismatch",
-      "--collector",
-      JSON.stringify(configMismatchCollector),
+      "--source-adapter",
+      JSON.stringify(configMismatchSourceAdapter),
       "--identity",
       "identity-binny-runtime-config-mismatch",
       "--config",
@@ -501,7 +501,7 @@ try {
     "binny-runtime-config-mismatch",
     {
       runtimeId: "binny-runtime-config-probe",
-      collector: allOfCollector,
+      sourceAdapter: allOfSourceAdapter,
       environment: {
         kind: "lightweight",
         browser: {
@@ -523,12 +523,12 @@ try {
   );
 
   const driftedManifest = {
-    ...collector,
+    ...sourceAdapter,
     version: "2.0.0",
   };
   const manifestMismatch = await postHeartbeat("binny-runtime-offline", {
     runtimeId: "binny-runtime-manifest-probe",
-    collector: driftedManifest,
+    sourceAdapter: driftedManifest,
     environment: {
       kind: "lightweight",
       browser: {
@@ -545,7 +545,7 @@ try {
   );
   assert.deepEqual(
     (manifestMismatch.body.error as { readonly path: unknown }).path,
-    ["collector", "version"],
+    ["sourceAdapter", "version"],
   );
 
   await compose(["stop", "runtime-one"]);

@@ -14,7 +14,7 @@ overrides: {}
 packages:
   - apps/*
   - packages/*
-  - collectors/*
+  - source-adapters/*
 catalog:
   "@changesets/cli": 3.0.3
   "@types/node": ^24.13.3
