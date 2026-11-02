@@ -628,6 +628,7 @@ export class BrowserLifecycle {
       const context = await chromium.launchPersistentContext(
         this.options.profileDirectory,
         {
+          channel: "chrome",
           args: [
             "--disable-dev-shm-usage",
             "--no-first-run",

@@ -759,7 +759,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
     browserImage,
     "--input-type=module",
     "--eval",
-    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chrome" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
   ]);
   assert.equal(
     launch.code,

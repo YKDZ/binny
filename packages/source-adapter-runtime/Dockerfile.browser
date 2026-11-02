@@ -1,10 +1,13 @@
+# syntax=docker/dockerfile:1.7
 ARG BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/browser-session-source-adapter.js
 
 FROM node:24.21.0-bookworm-slim AS browser-base
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ADD --checksum=sha256:be1a1e161419f5c8272432f6860912550d8e29985e925913fa800493a0d0c955 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.79-1_amd64.deb /tmp/google-chrome-stable.deb
+
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
+    /tmp/google-chrome-stable.deb \
     fonts-freefont-ttf \
     fonts-ipafont-gothic \
     fonts-liberation \
@@ -39,7 +42,8 @@ RUN apt-get update \
     x11vnc \
     xfonts-scalable \
     xvfb \
-  && rm -rf /var/lib/apt/lists/* \
+  && rm -rf /var/lib/apt/lists/* /tmp/google-chrome-stable.deb \
+    /etc/apt/sources.list.d/google-chrome.list \
   && corepack enable \
   && corepack prepare pnpm@12.9.1 --activate
 
@@ -59,7 +63,6 @@ COPY packages/tooling-config/package.json packages/tooling-config/
 COPY source-adapters/linuxdo/package.json source-adapters/linuxdo/
 COPY source-adapters/rss/package.json source-adapters/rss/
 RUN pnpm install --frozen-lockfile
-RUN pnpm --filter @binny/source-adapter-runtime exec patchright-core install chromium --no-shell
 COPY . .
 
 ARG BINNY_SOURCE_ADAPTER_PACKAGE
@@ -88,7 +91,6 @@ ENV BINNY_BROWSER_PROFILE_DIRECTORY=/var/lib/binny/runtime/browser-profile
 ENV DISPLAY=:99
 WORKDIR /app
 COPY --from=build --chown=node:node /deploy /app
-COPY --from=build --chown=node:node /ms-playwright /ms-playwright
 RUN command -v flock \
   && command -v Xvfb \
   && command -v x11vnc \
