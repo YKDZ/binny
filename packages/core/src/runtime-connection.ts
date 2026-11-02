@@ -8,7 +8,6 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
-  legacyRuntimeProtocolVersion,
   runtimeProtocolVersion,
   type BinError,
   type BinOperation,
@@ -229,10 +228,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     return offline("runtime_not_connected", row);
   }
 
-  if (
-    row.protocolVersion !== legacyRuntimeProtocolVersion &&
-    row.protocolVersion !== runtimeProtocolVersion
-  ) {
+  if (row.protocolVersion !== runtimeProtocolVersion) {
     return offline("runtime_protocol_outdated", row);
   }
 
@@ -661,10 +657,7 @@ export function createRuntimeConnectionStore(
             sourceAdapter: checked.data.sourceAdapter,
             environment: checked.data.environment,
             protocolVersion: checked.data.protocolVersion,
-            runtimeControlUrl:
-              checked.data.protocolVersion === runtimeProtocolVersion
-                ? checked.data.runtimeControlUrl
-                : null,
+            runtimeControlUrl: checked.data.runtimeControlUrl,
             disconnected: false,
             ownerState,
             ownerGeneration: incomingGeneration,
@@ -676,10 +669,7 @@ export function createRuntimeConnectionStore(
               sourceAdapter: checked.data.sourceAdapter,
               environment: checked.data.environment,
               protocolVersion: checked.data.protocolVersion,
-              runtimeControlUrl:
-                checked.data.protocolVersion === runtimeProtocolVersion
-                  ? checked.data.runtimeControlUrl
-                  : null,
+              runtimeControlUrl: checked.data.runtimeControlUrl,
               // 保持 PostgreSQL 服务端时钟语义。
               lastHeartbeatAt: sql`clock_timestamp()`,
               disconnected: false,
@@ -691,60 +681,38 @@ export function createRuntimeConnectionStore(
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
-        if (execution.status === "online") {
-          if (checked.data.protocolVersion === legacyRuntimeProtocolVersion) {
-            const previousEnvironment =
-              runtimeEnvironmentStoredSchema.safeParse(current?.environment);
-            const status = checked.data.environment.browser.power.status;
-            if (status !== "unavailable") {
-              await browserCapacity.reportLegacyPower(
-                transaction,
-                {
-                  binId,
-                  runtimeId: checked.data.runtimeId,
-                  ownerGeneration: checked.data.ownerGeneration,
-                },
-                status,
-                previousEnvironment.success
-                  ? previousEnvironment.data.browser.power?.status
-                  : undefined,
-              );
-            }
-          } else if (
-            "browserPowerEvent" in checked.data &&
-            checked.data.browserPowerEvent !== undefined
-          ) {
-            const owner = {
-              binId,
-              runtimeId: checked.data.runtimeId,
-              ownerGeneration: checked.data.ownerGeneration,
-            };
-            const event = checked.data.browserPowerEvent;
-            const accepted =
-              event.event === "not_started"
-                ? await browserCapacity.confirmNotStarted(
-                    transaction,
-                    owner,
-                    event.reservationId,
-                  )
-                : await browserCapacity.reportPower(
-                    transaction,
-                    owner,
-                    event.reservationId,
-                    event.event,
-                  );
-            if (!accepted) {
-              return failure(409, {
-                code: "browser_reservation_mismatch",
-                message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
-                path: ["browserPowerEvent"],
-              });
-            }
+        if (
+          execution.status === "online" &&
+          checked.data.browserPowerEvent !== undefined
+        ) {
+          const owner = {
+            binId,
+            runtimeId: checked.data.runtimeId,
+            ownerGeneration: checked.data.ownerGeneration,
+          };
+          const event = checked.data.browserPowerEvent;
+          const accepted =
+            event.event === "not_started"
+              ? await browserCapacity.confirmNotStarted(
+                  transaction,
+                  owner,
+                  event.reservationId,
+                )
+              : await browserCapacity.reportPower(
+                  transaction,
+                  owner,
+                  event.reservationId,
+                  event.event,
+                );
+          if (!accepted) {
+            return failure(409, {
+              code: "browser_reservation_mismatch",
+              message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
+              path: ["browserPowerEvent"],
+            });
           }
         }
         const humanSession =
-          checked.data.protocolVersion === runtimeProtocolVersion &&
-          "browserPowerEvent" in checked.data &&
           checked.data.browserPowerEvent !== undefined
             ? undefined
             : await applyRuntimeHumanSessionHeartbeat(
@@ -755,8 +723,7 @@ export function createRuntimeConnectionStore(
                   ownerGeneration: checked.data.ownerGeneration,
                   ownerConfirmed:
                     ownerState === "confirmed" && execution.status === "online",
-                  supportsReservationId:
-                    checked.data.protocolVersion >= runtimeProtocolVersion,
+                  supportsReservationId: true,
                   ...(checked.data.humanSessionEvent === undefined
                     ? {}
                     : { event: checked.data.humanSessionEvent }),

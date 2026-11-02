@@ -236,7 +236,6 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const legacyRuntimeProtocolVersion = 4;
 export const runtimeProtocolVersion = 6;
 export const runtimeConfigurationValidationPath =
   "/internal/configuration/validate";
@@ -337,10 +336,6 @@ const runtimeHeartbeatFieldsSchema = z.object({
   environment: runtimeEnvironmentSchema,
 });
 
-const legacyRuntimeHeartbeatSchema = runtimeHeartbeatFieldsSchema.extend({
-  protocolVersion: z.literal(legacyRuntimeProtocolVersion),
-});
-
 const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema
   .extend({
     protocolVersion: z.literal(runtimeProtocolVersion),
@@ -362,10 +357,7 @@ const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema
   });
 
 export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
-  z.discriminatedUnion("protocolVersion", [
-    legacyRuntimeHeartbeatSchema,
-    runtimeHeartbeatCurrentSchema,
-  ]),
+  runtimeHeartbeatCurrentSchema,
 );
 
 export const runtimeDisconnectInputSchema = z.object({

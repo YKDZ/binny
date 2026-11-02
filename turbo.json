@@ -45,8 +45,6 @@
       ],
       "passThroughEnv": [
         "BINNY_E2E_HOST",
-        "BINNY_E2E_BASELINE_IMAGE",
-        "BINNY_E2E_BASELINE_IMAGE_ID",
         "BINNY_E2E_CAPACITY_PROFILE",
         "BINNY_E2E_CAPACITY_PHASE",
         "BINNY_E2E_SUBNET",
