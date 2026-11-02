@@ -14,6 +14,7 @@ import {
   archiveSearchPageSchema,
   archiveAggregationInputSchema,
   archiveAggregationResultSchema,
+  archiveQueryContractVersion,
   archiveTimelinePageSchema,
   archiveTimelineQuerySchema,
   archiveSubmissionInputSchema,
@@ -480,6 +481,30 @@ export const archiveApiSchemas: {
   relationPage: toArchiveJsonSchema(archiveRelationPageSchema, "output"),
   error: toArchiveJsonSchema(archiveErrorSchema, "output"),
 };
+
+/** 查询发现文档引用正式请求与响应声明生成的 JSON Schema。 */
+export const archiveQueryContract = {
+  version: archiveQueryContractVersion,
+  validationNotes: [
+    "JSON Schema 描述可投影的输入结构；服务端仍执行完整原生校验，包括数值范围上下界顺序及搜索条件至少含 text 或 where。",
+  ],
+  operations: {
+    search: {
+      method: "POST",
+      path: "/archives/search",
+      description: "按字面或正则正文条件、结构化字段条件搜索归档。",
+      requestSchema: archiveApiSchemas.searchInput,
+      responseSchema: archiveApiSchemas.searchPage,
+    },
+    aggregate: {
+      method: "POST",
+      path: "/archives/aggregate",
+      description: "按相同范围与条件筛选完整匹配集合，再计算分组和指标。",
+      requestSchema: archiveApiSchemas.aggregateInput,
+      responseSchema: archiveApiSchemas.aggregateResult,
+    },
+  },
+} as const;
 
 export function createArchiveRoutes(
   operations: ArchiveOperations,

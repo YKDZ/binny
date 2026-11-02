@@ -11,6 +11,11 @@ import {
   scheduleApiSchemas as contractScheduleApiSchemas,
   scheduleCreateInputSchema,
   scheduleUpdateInputSchema,
+  archiveQueryContractPath,
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+  serviceCapabilities,
+  serviceMetadataSchema,
   manualRunTriggerInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
@@ -29,7 +34,11 @@ import { HTTPException } from "hono/http-exception";
 import * as z from "zod";
 
 // 正式 HTTP 路由入口；业务操作由 server 注入，客户端类型由此推导。
-import { archiveApiSchemas, createArchiveRoutes } from "./archive-routes.ts";
+import {
+  archiveApiSchemas,
+  archiveQueryContract,
+  createArchiveRoutes,
+} from "./archive-routes.ts";
 import { validationFailure } from "./validation.ts";
 export type {
   ArchiveOperations,
@@ -49,7 +58,19 @@ export type ApiOperations = {
   readonly humanSessions: HumanSessionOperations;
 };
 
-function makeApp(operations: ApiOperations) {
+function makeApp(operations: ApiOperations, productVersion: string) {
+  const serviceMetadata = serviceMetadataSchema.parse({
+    product: { name: "Binny", version: productVersion },
+    protocols: { httpApi: publicApiProtocolVersion },
+    capabilities: Object.values(serviceCapabilities),
+    contracts: {
+      archiveQuery: {
+        version: archiveQueryContractVersion,
+        path: archiveQueryContractPath,
+      },
+    },
+  });
+
   async function withExecution(configuration: BinConfiguration) {
     const result = await operations.runtime.getExecution(configuration.id);
     if (!result.ok)
@@ -79,6 +100,8 @@ function makeApp(operations: ApiOperations) {
       return c.text("Internal Server Error", 500);
     })
     .get("/health", (c) => c.json({ status: "ok" as const }, 200))
+    .get("/meta", (c) => c.json(serviceMetadata, 200))
+    .get("/meta/query", (c) => c.json(archiveQueryContract, 200))
     .get("/bins", async (c) => {
       const bins = await operations.bins.listBins();
       return c.json({ bins: await Promise.all(bins.map(withExecution)) }, 200);
@@ -589,6 +612,9 @@ export const scheduleApiSchemas = contractScheduleApiSchemas;
 
 export { archiveApiSchemas };
 
-export function createApiRoutes(operations: ApiOperations): ApiRoutes {
-  return makeApp(operations);
+export function createApiRoutes(
+  operations: ApiOperations,
+  options: { readonly productVersion?: string } = {},
+): ApiRoutes {
+  return makeApp(operations, options.productVersion ?? "unpublished");
 }

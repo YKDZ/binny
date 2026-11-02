@@ -13,6 +13,11 @@ import {
   archiveIdentifierSchema,
   archiveItemDeletionResultSchema,
   archiveSnapshotSequenceSchema,
+  archiveQueryContractPath,
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+  serviceCapabilities,
+  serviceMetadataSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
 import type {
@@ -126,6 +131,286 @@ function compilePublishedSchemas() {
     standardFilter: compileJsonSchema(standardRoots[2]),
     standardOutput: compileJsonSchema(standardRoots[5]),
   };
+}
+
+async function discoverArchiveQueryContract(baseUrl: string) {
+  const client = createApiClient(baseUrl);
+  const metadataResponse = await client.meta.$get();
+  assert.equal(metadataResponse.status, 200);
+  const metadata = serviceMetadataSchema.parse(await metadataResponse.json());
+  assert.equal(metadata.protocols.httpApi, publicApiProtocolVersion);
+  assert.equal(
+    metadata.contracts.archiveQuery.version,
+    archiveQueryContractVersion,
+  );
+  assert.equal(metadata.contracts.archiveQuery.path, archiveQueryContractPath);
+  assert.ok(metadata.capabilities.includes(serviceCapabilities.archiveSearch));
+  assert.ok(
+    metadata.capabilities.includes(serviceCapabilities.archiveAggregation),
+  );
+
+  const queryContractResponse = await client.meta.query.$get();
+  assert.equal(queryContractResponse.status, 200);
+  const queryContract = await queryContractResponse.json();
+  assert.equal(queryContract.version, metadata.contracts.archiveQuery.version);
+  assert.equal(queryContract.operations.search.path, "/archives/search");
+  assert.equal(queryContract.operations.aggregate.path, "/archives/aggregate");
+  return { metadata, queryContract };
+}
+
+async function postDiscoveredQuery(
+  baseUrl: string,
+  operation: {
+    readonly method: "POST";
+    readonly path: string;
+    readonly requestSchema: unknown;
+    readonly responseSchema: unknown;
+  },
+  request: unknown,
+): Promise<unknown> {
+  assert.equal(compileJsonSchema(operation.requestSchema)(request), true);
+  const response = await fetch(new URL(operation.path, baseUrl), {
+    method: operation.method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (response.status !== 200) {
+    throw new Error(
+      "公开查询失败：" + response.status + " " + (await response.text()),
+    );
+  }
+  const result = await response.json();
+  assert.equal(compileJsonSchema(operation.responseSchema)(result), true);
+  return result;
+}
+
+function verifyDiscoveredJsonFilterRules(queryContract: {
+  readonly operations: {
+    readonly search: { readonly requestSchema: unknown };
+    readonly aggregate: { readonly requestSchema: unknown };
+  };
+}) {
+  const searchInput = compileJsonSchema(
+    queryContract.operations.search.requestSchema,
+  );
+  const aggregateInput = compileJsonSchema(
+    queryContract.operations.aggregate.requestSchema,
+  );
+  const jsonPathFilter = {
+    type: "json" as const,
+    field: "properties" as const,
+    path: ["query"],
+  };
+  const filters = [
+    {
+      name: "JSON 字符串等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "string",
+        value: "ready",
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 数值等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "number",
+        value: 2,
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 布尔等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "boolean",
+        value: true,
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON null 等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "null",
+        value: null,
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 数组等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "array",
+        value: [1, "two"],
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 对象等值比较接受匹配的 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "object",
+        value: { enabled: true },
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 比较必须声明 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        value: "ready",
+      },
+      accepted: false,
+    },
+    {
+      name: "JSON 比较值必须符合声明类型",
+      filter: {
+        ...jsonPathFilter,
+        operator: "eq",
+        valueType: "number",
+        value: "2",
+      },
+      accepted: false,
+    },
+    {
+      name: "JSON exists 使用布尔值且不需要 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "exists",
+        value: true,
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON exists 不接受 valueType",
+      filter: {
+        ...jsonPathFilter,
+        operator: "exists",
+        valueType: "boolean",
+        value: true,
+      },
+      accepted: false,
+    },
+    {
+      name: "JSON 集合比较接受同类型 values",
+      filter: {
+        ...jsonPathFilter,
+        operator: "in",
+        valueType: "number",
+        values: [1, 2],
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 集合比较拒绝类型不符的 value",
+      filter: {
+        ...jsonPathFilter,
+        operator: "notIn",
+        valueType: "number",
+        values: [1, "2"],
+      },
+      accepted: false,
+    },
+    {
+      name: "JSON 数值范围要求两个数值边界",
+      filter: {
+        ...jsonPathFilter,
+        operator: "between",
+        valueType: "number",
+        lower: 1,
+        upper: 3,
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 字符串范围接受两个字符串边界",
+      filter: {
+        ...jsonPathFilter,
+        operator: "between",
+        valueType: "string",
+        lower: "a",
+        upper: "z",
+      },
+      accepted: true,
+    },
+    {
+      name: "JSON 范围拒绝缺少边界",
+      filter: {
+        ...jsonPathFilter,
+        operator: "between",
+        valueType: "number",
+        lower: 1,
+      },
+      accepted: false,
+    },
+    {
+      name: "JSON 范围只接受字符串或数值类型",
+      filter: {
+        ...jsonPathFilter,
+        operator: "between",
+        valueType: "boolean",
+        lower: false,
+        upper: true,
+      },
+      accepted: false,
+    },
+  ] as const;
+
+  for (const { name, filter, accepted } of filters) {
+    assert.equal(
+      archiveSearchFilterSchema.safeParse(filter).success,
+      accepted,
+      name,
+    );
+    const searchRequest = {
+      scope: { kind: "current" },
+      text: { kind: "literal", value: "needle" },
+      where: filter,
+    };
+    assert.equal(searchInput(searchRequest), accepted, name + " search schema");
+    assert.equal(
+      aggregateInput({
+        ...searchRequest,
+        unit: "item",
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      }),
+      accepted,
+      name + " aggregate schema",
+    );
+  }
+
+  const reversedRange = {
+    type: "json",
+    field: "properties",
+    path: ["count"],
+    operator: "between",
+    valueType: "number",
+    lower: 3,
+    upper: 1,
+  };
+  assert.equal(
+    archiveSearchFilterSchema.safeParse(reversedRange).success,
+    false,
+  );
+  assert.equal(
+    searchInput({
+      scope: { kind: "current" },
+      text: { kind: "literal", value: "needle" },
+      where: reversedRange,
+    }),
+    true,
+    "JSON Schema 无法表达原生的数值范围上下界顺序校验",
+  );
 }
 
 const archiveJourneySchema = z.object({
@@ -2444,6 +2729,17 @@ async function verifySearchRoute(
   historicalAsOf: string,
 ): Promise<void> {
   const client = createApiClient(baseUrl);
+  const discovery = await discoverArchiveQueryContract(baseUrl);
+  const searchContract = discovery.queryContract.operations.search;
+  const aggregateContract = discovery.queryContract.operations.aggregate;
+  const discoveredSearchSchemaText = JSON.stringify(
+    searchContract.requestSchema,
+  );
+  assert.match(discoveredSearchSchemaText, /current 查询最新已提交视图/u);
+  assert.match(discoveredSearchSchemaText, /asOf 查询固定观察序号/u);
+  assert.match(discoveredSearchSchemaText, /结果页条数/u);
+  assert.match(discoveredSearchSchemaText, /nextCursor/u);
+  verifyDiscoveredJsonFilterRules(discovery.queryContract);
   const searchSchemas = compilePublishedSchemas();
   for (const validationCase of [
     {
@@ -2490,8 +2786,8 @@ async function verifySearchRoute(
           value: 1,
         },
       },
-      message: "JSON 路径比较必须声明预期 JSON 类型。",
-      issuePath: ["where", "valueType"],
+      message: "字段值不符合要求。",
+      issuePath: ["where"],
     },
     {
       path: "/archives/search",
@@ -2544,13 +2840,33 @@ async function verifySearchRoute(
   };
   assert.equal(searchSchemas.apiInput(query), true);
   assert.equal(searchSchemas.standardInput(query), true);
-  const response = await client.archives.search.$post({ json: query });
-  if (response.status !== 200) {
-    throw new Error("公开正文搜索失败：" + (await response.text()));
-  }
-  const page = await response.json();
+  const aggregateRequest = {
+    scope: { kind: "current" as const, binId: "rss-main" },
+    text: { kind: "literal" as const, value: "正文 A" },
+    unit: "item" as const,
+    groupBy: [],
+    metrics: [{ key: "items", op: "count" as const }],
+    limit: 10,
+  };
+  const aggregateResult = await postDiscoveredQuery(
+    baseUrl,
+    aggregateContract,
+    aggregateRequest,
+  );
+  assert.equal(
+    archiveAggregationResultSchema.safeParse(aggregateResult).success,
+    true,
+  );
+
+  const responseBody = await postDiscoveredQuery(
+    baseUrl,
+    searchContract,
+    query,
+  );
+  const page = archiveSearchPageSchema.parse(responseBody);
   assert.equal(searchSchemas.apiOutput(page), true);
   assert.equal(searchSchemas.standardOutput(page), true);
+  assert.equal(compileJsonSchema(searchContract.responseSchema)(page), true);
   assert.equal(page.unit, "item");
   assert.equal(page.snapshot.mode, "current");
   assert.equal(page.results.length, 1);
@@ -2572,17 +2888,17 @@ async function verifySearchRoute(
     text: "正文 A🌿",
   });
 
-  const regexResponse = await client.archives.search.$post({
-    json: {
-      scope: { kind: "current", binId: "rss-main" },
-      text: { kind: "regex", pattern: "\\mA\\M" },
-      limit: 10,
-    },
-  });
-  if (regexResponse.status !== 200) {
-    throw new Error("PostgreSQL ARE 搜索失败：" + (await regexResponse.text()));
-  }
-  const regexPage = await regexResponse.json();
+  const regexRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    text: { kind: "regex", pattern: "\\mA\\M" },
+    limit: 10,
+  };
+  const regexResponseBody = await postDiscoveredQuery(
+    baseUrl,
+    searchContract,
+    regexRequest,
+  );
+  const regexPage = archiveSearchPageSchema.parse(regexResponseBody);
   assert.equal(regexPage.results.length, 1);
   assert.equal(regexPage.results[0]?.itemId, itemId);
   assert.deepEqual(regexPage.results[0]?.matches[0]?.hit?.position, {
@@ -2615,60 +2931,60 @@ async function verifySearchRoute(
     text: "前🙂中文短串后",
   });
 
-  const composedFilter = await client.archives.search.$post({
-    json: {
-      scope: { kind: "current", binId: "rss-main" },
-      text: { kind: "literal", value: "短串" },
-      where: {
-        type: "and",
-        conditions: [
-          {
-            type: "field",
-            field: "sourceKey.key",
-            operator: "in",
-            values: ["search-unicode", "other"],
-          },
-          {
-            type: "or",
-            conditions: [
-              {
-                type: "field",
-                field: "sourceModifiedAt",
-                operator: "between",
-                lower: "2026-10-28T04:00:00.000Z",
-                upper: "2026-10-28T04:05:00.000Z",
-              },
-              {
-                type: "field",
-                field: "sourceRef",
-                operator: "eq",
-                value: "https://example.test/other",
-              },
-            ],
-          },
-          {
-            type: "not",
-            condition: {
+  const composedRequest = {
+    scope: { kind: "current", binId: "rss-main" },
+    text: { kind: "literal", value: "短串" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["search-unicode", "other"],
+        },
+        {
+          type: "or",
+          conditions: [
+            {
+              type: "field",
+              field: "sourceModifiedAt",
+              operator: "between",
+              lower: "2026-10-28T04:00:00.000Z",
+              upper: "2026-10-28T04:05:00.000Z",
+            },
+            {
               type: "field",
               field: "sourceRef",
               operator: "eq",
               value: "https://example.test/other",
             },
-          },
-          {
+          ],
+        },
+        {
+          type: "not",
+          condition: {
             type: "field",
-            field: "runId",
-            operator: "exists",
-            value: false,
+            field: "sourceRef",
+            operator: "eq",
+            value: "https://example.test/other",
           },
-        ],
-      },
-      limit: 10,
+        },
+        {
+          type: "field",
+          field: "runId",
+          operator: "exists",
+          value: false,
+        },
+      ],
     },
-  });
-  if (composedFilter.status !== 200) {
-    throw new Error("组合字段过滤失败：" + (await composedFilter.text()));
-  }
+    limit: 10,
+  };
+  const composedResponse = await postDiscoveredQuery(
+    baseUrl,
+    searchContract,
+    composedRequest,
+  );
   assert.equal(
     searchSchemas.standardFilter({
       type: "field",
@@ -2678,7 +2994,7 @@ async function verifySearchRoute(
     }),
     true,
   );
-  const composedPage = (await composedFilter.json()) as typeof unicodePage;
+  const composedPage = archiveSearchPageSchema.parse(composedResponse);
   assert.equal(composedPage.results.length, 1);
   assert.equal(composedPage.results[0]?.itemId, unicodeItem.itemId);
 
@@ -4615,9 +4931,9 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       orderBy: [{ field: "sourceKey.key" }],
       limit: 10,
     });
-  const nestedPrototypeValue: unknown = JSON.parse(
+  const nestedPrototypeValue = JSON.parse(
     '{"__proto__":{"marker":1,"nested":{"__proto__":"preserve"}}}',
-  );
+  ) as Record<string, unknown>;
   assert.ok(
     typeof nestedPrototypeValue === "object" && nestedPrototypeValue !== null,
   );
@@ -5369,8 +5685,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   assert.equal(reversedRangePage.status, 400);
 
   const invalidTextKey: unknown = JSON.parse('{"\\u0000":"bad"}');
-  const invalidTextKeyPage = await client.archives.search.$post({
-    json: {
+  const invalidTextKeyPage = await fetch(new URL("/archives/search", baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
       scope: { kind: "current", binId: "rss-main" },
       where: {
         type: "json",
@@ -5381,14 +5699,14 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
         value: invalidTextKey,
       },
       limit: 10,
-    },
+    }),
   });
   assert.equal(invalidTextKeyPage.status, 400);
-  if (invalidTextKeyPage.status === 400) {
-    const invalidTextKeyError = await invalidTextKeyPage.json();
-    assert.equal(invalidTextKeyError.error.code, "invalid_input");
-    assert.ok(invalidTextKeyError.error.path?.includes("\u0000"));
-  }
+  const invalidTextKeyError = archiveErrorSchema.parse(
+    await invalidTextKeyPage.json(),
+  ).error;
+  assert.equal(invalidTextKeyError.code, "invalid_input");
+  assert.ok(invalidTextKeyError.path?.includes("\u0000"));
 }
 
 async function verifyRelationSearch(baseUrl: string): Promise<void> {

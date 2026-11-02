@@ -255,8 +255,20 @@ export const archiveAggregationInputSchema = withArchiveJsonSchemaProjection(
       metrics: z.array(archiveAggregationMetricSchema).min(1).max(10),
       having: archiveAggregationHavingSchema,
       orderBy: archiveAggregationOrderBySchema,
-      limit: z.number().int().min(1).max(100).default(50),
-      cursor: postgresTextSchema.min(1).max(4096).optional(),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(50)
+        .describe("分组结果页条数，默认 50，最多 100。"),
+      cursor: postgresTextSchema
+        .min(1)
+        .max(4096)
+        .optional()
+        .describe(
+          "继续读取上一页的 nextCursor；游标固定首屏快照并绑定聚合请求。",
+        ),
       budgetMs: z
         .number()
         .int()

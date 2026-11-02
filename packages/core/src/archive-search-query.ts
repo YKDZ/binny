@@ -187,6 +187,9 @@ export function compileJsonFilter(
       lte(comparedExpression, parameter(filter.upper)),
     )!;
   } else {
+    if (!("value" in filter)) {
+      throw new Error("JSON 路径比较缺少单个 value。");
+    }
     const value = parameter(filter.value);
     switch (filter.operator) {
       case "eq":
