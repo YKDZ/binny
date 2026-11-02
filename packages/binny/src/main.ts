@@ -156,7 +156,6 @@ function parseBrowserIdleTimeoutOption(
         },
       };
 }
-const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
 const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
   binConfigurationSchema,
 );
@@ -578,11 +577,6 @@ function createCliContract(identity: CliCommandIdentity) {
             longOption: "--config",
             description: "长期配置 JSON",
           },
-          targets: {
-            kind: "valueOption",
-            longOption: "--targets",
-            description: "采集目标列表 JSON",
-          },
           browserIdleTimeoutSeconds: {
             kind: "valueOption",
             longOption: "--browser-idle-timeout-seconds",
@@ -597,7 +591,6 @@ function createCliContract(identity: CliCommandIdentity) {
               sourceAdapter: true,
               identityId: true,
               config: true,
-              targets: true,
               browserIdleTimeoutSeconds: true,
             })
             .extend({
@@ -605,7 +598,6 @@ function createCliContract(identity: CliCommandIdentity) {
               sourceAdapter: sourceAdapterTextSchema,
               identityId: identityIdSchema,
               config: jsonObjectTextSchema,
-              targets: targetsTextSchema,
               browserIdleTimeoutSeconds:
                 browserIdleTimeoutOptionSchema.optional(),
             }),
@@ -738,11 +730,6 @@ function createCliContract(identity: CliCommandIdentity) {
             longOption: "--config",
             description: "长期配置 JSON",
           },
-          targets: {
-            kind: "valueOption",
-            longOption: "--targets",
-            description: "采集目标列表 JSON",
-          },
           browserIdleTimeoutSeconds: {
             kind: "valueOption",
             longOption: "--browser-idle-timeout-seconds",
@@ -757,7 +744,6 @@ function createCliContract(identity: CliCommandIdentity) {
               sourceAdapter: sourceAdapterTextSchema.optional(),
               identityId: identityIdSchema.optional(),
               config: jsonObjectTextSchema.optional(),
-              targets: targetsTextSchema.optional(),
               browserIdleTimeoutSeconds:
                 browserIdleTimeoutOptionSchema.optional(),
             })
@@ -766,13 +752,11 @@ function createCliContract(identity: CliCommandIdentity) {
                 sourceAdapter,
                 identityId,
                 config,
-                targets,
                 browserIdleTimeoutSeconds,
               }) =>
                 sourceAdapter !== undefined ||
                 identityId !== undefined ||
                 config !== undefined ||
-                targets !== undefined ||
                 browserIdleTimeoutSeconds !== undefined,
               { message: "至少提供一个需要修改的字段。" },
             ),

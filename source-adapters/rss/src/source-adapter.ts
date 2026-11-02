@@ -7,9 +7,7 @@ import {
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
-  defineSourceAdapterCheckAction,
   type ArchiveResourceMetadata,
-  type SourceAdapterCheckContext,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import * as z from "zod";
@@ -103,31 +101,35 @@ const actionParamsSchema = z
     }
   });
 
-type SourceAdapterConfig = z.infer<typeof sourceAdapterConfigSchema>;
-type ActionParams = z.infer<typeof actionParamsSchema>;
+type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
+type ActionParams = z.output<typeof actionParamsSchema>;
+const checkOutputSchema = z
+  .object({
+    availability: z.enum(["available", "unavailable", "unknown"]),
+    scope: z.array(z.string()),
+    basis: z.string().min(1),
+    problems: z.array(
+      z
+        .object({
+          code: z.string().min(1),
+          message: z.string().min(1),
+          impact: z.string().min(1),
+          path: z.array(z.union([z.string(), z.number()])).optional(),
+          suggestion: z.string().min(1),
+          requiresHuman: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+const collectOutputSchema = z
+  .object({ completedScopes: z.array(z.string()).readonly() })
+  .strict();
 function sourceAdapterStateDirectory(): string {
   return (
     process.env.BINNY_SOURCE_ADAPTER_STATE_DIRECTORY ??
     "/var/lib/binny/source-adapter-state"
   );
-}
-
-function parseConfig(value: unknown): SourceAdapterConfig {
-  const checked = sourceAdapterConfigSchema.safeParse(value);
-  if (!checked.success) {
-    const issue = checked.error.issues[0];
-    throw sourceAdapterActionError({
-      code: "rss_configuration_invalid",
-      message: issue?.message ?? "RSS/Atom 采集配置无效。",
-      impact: "本次运行没有读取或归档任何 feed。",
-      ...(issue === undefined
-        ? {}
-        : { path: issue.path.map((part) => String(part)) }),
-      suggestion: "检查 feeds 中的稳定标识与 HTTP/HTTPS 地址。",
-      requiresHuman: false,
-    });
-  }
-  return checked.data;
 }
 
 function selectedFeeds(
@@ -599,29 +601,10 @@ function feedReadFailure(
 }
 
 async function checkFeeds(
-  context: SourceAdapterCheckContext,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   params: ActionParams,
 ) {
-  let config: SourceAdapterConfig;
-  try {
-    config = parseConfig(context.config);
-  } catch (error) {
-    return {
-      availability: "unknown" as const,
-      scope: [],
-      basis: "无法根据当前配置确定要检查的 feed。",
-      problems: [
-        feedProblem(
-          "配置",
-          "rss_configuration_invalid",
-          error instanceof Error ? error.message : "RSS/Atom 采集配置无效。",
-          "检查 feeds 中的稳定标识与 HTTP/HTTPS 地址。",
-        ),
-      ],
-    };
-  }
-
-  const selected = selectedFeeds(config, params);
+  const selected = selectedFeeds(context.config, params);
   const problems = selected.missing.map((feedId) =>
     feedProblem(
       feedId,
@@ -778,11 +761,10 @@ function failureFromProblems(
 }
 
 async function collectFeeds(
-  context: SourceAdapterContext,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   params: ActionParams,
 ): Promise<{ readonly completedScopes: readonly string[] }> {
-  const config = parseConfig(context.config);
-  const selected = selectedFeeds(config, params);
+  const selected = selectedFeeds(context.config, params);
   const problems: {
     feedId: string;
     message: string;
@@ -1013,14 +995,16 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema: sourceAdapterConfigSchema,
   actions: {
-    check: defineSourceAdapterCheckAction({
+    check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "检查所选 RSS/Atom feed 的可达性、条目身份和正文范围。",
       params: actionParamsSchema,
+      output: checkOutputSchema,
       execute: checkFeeds,
     }),
-    collect: defineSourceAdapterAction({
+    collect: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "读取所选 feed 的新内容和编辑，并归档正文与可取得媒体。",
       params: actionParamsSchema,
+      output: collectOutputSchema,
       execute: collectFeeds,
     }),
   },

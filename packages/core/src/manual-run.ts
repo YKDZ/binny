@@ -5,8 +5,6 @@ import {
   sourceAdapterManifestStoredSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
-  manualRunCheckInputSchema,
-  manualRunCheckResultSchema,
   manualRunErrorSchema,
   manualRunFailureSchema,
   manualRunExecutionSchema,
@@ -65,7 +63,7 @@ const runSelection = {
   finishedAt: manualRuns.finishedAt,
   completedScopes: manualRuns.completedScopes,
   failure: manualRuns.failure,
-  checkResult: manualRuns.checkResult,
+  output: manualRuns.output,
 };
 
 const activeRuns = alias(manualRuns, "active_runs");
@@ -307,29 +305,8 @@ async function rowToRun(
     row.status === "completed" ||
     row.status === "failed" ||
     row.status === "cancelled";
-  if (
-    row.action === "check" &&
-    row.status === "completed" &&
-    row.checkResult === null
-  ) {
-    throw new Error("已完成的 check 运行缺少诊断结果。");
-  }
-  if (row.checkResult !== null && row.finishedAt === null) {
-    throw new Error("check 诊断结果缺少检查完成时间。");
-  }
   const failureValue =
     row.failure === null ? null : manualRunFailureSchema.parse(row.failure);
-  const checkInput =
-    row.checkResult === null
-      ? null
-      : manualRunCheckInputSchema.parse(row.checkResult);
-  const checkResult =
-    checkInput === null || row.finishedAt === null
-      ? undefined
-      : manualRunCheckResultSchema.parse({
-          ...checkInput,
-          checkedAt: row.finishedAt.toISOString(),
-        });
   return manualRunSchema.parse({
     runId: row.runId,
     binId: row.binId,
@@ -358,7 +335,7 @@ async function rowToRun(
           result: {
             completedScopes: row.completedScopes,
             commits,
-            ...(checkResult === undefined ? {} : { check: checkResult }),
+            ...(row.output === null ? {} : { output: row.output }),
             stopReason: statusReason(row.status, failureValue, row.startedAt),
             ...(failureValue === null ? {} : { error: failureValue }),
           },
@@ -371,7 +348,6 @@ type RunBinSnapshot = {
   readonly sourceAdapter: unknown;
   readonly identityId: string;
   readonly config: unknown;
-  readonly targets: unknown;
   readonly status: "active" | "disabled";
 };
 
@@ -413,7 +389,6 @@ export async function createQueuedRunInTransaction(
     sourceAdapter: bin.sourceAdapter,
     identityId: bin.identityId,
     config: bin.config,
-    targets: bin.targets,
   });
   const action = validateSourceAdapterActionParameters(
     configuredBin.sourceAdapter,
@@ -445,7 +420,6 @@ export async function createQueuedRunInTransaction(
       action: checkedInput.data.action,
       params: checkedInput.data.params,
       configSnapshot: configuredBin.config,
-      targetsSnapshot: configuredBin.targets,
       triggerType: triggerSource.kind,
       scheduleId:
         triggerSource.kind === "schedule" ? triggerSource.scheduleId : null,
@@ -487,7 +461,6 @@ export function createManualRunStore(
             sourceAdapter: binConfigurations.sourceAdapter,
             identityId: binConfigurations.identityId,
             config: binConfigurations.config,
-            targets: binConfigurations.targets,
             status: binConfigurations.status,
           })
           .from(binConfigurations)
@@ -652,7 +625,6 @@ export function createManualRunStore(
             sourceAdapterSnapshot: manualRuns.sourceAdapterSnapshot,
             params: manualRuns.params,
             configSnapshot: manualRuns.configSnapshot,
-            targetsSnapshot: manualRuns.targetsSnapshot,
           })
           .from(manualRuns)
           .where(
@@ -753,7 +725,6 @@ export function createManualRunStore(
           action: run.action,
           params: run.params,
           config: run.configSnapshot,
-          targets: run.targetsSnapshot,
           ...(browserReservationId === undefined ||
           runtimeConnection.protocolVersion < runtimeProtocolVersion
             ? {}
@@ -782,7 +753,6 @@ export function createManualRunStore(
         const [current] = await transaction
           .select({
             status: manualRuns.status,
-            action: manualRuns.action,
             runtimeId: manualRuns.runtimeId,
           })
           .from(manualRuns)
@@ -826,30 +796,6 @@ export function createManualRunStore(
           );
 
         const completion: ManualRunCompletion = checked.data.completion;
-        if (
-          current.action === "check" &&
-          completion.status === "completed" &&
-          completion.check === undefined
-        ) {
-          return failure(
-            400,
-            "invalid_input",
-            "check 必须提交结构化诊断结果。",
-            ["completion", "check"],
-          );
-        }
-        if (
-          current.action !== "check" &&
-          completion.status === "completed" &&
-          completion.check !== undefined
-        ) {
-          return failure(
-            400,
-            "invalid_input",
-            "只有 check 动作可以提交可用性诊断结果。",
-            ["completion", "check"],
-          );
-        }
         const runFailure =
           completion.status === "failed"
             ? serializeFailure(completion.error)
@@ -858,13 +804,11 @@ export function createManualRunStore(
           .update(manualRuns)
           .set({
             status: completion.status,
-            completedScopes: completion.completedScopes,
+            completedScopes:
+              completion.status === "failed" ? completion.completedScopes : [],
             failure: runFailure,
-            checkResult:
-              completion.status === "completed" &&
-              completion.check !== undefined
-                ? completion.check
-                : null,
+            output:
+              completion.status === "completed" ? completion.output : null,
             // 结果终结时间使用 PostgreSQL 墙钟，而非事务开始时间。
             finishedAt: sql`clock_timestamp()`,
             stopConfirmedAt: sql`clock_timestamp()`,

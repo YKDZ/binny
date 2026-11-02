@@ -33,7 +33,6 @@ const binSelection = {
   sourceAdapter: binConfigurations.sourceAdapter,
   identityId: binConfigurations.identityId,
   config: binConfigurations.config,
-  targets: binConfigurations.targets,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   status: binConfigurations.status,
   createdAt: binConfigurations.createdAt,
@@ -129,7 +128,7 @@ function createDynamicSchema(
 function dynamicSchemaCacheKey(sourceAdapter: SourceAdapterManifest): string {
   const actions = Object.entries(sourceAdapter.actions)
     .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([name, action]) => [name, action.params]);
+    .map(([name, action]) => [name, action.params, action.output]);
   return JSON.stringify({ config: sourceAdapter.configSchema, actions });
 }
 
@@ -164,6 +163,13 @@ function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
     );
     if (result.error !== undefined)
       return { validators: undefined, error: result.error };
+    const output = createDynamicSchema(
+      action.output,
+      ["sourceAdapter", "actions", name, "output"],
+      compiler,
+    );
+    if (output.error !== undefined)
+      return { validators: undefined, error: output.error };
     actions[name] = result.validator!;
   }
 
@@ -312,7 +318,6 @@ function rowToConfiguration(row: BinRow): BinConfiguration {
     sourceAdapter: row.sourceAdapter,
     identityId: row.identityId,
     config: row.config,
-    targets: row.targets,
     browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
     status: row.status,
     execution: {
@@ -384,7 +389,6 @@ export function createBinConfigurationStore(
             sourceAdapter: checked.data.sourceAdapter,
             identityId: checked.data.identityId,
             config: checked.data.config,
-            targets: checked.data.targets,
             browserIdleTimeoutSeconds,
             status: "active",
           })
@@ -425,12 +429,10 @@ export function createBinConfigurationStore(
           sourceAdapter: previous.sourceAdapter,
           identityId: previous.identityId,
           config: previous.config,
-          targets: previous.targets,
         });
         const sourceAdapter =
           checked.data.sourceAdapter ?? existing.sourceAdapter;
         const config = checked.data.config ?? existing.config;
-        const targets = checked.data.targets ?? existing.targets;
         const browserIdleTimeoutSeconds =
           checked.data.browserIdleTimeoutSeconds === undefined
             ? previous.browserIdleTimeoutSeconds
@@ -459,7 +461,6 @@ export function createBinConfigurationStore(
             sourceAdapter,
             identityId: checked.data.identityId ?? existing.identityId,
             config,
-            targets,
             browserIdleTimeoutSeconds,
             updatedAt: sql`now()`,
           })

@@ -941,10 +941,15 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     version: "1.0.0",
     configSchema: { type: "object" },
     actions: {
-      check: { description: "检查旧浏览器配置。", params: { type: "object" } },
+      check: {
+        description: "检查旧浏览器配置。",
+        params: { type: "object" },
+        output: { type: "object" },
+      },
       collect: {
         description: "读取旧浏览器配置。",
         params: { type: "object" },
+        output: { type: "object" },
       },
     },
     environment: {
@@ -969,7 +974,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         sourceAdapter,
         identityId: `identity-${binId}`,
         config: {},
-        targets: [],
       }),
     });
     assert.equal(response.status, 201, await response.clone().text());
@@ -1315,7 +1319,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
       sourceAdapter: legacyBrowserWithEmptyReason,
       identityId: "identity-binny-database-upgrade-new-empty-reason",
       config: {},
-      targets: [],
     }),
   });
   assert.equal(newEmptyReasonCreate.status, 400);
@@ -2221,17 +2224,15 @@ async function validateApiInput(): Promise<void> {
 async function createSdkManifest(): Promise<unknown> {
   const program = [
     'import { z } from "zod";',
-    'import { sourceAdapterManifest, defineSourceAdapter, defineSourceAdapterCheckAction } from "./dist/index.js";',
+    'import { sourceAdapterManifest, defineSourceAdapter, defineSourceAdapterAction } from "./dist/index.js";',
+    "const configSchema = z.object({ userAgent: z.string().min(1), key: z.string().regex(/^a/).regex(/z$/) });",
     "const sourceAdapter = defineSourceAdapter({",
     '  id: "rss",',
     '  version: "1.0.0",',
-    "  configSchema: z.object({",
-    "    userAgent: z.string().min(1),",
-    "    key: z.string().regex(/^a/).regex(/z$/),",
-    "  }),",
+    "  configSchema,",
     "  actions: {",
-    '    check: defineSourceAdapterCheckAction({ description: "检查测试信源配置。", params: z.object({}), execute: async () => ({ availability: "unknown", scope: ["test-source"], basis: "验收用 RSS 清单没有连接真实信源。", problems: [{ code: "test_source_unconfigured", message: "验收用 RSS 清单没有连接真实信源。", impact: "无法判断真实订阅源是否可用。", suggestion: "配置真实订阅源后重新触发 check。", requiresHuman: false }] }) }),',
-    '    collect: { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), execute: async () => undefined },',
+    '    check: defineSourceAdapterAction(configSchema, { description: "检查测试信源配置。", params: z.object({}), output: z.object({ availability: z.enum(["available", "unavailable", "unknown"]) }), execute: async () => ({ availability: "unknown" }) }),',
+    '    collect: defineSourceAdapterAction(configSchema, { description: "读取并归档订阅源。", params: z.object({ limit: z.number().int().min(1) }), output: z.object({ collected: z.number().int() }), execute: async () => ({ collected: 0 }) }),',
     "  },",
     "  environment: { browser: { required: false, profileReuseAfterRestart: false } },",
     "});",
@@ -2422,6 +2423,23 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
   };
 }
 
+type ManualActionOutput = {
+  readonly availability?: "available" | "unavailable" | "unknown";
+  readonly scope?: readonly string[];
+  readonly basis?: string;
+  readonly completedScopes?: readonly string[];
+  readonly problems?: readonly {
+    readonly code: string;
+    readonly message?: string;
+    readonly suggestion?: string;
+    readonly requiresHuman?: boolean;
+  }[];
+};
+
+function runOutput(run: { readonly result?: { readonly output?: unknown } }) {
+  return run.result?.output as ManualActionOutput | undefined;
+}
+
 type RssManualRun = {
   readonly status: string;
   readonly runId: string;
@@ -2430,6 +2448,7 @@ type RssManualRun = {
   readonly finishedAt?: string;
   readonly result?: {
     readonly completedScopes: readonly string[];
+    readonly output?: ManualActionOutput;
     readonly commits: readonly {
       readonly commitId: string;
       readonly items: readonly { readonly itemId: string }[];
@@ -2439,17 +2458,6 @@ type RssManualRun = {
       readonly code: string;
       readonly message: string;
       readonly suggestion?: string;
-    };
-    readonly check?: {
-      readonly availability: "available" | "unavailable" | "unknown";
-      readonly checkedAt: string;
-      readonly scope: readonly string[];
-      readonly basis: string;
-      readonly problems: readonly {
-        readonly code: string;
-        readonly message: string;
-        readonly suggestion: string;
-      }[];
     };
   };
 };
@@ -2535,22 +2543,26 @@ async function createLinuxdoBin(
       identityId,
       "--config",
       JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
-      "--targets",
-      JSON.stringify([
-        { id: "latest", kind: "latest" },
-        {
-          id: "category",
-          kind: "category",
-          categoryId: 42,
-          categorySlugPath: "controlled",
-        },
-        { id: "pinned", kind: "topic", topicId: 2401 },
-      ]),
     ]),
     "created",
   );
   assert.equal(created.id, binId);
   await waitForRuntime(baseUrl, binId);
+}
+
+const linuxdoTargetDefinitions = {
+  latest: { id: "latest", kind: "latest" },
+  category: {
+    id: "category",
+    kind: "category",
+    categoryId: 42,
+    categorySlugPath: "controlled",
+  },
+  pinned: { id: "pinned", kind: "topic", topicId: 2401 },
+} as const;
+
+function linuxdoTargets(...ids: (keyof typeof linuxdoTargetDefinitions)[]) {
+  return ids.map((id) => linuxdoTargetDefinitions[id]);
 }
 
 async function collectLinuxdoOnSchedule(
@@ -2685,7 +2697,7 @@ async function verifyLinuxdoArchiveJourney(
   const cliForLinuxdo = (args: readonly string[]) => cli(baseUrl, args);
   assert.equal(journey.firstCollection.status, "completed");
   assert.ok(
-    journey.firstCollection.result?.completedScopes?.includes("topic:2401"),
+    runOutput(journey.firstCollection)?.completedScopes?.includes("topic:2401"),
   );
 
   const searchTopic = async (text: string) =>
@@ -2894,29 +2906,29 @@ async function verifyLinuxdoArchiveJourney(
     cliForLinuxdo,
     binId,
     "check",
-    { targetIds: ["latest"] },
+    { targets: linuxdoTargets("latest") },
   );
   assert.equal(discoveryCheck.status, "completed");
-  assert.equal(discoveryCheck.result?.check?.availability, "available");
-  assert.deepEqual(discoveryCheck.result?.check?.scope, ["target:latest"]);
+  assert.equal(runOutput(discoveryCheck)?.availability, "available");
+  assert.deepEqual(runOutput(discoveryCheck)?.scope, ["target:latest"]);
   assert.equal(discoveryCheck.result?.commits?.length ?? 0, 0);
   const discoveryCollection = await triggerLinuxdoRun(
     cliForLinuxdo,
     binId,
     "collect",
-    { targetIds: ["latest"], maxTopics: 1 },
+    { targets: linuxdoTargets("latest"), maxTopics: 1 },
   );
   assert.equal(discoveryCollection.status, "completed");
   assert.ok(
-    discoveryCollection.result?.completedScopes?.some((scope) =>
+    runOutput(discoveryCollection)?.completedScopes?.some((scope) =>
       scope.startsWith("target:latest"),
     ),
   );
   assert.ok(
-    discoveryCollection.result?.completedScopes?.includes("topic:2401"),
+    runOutput(discoveryCollection)?.completedScopes?.includes("topic:2401"),
   );
   assert.ok(
-    discoveryCollection.result?.completedScopes?.includes("post:240001"),
+    runOutput(discoveryCollection)?.completedScopes?.includes("post:240001"),
   );
   const discoveryCommitLocator = discoveryCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
@@ -2953,7 +2965,9 @@ async function verifyLinuxdoArchiveJourney(
     discoveryCollection.runId,
   );
   assert.equal(secondCollection.status, "completed");
-  assert.ok(secondCollection.result?.completedScopes?.includes("topic:2401"));
+  assert.ok(
+    runOutput(secondCollection)?.completedScopes?.includes("topic:2401"),
+  );
   const updatedSearch = await searchTopic("主题正文版本 2");
   assert.equal(updatedSearch.results.length, 1);
   assert.equal(updatedSearch.results[0]?.itemId, rootItemId);
@@ -3003,7 +3017,7 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.equal(partialCollection.status, "completed");
   assert.equal(
-    partialCollection.result?.completedScopes?.includes("topic:2401"),
+    runOutput(partialCollection)?.completedScopes?.includes("topic:2401"),
     false,
   );
   const currentPartialSearch = await searchTopic("主题正文版本 3");
@@ -3451,7 +3465,7 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   assert.ok((await browserProcesses()).length <= 1);
   const secondRun = await waitForRunEnd(secondBinId, queuedOnCapacity.runId);
   assert.equal(secondRun.status, "completed");
-  assert.equal(secondRun.result?.check?.availability, "unavailable");
+  assert.equal(secondRun.result?.output?.availability, "unavailable");
   await waitForPower(secondBinId, "ready");
   const disabledOwnerProcess = await browserProcesses();
   assert.equal(disabledOwnerProcess.length, 1);
@@ -3481,7 +3495,7 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   assert.ok((await browserProcesses()).length <= 1);
   const firstRun = await waitForRunEnd(firstBinId, waitingFirstRun.runId);
   assert.equal(firstRun.status, "completed");
-  assert.equal(firstRun.result?.check?.availability, "available");
+  assert.equal(firstRun.result?.output?.availability, "available");
   await waitForPower(firstBinId, "stopped");
   assert.equal((await browserProcesses()).length, 0);
 
@@ -3602,8 +3616,6 @@ async function createRssBin(
       binId + "-identity",
       "--config",
       configJson,
-      "--targets",
-      "[]",
     ]),
     "created",
   );
@@ -4139,18 +4151,9 @@ type ManualRunCliState = {
       readonly commitId: string;
       readonly items: readonly { readonly itemId: string }[];
     }[];
+    readonly output?: ManualActionOutput;
     readonly stopReason: { readonly code: string };
     readonly error?: { readonly code: string };
-    readonly check?: {
-      readonly availability: "available" | "unavailable" | "unknown";
-      readonly checkedAt: string;
-      readonly scope: readonly string[];
-      readonly basis: string;
-      readonly problems: readonly {
-        readonly suggestion: string;
-        readonly requiresHuman: boolean;
-      }[];
-    };
   };
 };
 
@@ -4525,8 +4528,6 @@ async function manualRunsCliStep(
         binId + "-identity",
         "--config",
         JSON.stringify({ section: "initial" }),
-        "--targets",
-        "[]",
       ]),
       "created",
     );
@@ -4588,7 +4589,7 @@ async function manualRunsCliStep(
   assert.ok(completed !== undefined, "CLI 没有读取到终结运行结果。");
   assert.equal(completed.status, "completed");
   assert.equal(completed.result?.stopReason.code, "completed");
-  assert.deepEqual(completed.result?.completedScopes, [
+  assert.deepEqual(completed.result?.output?.completedScopes, [
     "source/cli-created-item",
   ]);
   const savedCommit = completed.result?.commits[0];
@@ -4665,10 +4666,10 @@ async function manualRunsCliStep(
   }
   assert.ok(checkedRun !== undefined, "CLI 没有读取到 check 终结结果。");
   assert.equal(checkedRun.status, "completed");
-  assert.equal(checkedRun.result?.check?.availability, "unknown");
+  assert.equal(checkedRun.result?.output?.availability, "unknown");
   assert.deepEqual(checkedRun.result?.commits, []);
   assert.ok(
-    (checkedRun.result?.check?.problems[0]?.suggestion.length ?? 0) > 0,
+    (checkedRun.result?.output?.problems?.[0]?.suggestion?.length ?? 0) > 0,
   );
   assert.equal(checkedRun.result?.stopReason.code, "completed");
 
@@ -4716,7 +4717,7 @@ async function manualRunsCliStep(
     "最近 check 结果之后没有产生新的 collect 运行结果。",
   );
   assert.equal(collectedAfterCheck.status, "completed");
-  assert.deepEqual(collectedAfterCheck.result?.completedScopes, [
+  assert.deepEqual(collectedAfterCheck.result?.output?.completedScopes, [
     "source/cli-after-check",
   ]);
 
@@ -5311,7 +5312,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   assert.equal(completedFirst.status, "completed");
   if (completedFirst.action === "collect")
     assert.equal(completedFirst.result?.commits.length, 1);
-  else assert.ok(completedFirst.result?.check !== undefined);
+  else assert.ok(completedFirst.result?.output !== undefined);
 
   const secondArrival = await waitForScheduledArrival(
     sourceControlUrl,
@@ -5347,7 +5348,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   assert.equal(completedSecond.status, "completed");
   if (completedSecond.action === "collect")
     assert.equal(completedSecond.result?.commits.length, 1);
-  else assert.ok(completedSecond.result?.check !== undefined);
+  else assert.ok(completedSecond.result?.output !== undefined);
 
   const manualGateKey = "schedule-scheduled-queue-marker-" + randomUUID();
   const manualRun = cliData<{
@@ -5594,9 +5595,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   const manifest = await createSdkManifest();
   const manifestJson = JSON.stringify(manifest);
   const initialConfig = JSON.stringify({ userAgent: "Binny E2E", key: "az" });
-  const initialTargets = JSON.stringify([
-    { url: "https://example.test/one.xml" },
-  ]);
 
   const emptyList = cliData<{ readonly bins: readonly unknown[] }>(
     await cli(baseUrl, ["bin", "list"]),
@@ -5620,8 +5618,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "account-one",
       "--config",
       initialConfig,
-      "--targets",
-      initialTargets,
     ]),
     "created",
   );
@@ -5650,8 +5646,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "duplicate-account",
       "--config",
       initialConfig,
-      "--targets",
-      initialTargets,
     ]),
     "bin_already_exists",
   );
@@ -5671,8 +5665,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "account-invalid-config",
       "--config",
       "{}",
-      "--targets",
-      initialTargets,
     ]),
     "invalid_configuration",
   );
@@ -5687,7 +5679,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       sourceAdapter: manifest,
       identityId: "account-regex-invalid",
       config: { userAgent: "Binny E2E", key: "ab" },
-      targets: [],
     }),
   });
   assert.equal(invalidRegexCreate.status, 400);
@@ -5710,7 +5701,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       sourceAdapter: manifest,
       identityId: "account-regex",
       config: { userAgent: "Binny E2E", key: "az" },
-      targets: [],
     }),
   });
   assert.equal(validRegexCreate.status, 201);
@@ -5771,8 +5761,6 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "account-two",
       "--config",
       initialConfig,
-      "--targets",
-      JSON.stringify([{ url: "https://example.test/two.xml" }]),
     ]),
     "created",
   );
@@ -5796,14 +5784,9 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
     userAgent: "Binny E2E updated",
     key: "aaz",
   });
-  const updatedTargets = JSON.stringify([
-    { url: "https://example.test/one.xml" },
-    { url: "https://example.test/extra.xml" },
-  ]);
   const updated = cliData<{
     readonly identityId: string;
     readonly config: { readonly userAgent: string };
-    readonly targets: readonly unknown[];
   }>(
     await cli(baseUrl, [
       "bin",
@@ -5813,14 +5796,11 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
       "account-primary",
       "--config",
       updatedConfig,
-      "--targets",
-      updatedTargets,
     ]),
     "updated",
   );
   assert.equal(updated.identityId, "account-primary");
   assert.equal(updated.config.userAgent, "Binny E2E updated");
-  assert.equal(updated.targets.length, 2);
 
   cliFailure(
     await cli(baseUrl, ["bin", "update", "rss-main", "--config", "{}"]),
@@ -5864,12 +5844,10 @@ async function verifyRestartAndRemoval(
     readonly status: string;
     readonly identityId: string;
     readonly config: { readonly userAgent: string };
-    readonly targets: readonly unknown[];
   }>(await cli(baseUrl, ["bin", "get", "rss-main"]), "found");
   assert.equal(persisted.status, "disabled");
   assert.equal(persisted.identityId, "account-primary");
   assert.equal(persisted.config.userAgent, "Binny E2E updated");
-  assert.equal(persisted.targets.length, 2);
 
   const persistedRegexConfiguration = cliData<{
     readonly config: { readonly userAgent: string; readonly key: string };
@@ -6659,13 +6637,13 @@ async function runRssAcceptance(
     },
   );
   assert.equal(staticCheck.status, "completed");
-  assert.equal(staticCheck.result?.check?.availability, "unavailable");
-  assert.deepEqual(staticCheck.result?.check?.scope, ["static-main"]);
+  assert.equal(staticCheck.result?.output?.availability, "unavailable");
+  assert.deepEqual(staticCheck.result?.output?.scope, ["static-main"]);
   assert.ok(
-    staticCheck.result?.check?.problems.some(
+    staticCheck.result?.output?.problems?.some(
       ({ code, suggestion }) =>
         code === "rss_static_article_unavailable" &&
-        suggestion.includes("可公开访问的静态正文来源"),
+        suggestion?.includes("可公开访问的静态正文来源") === true,
     ),
   );
   const staticPageRequestsAfterCheck = (await source.requests()).filter(
@@ -7284,11 +7262,10 @@ async function runRssAcceptance(
     feedIds: ["rss-main"],
   });
   assert.equal(checkRun.status, "completed");
-  assert.equal(checkRun.result?.check?.availability, "available");
-  assert.deepEqual(checkRun.result?.check?.scope, ["rss-main"]);
-  assert.ok((checkRun.result?.check?.checkedAt.length ?? 0) > 0);
+  assert.equal(checkRun.result?.output?.availability, "available");
+  assert.deepEqual(checkRun.result?.output?.scope, ["rss-main"]);
   assert.ok(
-    checkRun.result?.check?.problems.some(
+    checkRun.result?.output?.problems?.some(
       ({ code }) => code === "rss_feed_summary_only",
     ),
   );
@@ -7760,12 +7737,13 @@ async function runRssAcceptance(
     { feedIds: ["bad-identity"] },
   );
   assert.equal(badIdentityCheck.status, "completed");
-  assert.equal(badIdentityCheck.result?.check?.availability, "unavailable");
-  assert.deepEqual(badIdentityCheck.result?.check?.scope, ["bad-identity"]);
+  assert.equal(badIdentityCheck.result?.output?.availability, "unavailable");
+  assert.deepEqual(badIdentityCheck.result?.output?.scope, ["bad-identity"]);
   assert.ok(
-    badIdentityCheck.result?.check?.problems.some(
+    badIdentityCheck.result?.output?.problems?.some(
       ({ code, suggestion }) =>
-        code === "rss_entry_identity_unavailable" && suggestion.length > 0,
+        code === "rss_entry_identity_unavailable" &&
+        (suggestion?.length ?? 0) > 0,
     ),
   );
   const badIdentityRun = await triggerRssAction(
@@ -7791,17 +7769,16 @@ async function runRssAcceptance(
     { feedIds: ["real-feed-parser"] },
   );
   assert.equal(realFeedCheck.status, "completed");
-  assert.deepEqual(realFeedCheck.result?.check?.scope, ["real-feed-parser"]);
+  assert.deepEqual(realFeedCheck.result?.output?.scope, ["real-feed-parser"]);
   process.stdout.write(
     "真实 feed 兼容性结果：" +
       JSON.stringify({
         url: realFeedUrl,
         environment: "Compose runtime-rss 正式轻量镜像",
         action: "check",
-        scope: realFeedCheck.result?.check?.scope,
-        availability: realFeedCheck.result?.check?.availability,
-        checkedAt: realFeedCheck.result?.check?.checkedAt,
-        problems: realFeedCheck.result?.check?.problems,
+        scope: realFeedCheck.result?.output?.scope,
+        availability: realFeedCheck.result?.output?.availability,
+        problems: realFeedCheck.result?.output?.problems,
       }) +
       "\n",
   );

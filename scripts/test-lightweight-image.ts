@@ -117,6 +117,41 @@ try {
             properties: {},
             type: "object",
           },
+          output: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            properties: {
+              availability: {
+                enum: ["available", "unavailable", "unknown"],
+                type: "string",
+              },
+              scope: { items: { type: "string" }, type: "array" },
+              basis: { type: "string" },
+              problems: {
+                items: {
+                  properties: {
+                    code: { type: "string" },
+                    message: { type: "string" },
+                    impact: { type: "string" },
+                    suggestion: { type: "string" },
+                    requiresHuman: { type: "boolean" },
+                  },
+                  required: [
+                    "code",
+                    "message",
+                    "impact",
+                    "suggestion",
+                    "requiresHuman",
+                  ],
+                  type: "object",
+                  additionalProperties: false,
+                },
+                type: "array",
+              },
+            },
+            required: ["availability", "scope", "basis", "problems"],
+            type: "object",
+            additionalProperties: false,
+          },
         },
         collect: {
           description: "运行轻量测试采集动作。",
@@ -124,6 +159,18 @@ try {
             $schema: "https://json-schema.org/draft/2020-12/schema",
             properties: {},
             type: "object",
+          },
+          output: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            properties: {
+              completedScopes: {
+                items: { type: "string" },
+                type: "array",
+              },
+            },
+            required: ["completedScopes"],
+            type: "object",
+            additionalProperties: false,
           },
         },
         sample: {
@@ -139,6 +186,13 @@ try {
             },
             required: ["limit"],
             type: "object",
+          },
+          output: {
+            $schema: "https://json-schema.org/draft/2020-12/schema",
+            properties: { sampled: { type: "boolean" } },
+            required: ["sampled"],
+            type: "object",
+            additionalProperties: false,
           },
         },
       },

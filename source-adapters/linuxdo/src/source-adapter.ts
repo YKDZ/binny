@@ -4,10 +4,8 @@ import {
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
-  defineSourceAdapterCheckAction,
   isSourceAdapterActionError,
   type ArchiveResourceMetadata,
-  type SourceAdapterCheckContext,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { chromium, type APIRequestContext, type Page } from "playwright-core";
@@ -34,54 +32,6 @@ const siteOriginSchema = z.url().refine((value) => {
 const sourceAdapterConfigSchema = z
   .object({ origin: siteOriginSchema })
   .strict();
-const selectedTargetsSchema = z
-  .array(targetIdSchema)
-  .min(1)
-  .max(100)
-  .superRefine((values, context) => {
-    const duplicateIndex = values.findIndex(
-      (value, index) => values.indexOf(value) !== index,
-    );
-    if (duplicateIndex !== -1) {
-      context.addIssue({
-        code: "custom",
-        path: [duplicateIndex],
-        message: "本次选择的目标 id 不能重复。",
-      });
-    }
-  });
-const checkParamsSchema = z
-  .object({
-    topicId: topicIdSchema.optional(),
-    targetIds: selectedTargetsSchema.optional(),
-  })
-  .strict()
-  .superRefine((params, context) => {
-    if (params.topicId !== undefined && params.targetIds !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["targetIds"],
-        message: "topicId 与 targetIds 不能同时使用。",
-      });
-    }
-  });
-const collectParamsSchema = z
-  .object({
-    topicId: topicIdSchema.optional(),
-    targetIds: selectedTargetsSchema.optional(),
-    createdAfter: z.iso.datetime().optional(),
-    maxTopics: z.number().int().min(1).max(500).optional(),
-  })
-  .strict()
-  .superRefine((params, context) => {
-    if (params.topicId !== undefined && params.targetIds !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["targetIds"],
-        message: "topicId 与 targetIds 不能同时使用。",
-      });
-    }
-  });
 const categorySlugPathSchema = z
   .string()
   .min(1)
@@ -105,7 +55,63 @@ const configuredTargetSchema = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-const configuredTargetsSchema = z.array(configuredTargetSchema).max(100);
+const actionTargetsSchema = z
+  .array(configuredTargetSchema)
+  .max(100)
+  .superRefine((targets, context) => {
+    const ids = new Set<string>();
+    for (const [index, target] of targets.entries()) {
+      if (ids.has(target.id)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "id"],
+          message: "本次运行参数中的目标 id 不能重复。",
+        });
+      }
+      ids.add(target.id);
+    }
+  });
+const checkParamsSchema = z
+  .object({
+    topicId: topicIdSchema.optional(),
+    targets: actionTargetsSchema.optional(),
+  })
+  .strict()
+  .superRefine((params, context) => {
+    if (params.topicId !== undefined && params.targets !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["targets"],
+        message: "topicId 与 targets 不能同时使用。",
+      });
+    }
+  });
+const collectParamsSchema = z
+  .object({
+    topicId: topicIdSchema.optional(),
+    targets: actionTargetsSchema.optional(),
+    createdAfter: z.iso.datetime().optional(),
+    maxTopics: z.number().int().min(1).max(500).optional(),
+  })
+  .strict()
+  .superRefine((params, context) => {
+    if (params.topicId !== undefined && params.targets !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["targets"],
+        message: "topicId 与 targets 不能同时使用。",
+      });
+    } else if (
+      params.topicId === undefined &&
+      (params.targets === undefined || params.targets.length === 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["targets"],
+        message: "采集主题列表时必须在本次参数中指定至少一个目标。",
+      });
+    }
+  });
 const discoveredTopicSchema = z
   .object({ id: topicIdSchema, created_at: z.string().optional() })
   .passthrough();
@@ -194,6 +200,7 @@ const topicPostsResponseSchema = z
 type DiscoursePost = z.infer<typeof discoursePostSchema>;
 type DiscourseTopic = z.infer<typeof discourseTopicSchema>;
 type ConfiguredTarget = z.infer<typeof configuredTargetSchema>;
+type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
 type CollectParams = z.output<typeof collectParamsSchema>;
 type CheckParams = z.output<typeof checkParamsSchema>;
 type DiscourseProblem = {
@@ -203,6 +210,28 @@ type DiscourseProblem = {
   readonly suggestion: string;
   readonly requiresHuman: boolean;
 };
+const checkOutputSchema = z
+  .object({
+    availability: z.enum(["available", "unavailable", "unknown"]),
+    scope: z.array(z.string().min(1)),
+    basis: z.string().min(1),
+    problems: z.array(
+      z
+        .object({
+          code: z.string().min(1),
+          message: z.string().min(1),
+          impact: z.string().min(1),
+          path: z.array(z.union([z.string(), z.number()])).optional(),
+          suggestion: z.string().min(1),
+          requiresHuman: z.boolean(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+const collectOutputSchema = z
+  .object({ completedScopes: z.array(z.string()).readonly() })
+  .strict();
 type JsonResponse =
   | { readonly kind: "json"; readonly status: number; readonly value: unknown }
   | { readonly kind: "nonJson"; readonly status: number }
@@ -266,12 +295,11 @@ const checkBasis =
   "通过正式持久浏览器的共享身份读取 Discourse 当前会话和指定主题 JSON；检查不下载媒体、不写入归档。";
 const postBatchSize = 100;
 
-function siteFromConfig(value: unknown): {
+function siteFromConfig(config: SourceAdapterConfig): {
   readonly origin: URL;
   readonly namespace: string;
 } {
-  const { origin } = sourceAdapterConfigSchema.parse(value);
-  const url = new URL(origin);
+  const url = new URL(config.origin);
   return {
     origin: new URL(url.origin),
     namespace: `linuxdo:${url.host}`,
@@ -632,82 +660,6 @@ function failureFromAccess(
   return failureFromProblem(access.problem);
 }
 
-function configuredTargets(value: readonly unknown[]): ConfiguredTarget[] {
-  const parsed = configuredTargetsSchema.safeParse(value);
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    throw sourceAdapterActionError({
-      code: "linuxdo_targets_invalid",
-      message: "长期目标配置格式无效。",
-      impact: "本次没有读取或归档目标。",
-      ...(issue === undefined
-        ? { path: ["targets"] }
-        : {
-            path: [
-              "targets",
-              ...issue.path.map((part) =>
-                typeof part === "symbol" ? String(part) : part,
-              ),
-            ],
-          }),
-      suggestion:
-        "将 targets 配置为 latest、category 或 topic 目标数组，并为每个目标设置唯一 id。",
-      requiresHuman: false,
-    });
-  }
-  const ids = new Set<string>();
-  for (const [index, target] of parsed.data.entries()) {
-    if (ids.has(target.id)) {
-      throw sourceAdapterActionError({
-        code: "linuxdo_target_id_duplicate",
-        message: `长期目标标识 ${target.id} 重复。`,
-        impact: "本次没有读取或归档目标。",
-        path: ["targets", index, "id"],
-        suggestion: "为每个长期目标设置唯一 id 后重新运行。",
-        requiresHuman: false,
-      });
-    }
-    ids.add(target.id);
-  }
-  return parsed.data;
-}
-
-function selectConfiguredTargets(
-  rawTargets: readonly unknown[],
-  targetIds: readonly string[] | undefined,
-): ConfiguredTarget[] {
-  const targets = configuredTargets(rawTargets);
-  if (targetIds === undefined) {
-    if (targets.length === 0) {
-      throw sourceAdapterActionError({
-        code: "linuxdo_target_required",
-        message: "本次运行需要选择或配置至少一个长期目标。",
-        impact: "本次没有读取或归档主题资料。",
-        path: ["targetIds"],
-        suggestion:
-          "配置 latest、category 或 topic 目标，或在本次运行选择目标 id。",
-        requiresHuman: false,
-      });
-    }
-    return targets;
-  }
-  const byId = new Map(targets.map((target) => [target.id, target]));
-  return targetIds.map((id, index) => {
-    const target = byId.get(id);
-    if (target === undefined) {
-      throw sourceAdapterActionError({
-        code: "linuxdo_target_not_found",
-        message: `没有配置 id 为 ${id} 的长期目标。`,
-        impact: "本次运行没有处理该目标。",
-        path: ["targetIds", index],
-        suggestion: "检查本次选择的 targetIds 与长期目标配置。",
-        requiresHuman: false,
-      });
-    }
-    return target;
-  });
-}
-
 function targetScope(target: ConfiguredTarget): string {
   return `target:${target.id}`;
 }
@@ -913,14 +865,14 @@ function listCheckDiagnostic(
 }
 
 async function checkTopic(
-  context: SourceAdapterCheckContext,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   params: CheckParams,
 ) {
   const site = siteFromConfig(context.config);
   if (params.topicId !== undefined) {
     return await checkOneTopic(context, site, params.topicId);
   }
-  const targets = selectConfiguredTargets(context.targets, params.targetIds);
+  const targets = params.targets ?? [];
   const scopes = targets.map(targetScope);
   return await withSharedBrowser(context, async ({ page }) => {
     const session = await readSessionAccess(page, site, context.signal);
@@ -983,7 +935,7 @@ async function checkTopic(
 }
 
 async function checkOneTopic(
-  context: SourceAdapterCheckContext,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   site: ReturnType<typeof siteFromConfig>,
   topicId: number,
 ) {
@@ -1733,13 +1685,10 @@ function failureWithProgress(
 }
 
 async function collectTopic(
-  context: SourceAdapterContext,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   params: CollectParams,
 ): Promise<{ readonly completedScopes: readonly string[] }> {
-  const targets =
-    params.topicId === undefined
-      ? selectConfiguredTargets(context.targets, params.targetIds)
-      : [];
+  const targets = params.targets ?? [];
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
   try {
@@ -1873,14 +1822,16 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema: sourceAdapterConfigSchema,
   actions: {
-    check: defineSourceAdapterCheckAction({
+    check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "检查登录状态以及所选 Linux.do 目标的可见范围。",
       params: checkParamsSchema,
+      output: checkOutputSchema,
       execute: checkTopic,
     }),
-    collect: defineSourceAdapterAction({
+    collect: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "发现所选 Linux.do 目标的主题并归档帖子、回复和媒体。",
       params: collectParamsSchema,
+      output: collectOutputSchema,
       execute: collectTopic,
     }),
   },

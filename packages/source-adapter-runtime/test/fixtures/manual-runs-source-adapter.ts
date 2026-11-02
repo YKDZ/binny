@@ -1,21 +1,39 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-import { manualRunCheckInputSchema } from "@binny/contracts";
 import {
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
-  defineSourceAdapterCheckAction,
   type SourceAdapterArchiveSubmission,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
 
-const configurationSchema = z.object({ section: z.string() });
+const configurationSchema = z.object({
+  section: z.string(),
+  label: z
+    .string()
+    .default("runtime")
+    .transform((value) => value + "!"),
+});
 const sourceResultSchema = z.object({
   disposition: z.enum(["material", "manual", "empty", "partial", "slow"]),
   sourceKey: z.string(),
   title: z.string(),
   text: z.string(),
+});
+const diagnosticOutputSchema = z.object({
+  availability: z.enum(["available", "unavailable", "unknown"]),
+  scope: z.array(z.string()),
+  basis: z.string(),
+  problems: z.array(
+    z.object({
+      code: z.string(),
+      message: z.string(),
+      impact: z.string(),
+      suggestion: z.string(),
+      requiresHuman: z.boolean(),
+    }),
+  ),
 });
 
 export default defineSourceAdapter({
@@ -26,15 +44,16 @@ export default defineSourceAdapter({
   },
   configSchema: configurationSchema,
   actions: {
-    check: defineSourceAdapterCheckAction({
+    check: defineSourceAdapterAction(configurationSchema, {
       description: "检查受控信源并返回当前可用性诊断。",
       params: z.object({
         sourceUrl: z.url(),
         gateKey: z.string().min(1),
         sourceKey: z.string().min(1),
+        submitArchive: z.boolean().optional(),
       }),
+      output: diagnosticOutputSchema,
       async execute(context, params) {
-        // @ts-expect-error 可用性检查动作不能提交归档。
         void context.archive;
         const response = await fetch(
           new URL("/source/check", params.sourceUrl),
@@ -59,18 +78,40 @@ export default defineSourceAdapter({
             requiresHuman: false,
           });
         }
-        return manualRunCheckInputSchema.parse(await response.json());
+        const diagnostic = diagnosticOutputSchema.parse(await response.json());
+        if (params.submitArchive === true) {
+          await context.archive.submit({
+            requestId: "binny-runs:check:" + context.runId,
+            items: [
+              {
+                sourceKey: {
+                  namespace: "binny-runs.check-fixture",
+                  key: params.sourceKey,
+                },
+                body: { text: "检查动作提交的归档" },
+                capture: {
+                  scope: { gateKey: params.gateKey },
+                  completeness: "complete",
+                  missing: [],
+                },
+              },
+            ],
+          });
+        }
+        return diagnostic;
       },
     }),
-    collect: defineSourceAdapterAction({
+    collect: defineSourceAdapterAction(configurationSchema, {
       description: "从受控信源解析并提交资料。",
       params: z.object({
         sourceUrl: z.url(),
         gateKey: z.string().min(1),
         sourceKey: z.string().min(1),
+        invalidOutput: z.boolean().optional(),
         waitBeforeSourceMs: z.number().int().min(0).max(60_000).optional(),
         waitAfterCommitMs: z.number().int().min(0).max(60_000).optional(),
       }),
+      output: z.object({ completedScopes: z.array(z.string()) }),
       async execute(context, params) {
         if (params.waitBeforeSourceMs !== undefined)
           await delay(params.waitBeforeSourceMs);
@@ -119,7 +160,6 @@ export default defineSourceAdapter({
           });
         }
 
-        const config = configurationSchema.parse(context.config);
         const submission = {
           requestId: "binny-runs:manual-run:" + context.runId,
           items: [
@@ -128,7 +168,10 @@ export default defineSourceAdapter({
                 namespace: "binny-runs.controlled-source",
                 key: source.sourceKey,
               },
-              metadata: { title: source.title, section: config.section },
+              metadata: {
+                title: source.title,
+                section: context.config.section,
+              },
               body: { text: source.text },
               capture: {
                 scope: { gateKey: params.gateKey },
@@ -187,7 +230,26 @@ export default defineSourceAdapter({
             requiresHuman: true,
           });
         }
-        return { completedScopes: ["source/" + source.sourceKey] };
+        const completedScopes = ["source/" + source.sourceKey];
+        return params.invalidOutput === true
+          ? { completedScopes: [123] as unknown as string[] }
+          : { completedScopes };
+      },
+    }),
+    discover: defineSourceAdapterAction(configurationSchema, {
+      description: "返回本地受控适配器提供的普通发现结果。",
+      params: z.object({
+        prefix: z
+          .string()
+          .default("entry")
+          .refine((value) => value.trim().length > 0)
+          .transform((value) => value + "!"),
+      }),
+      output: z.object({ name: z.string() }),
+      async execute(context, params) {
+        return {
+          name: `${params.prefix}:${context.config.label}:${context.config.section}`,
+        };
       },
     }),
   },

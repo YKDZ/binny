@@ -2023,10 +2023,12 @@ async function verifyPersistableTextBoundary(
       check: {
         description: "检查输入是否处于可用状态",
         params: { type: "object" },
+        output: { type: "object" },
       },
       collect: {
         description: "采集验证资料",
         params: { type: "object" },
+        output: { type: "object" },
       },
     },
     environment: {
@@ -2038,7 +2040,6 @@ async function verifyPersistableTextBoundary(
     sourceAdapter,
     identityId: "text-boundary",
     config: { value: "正常中文🌿" },
-    targets: [{ value: "正常中文🌿" }],
   };
   const invalidBins: {
     readonly label: string;
@@ -2072,11 +2073,6 @@ async function verifyPersistableTextBoundary(
         config: { ["bad\u0000key"]: "value" },
       },
       path: ["config", "bad\u0000key"],
-    },
-    {
-      label: "目标中的空字符",
-      input: { ...binInput, targets: [{ value: "a\u0000b" }] },
-      path: ["targets", 0, "value"],
     },
     {
       label: "信源适配器版本中的空字符",
@@ -2114,7 +2110,6 @@ async function verifyPersistableTextBoundary(
     sourceAdapter: { ...sourceAdapter, version: "版本 1.0 🌿" },
     identityId: "身份🌿",
     config: { value: "配置🌿" },
-    targets: [{ value: "目标🌿" }],
   };
   const validBinResponse = await client.bins.$post({ json: validBinInput });
   if (validBinResponse.status !== 201) {
@@ -2129,7 +2124,6 @@ async function verifyPersistableTextBoundary(
     validBinInput.sourceAdapter.version,
   );
   assert.deepEqual(validBin.config, validBinInput.config);
-  assert.deepEqual(validBin.targets, validBinInput.targets);
   const removed = await client.bins[":binId"].$delete({
     param: { binId: validBinInput.id },
   });

@@ -135,7 +135,6 @@ function scheduleActionError(
     readonly sourceAdapter: unknown;
     readonly identityId: string;
     readonly config: unknown;
-    readonly targets: unknown;
   },
   action: string,
   params: unknown,
@@ -179,7 +178,6 @@ function readBinForRun(transaction: Transaction, binId: string) {
       sourceAdapter: binConfigurations.sourceAdapter,
       identityId: binConfigurations.identityId,
       config: binConfigurations.config,
-      targets: binConfigurations.targets,
       status: binConfigurations.status,
     })
     .from(binConfigurations)

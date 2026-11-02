@@ -70,7 +70,7 @@ type Run = {
   readonly stopConfirmedAt?: string;
   readonly result?: {
     readonly commits: readonly unknown[];
-    readonly check?: {
+    readonly output?: {
       readonly availability: string;
       readonly problems: readonly { readonly requiresHuman: boolean }[];
     };
@@ -1276,8 +1276,6 @@ async function createBin(
     `identity-${binId}`,
     "--config",
     JSON.stringify(config),
-    "--targets",
-    "[]",
     "--browser-idle-timeout-seconds",
     String(idleTimeout),
   ];
@@ -2171,8 +2169,6 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
         "identity-binny-capacity-legacy",
         "--config",
         JSON.stringify(legacyConfiguration),
-        "--targets",
-        "[]",
         "--browser-idle-timeout-seconds",
         "disabled",
       ],
@@ -2252,8 +2248,6 @@ async function runProtocol4UpgradeAcceptance(): Promise<void> {
         "identity-binny-capacity-current",
         "--config",
         JSON.stringify(legacyConfiguration),
-        "--targets",
-        "[]",
         "--browser-idle-timeout-seconds",
         "disabled",
       ],
@@ -2503,8 +2497,6 @@ async function main(): Promise<void> {
       "identity-binny-idle-no-reason",
       "--config",
       JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
-      "--targets",
-      "[]",
     ]),
     [
       "sourceAdapter",
@@ -2527,8 +2519,6 @@ async function main(): Promise<void> {
       "identity-binny-idle-incompatible",
       "--config",
       JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
-      "--targets",
-      "[]",
       "--browser-idle-timeout-seconds",
       "4",
     ]),
@@ -2778,8 +2768,8 @@ async function main(): Promise<void> {
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(initialResult.status, "completed");
-  assert.equal(initialResult.result?.check?.availability, "unavailable");
-  assert.equal(initialResult.result?.check?.problems[0]?.requiresHuman, true);
+  assert.equal(initialResult.result?.output?.availability, "unavailable");
+  assert.equal(initialResult.result?.output?.problems[0]?.requiresHuman, true);
 
   await waitForBrowserPower("binny-browser-one", "ready");
   const awakeMemory = await browserContainerMemoryBytes("browser-one");
@@ -2859,7 +2849,7 @@ async function main(): Promise<void> {
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(persistedCheckResult.status, "completed");
-  assert.equal(persistedCheckResult.result?.check?.availability, "available");
+  assert.equal(persistedCheckResult.result?.output?.availability, "available");
   assert.equal(persistedCheckResult.result?.commits.length, 0);
   const checkWakeProcess = await browserMainProcess("browser-one");
   assert.notEqual(
@@ -2924,7 +2914,7 @@ async function main(): Promise<void> {
   );
   assert.equal(imageUpdateCheckResult.status, "completed");
   assert.equal(
-    imageUpdateCheckResult.result?.check?.availability,
+    imageUpdateCheckResult.result?.output?.availability,
     "available",
     "浏览器镜像替换后，持久 profile 应继续保持登录状态。",
   );
@@ -2950,7 +2940,7 @@ async function main(): Promise<void> {
       newContainerId: browserImageB.current.id,
       profileVolume: browserImageB.current.ownerVolume,
       archivedFixtureIds: [...archivedBeforeImageUpdate].toSorted(),
-      postUpdateCheck: imageUpdateCheckResult.result?.check?.availability,
+      postUpdateCheck: imageUpdateCheckResult.result?.output?.availability,
     })}\n`,
   );
 
@@ -3176,7 +3166,7 @@ async function main(): Promise<void> {
   );
   assert.equal(profileTwoCheckResult.status, "completed");
   assert.equal(
-    profileTwoCheckResult.result?.check?.availability,
+    profileTwoCheckResult.result?.output?.availability,
     "unavailable",
   );
   await updateBin("binny-browser-two", 0);
@@ -3365,9 +3355,9 @@ async function main(): Promise<void> {
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(expiredCheckResult.status, "completed");
-  assert.equal(expiredCheckResult.result?.check?.availability, "unavailable");
+  assert.equal(expiredCheckResult.result?.output?.availability, "unavailable");
   assert.equal(
-    expiredCheckResult.result?.check?.problems[0]?.requiresHuman,
+    expiredCheckResult.result?.output?.problems[0]?.requiresHuman,
     true,
   );
 
