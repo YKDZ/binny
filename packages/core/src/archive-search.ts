@@ -20,9 +20,7 @@ import {
 import {
   archiveCommits,
   archiveItems,
-  archiveObservations,
   archiveRelationObservationGaps,
-  archiveRelationObservations,
   archiveRelationRevisions,
   archiveRelations,
   archiveRevisions,
@@ -53,6 +51,11 @@ import { alias } from "drizzle-orm/pg-core";
 import { canonicalJson, isoTimestamp, optionalText } from "./archive-common.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import { resolveSnapshot, type ResolvedSnapshot } from "./archive-read.ts";
+import {
+  latestArchiveItemObservation,
+  latestArchiveRelationObservation,
+  relationObservationGapIsCurrent,
+} from "./archive-relation-view.ts";
 import {
   buildArchiveMatchedQuery,
   compileJsonFilter,
@@ -855,10 +858,6 @@ async function readCurrentSearchPage(
         );
         const gap = alias(archiveRelationObservationGaps, "expanded_gap");
         const gapCommit = alias(archiveCommits, "expanded_gap_commit");
-        const laterObservation = alias(
-          archiveRelationObservations,
-          "expanded_later_observation",
-        );
         const gapEndpoint =
           selector.direction === "outgoing"
             ? eq(gap.fromItemId, viewsCte.itemId)
@@ -868,18 +867,13 @@ async function readCurrentSearchPage(
                   eq(gap.fromItemId, viewsCte.itemId),
                   eq(gap.targetItemId, viewsCte.itemId),
                 );
-        const laterObservationExists = notExists(
-          transaction
-            .select({ present: sql`1` })
-            .from(laterObservation)
-            .where(
-              and(
-                eq(laterObservation.relationId, gap.relationId),
-                eq(laterObservation.binId, viewsCte.binId),
-                gt(laterObservation.archiveSequence, gapCommit.archiveSequence),
-                lte(laterObservation.archiveSequence, asOf),
-              ),
-            ),
+        const laterObservationExists = relationObservationGapIsCurrent(
+          transaction,
+          gap.relationId,
+          viewsCte.binId,
+          gapCommit.archiveSequence,
+          asOf,
+          "expanded_later_observation",
         );
         // RC 没有 CASE 构造器；方向由当前 match 与 gap 的声明端点决定。
         const latestGaps = transaction.$with("latest_gaps").as(
@@ -928,48 +922,17 @@ async function readCurrentSearchPage(
         );
 
         const relation = alias(archiveRelations, "expanded_relation");
-        const relationObservation = alias(
-          archiveRelationObservations,
-          "expanded_relation_observation",
-        );
-        const relationCommit = alias(
-          archiveCommits,
-          "expanded_relation_commit",
-        );
         const relationRevision = alias(
           archiveRelationRevisions,
           "expanded_relation_revision",
         );
-        const relationLatest = transaction
-          .select({
-            relationRevisionId: relationObservation.relationRevisionId,
-            commitId: relationObservation.commitId,
-            archiveSequence: relationObservation.archiveSequence,
-            ordinal: relationObservation.ordinal,
-            observedAt: relationCommit.observedAt,
-            recordedAt: relationCommit.recordedAt,
-            runId: relationCommit.runId,
-            collectorVersion: relationCommit.collectorVersion,
-          })
-          .from(relationObservation)
-          .innerJoin(
-            relationCommit,
-            eq(relationCommit.commitId, relationObservation.commitId),
-          )
-          .where(
-            and(
-              eq(relationObservation.relationId, relation.relationId),
-              eq(relationObservation.binId, viewsCte.binId),
-              lte(relationObservation.archiveSequence, asOf),
-            ),
-          )
-          .orderBy(
-            desc(relationObservation.archiveSequence),
-            desc(relationObservation.ordinal),
-            desc(relationObservation.commitId),
-          )
-          .limit(1)
-          .as("expanded_relation_latest");
+        const relationLatest = latestArchiveRelationObservation(
+          transaction,
+          relation.relationId,
+          viewsCte.binId,
+          asOf,
+          "expanded_relation_latest",
+        );
         const relationEndpoint =
           selector.direction === "outgoing"
             ? eq(relation.fromItemId, viewsCte.itemId)
@@ -1144,59 +1107,21 @@ async function readCurrentSearchPage(
         );
 
         const fromItem = alias(archiveItems, "expanded_from_item");
-        const fromObservation = alias(
-          archiveObservations,
-          "expanded_from_observation",
+        const fromLatest = latestArchiveItemObservation(
+          transaction,
+          limited.fromItemId,
+          limited.binId,
+          asOf,
+          "expanded_from_latest",
         );
-        const fromCommit = alias(archiveCommits, "expanded_from_commit");
-        const fromLatest = transaction
-          .select({ revisionId: fromObservation.revisionId })
-          .from(fromObservation)
-          .innerJoin(
-            fromCommit,
-            eq(fromCommit.commitId, fromObservation.commitId),
-          )
-          .where(
-            and(
-              eq(fromObservation.itemId, limited.fromItemId),
-              eq(fromCommit.binId, limited.binId),
-              lte(fromCommit.archiveSequence, asOf),
-            ),
-          )
-          .orderBy(
-            desc(fromCommit.archiveSequence),
-            desc(fromObservation.ordinal),
-            desc(fromCommit.commitId),
-          )
-          .limit(1)
-          .as("expanded_from_latest");
         const targetItem = alias(archiveItems, "expanded_target_item");
-        const targetObservation = alias(
-          archiveObservations,
-          "expanded_target_observation",
+        const targetLatest = latestArchiveItemObservation(
+          transaction,
+          limited.targetItemId,
+          limited.binId,
+          asOf,
+          "expanded_target_latest",
         );
-        const targetCommit = alias(archiveCommits, "expanded_target_commit");
-        const targetLatest = transaction
-          .select({ revisionId: targetObservation.revisionId })
-          .from(targetObservation)
-          .innerJoin(
-            targetCommit,
-            eq(targetCommit.commitId, targetObservation.commitId),
-          )
-          .where(
-            and(
-              eq(targetObservation.itemId, limited.targetItemId),
-              eq(targetCommit.binId, limited.binId),
-              lte(targetCommit.archiveSequence, asOf),
-            ),
-          )
-          .orderBy(
-            desc(targetCommit.archiveSequence),
-            desc(targetObservation.ordinal),
-            desc(targetCommit.commitId),
-          )
-          .limit(1)
-          .as("expanded_target_latest");
         const rows = await transaction
           .with(
             viewsCte,
