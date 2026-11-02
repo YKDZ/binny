@@ -19,7 +19,10 @@ import {
   copyImageBuildContext,
   setBuildContextSourceAdapterVersion,
 } from "./binny-image-update-context.ts";
-import { verifyIsolatedApiConsumer } from "./binny-isolated-consumer.ts";
+import {
+  createIsolatedCliConsumer,
+  type IsolatedCliConsumer,
+} from "./binny-isolated-consumer.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -120,6 +123,7 @@ let composePort = 0;
 let manualRunSourcePort = 0;
 let linuxdoSourcePort = 0;
 let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
+let installedCliConsumer: IsolatedCliConsumer | undefined;
 
 function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
   const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
@@ -356,22 +360,14 @@ function startManagedProcess(
 }
 
 async function cli(
-  _baseUrl: string,
+  baseUrl: string,
   args: readonly string[],
 ): Promise<ProcessResult> {
-  return await run(
-    "docker",
-    [
-      ...composePrefix(),
-      "exec",
-      "--no-TTY",
-      "server",
-      "node",
-      "packages/binny/dist/cli.js",
-      ...args,
-    ],
-    { env: composeEnvironment() },
-  );
+  assert.ok(installedCliConsumer !== undefined, "未安装独立 CLI 消费者。");
+  return await installedCliConsumer.run(args, {
+    apiUrl: baseUrl,
+    environmentApiUrl: "http://127.0.0.1:1",
+  });
 }
 
 async function publishedPort(
@@ -456,6 +452,7 @@ async function archiveHttpStep(
 async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
   const request = {
     scope: { kind: "current" },
+    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
     unit: "item",
     where: {
       type: "and",
@@ -472,9 +469,48 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
           operator: "in",
           values: ["aggregation-shared-p", "aggregation-distinct-q"],
         },
+        {
+          type: "or",
+          conditions: [
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "x",
+            },
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "y",
+            },
+          ],
+        },
+        {
+          type: "not",
+          condition: {
+            type: "json",
+            field: "properties",
+            path: ["category"],
+            operator: "eq",
+            valueType: "string",
+            value: "y",
+          },
+        },
       ],
     },
-    groupBy: [],
+    groupBy: [
+      {
+        key: "category",
+        type: "json",
+        field: "properties",
+        path: ["category"],
+      },
+    ],
     metrics: [
       { key: "items", op: "count" },
       {
@@ -488,10 +524,18 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
         },
       },
     ],
+    orderBy: [{ key: "category", direction: "asc" }],
   };
   const result = cliData<{
     readonly unit: string;
     readonly groups: readonly {
+      readonly keys: readonly {
+        readonly key: string;
+        readonly result: {
+          readonly status: string;
+          readonly value?: unknown;
+        };
+      }[];
       readonly metrics: readonly {
         readonly key: string;
         readonly value: string | null;
@@ -511,6 +555,9 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
     { key: "items", op: "count", value: "2" },
     { key: "priceSum", op: "sum", value: "20" },
   ]);
+  assert.deepEqual(result.groups[0]?.keys, [
+    { key: "category", result: { status: "value", value: "x" } },
+  ]);
 
   const invalidRequest = { ...request, unit: "unknown" };
   const failure = cliFailure<{
@@ -526,6 +573,111 @@ async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
     "invalid_input",
   );
   assert.deepEqual(failure.path, ["unit"]);
+}
+
+async function archiveSearchPaginationCliStep(baseUrl: string): Promise<void> {
+  const query = {
+    scope: { kind: "current", binId: "rss-main" },
+    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
+    where: {
+      type: "and",
+      conditions: [
+        {
+          type: "field",
+          field: "sourceKey.namespace",
+          operator: "eq",
+          value: "e2e",
+        },
+        {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "in",
+          values: ["aggregation-shared-p", "aggregation-distinct-q"],
+        },
+        {
+          type: "or",
+          conditions: [
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "x",
+            },
+            {
+              type: "json",
+              field: "properties",
+              path: ["category"],
+              operator: "eq",
+              valueType: "string",
+              value: "y",
+            },
+          ],
+        },
+        {
+          type: "not",
+          condition: {
+            type: "json",
+            field: "properties",
+            path: ["category"],
+            operator: "eq",
+            valueType: "string",
+            value: "y",
+          },
+        },
+      ],
+    },
+    select: [
+      "sourceKey",
+      { type: "json", field: "properties", path: ["category"] },
+    ],
+    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    limit: 1,
+  };
+  const firstPage = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+      readonly matches: readonly {
+        readonly json?: readonly {
+          readonly path: readonly (string | number)[];
+          readonly value?: unknown;
+        }[];
+      }[];
+    }[];
+    readonly nextCursor?: string;
+  }>(
+    await cli(baseUrl, ["archive", "search", "--query", JSON.stringify(query)]),
+    "found",
+  );
+  assert.deepEqual(
+    firstPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["aggregation-distinct-q"],
+  );
+  assert.equal(typeof firstPage.nextCursor, "string");
+  assert.ok(
+    firstPage.results[0]?.matches[0]?.json?.some(
+      ({ path, value }) => path.join(".") === "category" && value === "x",
+    ),
+  );
+
+  const secondPage = cliData<{
+    readonly results: readonly {
+      readonly sourceKey?: { readonly key: string };
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({ ...query, cursor: firstPage.nextCursor }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    secondPage.results.map(({ sourceKey }) => sourceKey?.key),
+    ["aggregation-shared-p"],
+  );
 }
 
 async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
@@ -6490,6 +6642,166 @@ async function runRssAcceptance(
   assert.doesNotMatch(rssV1.body?.html ?? "", /RSS 摘要版本 1/u);
   assert.match(rssV1.body?.html ?? "", /binny:\/\/resource\//u);
   assert.equal(rssV1.resources?.length, 2);
+  const rssTitleSearch = await searchRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 全文测试文章",
+  );
+  assert.equal(rssTitleSearch.length, 1);
+  assert.equal(rssTitleSearch[0]?.itemId, rssItemV1.itemId);
+  assert.deepEqual(
+    await searchRssArchive(baseUrl, "binny-rss-one", "没有对应资料的词"),
+    [],
+  );
+  assert.deepEqual(
+    await searchRssArchive(baseUrl, "binny-rss-one", "rss 全文测试文章"),
+    [],
+    "literal 搜索沿用大小写敏感的子串语义。",
+  );
+
+  const rssRegexTitle = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "regex", pattern: "^RSS 全文测试文章" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.ok(
+    rssRegexTitle.results.some(({ itemId }) => itemId === rssItemV1.itemId),
+  );
+  const rssRegexLowercase = cliData<typeof rssRegexTitle>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "regex", pattern: "^rss 全文测试文章" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(rssRegexLowercase.results, []);
+
+  const titleOnlyItem = await readRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 仅标题資料🌿",
+  );
+  const titleOnlyState = rssArchiveView(titleOnlyItem, "binny-rss-one");
+  assert.deepEqual(titleOnlyItem.sourceKey, {
+    namespace: "rss:rss-main",
+    key: "id:urn:binny:rss:rss-title-only",
+  });
+  assert.equal(titleOnlyState.body?.searchText, "RSS 仅标题資料🌿");
+  assert.equal(titleOnlyState.body?.text, undefined);
+  assert.equal(titleOnlyState.capture.completeness, "partial");
+  assert.ok(
+    titleOnlyState.capture.missing.some(({ path }) => path === "body.fullText"),
+  );
+
+  const titleOnlyUnicodeSearch = cliData<{
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly matches: readonly {
+        readonly hit?: {
+          readonly position: {
+            readonly encoding: string;
+            readonly start: number;
+            readonly end: number;
+          };
+        };
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "literal", value: "标题資料🌿" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  const titleOnlyUnicodeResult = titleOnlyUnicodeSearch.results.find(
+    ({ itemId }) => itemId === titleOnlyItem.itemId,
+  );
+  assert.ok(titleOnlyUnicodeResult !== undefined);
+  assert.deepEqual(titleOnlyUnicodeResult.matches[0]?.hit?.position, {
+    encoding: "unicode-code-point",
+    start: 5,
+    end: 10,
+  });
+
+  const titleOnlyFilter = {
+    type: "and",
+    conditions: [
+      {
+        type: "text",
+        text: { kind: "literal", value: "标题資料🌿" },
+      },
+      {
+        type: "field",
+        field: "sourceKey.namespace",
+        operator: "eq",
+        value: "rss:rss-main",
+      },
+    ],
+  } as const;
+  const titleOnlyFilteredSearch = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        where: titleOnlyFilter,
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    titleOnlyFilteredSearch.results.map(({ itemId }) => itemId),
+    [titleOnlyItem.itemId],
+  );
+  const titleOnlyAggregate = cliData<{
+    readonly groups: readonly {
+      readonly metrics: readonly {
+        readonly key: string;
+        readonly value: string;
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        unit: "item",
+        where: titleOnlyFilter,
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      }),
+    ]),
+    "aggregated",
+  );
+  assert.equal(titleOnlyAggregate.groups[0]?.metrics[0]?.value, "1");
   const rssResources = rssV1.resources ?? [];
   const rssResourceBytes = await Promise.all(
     rssResources.map(({ resourceId }) => readRssResource(baseUrl, resourceId)),
@@ -6948,16 +7260,16 @@ async function runRssAcceptance(
   const literalWidgetItemsByKey = new Map(
     literalWidgetItems.map((item) => [item.sourceKey.key, item]),
   );
-  for (const key of [
-    "id:tag:example.test,2026:atom-text-explicit",
-    "id:tag:example.test,2026:atom-text-default",
-  ]) {
+  for (const [key, title] of [
+    ["id:tag:example.test,2026:atom-text-explicit", "Atom 显式纯文本"],
+    ["id:tag:example.test,2026:atom-text-default", "Atom 默认纯文本"],
+  ] as const) {
     const atomTextItem = literalWidgetItemsByKey.get(key);
     assert.ok(atomTextItem !== undefined);
     const state = rssArchiveView(atomTextItem, "binny-rss-one");
     assert.equal(state.capture.completeness, "complete");
     assert.equal(state.body?.text, "代码 <widget> 与 A & B");
-    assert.equal(state.body?.searchText, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.searchText, `${title}\n代码 <widget> 与 A & B`);
     assert.equal(state.body?.html, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.ok(
@@ -6991,7 +7303,7 @@ async function runRssAcceptance(
   assert.equal(rssEscapedLiteralState.body?.text, "代码 <widget> 与 A & B");
   assert.equal(
     rssEscapedLiteralState.body?.searchText,
-    "代码 <widget> 与 A & B",
+    "RSS XML 转义 HTML 测试文章\n代码 <widget> 与 A & B",
   );
   assert.match(rssEscapedLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
@@ -7039,7 +7351,7 @@ async function runRssAcceptance(
   assert.equal(atomEntityTextState.body?.text, "A &lt;widget&gt; &amp; B");
   assert.equal(
     atomEntityTextState.body?.searchText,
-    "A &lt;widget&gt; &amp; B",
+    "Atom 纯文本中的实体字面值\nA &lt;widget&gt; &amp; B",
   );
   assert.equal(
     atomEntityTextState.body?.html,
@@ -7262,8 +7574,13 @@ async function runRssAcceptance(
     feedIds: ["rss-main"],
   });
   assert.equal(checkRun.status, "completed");
-  assert.equal(checkRun.result?.output?.availability, "available");
+  assert.equal(checkRun.result?.output?.availability, "unavailable");
   assert.deepEqual(checkRun.result?.output?.scope, ["rss-main"]);
+  assert.ok(
+    checkRun.result?.output?.problems?.some(
+      ({ code }) => code === "rss_entry_body_unavailable",
+    ),
+  );
   assert.ok(
     checkRun.result?.output?.problems?.some(
       ({ code }) => code === "rss_feed_summary_only",
@@ -8505,14 +8822,10 @@ async function main(): Promise<void> {
     await waitForApiAndDatabase(baseUrl);
     if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
-      const isolatedClient = await verifyIsolatedApiConsumer({
+      installedCliConsumer = await createIsolatedCliConsumer({
         repositoryRoot,
-        projectName,
       });
-      assert.deepEqual(isolatedClient, {
-        health: "ok",
-        binIds: [],
-      });
+      await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
       await verifyConfigurationJourney(baseUrl);
       const manualRunManifest = await createRuntimeFixtureManifest();
       await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
@@ -8539,6 +8852,7 @@ async function main(): Promise<void> {
       const archive = await archiveHttpStep("submit", baseUrl);
       await archiveQueryValidationCliStep(baseUrl);
       await archiveAggregationCliStep(baseUrl);
+      await archiveSearchPaginationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
       baseUrl = await verifyRestartAndRemoval(
@@ -8613,6 +8927,15 @@ async function main(): Promise<void> {
       "Compose 验收失败日志：\n" + logs.stdout + logs.stderr,
     );
   } finally {
+    if (installedCliConsumer !== undefined) {
+      try {
+        await installedCliConsumer.close();
+        installedCliConsumer = undefined;
+      } catch (error) {
+        cleanupError =
+          error instanceof Error ? error : new Error(String(error));
+      }
+    }
     if (linuxdoViewerBrowser !== undefined) {
       try {
         await linuxdoViewerBrowser.close();

@@ -66,7 +66,7 @@ export const binConfigurations = pgTable(
   "bin_configurations",
   {
     id: text("id").primaryKey(),
-    sourceAdapter: jsonb("collector").notNull(),
+    sourceAdapter: jsonb("source_adapter").notNull(),
     identityId: text("identity_id").notNull(),
     config: jsonb("config").notNull(),
     browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
@@ -99,7 +99,7 @@ export const runtimeConnections = pgTable(
       .primaryKey()
       .references(() => binConfigurations.id, { onDelete: "cascade" }),
     runtimeId: text("runtime_id").notNull(),
-    sourceAdapter: jsonb("collector").notNull(),
+    sourceAdapter: jsonb("source_adapter").notNull(),
     environment: jsonb("environment").notNull(),
     lastHeartbeatAt: timestamp("last_heartbeat_at", {
       withTimezone: true,
@@ -354,7 +354,7 @@ export const archiveCommits = pgTable(
     // 归档保留 bin ID 值；删除配置不能级联删除归档。
     binId: text("bin_id").notNull(),
     runId: text("run_id"),
-    sourceAdapterVersion: text("collector_version"),
+    sourceAdapterVersion: text("source_adapter_version"),
     observedAt: timestamp("observed_at", {
       withTimezone: true,
       mode: "date",
@@ -619,9 +619,9 @@ export const manualRuns = pgTable(
     runId: uuid("run_id").primaryKey(),
     binId: text("bin_id").notNull(),
     identityId: text("identity_id").notNull(),
-    sourceAdapterSnapshot: jsonb("collector_snapshot").notNull(),
-    sourceAdapterId: text("collector_id").notNull(),
-    sourceAdapterVersion: text("collector_version").notNull(),
+    sourceAdapterSnapshot: jsonb("source_adapter_snapshot").notNull(),
+    sourceAdapterId: text("source_adapter_id").notNull(),
+    sourceAdapterVersion: text("source_adapter_version").notNull(),
     action: text("action").notNull(),
     params: jsonb("params").notNull(),
     configSnapshot: jsonb("config_snapshot").notNull(),

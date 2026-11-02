@@ -484,6 +484,14 @@ async function submitEntry(
   const resources = [...archiveResourceManifest([...uploaded.values()])];
   const sourceModifiedAt = item.updated ?? item.published ?? undefined;
   const html = body?.rewriteHtml(feedResourceReferences);
+  const searchText = [item.title?.trim(), body?.text?.trim()]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join("\n");
+  const hasBodyRepresentation =
+    (html?.length ?? 0) > 0 ||
+    (body?.text.length ?? 0) > 0 ||
+    bodyWithResources.content.length > 0 ||
+    searchText.length > 0;
   const state = {
     sourceKey: { namespace: `rss:${feed.id}`, key },
     sourceRef: sourceRef(feed, item),
@@ -496,9 +504,8 @@ async function submitEntry(
       [...media.values()],
       page,
     ),
-    ...(body === undefined && bodyWithResources.content.length === 0
-      ? {}
-      : {
+    ...(hasBodyRepresentation
+      ? {
           body: {
             ...(html === undefined || html.length === 0 ? {} : { html }),
             ...(body?.text === undefined || body.text.length === 0
@@ -507,11 +514,10 @@ async function submitEntry(
             ...(bodyWithResources.content.length === 0
               ? {}
               : { markdown: bodyWithResources.content }),
-            ...(body?.text === undefined || body.text.length === 0
-              ? {}
-              : { searchText: body.text }),
+            ...(searchText.length === 0 ? {} : { searchText }),
           },
-        }),
+        }
+      : {}),
     ...(resources.length === 0 ? {} : { resources }),
     capture: {
       scope: {

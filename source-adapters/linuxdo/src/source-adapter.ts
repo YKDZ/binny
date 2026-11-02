@@ -1423,6 +1423,12 @@ async function archivePost(
     });
   }
   const body = await rewriteCookedBody(page, prepared.html, references);
+  const searchText = [
+    post.post_number === 1 ? topic.title?.trim() : undefined,
+    body.text.trim(),
+  ]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join("\n");
   const sourceModifiedAt = modifiedAt(post);
   const state = {
     sourceKey: sourceKey(siteNamespace, post.id),
@@ -1454,7 +1460,7 @@ async function archivePost(
           }
         : {}),
     },
-    body: { html: body.html, text: body.text, searchText: body.text },
+    body: { html: body.html, text: body.text, searchText },
     resources: [...archiveResourceManifest(resources)],
     capture: {
       scope: {
