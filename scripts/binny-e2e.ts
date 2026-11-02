@@ -6512,6 +6512,166 @@ async function runRssAcceptance(
   assert.doesNotMatch(rssV1.body?.html ?? "", /RSS 摘要版本 1/u);
   assert.match(rssV1.body?.html ?? "", /binny:\/\/resource\//u);
   assert.equal(rssV1.resources?.length, 2);
+  const rssTitleSearch = await searchRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 全文测试文章",
+  );
+  assert.equal(rssTitleSearch.length, 1);
+  assert.equal(rssTitleSearch[0]?.itemId, rssItemV1.itemId);
+  assert.deepEqual(
+    await searchRssArchive(baseUrl, "binny-rss-one", "没有对应资料的词"),
+    [],
+  );
+  assert.deepEqual(
+    await searchRssArchive(baseUrl, "binny-rss-one", "rss 全文测试文章"),
+    [],
+    "literal 搜索沿用大小写敏感的子串语义。",
+  );
+
+  const rssRegexTitle = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "regex", pattern: "^RSS 全文测试文章" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.ok(
+    rssRegexTitle.results.some(({ itemId }) => itemId === rssItemV1.itemId),
+  );
+  const rssRegexLowercase = cliData<typeof rssRegexTitle>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "regex", pattern: "^rss 全文测试文章" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(rssRegexLowercase.results, []);
+
+  const titleOnlyItem = await readRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 仅标题資料🌿",
+  );
+  const titleOnlyState = rssArchiveView(titleOnlyItem, "binny-rss-one");
+  assert.deepEqual(titleOnlyItem.sourceKey, {
+    namespace: "rss:rss-main",
+    key: "id:urn:binny:rss:rss-title-only",
+  });
+  assert.equal(titleOnlyState.body?.searchText, "RSS 仅标题資料🌿");
+  assert.equal(titleOnlyState.body?.text, undefined);
+  assert.equal(titleOnlyState.capture.completeness, "partial");
+  assert.ok(
+    titleOnlyState.capture.missing.some(({ path }) => path === "body.fullText"),
+  );
+
+  const titleOnlyUnicodeSearch = cliData<{
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly matches: readonly {
+        readonly hit?: {
+          readonly position: {
+            readonly encoding: string;
+            readonly start: number;
+            readonly end: number;
+          };
+        };
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        text: { kind: "literal", value: "标题資料🌿" },
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  const titleOnlyUnicodeResult = titleOnlyUnicodeSearch.results.find(
+    ({ itemId }) => itemId === titleOnlyItem.itemId,
+  );
+  assert.ok(titleOnlyUnicodeResult !== undefined);
+  assert.deepEqual(titleOnlyUnicodeResult.matches[0]?.hit?.position, {
+    encoding: "unicode-code-point",
+    start: 5,
+    end: 10,
+  });
+
+  const titleOnlyFilter = {
+    type: "and",
+    conditions: [
+      {
+        type: "text",
+        text: { kind: "literal", value: "标题資料🌿" },
+      },
+      {
+        type: "field",
+        field: "sourceKey.namespace",
+        operator: "eq",
+        value: "rss:rss-main",
+      },
+    ],
+  } as const;
+  const titleOnlyFilteredSearch = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        where: titleOnlyFilter,
+        limit: 10,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    titleOnlyFilteredSearch.results.map(({ itemId }) => itemId),
+    [titleOnlyItem.itemId],
+  );
+  const titleOnlyAggregate = cliData<{
+    readonly groups: readonly {
+      readonly metrics: readonly {
+        readonly key: string;
+        readonly value: string;
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "aggregate",
+      "--query",
+      JSON.stringify({
+        scope: { kind: "current", binId: "binny-rss-one" },
+        unit: "item",
+        where: titleOnlyFilter,
+        groupBy: [],
+        metrics: [{ key: "items", op: "count" }],
+      }),
+    ]),
+    "aggregated",
+  );
+  assert.equal(titleOnlyAggregate.groups[0]?.metrics[0]?.value, "1");
   const rssResources = rssV1.resources ?? [];
   const rssResourceBytes = await Promise.all(
     rssResources.map(({ resourceId }) => readRssResource(baseUrl, resourceId)),
@@ -6970,16 +7130,16 @@ async function runRssAcceptance(
   const literalWidgetItemsByKey = new Map(
     literalWidgetItems.map((item) => [item.sourceKey.key, item]),
   );
-  for (const key of [
-    "id:tag:example.test,2026:atom-text-explicit",
-    "id:tag:example.test,2026:atom-text-default",
-  ]) {
+  for (const [key, title] of [
+    ["id:tag:example.test,2026:atom-text-explicit", "Atom 显式纯文本"],
+    ["id:tag:example.test,2026:atom-text-default", "Atom 默认纯文本"],
+  ] as const) {
     const atomTextItem = literalWidgetItemsByKey.get(key);
     assert.ok(atomTextItem !== undefined);
     const state = rssArchiveView(atomTextItem, "binny-rss-one");
     assert.equal(state.capture.completeness, "complete");
     assert.equal(state.body?.text, "代码 <widget> 与 A & B");
-    assert.equal(state.body?.searchText, "代码 <widget> 与 A & B");
+    assert.equal(state.body?.searchText, `${title}\n代码 <widget> 与 A & B`);
     assert.equal(state.body?.html, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.ok(
@@ -7013,7 +7173,7 @@ async function runRssAcceptance(
   assert.equal(rssEscapedLiteralState.body?.text, "代码 <widget> 与 A & B");
   assert.equal(
     rssEscapedLiteralState.body?.searchText,
-    "代码 <widget> 与 A & B",
+    "RSS XML 转义 HTML 测试文章\n代码 <widget> 与 A & B",
   );
   assert.match(rssEscapedLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
@@ -7061,7 +7221,7 @@ async function runRssAcceptance(
   assert.equal(atomEntityTextState.body?.text, "A &lt;widget&gt; &amp; B");
   assert.equal(
     atomEntityTextState.body?.searchText,
-    "A &lt;widget&gt; &amp; B",
+    "Atom 纯文本中的实体字面值\nA &lt;widget&gt; &amp; B",
   );
   assert.equal(
     atomEntityTextState.body?.html,
@@ -7284,9 +7444,14 @@ async function runRssAcceptance(
     feedIds: ["rss-main"],
   });
   assert.equal(checkRun.status, "completed");
-  assert.equal(checkRun.result?.check?.availability, "available");
+  assert.equal(checkRun.result?.check?.availability, "unavailable");
   assert.deepEqual(checkRun.result?.check?.scope, ["rss-main"]);
   assert.ok((checkRun.result?.check?.checkedAt.length ?? 0) > 0);
+  assert.ok(
+    checkRun.result?.check?.problems.some(
+      ({ code }) => code === "rss_entry_body_unavailable",
+    ),
+  );
   assert.ok(
     checkRun.result?.check?.problems.some(
       ({ code }) => code === "rss_feed_summary_only",
