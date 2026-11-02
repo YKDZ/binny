@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type Page } from "patchright-core";
 
 export type LinuxdoCliResult = {
   readonly code: number;
@@ -147,7 +147,7 @@ export async function startLinuxdoViewerBrowser(input: {
     input.image,
     "--input-type=module",
     "--eval",
-    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(wsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_LINUXDO_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(wsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_LINUXDO_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
   ]);
   assert.equal(launch.code, 0, `外层浏览器启动失败：\n${launch.stderr}`);
 

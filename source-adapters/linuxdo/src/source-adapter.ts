@@ -8,7 +8,7 @@ import {
   type ArchiveResourceMetadata,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
-import { chromium, type APIRequestContext, type Page } from "playwright-core";
+import { chromium, type APIRequestContext, type Page } from "patchright-core";
 import { z } from "zod";
 
 const topicIdSchema = z.number().int().safe().positive();
@@ -389,7 +389,7 @@ async function withSharedBrowser<T>(
   if (connection === undefined || connection.protocol !== "playwright") {
     throw new Error("Linux.do 采集需要正式浏览器运行器提供 Playwright 连接。");
   }
-  if (connection.playwrightVersion !== "1.64.1") {
+  if (connection.playwrightVersion !== "1.64.2") {
     throw new Error(
       "Linux.do 信源适配器与浏览器运行器的 Playwright 版本不一致。",
     );

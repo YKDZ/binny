@@ -4,7 +4,7 @@ import {
   defineSourceAdapterAction,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
-import { chromium, type Page } from "playwright-core";
+import { chromium, type Page } from "patchright-core";
 import { z } from "zod";
 
 const configSchema = z.object({ baseUrl: z.url() });
@@ -37,7 +37,7 @@ async function withSharedPage<T>(
   if (connection === undefined || connection.protocol !== "playwright") {
     throw new Error("浏览器运行器没有提供 Playwright 连接。");
   }
-  if (connection.playwrightVersion !== "1.64.1") {
+  if (connection.playwrightVersion !== "1.64.2") {
     throw new Error("信源适配器与浏览器运行器的 Playwright 版本不一致。");
   }
 

@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import type { Browser as PlaywrightBrowser, Page } from "playwright-core";
+import type { Browser as PlaywrightBrowser, Page } from "patchright-core";
 
 import {
   copyImageBuildContext,
@@ -759,7 +759,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
     browserImage,
     "--input-type=module",
     "--eval",
-    `import { chromium } from "playwright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chromium" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
   ]);
   assert.equal(
     launch.code,
@@ -804,7 +804,7 @@ async function startOuterBrowser(): Promise<PlaywrightBrowser> {
   const endpoint = new URL(`ws://localhost:9224${outerBrowserWsPath}`);
   endpoint.hostname = publishedHost;
   endpoint.port = String(port);
-  const { chromium } = await import("playwright-core");
+  const { chromium } = await import("patchright-core");
   return await chromium.connect(endpoint.href);
 }
 
@@ -1433,16 +1433,16 @@ async function requestHumanSessionClose(
   return cliData<HumanSessionStatus>(result, "closed");
 }
 
-async function verifyPlaywrightDeploys(service: string): Promise<void> {
+async function verifyPatchrightDeploys(service: string): Promise<void> {
   const result = await compose([
     "exec",
     "--no-TTY",
     service,
     "node",
     "-e",
-    'const fs = require("node:fs"); const path = require("node:path"); for (const root of ["/app", "/app/binny-runtime"]) console.log(JSON.parse(fs.readFileSync(path.join(root, "node_modules/playwright-core/package.json"), "utf8")).version);',
+    'const fs = require("node:fs"); const path = require("node:path"); for (const root of ["/app", "/app/binny-runtime"]) console.log(JSON.parse(fs.readFileSync(path.join(root, "node_modules/patchright-core/package.json"), "utf8")).version);',
   ]);
-  assert.deepEqual(result.stdout.trim().split(/\s+/u), ["1.64.1", "1.64.1"]);
+  assert.deepEqual(result.stdout.trim().split(/\s+/u), ["1.64.2", "1.64.2"]);
 }
 
 async function browserPortBindings(
@@ -1873,8 +1873,8 @@ async function main(): Promise<void> {
     "online",
   );
   await Promise.all([
-    verifyPlaywrightDeploys("browser-one"),
-    verifyPlaywrightDeploys("browser-two"),
+    verifyPatchrightDeploys("browser-one"),
+    verifyPatchrightDeploys("browser-two"),
   ]);
 
   const oneBindings = await browserPortBindings("browser-one");

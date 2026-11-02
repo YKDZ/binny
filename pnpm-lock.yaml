@@ -214,9 +214,9 @@ importers:
       oxlint-tsgolint:
         specifier: 'catalog:'
         version: 7.0.2005
-      playwright-core:
-        specifier: 1.64.1
-        version: 1.64.1
+      patchright-core:
+        specifier: 1.64.2
+        version: 1.64.2
       turbo:
         specifier: 'catalog:'
         version: 2.11.10
@@ -451,9 +451,9 @@ importers:
       '@binny/source-adapter-sdk':
         specifier: workspace:*
         version: link:../source-adapter-sdk
-      playwright-core:
-        specifier: 1.64.1
-        version: 1.64.1
+      patchright-core:
+        specifier: 1.64.2
+        version: 1.64.2
       ws:
         specifier: 8.18.3
         version: 8.18.3
@@ -537,9 +537,9 @@ importers:
       '@binny/source-adapter-sdk':
         specifier: workspace:*
         version: link:../../packages/source-adapter-sdk
-      playwright-core:
-        specifier: 1.64.1
-        version: 1.64.1
+      patchright-core:
+        specifier: 1.64.2
+        version: 1.64.2
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -1714,6 +1714,11 @@ packages:
   parse5@8.0.1:
     resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
 
+  patchright-core@1.64.2:
+    resolution: {integrity: sha512-j7Hsw8XThZfiGlNPGJZtX4ERLLi4cval4ihCdOScwBgWqElCT4MWQSDmV/Tuuartgy9/a8DColg4gTAtJ27nPQ==}
+    engines: {node: '>=20'}
+    hasBin: true
+
   path-expression-matcher@1.6.2:
     resolution: {integrity: sha512-enSlaiat05iasnzmgNxRj8reFdj3puY2QpNgP1aPIaVfT6nn9ICuPoFlKHk8EN22HcwewshO+mN2DGbkCEOtqQ==}
     engines: {node: '>=14.0.0'}
@@ -1724,11 +1729,6 @@ packages:
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
     engines: {node: '>=12'}
-
-  playwright-core@1.64.1:
-    resolution: {integrity: sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ==}
-    engines: {node: '>=20'}
-    hasBin: true
 
   postgres@3.4.9:
     resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
@@ -2615,13 +2615,13 @@ snapshots:
     dependencies:
       entities: 8.1.0
 
+  patchright-core@1.64.2: {}
+
   path-expression-matcher@1.6.2: {}
 
   picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
-
-  playwright-core@1.64.1: {}
 
   postgres@3.4.9: {}
 

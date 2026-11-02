@@ -6,7 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import type { BrowserPower } from "@binny/contracts";
 import type { SourceAdapterBrowserConnection } from "@binny/source-adapter-sdk";
-import { chromium, type Browser, type BrowserContext } from "playwright-core";
+import { chromium, type Browser, type BrowserContext } from "patchright-core";
 import WebSocket from "ws";
 
 type BrowserOptions = {
@@ -259,7 +259,7 @@ export class BrowserLifecycle {
     return {
       protocol: "playwright",
       endpoint: bound.endpoint,
-      playwrightVersion: "1.64.1",
+      playwrightVersion: "1.64.2",
     };
   }
 

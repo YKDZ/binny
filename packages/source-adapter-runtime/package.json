@@ -35,7 +35,7 @@
     "@binny/api": "workspace:*",
     "@binny/contracts": "workspace:*",
     "@binny/source-adapter-sdk": "workspace:*",
-    "playwright-core": "1.64.1",
+    "patchright-core": "1.64.2",
     "ws": "8.18.3",
     "zod": "catalog:"
   },

@@ -7,7 +7,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-import { type Browser, type Page } from "playwright-core";
+import { type Browser, type Page } from "patchright-core";
 
 import {
   closeLinuxdoHumanSession,
