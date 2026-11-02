@@ -48,6 +48,13 @@
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]
+    },
+    "test": {
+      "dependsOn": [],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:light"]
     }
   }
 }
