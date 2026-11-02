@@ -156,6 +156,84 @@ function parseBrowserIdleTimeoutOption(
         },
       };
 }
+
+const apiUrlOptionField = {
+  kind: "valueOption",
+  longOption: "--url",
+  description:
+    "目标服务 HTTP URL；优先于 BINNY_API_URL，默认地址为 http://localhost:3000",
+} as const;
+
+type ApiUrlOptionField = typeof apiUrlOptionField;
+type ApiUrlInputField = z.ZodOptional<z.ZodString>;
+type ExtendedCommandInput<Input> =
+  Input extends z.ZodObject<infer Shape, infer Config>
+    ? z.ZodObject<Shape & { apiUrl: ApiUrlInputField }, Config>
+    : Input;
+type CommandWithApiUrl<Definition> = Definition extends {
+  readonly kind: "command";
+  readonly fields?: infer Fields;
+  readonly input: infer Input;
+}
+  ? Omit<Definition, "fields" | "input"> & {
+      readonly fields: (Fields extends object ? Fields : {}) & {
+        readonly apiUrl: ApiUrlOptionField;
+      };
+      readonly input: ExtendedCommandInput<Input>;
+    }
+  : Definition;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parsedApiUrl(invocation: unknown): string | undefined {
+  if (
+    !isRecord(invocation) ||
+    invocation.kind !== "parsed" ||
+    !isRecord(invocation.input) ||
+    typeof invocation.input.apiUrl !== "string"
+  ) {
+    return undefined;
+  }
+  return invocation.input.apiUrl;
+}
+
+function addApiUrlOption<Commands extends Record<string, unknown>>(
+  commands: Commands,
+): { [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]> } {
+  const extendedCommands = Object.fromEntries(
+    Object.entries(commands).map(([name, definition]) => {
+      if (!isRecord(definition) || definition.kind !== "command") {
+        return [name, definition];
+      }
+      if (!(definition.input instanceof z.ZodObject)) {
+        throw new Error(`CLI 命令 ${name} 的输入必须是对象 schema。`);
+      }
+      return [
+        name,
+        {
+          ...definition,
+          fields: {
+            ...(isRecord(definition.fields) ? definition.fields : {}),
+            apiUrl: apiUrlOptionField,
+          },
+          // safeExtend 会创建新对象；重新绑定投影以保留归档自定义 JSON 节点。
+          input: withPostgresJsonSchemaProjection(
+            definition.input.safeExtend({
+              apiUrl: z.string().url().optional(),
+            }),
+          ),
+        },
+      ];
+    }),
+  );
+  // 每条命令的解析字段与输入 schema 同步扩展，避免另写 argv 解析器。
+  return extendedCommands as {
+    [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]>;
+  };
+}
+
 const targetsTextSchema = jsonTextSchema.pipe(z.array(z.unknown()));
 const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
   binConfigurationSchema,
@@ -316,11 +394,14 @@ function createCliContract(identity: CliCommandIdentity) {
     }),
     output: outputCapability({ defaultFormat: "structured", text: true }),
     usageFailureExitCode: 2,
-    commands: {
+    commands: addApiUrlOption({
       cli: {
         kind: "rootGroup",
         name: identity.commandName,
         description: "配置和管理 Binny 垃圾桶。",
+        helpSupplement: text.lines([
+          "联网命令可在具体命令后添加 --url <服务地址>；未指定时读取 BINNY_API_URL，否则使用 http://localhost:3000。",
+        ]),
       },
       bin: {
         kind: "commandGroup",
@@ -1921,16 +2002,18 @@ function createCliContract(identity: CliCommandIdentity) {
           throw new Error("服务返回了未声明的归档资源读取状态。");
         },
       }),
-    },
+    } as const),
   });
 }
 
 export async function runCli(runtime: CliRuntime): Promise<number> {
   try {
     const contract = createCliContract(runtime.identity);
-    const apiUrl = runtime.apiUrl ?? "http://localhost:3000";
+    const invocation = parseCliInvocation(contract, runtime.argv.slice(2));
+    const apiUrl =
+      parsedApiUrl(invocation) ?? runtime.apiUrl ?? "http://localhost:3000";
     const result = await executeCli(contract, {
-      invocation: parseCliInvocation(contract, runtime.argv.slice(2)),
+      invocation,
       dependencies: {
         apiUrl,
         createClient: () =>

@@ -1,5 +1,6 @@
 {
   "name": "@binny/binny",
+  "version": "0.0.0",
   "private": true,
   "bin": {
     "binny": "./dist/cli.js"
@@ -25,7 +26,7 @@
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@binny/tooling-config": "link:../tooling-config",
+    "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",

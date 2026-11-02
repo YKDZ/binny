@@ -11,9 +11,7 @@ const fixtureDirectory = fileURLToPath(
 );
 const outputPath = path.resolve(outputDirectory);
 await mkdir(outputPath, { recursive: true });
-for (const filename of ["client-types.ts", "client-runtime.ts"]) {
-  await copyFile(
-    path.join(fixtureDirectory, filename),
-    path.join(outputPath, filename),
-  );
-}
+await copyFile(
+  path.join(fixtureDirectory, "client-types.ts"),
+  path.join(outputPath, "client-types.ts"),
+);

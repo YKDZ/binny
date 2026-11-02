@@ -19,11 +19,19 @@ function fakeService(options: {
   readonly archiveQueryVersion?: number;
   readonly productVersion?: string;
 }) {
-  const requests: { readonly method: string; readonly path: string }[] = [];
+  const requests: {
+    readonly method: string;
+    readonly path: string;
+    readonly origin: string;
+  }[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    requests.push({ method: request.method, path: url.pathname });
+    requests.push({
+      method: request.method,
+      path: url.pathname,
+      origin: url.origin,
+    });
     if (url.pathname === "/meta") {
       return Response.json({
         ...matchingMetadata,
@@ -64,13 +72,14 @@ async function run(
   argv: readonly string[],
   fetch: typeof globalThis.fetch,
   version = "9.8.7",
+  apiUrl: string | null = "http://service.test",
 ) {
   let output = "";
   const exitCode = await runCli({
     argv: ["node", "binny", ...argv],
     identity: { commandName: "binny", version },
     fetch,
-    apiUrl: "http://service.test",
+    ...(apiUrl === null ? {} : { apiUrl }),
     write: async ({ chunk }) => {
       output += chunk;
     },
@@ -116,6 +125,80 @@ void describe("查询服务发现", () => {
         ["GET", "/meta"],
         ["POST", "/archives/search"],
       ],
+    );
+  });
+
+  void it("显式 --url 覆盖服务地址环境变量", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          scope: { kind: "current" },
+          text: { kind: "literal", value: "needle" },
+        }),
+        "--url",
+        "http://selected.test",
+      ],
+      service.fetch,
+      "9.8.7",
+      "http://from-environment.test",
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(
+      service.requests.map(({ origin }) => origin),
+      ["http://selected.test", "http://selected.test"],
+    );
+  });
+
+  void it("未提供显式地址时使用环境地址", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          scope: { kind: "current" },
+          text: { kind: "literal", value: "needle" },
+        }),
+      ],
+      service.fetch,
+      "9.8.7",
+      "http://from-environment.test",
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(
+      service.requests.map(({ origin }) => origin),
+      ["http://from-environment.test", "http://from-environment.test"],
+    );
+  });
+
+  void it("未提供显式地址或环境地址时使用默认服务地址", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          scope: { kind: "current" },
+          text: { kind: "literal", value: "needle" },
+        }),
+      ],
+      service.fetch,
+      "9.8.7",
+      null,
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.deepEqual(
+      service.requests.map(({ origin }) => origin),
+      ["http://localhost:3000", "http://localhost:3000"],
     );
   });
 
