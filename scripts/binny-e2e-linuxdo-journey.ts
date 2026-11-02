@@ -19,7 +19,19 @@ export type LinuxdoCommandRunner = (
 
 export type LinuxdoManualRun = {
   readonly runId: string;
-  readonly status: "queued" | "running" | "completed" | "failed";
+  readonly status:
+    | "queued"
+    | "executing"
+    | "cancelling"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  readonly referenceTime?: string;
+  readonly trigger?: {
+    readonly kind: string;
+    readonly scheduleId?: string;
+    readonly scheduledFor?: string;
+  };
   readonly result?: {
     readonly output?: {
       readonly completedScopes?: readonly string[];

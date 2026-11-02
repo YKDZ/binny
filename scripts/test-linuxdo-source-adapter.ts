@@ -64,6 +64,8 @@ type FixtureState = {
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
+  readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
+  readonly topicListDelayMs?: number;
 };
 
 const targetDefinitions = {
@@ -144,6 +146,10 @@ const repositoryRoot = path.resolve(
   "..",
 );
 const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
+const clockShimSource = path.join(
+  repositoryRoot,
+  "scripts/binny-e2e-test-clock.ts",
+);
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny-discovery-${suffix}`;
 const serverImage = `${projectName}-server:local`;
@@ -229,10 +235,15 @@ async function rawCompose(args: readonly string[]): Promise<ProcessResult> {
   return await run("docker", [...composePrefix(), ...args]);
 }
 
-async function cli(args: readonly string[]): Promise<ProcessResult> {
+async function cli(
+  args: readonly string[],
+  serverIndex = 1,
+): Promise<ProcessResult> {
   return await run("docker", [
     ...composePrefix(),
     "exec",
+    "--index",
+    String(serverIndex),
     "--no-TTY",
     "server",
     "node",
@@ -269,6 +280,11 @@ async function createOverlay(): Promise<void> {
       "    networks: !override",
       "      - default",
       "  server:",
+      "    environment:",
+      "      NODE_OPTIONS: --import=/var/lib/binny/test-clock/clock.ts",
+      "      BINNY_TEST_CLOCK_FILE: /var/lib/binny/test-clock/offset-ms",
+      "    volumes:",
+      "      - discovery-test-clock:/var/lib/binny/test-clock",
       "    ports: !override",
       '      - "3000"',
       "    networks: !override",
@@ -276,6 +292,11 @@ async function createOverlay(): Promise<void> {
       "      - runtime",
       "      - connections",
       "  runtime-linuxdo:",
+      "    environment:",
+      "      NODE_OPTIONS: --import=/var/lib/binny/test-clock/clock.ts",
+      "      BINNY_TEST_CLOCK_FILE: /var/lib/binny/test-clock/offset-ms",
+      "    volumes:",
+      "      - discovery-test-clock:/var/lib/binny/test-clock",
       "    networks: !override",
       "      - runtime",
       "      - connections",
@@ -302,6 +323,8 @@ async function createOverlay(): Promise<void> {
       "    ipam:",
       "      config:",
       `        - subnet: ${subnets.browser}`,
+      "volumes:",
+      "  discovery-test-clock: {}",
       "",
     ].join("\n"),
   );
@@ -380,16 +403,72 @@ async function clearSourceEvents(): Promise<void> {
   assert.equal(response.status, 204);
 }
 
-async function waitForApi(): Promise<void> {
+async function waitForApi(serverIndex = 1): Promise<void> {
   const deadline = Date.now() + 120_000;
   let lastError = "正式服务尚未就绪。";
   while (Date.now() < deadline) {
-    const result = await cli(["bin", "list"]);
+    const result = await cli(["bin", "list"], serverIndex);
     if (result.code === 0) return;
     lastError = result.stderr;
     await delay(500);
   }
   throw new Error(`等待正式 API、PostgreSQL 和 CLI 超时：\n${lastError}`);
+}
+
+async function setTestClockOffset(offsetMilliseconds: number): Promise<void> {
+  assert.ok(Number.isSafeInteger(offsetMilliseconds));
+  await compose([
+    "run",
+    "--rm",
+    "--no-deps",
+    "--no-TTY",
+    "--entrypoint",
+    "node",
+    "--env",
+    `BINNY_TEST_CLOCK_OFFSET_MS=${String(offsetMilliseconds)}`,
+    "server",
+    "--input-type=module",
+    "-e",
+    'import { writeFileSync } from "node:fs"; writeFileSync(process.env.BINNY_TEST_CLOCK_FILE, process.env.BINNY_TEST_CLOCK_OFFSET_MS ?? "0");',
+  ]);
+}
+
+async function provisionClockShim(): Promise<void> {
+  await compose(["build", "server", "runtime-linuxdo"]);
+  await compose(["create", "server"]);
+  const containerId = (
+    await compose(["ps", "--all", "--quiet", "server"])
+  ).stdout.trim();
+  assert.ok(containerId.length > 0, "Compose 没有创建时钟 volume 容器。");
+  const copied = await run("docker", [
+    "cp",
+    clockShimSource,
+    `${containerId}:/var/lib/binny/test-clock/clock.ts`,
+  ]);
+  assert.equal(
+    copied.code,
+    0,
+    `复制受检时钟 shim 到测试 volume 失败：\n${copied.stderr}`,
+  );
+  await compose(["rm", "--force", "server"]);
+}
+
+async function setTestClockAt(isoDate: string): Promise<void> {
+  const target = Date.parse(isoDate);
+  assert.ok(Number.isFinite(target));
+  await setTestClockOffset(target - Date.now());
+}
+
+async function readContainerTime(service: string): Promise<string> {
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "node",
+    "-e",
+    "process.stdout.write(new Date().toISOString())",
+  ]);
+  return result.stdout.trim();
 }
 
 async function waitForRuntimeHealth(): Promise<void> {
@@ -722,17 +801,37 @@ async function verifyLoginRequired(): Promise<
 
 async function verifyActionParameterValidation(): Promise<void> {
   for (const [params, path] of [
-    [{ date: "2026-02-30", timeZone: "UTC" }, ["params", "date"]],
     [
-      { date: "2026-10-28", timeZone: "Mars/Olympus_Mons" },
+      {
+        targets: linuxdoTargets("latest"),
+        date: "2026-02-30",
+        timeZone: "UTC",
+      },
+      ["params", "date"],
+    ],
+    [
+      {
+        targets: linuxdoTargets("latest"),
+        date: "today",
+        timeZone: "Mars/Phobos",
+      },
       ["params", "timeZone"],
     ],
     [
-      { date: "2026-10-28", timeZone: "UTC", maxTopics: 0 },
+      { targets: linuxdoTargets("latest"), date: "today" },
+      ["params", "timeZone"],
+    ],
+    [
+      {
+        targets: linuxdoTargets("latest"),
+        date: "2026-10-28",
+        timeZone: "UTC",
+        maxTopics: 0,
+      },
       ["params", "maxTopics"],
     ],
     [
-      { date: "2026-10-28", timeZone: "UTC", targets: [1] },
+      { targets: [1], date: "today", timeZone: "UTC" },
       ["params", "targets", 0],
     ],
   ] as const) {
@@ -915,6 +1014,399 @@ async function verifyCategoryDiscovery(): Promise<void> {
   const archived = await searchArchiveItem("发现主题 2499");
   assert.equal(archived.sourceKey.key, "post:249900");
   assert.equal(binState(archived).capture.scope.topicId, 2499);
+}
+
+async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
+  await updateFixtureState({
+    topicVersion: 4,
+    addedReply: true,
+    discoveryAddedReply: true,
+    topicListDelayMs: 0,
+    topicCreatedAtOverrides: {
+      2401: "2026-10-28T23:59:44.999Z",
+      2402: "2026-10-29T00:00:00.000Z",
+      2403: "2026-10-29T00:00:00.000Z",
+      2404: "2026-10-29T00:00:00.000Z",
+      2405: "2026-10-29T00:00:00.000Z",
+      2406: "2026-10-29T00:00:00.000Z",
+      2407: "2026-10-29T00:00:00.000Z",
+      2408: "2026-10-29T00:00:00.000Z",
+      2409: "2026-10-29T00:00:00.000Z",
+      2410: "2026-10-29T00:00:00.000Z",
+    },
+  });
+
+  await compose(["stop", "runtime-linuxdo", "server"]);
+  await setTestClockAt("2026-10-28T23:59:00.000Z");
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
+    "server",
+    "runtime-linuxdo",
+  ]);
+  serverPort = await publishedPort("server", 3000);
+  await waitForApi();
+  await waitForRuntimeHealth();
+  await waitForRuntime();
+  const scheduleCreatedAt = await readContainerTime("server");
+  assert.ok(
+    Date.parse(scheduleCreatedAt) >= Date.parse("2026-10-28T23:59:00.000Z") &&
+      Date.parse(scheduleCreatedAt) < Date.parse("2026-10-28T23:59:45.000Z"),
+  );
+
+  const schedule = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+  }>(
+    await cli([
+      "schedule",
+      "create",
+      "binny-discovery-topic",
+      "--expression",
+      "45 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        targets: linuxdoTargets("latest"),
+        date: "today",
+        timeZone: "UTC",
+        maxTopics: 10,
+      }),
+    ]),
+    "created",
+  );
+  assert.equal(schedule.nextDueAt, "2026-10-28T23:59:45.000Z");
+
+  const scheduleBlockerTime = await waitFor(
+    async () => Date.parse(await readContainerTime("server")),
+    (milliseconds) =>
+      milliseconds >= Date.parse("2026-10-28T23:59:25.000Z") &&
+      milliseconds < Date.parse("2026-10-28T23:59:45.000Z"),
+    "等待计划到期前启动受控运行器占用",
+  );
+  assert.ok(Number.isFinite(scheduleBlockerTime));
+  await updateFixtureState({ topicListDelayMs: 25_000 });
+  const eventsBeforeScheduleBlocker = await sourceState();
+  const scheduleBlocker = cliData<ManualRun>(
+    await cli([
+      "run",
+      "trigger",
+      "binny-discovery-topic",
+      "collect",
+      "--params",
+      JSON.stringify({
+        targets: linuxdoTargets("latest"),
+        date: "2026-10-28",
+        timeZone: "UTC",
+        maxTopics: 10,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceEvent(
+    "topic-list",
+    eventsBeforeScheduleBlocker.events.filter(
+      ({ action }) => action === "topic-list",
+    ).length + 1,
+  );
+  const runningScheduleBlocker = await waitFor(
+    async () =>
+      cliData<ManualRun>(
+        await cli([
+          "run",
+          "get",
+          "binny-discovery-topic",
+          scheduleBlocker.runId,
+        ]),
+        "found",
+      ),
+    ({ status }) => status === "executing",
+    "确认受控运行器占用正在执行",
+  );
+  assert.equal(runningScheduleBlocker.status, "executing");
+
+  const queuedDue = await waitFor(
+    async () =>
+      cliData<{
+        readonly lastRunId?: string;
+        readonly nextDueAt: string;
+      }>(
+        await cli([
+          "schedule",
+          "get",
+          "binny-discovery-topic",
+          schedule.scheduleId,
+        ]),
+        "found",
+      ),
+    ({ lastRunId }) => lastRunId !== undefined,
+    "在运行器占用时排入午夜前的计划触发",
+  );
+  const queuedRunId = queuedDue.lastRunId;
+  assert.ok(queuedRunId !== undefined);
+  const queuedRun = cliData<ManualRun>(
+    await cli(["run", "get", "binny-discovery-topic", queuedRunId]),
+    "found",
+  );
+  assert.equal(queuedRun.status, "queued");
+  assert.equal(queuedRun.trigger?.kind, "schedule");
+  assert.equal(queuedRun.trigger?.scheduleId, schedule.scheduleId);
+  assert.equal(queuedRun.trigger?.scheduledFor, "2026-10-28T23:59:45.000Z");
+  assert.equal(queuedRun.referenceTime, "2026-10-28T23:59:45.000Z");
+  const listedSchedules = cliData<{
+    readonly schedules: readonly {
+      readonly scheduleId: string;
+      readonly lastRunId?: string;
+    }[];
+  }>(await cli(["schedule", "list", "binny-discovery-topic"]), "listed");
+  assert.equal(
+    listedSchedules.schedules.find(
+      ({ scheduleId }) => scheduleId === schedule.scheduleId,
+    )?.lastRunId,
+    queuedRunId,
+  );
+
+  const changedSchedule = cliData<{
+    readonly lastRunId?: string;
+    readonly nextDueAt: string;
+    readonly params: { readonly date: string };
+  }>(
+    await cli([
+      "schedule",
+      "update",
+      "binny-discovery-topic",
+      schedule.scheduleId,
+      "--params",
+      JSON.stringify({
+        targets: linuxdoTargets("latest"),
+        date: "2026-10-29",
+        timeZone: "UTC",
+        maxTopics: 10,
+      }),
+    ]),
+    "updated",
+  );
+  assert.equal(changedSchedule.params.date, "2026-10-29");
+  assert.equal(changedSchedule.lastRunId, queuedRunId);
+  assert.equal(changedSchedule.nextDueAt, "2026-10-29T00:00:45.000Z");
+  const queuedRunAfterPlanUpdate = cliData<ManualRun>(
+    await cli(["run", "get", "binny-discovery-topic", queuedRunId]),
+    "found",
+  );
+  assert.equal(queuedRunAfterPlanUpdate.status, "queued");
+  assert.equal(queuedRunAfterPlanUpdate.referenceTime, queuedRun.referenceTime);
+  assert.equal(
+    queuedRunAfterPlanUpdate.trigger?.scheduleId,
+    schedule.scheduleId,
+  );
+  assert.equal(
+    queuedRunAfterPlanUpdate.trigger?.scheduledFor,
+    "2026-10-28T23:59:45.000Z",
+  );
+  await compose(["stop", "runtime-linuxdo"]);
+  const stoppedScheduleBlocker = await waitFor(
+    async () =>
+      cliData<ManualRun>(
+        await cli([
+          "run",
+          "get",
+          "binny-discovery-topic",
+          scheduleBlocker.runId,
+        ]),
+        "found",
+      ),
+    ({ status }) =>
+      status === "failed" || status === "cancelled" || status === "completed",
+    "运行器停止后终结占用运行",
+  );
+  assert.notEqual(stoppedScheduleBlocker.status, "completed");
+  await updateFixtureState({ topicListDelayMs: 0 });
+  const queuedRunAfterRunnerStop = cliData<ManualRun>(
+    await cli(["run", "get", "binny-discovery-topic", queuedRunId]),
+    "found",
+  );
+  assert.equal(queuedRunAfterRunnerStop.status, "queued");
+  assert.equal(queuedRunAfterRunnerStop.referenceTime, queuedRun.referenceTime);
+
+  const coreStoppedAt = Date.now();
+  await compose(["stop", "server"]);
+  await setTestClockAt("2026-10-29T00:00:50.000Z");
+  await compose(["up", "--detach", "--scale", "server=2", "server"]);
+  serverPort = await publishedPort("server", 3000);
+  await waitForApi();
+  const coreOutageMilliseconds = Date.now() - coreStoppedAt;
+  await waitForApi(2);
+  const resumedSchedule = await waitFor(
+    async () =>
+      cliData<{
+        readonly lastRunId?: string;
+        readonly nextDueAt: string;
+        readonly params: { readonly date: string };
+      }>(
+        await cli([
+          "schedule",
+          "get",
+          "binny-discovery-topic",
+          schedule.scheduleId,
+        ]),
+        "found",
+      ),
+    ({ nextDueAt }) => nextDueAt === "2026-10-29T00:01:45.000Z",
+    "启动时跳过停机期间遗漏的下一次计划触发",
+  );
+  assert.equal(resumedSchedule.nextDueAt, "2026-10-29T00:01:45.000Z");
+  if (
+    resumedSchedule.lastRunId !== undefined &&
+    resumedSchedule.lastRunId !== queuedRunId
+  ) {
+    const unexpectedRun = cliData<ManualRun>(
+      await cli([
+        "run",
+        "get",
+        "binny-discovery-topic",
+        resumedSchedule.lastRunId,
+      ]),
+      "found",
+    );
+    assert.equal(
+      unexpectedRun.trigger?.scheduledFor,
+      "2026-10-29T00:00:45.000Z",
+    );
+  }
+  assert.equal(resumedSchedule.lastRunId, queuedRunId);
+  assert.equal(resumedSchedule.params.date, "2026-10-29");
+  const resumedScheduleFromSecondCore = cliData<{
+    readonly lastRunId?: string;
+    readonly nextDueAt: string;
+    readonly params: { readonly date: string };
+  }>(
+    await cli(
+      ["schedule", "get", "binny-discovery-topic", schedule.scheduleId],
+      2,
+    ),
+    "found",
+  );
+  assert.equal(resumedScheduleFromSecondCore.lastRunId, queuedRunId);
+  assert.equal(
+    resumedScheduleFromSecondCore.nextDueAt,
+    "2026-10-29T00:01:45.000Z",
+  );
+  assert.equal(resumedScheduleFromSecondCore.params.date, "2026-10-29");
+  const stillQueuedRun = cliData<ManualRun>(
+    await cli(["run", "get", "binny-discovery-topic", queuedRunId], 2),
+    "found",
+  );
+  assert.equal(stillQueuedRun.status, "queued");
+  assert.equal(stillQueuedRun.referenceTime, "2026-10-28T23:59:45.000Z");
+  assert.equal(
+    stillQueuedRun.trigger?.scheduledFor,
+    "2026-10-28T23:59:45.000Z",
+  );
+
+  await compose(["start", "runtime-linuxdo"]);
+  await waitForRuntimeHealth();
+  await waitForRuntime();
+  const runtimeOnlineAt = await readContainerTime("runtime-linuxdo");
+  assert.ok(
+    Date.parse(runtimeOnlineAt) >= Date.parse("2026-10-29T00:00:50.000Z"),
+  );
+
+  const searchScheduledObservationRunIds = async (): Promise<string[]> => {
+    const page = cliData<{
+      readonly results: readonly {
+        readonly matches: readonly { readonly runId?: string }[];
+      }[];
+    }>(
+      await cli([
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          scope: { kind: "observations", binId: "binny-discovery-topic" },
+          text: { kind: "literal", value: "主题正文版本 4" },
+          select: ["runId"],
+          limit: 10,
+        }),
+      ]),
+      "found",
+    );
+    return [
+      ...new Set(
+        page.results.flatMap(({ matches }) =>
+          matches.flatMap(({ runId }) => (runId === undefined ? [] : [runId])),
+        ),
+      ),
+    ].sort();
+  };
+
+  const observedRunIds = await waitFor(
+    searchScheduledObservationRunIds,
+    (runIds) => runIds.length >= 1,
+    "归档午夜前计划运行的主题正文",
+  );
+  const scheduledRunId = observedRunIds[0];
+  assert.ok(scheduledRunId !== undefined);
+  assert.equal(scheduledRunId, queuedRunId);
+  const scheduledRun = await waitForManualRun(scheduledRunId);
+  assert.equal(scheduledRun.status, "completed", JSON.stringify(scheduledRun));
+  assert.equal(scheduledRun.trigger?.kind, "schedule");
+  assert.equal(scheduledRun.trigger?.scheduleId, schedule.scheduleId);
+  assert.equal(scheduledRun.trigger?.scheduledFor, "2026-10-28T23:59:45.000Z");
+  assert.equal(scheduledRun.referenceTime, "2026-10-28T23:59:45.000Z");
+  await delay(10_000);
+  assert.deepEqual(
+    await searchScheduledObservationRunIds(),
+    [scheduledRunId],
+    "停机期间 00:00:45 的触发不能在重启后补发第二个归档运行。",
+  );
+  assert.deepEqual(
+    [...(scheduledRun.result?.output?.completedScopes ?? [])].sort(),
+    [
+      "target:latest",
+      "topic:2401",
+      "post:240001",
+      "post:240002",
+      "post:240003",
+      "post:240004",
+      "post:240005",
+    ].sort(),
+  );
+
+  cliData(
+    await cli([
+      "schedule",
+      "remove",
+      "binny-discovery-topic",
+      schedule.scheduleId,
+    ]),
+    "removed",
+  );
+  await compose(["stop", "runtime-linuxdo", "server"]);
+  await setTestClockOffset(0);
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
+    "--scale",
+    "server=1",
+    "server",
+    "runtime-linuxdo",
+  ]);
+  serverPort = await publishedPort("server", 3000);
+  await waitForApi();
+  await waitForRuntimeHealth();
+  await waitForRuntime();
+  process.stdout.write(
+    `跨午夜计划运行通过：runId=${scheduledRunId}, scheduleId=${schedule.scheduleId}, createdAt=${scheduleCreatedAt}, scheduledFor/referenceTime=2026-10-28T23:59:45.000Z, runtimeOnlineAt=${runtimeOnlineAt}, coreRecoveryMs=${coreOutageMilliseconds}, archivedScopes=[topic:2401]；恢复时跳过 2026-10-29T00:00:45.000Z。\n`,
+  );
 }
 
 async function assertSignedInCheckFailures(): Promise<void> {
@@ -1328,6 +1820,255 @@ async function verifyTopicArchive(
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
 }
 
+function localDateKey(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(
+    parts.map(({ type, value }) => [type, value]),
+  );
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function timeZoneWithRoomAroundNow(): string {
+  const now = Date.now();
+  for (const timeZone of ["UTC", "Etc/GMT+12"]) {
+    const currentDay = localDateKey(new Date(now), timeZone);
+    if (
+      localDateKey(new Date(now - 60_000), timeZone) === currentDay &&
+      localDateKey(new Date(now + 120_000), timeZone) === currentDay
+    ) {
+      return timeZone;
+    }
+  }
+  assert.fail("无法为 referenceTime 边界选择有余量的固定时区。");
+}
+
+async function waitForManualRun(runId: string): Promise<ManualRun> {
+  const deadline = Date.now() + 90_000;
+  let latest: ManualRun | undefined;
+  while (Date.now() < deadline) {
+    latest = cliData<ManualRun>(
+      await cli(["run", "get", "binny-discovery-topic", runId]),
+      "found",
+    );
+    if (latest.status === "completed" || latest.status === "failed")
+      return latest;
+    await delay(100);
+  }
+  assert.fail(`等待运行终结超时：${JSON.stringify(latest)}`);
+}
+
+async function waitFor<T>(
+  read: () => Promise<T>,
+  isReady: (value: T) => boolean,
+  description: string,
+): Promise<T> {
+  const deadline = Date.now() + 90_000;
+  let latest: T | undefined;
+  while (Date.now() < deadline) {
+    latest = await read();
+    if (isReady(latest)) return latest;
+    await delay(250);
+  }
+  assert.fail(`等待${description}超时：${JSON.stringify(latest)}`);
+}
+
+async function verifyCollectionDateWindows(): Promise<void> {
+  await updateFixtureState({
+    discoveryAddedReply: true,
+    topicCreatedAtOverrides: {
+      2401: "2026-10-26T00:00:00.000Z",
+      2402: "2026-10-27T23:59:59.999Z",
+      2403: "2026-10-28T00:00:00.000Z",
+      2404: "2026-10-26T23:59:59.999Z",
+      2410: "2026-10-27T00:00:00.000Z",
+    },
+  });
+  const eventsBeforeFixedDate = (await sourceState()).events.length;
+  const fixedDate = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    date: "2026-10-27",
+    timeZone: "UTC",
+    maxTopics: 10,
+  });
+  assert.equal(fixedDate.status, "completed", JSON.stringify(fixedDate));
+  const fixedScopes = fixedDate.result?.output?.completedScopes ?? [];
+  assert.ok(fixedScopes.includes("topic:2410"));
+  assert.ok(fixedScopes.includes("post:241000"));
+  assert.ok(fixedScopes.includes("topic:2402"));
+  assert.ok(fixedScopes.includes("post:240200"));
+  assert.ok(!fixedScopes.includes("topic:2401"));
+  assert.ok(!fixedScopes.includes("post:240005"));
+  assert.ok(!fixedScopes.includes("topic:2403"));
+  assert.ok(!fixedScopes.includes("topic:2404"));
+  const fixedDateEvents = (await sourceState()).events.slice(
+    eventsBeforeFixedDate,
+  );
+  assert.ok(
+    !fixedDateEvents.some(
+      ({ action, path }) => action === "topic" && path === "/t/2401.json",
+    ),
+    "旧主题即使有新回复，也不应读取并进入固定日期运行。",
+  );
+
+  await updateFixtureState({
+    topicCreatedAtOverrides: {
+      2401: "2026-03-08T04:59:59.999Z",
+      2402: "2026-03-08T05:00:00.000Z",
+      2403: "2026-03-09T03:59:59.999Z",
+      2404: "2026-03-09T04:00:00.000Z",
+      2410: "2026-03-08T05:00:00.000Z",
+    },
+  });
+  const dstDate = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    date: "2026-03-08",
+    timeZone: "America/New_York",
+    maxTopics: 10,
+  });
+  assert.equal(dstDate.status, "completed", JSON.stringify(dstDate));
+  const dstScopes = dstDate.result?.output?.completedScopes ?? [];
+  assert.ok(dstScopes.includes("topic:2402"));
+  assert.ok(dstScopes.includes("topic:2403"));
+  assert.ok(dstScopes.includes("topic:2410"));
+  assert.ok(!dstScopes.includes("topic:2401"));
+  assert.ok(!dstScopes.includes("topic:2404"));
+
+  await updateFixtureState({
+    topicCreatedAtOverrides: {
+      2401: "2026-11-01T03:59:59.999Z",
+      2402: "2026-11-01T04:00:00.000Z",
+      2403: "2026-11-02T04:59:59.999Z",
+      2404: "2026-11-02T05:00:00.000Z",
+      2410: "2026-11-01T04:00:00.000Z",
+    },
+  });
+  const dstFallDate = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    date: "2026-11-01",
+    timeZone: "America/New_York",
+    maxTopics: 10,
+  });
+  assert.equal(dstFallDate.status, "completed", JSON.stringify(dstFallDate));
+  const dstFallScopes = dstFallDate.result?.output?.completedScopes ?? [];
+  assert.ok(dstFallScopes.includes("topic:2402"));
+  assert.ok(dstFallScopes.includes("topic:2403"));
+  assert.ok(dstFallScopes.includes("topic:2410"));
+  assert.ok(!dstFallScopes.includes("topic:2401"));
+  assert.ok(!dstFallScopes.includes("topic:2404"));
+
+  const eventsBeforeFutureDate = (await sourceState()).events.length;
+  const futureDate = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    date: "2099-01-01",
+    timeZone: "UTC",
+  });
+  assert.equal(futureDate.status, "failed", JSON.stringify(futureDate));
+  assert.equal(
+    futureDate.result?.error?.code,
+    "linuxdo_collection_date_in_future",
+  );
+  assert.equal(
+    (await sourceState()).events
+      .slice(eventsBeforeFutureDate)
+      .filter(({ action }) => action === "topic-list" || action === "topic")
+      .length,
+    0,
+    "未来日期必须在访问 Linux.do 前失败。",
+  );
+
+  const timeZone = timeZoneWithRoomAroundNow();
+  await updateFixtureState({
+    topicListDelayMs: 5_000,
+    topicCreatedAtOverrides: {},
+  });
+  const eventsBeforeBlocker = await sourceState();
+  const blocker = cliData<ManualRun>(
+    await cli([
+      "run",
+      "trigger",
+      "binny-discovery-topic",
+      "collect",
+      "--params",
+      JSON.stringify({
+        targets: linuxdoTargets("latest"),
+        date: "yesterday",
+        timeZone,
+        maxTopics: 1,
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(blocker.status, "queued");
+  await waitForSourceEvent(
+    "topic-list",
+    eventsBeforeBlocker.events.filter(({ action }) => action === "topic-list")
+      .length + 1,
+  );
+
+  const todayQueued = cliData<ManualRun>(
+    await cli([
+      "run",
+      "trigger",
+      "binny-discovery-topic",
+      "collect",
+      "--params",
+      JSON.stringify({
+        targets: linuxdoTargets("latest"),
+        date: "today",
+        timeZone,
+        maxTopics: 10,
+      }),
+    ]),
+    "triggered",
+  );
+  assert.equal(todayQueued.status, "queued");
+  assert.ok(todayQueued.referenceTime !== undefined);
+  const referenceMilliseconds = Date.parse(todayQueued.referenceTime);
+  assert.ok(Number.isFinite(referenceMilliseconds));
+  const referenceDay = localDateKey(new Date(referenceMilliseconds), timeZone);
+  const beforeReferenceTime = new Date(
+    referenceMilliseconds - 1_000,
+  ).toISOString();
+  const atReferenceTime = new Date(referenceMilliseconds).toISOString();
+  assert.equal(
+    localDateKey(new Date(beforeReferenceTime), timeZone),
+    referenceDay,
+  );
+  assert.equal(localDateKey(new Date(atReferenceTime), timeZone), referenceDay);
+  await updateFixtureState({
+    topicListDelayMs: 0,
+    topicCreatedAtOverrides: {
+      2401: new Date(referenceMilliseconds - 2_000).toISOString(),
+      2402: beforeReferenceTime,
+      2403: atReferenceTime,
+    },
+  });
+
+  const completedBlocker = await waitForManualRun(blocker.runId);
+  assert.equal(
+    completedBlocker.status,
+    "completed",
+    JSON.stringify(completedBlocker),
+  );
+  const todayRun = await waitForManualRun(todayQueued.runId);
+  assert.equal(todayRun.status, "completed", JSON.stringify(todayRun));
+  assert.equal(todayRun.referenceTime, todayQueued.referenceTime);
+  const todayScopes = todayRun.result?.output?.completedScopes ?? [];
+  assert.ok(todayScopes.includes("topic:2401"));
+  assert.ok(todayScopes.includes("topic:2402"));
+  assert.ok(!todayScopes.includes("topic:2403"));
+
+  await updateFixtureState({
+    topicListDelayMs: 0,
+    topicCreatedAtOverrides: {},
+  });
+}
+
 async function verifyDiscovery(): Promise<void> {
   await updateFixtureState({
     topicVersion: 3,
@@ -1735,6 +2476,8 @@ async function verifyDiscovery(): Promise<void> {
     ),
   );
 
+  await verifyCollectionDateWindows();
+
   const limited = await trigger("collect", {
     targets: linuxdoTargets("latest", "category"),
     maxTopics: 1,
@@ -2131,11 +2874,14 @@ async function main(): Promise<void> {
     const config = await compose(["config", "--quiet"]);
     assert.equal(config.code, 0);
     composeStarted = true;
+    await provisionClockShim();
 
     await compose([
       "up",
       "--detach",
-      "--build",
+      "--wait",
+      "--wait-timeout",
+      "90",
       "postgres",
       "server",
       "runtime-linuxdo",
@@ -2143,6 +2889,9 @@ async function main(): Promise<void> {
     ]);
     serverPort = await publishedPort("server", 3000);
     sourcePort = await publishedPort("linuxdo-e2e-source", 8081);
+    process.stdout.write(
+      `Linux.do 验收隔离环境：project=${projectName}, serverImage=${serverImage}, browserImage=${browserImage}, server=${publishedHost}:${String(serverPort)}, source=${publishedHost}:${String(sourcePort)}。\n`,
+    );
     await Promise.all([waitForApi(), waitForRuntimeHealth()]);
     browser = await startOuterBrowser();
 
@@ -2187,6 +2936,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       "全日跨板块分页、501 个唯一主题、日期边界、限额部分结果和失败保留通过。\n",
     );
+    await verifyScheduledCollectionAcrossMidnight();
     await verifyLogout();
     process.stdout.write("退出登录后的全新检查和采集语义通过。\n");
   } catch (error) {
@@ -2221,6 +2971,7 @@ async function main(): Promise<void> {
         "bins",
         "resource-data",
         "linuxdo-runtime-owner",
+        "discovery-test-clock",
       ]) {
         await run("docker", ["volume", "rm", `${projectName}_${volume}`]).catch(
           () => undefined,

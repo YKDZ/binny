@@ -10,8 +10,14 @@ import { archiveWriteClock } from "./schema.ts";
 export type Database = PostgresJsDatabase;
 export type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
+export type ReservedDatabaseConnection = {
+  readonly database: Database;
+  readonly release: () => void;
+};
+
 export type DatabaseConnection = {
   readonly database: Database;
+  readonly reserveSession: () => Promise<ReservedDatabaseConnection>;
   readonly close: () => Promise<void>;
 };
 
@@ -25,6 +31,16 @@ export function connectDatabase(connectionString: string): DatabaseConnection {
 
   return {
     database: drizzle({ client }),
+    reserveSession: async () => {
+      const reservedClient = await client.reserve();
+      // postgres.js 3.4.9 omits Sql.options on its ReservedSql runtime value,
+      // while Drizzle's postgres-js driver reads the public options property.
+      reservedClient.options = client.options;
+      return {
+        database: drizzle({ client: reservedClient }),
+        release: () => reservedClient.release(),
+      };
+    },
     close: () => client.end(),
   };
 }

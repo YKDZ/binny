@@ -105,6 +105,7 @@ assert.ok(
   "BINNY_E2E_CAPACITY_PHASE 必须为 all、seed、verify 或 delete。",
 );
 const isFullCapacityRun = capacityProfile === "full";
+const scheduleOnly = process.env.BINNY_E2E_INTERNAL_STEP === "scheduled-runs";
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -4461,6 +4462,106 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   const collectGateKey = "schedule-scheduled-collect-" + randomUUID();
   const checkGateKey = "schedule-scheduled-check-" + randomUUID();
 
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+  await waitForRuntime(baseUrl, binId);
+  await waitForManualRunSource();
+
+  const shortOutageGateKey = "schedule-short-outage-" + randomUUID();
+  const shortOutageSchedule = cliData<{
+    readonly scheduleId: string;
+    readonly nextDueAt: string;
+    readonly enabled: boolean;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      binId,
+      "--expression",
+      "*/20 * * * * *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: shortOutageGateKey,
+        sourceKey: shortOutageGateKey,
+      }),
+      "--disabled",
+    ]),
+    "created",
+  );
+  assert.equal(shortOutageSchedule.enabled, false);
+  const disabledFirstDueAt = Date.parse(shortOutageSchedule.nextDueAt);
+  await wait(disabledFirstDueAt - Date.now() + 100);
+  const enabledShortOutageSchedule = cliData<{
+    readonly nextDueAt: string;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "enable",
+      binId,
+      shortOutageSchedule.scheduleId,
+    ]),
+    "enabled",
+  );
+  const shortOutageScheduledAt = Date.parse(
+    enabledShortOutageSchedule.nextDueAt,
+  );
+  assert.ok(shortOutageScheduledAt - Date.now() > 15_000);
+
+  await wait(Math.max(0, shortOutageScheduledAt - Date.now() - 4_500));
+  const shortOutageStartedAt = Date.now();
+  await compose(["stop", "server"]);
+  const shortOutageStoppedAt = Date.now();
+  assert.ok(
+    shortOutageScheduledAt - shortOutageStoppedAt > 500,
+    `所有 server 停止时应距离触发仍超过0.5秒，实际 ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms。`,
+  );
+  await wait(shortOutageScheduledAt - shortOutageStoppedAt + 250);
+  await compose(["start", "server"]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+  const shortOutageResumedAt = Date.now();
+  assert.ok(
+    shortOutageResumedAt - shortOutageStartedAt < 10_000,
+    `全部 core 停机和恢复耗时应少于10秒，实际 ${String(shortOutageResumedAt - shortOutageStartedAt)}ms。`,
+  );
+  await waitForRuntime(baseUrl, binId);
+  await wait(1_500);
+
+  const shortOutageAfterRestart = cliData<{
+    readonly nextDueAt: string;
+    readonly lastRunId?: string;
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "get",
+      binId,
+      shortOutageSchedule.scheduleId,
+    ]),
+    "found",
+  );
+  assert.equal(shortOutageAfterRestart.lastRunId, undefined);
+  assert.ok(Date.parse(shortOutageAfterRestart.nextDueAt) > Date.now());
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, shortOutageGateKey, binId),
+    0,
+  );
+  cliData(
+    await cli(baseUrl, [
+      "schedule",
+      "remove",
+      binId,
+      shortOutageSchedule.scheduleId,
+    ]),
+    "removed",
+  );
+
   // 两个正式 server 实例共享 PostgreSQL，验证竞争扫描只会排入一次到期运行。
   await compose([
     "up",
@@ -4475,6 +4576,23 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
+  await waitForRuntime(baseUrl, binId);
+
+  const serverInstances = (await compose(["ps", "-q", "server"])).stdout
+    .trim()
+    .split("\n")
+    .filter((containerId) => containerId.length > 0);
+  assert.equal(serverInstances.length, 2);
+  const singleServerRestart = await run(
+    "docker",
+    ["restart", serverInstances[0]!],
+    { env: composeEnvironment() },
+  );
+  assert.equal(singleServerRestart.code, 0, singleServerRestart.stderr);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+  await waitForRuntime(baseUrl, binId);
 
   const collectSchedule = cliData<{
     readonly scheduleId: string;
@@ -4573,6 +4691,84 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
 
   await wait(Math.max(0, scheduledTimestamp - Date.now() - 5_000));
   assert.ok(scheduledTimestamp - Date.now() >= 4_000);
+  await compose(["stop", "runtime-fifteen-one"]);
+  const collectAfterFirstTrigger = await waitFor(
+    async () =>
+      cliData<{
+        readonly nextDueAt: string;
+        readonly lastRunId?: string;
+      }>(
+        await cli(baseUrl, [
+          "schedule",
+          "get",
+          binId,
+          collectSchedule.scheduleId,
+        ]),
+        "found",
+      ),
+    (schedule) => schedule.lastRunId !== undefined,
+    "活 core 应为短轮询延迟到期计划创建运行",
+  );
+  const checkAfterFirstTrigger = await waitFor(
+    async () =>
+      cliData<{
+        readonly nextDueAt: string;
+        readonly lastRunId?: string;
+      }>(
+        await cli(baseUrl, [
+          "schedule",
+          "get",
+          binId,
+          checkSchedule.scheduleId,
+        ]),
+        "found",
+      ),
+    (schedule) => schedule.lastRunId !== undefined,
+    "第二个活 core 并发扫描也应创建对应计划运行",
+  );
+  assert.ok(collectAfterFirstTrigger.lastRunId !== undefined);
+  assert.ok(checkAfterFirstTrigger.lastRunId !== undefined);
+  const collectQueuedRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, [
+      "run",
+      "get",
+      binId,
+      collectAfterFirstTrigger.lastRunId,
+    ]),
+    "found",
+  );
+  const checkQueuedRun = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", binId, checkAfterFirstTrigger.lastRunId]),
+    "found",
+  );
+  for (const [runState, scheduleId, action] of [
+    [collectQueuedRun, collectSchedule.scheduleId, "collect"],
+    [checkQueuedRun, checkSchedule.scheduleId, "check"],
+  ] as const) {
+    assert.equal(runState.status, "queued");
+    assert.equal(runState.queueReason, "runtime_offline");
+    assert.equal(runState.action, action);
+    assert.equal(runState.trigger.kind, "schedule");
+    if (runState.trigger.kind === "schedule") {
+      assert.equal(runState.trigger.scheduleId, scheduleId);
+      assert.equal(runState.trigger.scheduledFor, scheduledFor);
+    }
+    assert.ok(Date.parse(runState.createdAt) >= scheduledTimestamp);
+    assert.ok(Date.parse(runState.createdAt) - scheduledTimestamp < 5_000);
+  }
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, collectGateKey, binId),
+    0,
+  );
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, checkGateKey, binId),
+    0,
+  );
+
+  const nextCollectDueAt = Date.parse(collectAfterFirstTrigger.nextDueAt);
+  assert.ok(nextCollectDueAt > Date.now());
+  await wait(Math.max(0, nextCollectDueAt - Date.now() - 15_000));
+  assert.ok(nextCollectDueAt - Date.now() > 10_000);
   await compose(["stop", "server"]);
   await wait(65_000);
   await compose(["start", "server"]);
@@ -4583,6 +4779,49 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     `计划服务端点重启后刷新：${apiUrlBeforeRestart} -> ${baseUrl}\n`,
   );
   await waitForApiAndDatabase(baseUrl);
+
+  const resumedCollectSchedule = cliData<{
+    readonly nextDueAt: string;
+    readonly lastRunId?: string;
+  }>(
+    await cli(baseUrl, ["schedule", "get", binId, collectSchedule.scheduleId]),
+    "found",
+  );
+  const resumedCheckSchedule = cliData<{
+    readonly nextDueAt: string;
+    readonly lastRunId?: string;
+  }>(
+    await cli(baseUrl, ["schedule", "get", binId, checkSchedule.scheduleId]),
+    "found",
+  );
+  assert.ok(Date.parse(resumedCollectSchedule.nextDueAt) > Date.now());
+  assert.ok(Date.parse(resumedCheckSchedule.nextDueAt) > Date.now());
+  assert.equal(resumedCollectSchedule.lastRunId, collectQueuedRun.runId);
+  assert.equal(resumedCheckSchedule.lastRunId, checkQueuedRun.runId);
+  assert.equal(
+    cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, collectQueuedRun.runId]),
+      "found",
+    ).status,
+    "queued",
+  );
+  assert.equal(
+    cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, checkQueuedRun.runId]),
+      "found",
+    ).status,
+    "queued",
+  );
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, collectGateKey, binId),
+    0,
+  );
+  assert.equal(
+    await countSourceArrivals(sourceControlUrl, checkGateKey, binId),
+    0,
+  );
+
+  await compose(["start", "runtime-fifteen-one"]);
   await waitForRuntime(baseUrl, binId);
 
   const controlArrivals = [collectGateKey, checkGateKey] as const;
@@ -4624,34 +4863,6 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     assert.equal(firstRun.referenceTime, firstRun.trigger.scheduledFor);
   }
 
-  const resumedCollectSchedule = await waitFor(
-    async () =>
-      cliData<{ readonly nextDueAt: string }>(
-        await cli(baseUrl, [
-          "schedule",
-          "get",
-          binId,
-          collectSchedule.scheduleId,
-        ]),
-        "found",
-      ),
-    (schedule) => Date.parse(schedule.nextDueAt) > Date.now(),
-    "重启后推进采集计划的到期时间",
-  );
-  const resumedCheckSchedule = await waitFor(
-    async () =>
-      cliData<{ readonly nextDueAt: string }>(
-        await cli(baseUrl, [
-          "schedule",
-          "get",
-          binId,
-          checkSchedule.scheduleId,
-        ]),
-        "found",
-      ),
-    (schedule) => Date.parse(schedule.nextDueAt) > Date.now(),
-    "重启后推进检查计划的到期时间",
-  );
   assert.ok(Date.parse(resumedCollectSchedule.nextDueAt) > Date.now());
   assert.ok(Date.parse(resumedCheckSchedule.nextDueAt) > Date.now());
 
@@ -7721,12 +7932,16 @@ async function main(): Promise<void> {
       "      - runtime",
       "  runtime-fifteen-one:",
       "    environment:",
-      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      scheduleOnly
+        ? "      BINNY_API_URL: http://server:3000"
+        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
       "    networks: !override",
       "      - runtime",
       "  runtime-fifteen-two:",
       "    environment:",
-      "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      scheduleOnly
+        ? "      BINNY_API_URL: http://server:3000"
+        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
       "    networks: !override",
       "      - runtime",
       "  runtime-linuxdo:",
@@ -7790,10 +8005,12 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney = !(
-    isFullCapacityRun &&
-    (capacityPhase === "verify" || capacityPhase === "delete")
-  );
+  const runFunctionalJourney =
+    !scheduleOnly &&
+    !(
+      isFullCapacityRun &&
+      (capacityPhase === "verify" || capacityPhase === "delete")
+    );
   let rssImageUpdate: RssImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
@@ -7803,8 +8020,10 @@ async function main(): Promise<void> {
     builtImages.add(imageName);
     await compose(["build", "runtime-fifteen-one"]);
     builtImages.add(runtimeImageName);
-    await compose(["build", "runtime-rss"]);
-    builtImages.add(rssRuntimeImageName);
+    if (!scheduleOnly) {
+      await compose(["build", "runtime-rss"]);
+      builtImages.add(rssRuntimeImageName);
+    }
     if (runFunctionalJourney) {
       await compose(["build", "runtime-linuxdo"]);
       builtImages.add(linuxdoRuntimeImageName);
@@ -7816,17 +8035,19 @@ async function main(): Promise<void> {
       builtImages.add(rssBaselineRuntimeImageName);
       activeRssRuntimeImage = rssBaselineRuntimeImageName;
     }
-    const e2eServices = [
-      "postgres",
-      "server",
-      "manual-runs-source",
-      "rss-e2e-source",
-      "runtime-fifteen-one",
-      "runtime-fifteen-two",
-      "runtime-rss",
-      "runtime-rss-two",
-      "heartbeat-proxy",
-    ];
+    const e2eServices = scheduleOnly
+      ? ["postgres", "server", "manual-runs-source", "runtime-fifteen-one"]
+      : [
+          "postgres",
+          "server",
+          "manual-runs-source",
+          "rss-e2e-source",
+          "runtime-fifteen-one",
+          "runtime-fifteen-two",
+          "runtime-rss",
+          "runtime-rss-two",
+          "heartbeat-proxy",
+        ];
     if (runFunctionalJourney) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -7848,18 +8069,46 @@ async function main(): Promise<void> {
     if (runFunctionalJourney) {
       linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
     }
-    const activeHeartbeatProxy = createHeartbeatDelayProxy(
-      await publishedPort("heartbeat-proxy", 8083),
-    );
-    heartbeatProxy = activeHeartbeatProxy;
-    rssControlSource = await createRssControlSource(
-      await publishedPort("rss-e2e-source", 8081),
-    );
+    let activeHeartbeatProxy: HeartbeatDelayProxy | undefined;
+    if (!scheduleOnly) {
+      activeHeartbeatProxy = createHeartbeatDelayProxy(
+        await publishedPort("heartbeat-proxy", 8083),
+      );
+      heartbeatProxy = activeHeartbeatProxy;
+      rssControlSource = await createRssControlSource(
+        await publishedPort("rss-e2e-source", 8081),
+      );
+    }
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    if (runFunctionalJourney) {
+    if (scheduleOnly) {
+      const registered = await waitForBinRegistration(
+        baseUrl,
+        "binny-runs-one",
+      );
+      assert.equal(
+        registered.sourceAdapter.version,
+        rssManifestVersion(await createRuntimeFixtureManifest()),
+      );
+      cliData(
+        await cli(baseUrl, [
+          "bin",
+          "update",
+          "binny-runs-one",
+          "--identity",
+          "binny-runs-one-identity",
+          "--config",
+          JSON.stringify({ section: "initial" }),
+        ]),
+        "updated",
+      );
+      await waitForRuntime(baseUrl, "binny-runs-one");
+      baseUrl = await scheduledRunsStep(baseUrl);
+    } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(installedCliConsumer !== undefined);
+      assert.ok(activeHeartbeatProxy !== undefined);
+      assert.ok(rssControlSource !== undefined);
       await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
       await verifyConfigurationJourney(baseUrl);
       const manualRunManifest = await createRuntimeFixtureManifest();
@@ -7932,7 +8181,9 @@ async function main(): Promise<void> {
       );
       await verifyLinuxdoCapacityJourney(baseUrl);
     }
-    await runCapacityAcceptance(baseUrl);
+    if (!scheduleOnly) {
+      await runCapacityAcceptance(baseUrl);
+    }
   } catch (error) {
     acceptanceFailed = true;
     acceptanceError = error;

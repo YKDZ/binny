@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 
 type SourceState = {
   readonly challengePage: boolean;
@@ -27,6 +28,8 @@ type SourceState = {
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
+  readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
+  readonly topicListDelayMs?: number;
 };
 
 type SourceEvent = {
@@ -87,6 +90,8 @@ let activeState: SourceState = {
   unavailableTopicIds: [],
   unavailableMedia: [],
   unavailableMediaStatus: 503,
+  topicCreatedAtOverrides: {},
+  topicListDelayMs: 0,
 };
 const events: SourceEvent[] = [];
 
@@ -287,7 +292,10 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
     };
   }
 
-  const createdAt = legacyTopicCreatedAt(topicId);
+  const defaultCreatedAt = "2026-10-28T00:00:00.000Z";
+  const createdAt =
+    activeState.topicCreatedAtOverrides?.[topicId] ??
+    (topicId === 2401 ? defaultCreatedAt : legacyTopicCreatedAt(topicId));
   if (topicId === 2401) {
     const availablePosts = posts();
     return {
@@ -396,28 +404,30 @@ function discoveredTopicList(
     );
   }
 
-  const topicIds = childCategory
-    ? page === 0
-      ? [2499].slice(0, perPage)
-      : []
-    : page === 0
-      ? (category
-          ? [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
-          : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410]
-        ).slice(0, perPage)
-      : category
-        ? [2410].slice(0, perPage)
-        : [2410].slice(0, perPage);
   const pathname = childCategory
     ? "/c/controlled/child/43/l/latest.json"
     : category
       ? "/c/controlled/42/l/latest.json"
       : "/latest.json";
+  const topicRows = (
+    childCategory
+      ? [2499]
+      : [2401, 2403, 2402, 2404, 2405, 2406, 2407, 2408, 2409, 2410, 2410]
+  )
+    .map((id) => ({
+      id,
+      createdAt:
+        activeState.topicCreatedAtOverrides?.[id] ?? legacyTopicCreatedAt(id),
+    }))
+    .toSorted((first, second) =>
+      second.createdAt.localeCompare(first.createdAt),
+    );
+  const pageRows = topicRows.slice(page * perPage, (page + 1) * perPage);
   return topicListResponse(
     pathname,
     page,
-    topicIds.map((id) => ({ id, createdAt: legacyTopicCreatedAt(id) })),
-    page === 0 && topicIds.length === perPage,
+    pageRows,
+    (page + 1) * perPage < topicRows.length,
   );
 }
 
@@ -585,6 +595,28 @@ function updateState(value: unknown): boolean {
     (!Number.isSafeInteger(updates.dailyTopicOverlapCount) ||
       Number(updates.dailyTopicOverlapCount) < 1 ||
       Number(updates.dailyTopicOverlapCount) > 99)
+  ) {
+    return false;
+  }
+  if (
+    "topicCreatedAtOverrides" in updates &&
+    (typeof updates.topicCreatedAtOverrides !== "object" ||
+      updates.topicCreatedAtOverrides === null ||
+      Array.isArray(updates.topicCreatedAtOverrides) ||
+      Object.entries(updates.topicCreatedAtOverrides).some(
+        ([topicId, createdAt]) =>
+          !/^[1-9]\d*$/u.test(topicId) ||
+          typeof createdAt !== "string" ||
+          !Number.isFinite(Date.parse(createdAt)),
+      ))
+  ) {
+    return false;
+  }
+  if (
+    "topicListDelayMs" in updates &&
+    (!Number.isSafeInteger(updates.topicListDelayMs) ||
+      Number(updates.topicListDelayMs) < 0 ||
+      Number(updates.topicListDelayMs) > 30_000)
   ) {
     return false;
   }
@@ -837,6 +869,8 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
+      const topicListDelayMs = activeState.topicListDelayMs ?? 0;
+      if (topicListDelayMs > 0) await delay(topicListDelayMs);
       const listPage = Number(url.searchParams.get("page") ?? "0");
       if (activeState.targetUnavailablePage === listPage) {
         sendJson(response, 404, { errors: ["列表目标当前不可见。"] });

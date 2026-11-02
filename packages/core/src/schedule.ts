@@ -14,12 +14,14 @@ import {
 } from "@binny/contracts";
 import {
   binConfigurations,
+  manualRuns,
   schedules,
   type Database,
+  type ReservedDatabaseConnection,
   type Transaction,
 } from "@binny/db";
 import { CronExpressionParser } from "cron-parser";
-import { and, eq, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
 
 import { createQueuedRunInTransaction } from "./manual-run.ts";
 import {
@@ -29,7 +31,16 @@ import {
 
 type ScheduleStore = ScheduleOperations & {
   readonly processDueSchedules: () => Promise<void>;
+  readonly skipOverdueSchedules: () => Promise<void>;
 };
+
+export type ScheduleDispatcher = {
+  readonly close: () => Promise<void>;
+};
+
+const scheduleAdvisoryNamespace = 0x4249_4e59;
+const scheduleBootstrapLockKey = 1;
+const scheduleLifecycleLockKey = 2;
 
 type DueResult =
   | { readonly ok: true; readonly value: Date }
@@ -114,7 +125,42 @@ function computeNextDue(
   }
 }
 
-function toSchedule(row: typeof schedules.$inferSelect): Schedule {
+async function latestScheduleRunIds(
+  database: Database | Transaction,
+  binId: string,
+  scheduleIds: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  if (scheduleIds.length === 0) return new Map();
+  const rows = await database
+    .select({
+      scheduleId: manualRuns.scheduleId,
+      runId: manualRuns.runId,
+    })
+    .from(manualRuns)
+    .where(
+      and(
+        eq(manualRuns.binId, binId),
+        inArray(manualRuns.scheduleId, scheduleIds),
+      ),
+    )
+    .orderBy(
+      asc(manualRuns.scheduleId),
+      desc(manualRuns.createdAt),
+      desc(manualRuns.runId),
+    );
+  const latest = new Map<string, string>();
+  for (const row of rows) {
+    if (row.scheduleId !== null && !latest.has(row.scheduleId)) {
+      latest.set(row.scheduleId, row.runId);
+    }
+  }
+  return latest;
+}
+
+function toSchedule(
+  row: typeof schedules.$inferSelect,
+  lastRunId?: string,
+): Schedule {
   return scheduleSchema.parse({
     scheduleId: row.scheduleId,
     binId: row.binId,
@@ -124,6 +170,7 @@ function toSchedule(row: typeof schedules.$inferSelect): Schedule {
     params: row.params,
     enabled: row.enabled,
     nextDueAt: row.nextDueAt.toISOString(),
+    ...(lastRunId === undefined ? {} : { lastRunId }),
     ...(row.lastError === null
       ? {}
       : { lastError: scheduleLastErrorSchema.parse(row.lastError) }),
@@ -147,6 +194,97 @@ function readBinForRun(transaction: Transaction, binId: string) {
     .for("update");
 }
 
+async function unlockScheduleAdvisoryLock(
+  session: ReservedDatabaseConnection,
+  lockKey: number,
+  shared: boolean,
+): Promise<void> {
+  const rows = shared
+    ? await session.database.execute<{ readonly unlocked: boolean }>(
+        sql`select pg_advisory_unlock_shared(${scheduleAdvisoryNamespace}, ${lockKey}) as unlocked`,
+        "objects",
+      )
+    : await session.database.execute<{ readonly unlocked: boolean }>(
+        sql`select pg_advisory_unlock(${scheduleAdvisoryNamespace}, ${lockKey}) as unlocked`,
+        "objects",
+      );
+  if (rows[0]?.unlocked !== true)
+    throw new Error(
+      "采集计划 dispatcher 没有持有预期的 PostgreSQL advisory lock。",
+    );
+}
+
+/** 通过保留的同池 PostgreSQL session 判断其他 core 是否仍在运行。 */
+export async function startScheduleDispatcher(
+  schedulesStore: Pick<ScheduleStore, "skipOverdueSchedules">,
+  reserveSession: () => Promise<ReservedDatabaseConnection>,
+): Promise<ScheduleDispatcher> {
+  const session = await reserveSession();
+  let hasExclusiveLifecycleLock = false;
+  let hasSharedLifecycleLock = false;
+  let closed = false;
+
+  try {
+    await session.database.execute(
+      sql`select pg_advisory_lock(${scheduleAdvisoryNamespace}, ${scheduleBootstrapLockKey})`,
+    );
+    const lockRows = await session.database.execute<{
+      readonly acquired: boolean;
+    }>(
+      sql`select pg_try_advisory_lock(${scheduleAdvisoryNamespace}, ${scheduleLifecycleLockKey}) as acquired`,
+      "objects",
+    );
+    hasExclusiveLifecycleLock = lockRows[0]?.acquired === true;
+
+    if (hasExclusiveLifecycleLock) await schedulesStore.skipOverdueSchedules();
+
+    await session.database.execute(
+      sql`select pg_advisory_lock_shared(${scheduleAdvisoryNamespace}, ${scheduleLifecycleLockKey})`,
+    );
+    hasSharedLifecycleLock = true;
+    if (hasExclusiveLifecycleLock) {
+      await unlockScheduleAdvisoryLock(
+        session,
+        scheduleLifecycleLockKey,
+        false,
+      );
+      hasExclusiveLifecycleLock = false;
+    }
+    await unlockScheduleAdvisoryLock(session, scheduleBootstrapLockKey, false);
+
+    return {
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        try {
+          if (hasSharedLifecycleLock) {
+            await unlockScheduleAdvisoryLock(
+              session,
+              scheduleLifecycleLockKey,
+              true,
+            );
+            hasSharedLifecycleLock = false;
+          }
+        } finally {
+          if (hasSharedLifecycleLock) {
+            await session.database
+              .execute(sql`select pg_advisory_unlock_all()`)
+              .catch(() => undefined);
+            hasSharedLifecycleLock = false;
+          }
+          session.release();
+        }
+      },
+    };
+  } catch (error) {
+    await session.database
+      .execute(sql`select pg_advisory_unlock_all()`)
+      .catch(() => undefined);
+    session.release();
+    throw error;
+  }
+}
+
 export function createScheduleStore(database: Database): ScheduleStore {
   return {
     async listSchedules(binId) {
@@ -163,7 +301,17 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .from(schedules)
           .where(eq(schedules.binId, binId))
           .orderBy(schedules.createdAt, schedules.scheduleId);
-        return { ok: true, value: rows.map(toSchedule) };
+        const lastRunIds = await latestScheduleRunIds(
+          transaction,
+          binId,
+          rows.map(({ scheduleId }) => scheduleId),
+        );
+        return {
+          ok: true,
+          value: rows.map((row) =>
+            toSchedule(row, lastRunIds.get(row.scheduleId)),
+          ),
+        };
       });
     },
 
@@ -187,11 +335,18 @@ export function createScheduleStore(database: Database): ScheduleStore {
           )
           .limit(1);
         const row = rows[0];
-        return row === undefined
-          ? failure(404, "schedule_not_found", "没有找到这个采集计划。", [
-              "scheduleId",
-            ])
-          : { ok: true, value: toSchedule(row) };
+        if (row === undefined) {
+          return failure(404, "schedule_not_found", "没有找到这个采集计划。", [
+            "scheduleId",
+          ]);
+        }
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          row.scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(row.scheduleId)),
+        };
       });
     },
 
@@ -378,7 +533,13 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .where(eq(schedules.scheduleId, scheduleId))
           .returning();
         if (row === undefined) throw new Error("采集计划修改后没有返回记录。");
-        return { ok: true, value: toSchedule(row) };
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(scheduleId)),
+        };
       });
     },
 
@@ -425,7 +586,13 @@ export function createScheduleStore(database: Database): ScheduleStore {
           .returning();
         if (row === undefined)
           throw new Error("采集计划状态修改后没有返回记录。");
-        return { ok: true, value: toSchedule(row) };
+        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+          scheduleId,
+        ]);
+        return {
+          ok: true,
+          value: toSchedule(row, lastRunIds.get(scheduleId)),
+        };
       });
     },
 
@@ -458,6 +625,64 @@ export function createScheduleStore(database: Database): ScheduleStore {
           value: { removed: true as const, scheduleId: row.scheduleId },
         };
       });
+    },
+
+    async skipOverdueSchedules() {
+      const now = new Date();
+      const dueRows = await database
+        .select({ binId: schedules.binId, scheduleId: schedules.scheduleId })
+        .from(schedules)
+        .where(and(eq(schedules.enabled, true), lte(schedules.nextDueAt, now)))
+        .orderBy(schedules.nextDueAt, schedules.binId, schedules.scheduleId);
+
+      for (const due of dueRows) {
+        await database.transaction(async (transaction) => {
+          const [bin] = await readBinForRun(transaction, due.binId);
+          if (bin === undefined) return;
+          const rows = await transaction
+            .select()
+            .from(schedules)
+            .where(
+              and(
+                eq(schedules.binId, due.binId),
+                eq(schedules.scheduleId, due.scheduleId),
+                eq(schedules.enabled, true),
+                lte(schedules.nextDueAt, now),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const current = rows[0];
+          if (current === undefined) return;
+
+          const nextDue = computeNextDue(
+            current.expression,
+            current.timeZone,
+            current.scheduleId,
+            now,
+          );
+          if (!nextDue.ok) {
+            await transaction
+              .update(schedules)
+              .set({
+                enabled: false,
+                lastError: nextDue.error,
+                updatedAt: sql`clock_timestamp()`,
+              })
+              .where(eq(schedules.scheduleId, current.scheduleId));
+            return;
+          }
+
+          // The due point has no run: advancing this row skips it without touching any queued runs.
+          await transaction
+            .update(schedules)
+            .set({
+              nextDueAt: nextDue.value,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(eq(schedules.scheduleId, current.scheduleId));
+        });
+      }
     },
 
     async processDueSchedules() {
