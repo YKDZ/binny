@@ -56,7 +56,6 @@ type ArchiveRelationQuery = Parameters<
 type ArchiveSubmission = Parameters<
   ArchiveClient["archives"]["$post"]
 >[0]["json"];
-type BinCreateRequest = Parameters<ArchiveClient["bins"]["$post"]>[0]["json"];
 type ArchiveJourney = {
   readonly itemId: string;
   readonly relationItemId: string;
@@ -530,7 +529,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   } satisfies ArchiveSubmission["items"][number];
   const firstCommitPromise = submitArchive(client, {
     requestId: "e2e:archive:resource-history:first",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [originalState],
   });
   const duplicateResponse = await duplicateResponsePromise;
@@ -568,7 +567,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
 
   const resourceMarker = await submitArchive(client, {
     requestId: "e2e:archive:resource-text-marker-only",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-text-marker-only" },
@@ -597,7 +596,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   const invalidReference = await client.archives.$post({
     json: {
       requestId: "e2e:archive:invalid-resource-reference",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "invalid-resource-reference" },
@@ -629,7 +628,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
 
   const attachmentOnly = await submitArchive(client, {
     requestId: "e2e:archive:resource-attachment-only",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-attachment-only" },
@@ -652,7 +651,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
 
   const partialCommit = await submitArchive(client, {
     requestId: "e2e:archive:resource-history:partial",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
@@ -755,7 +754,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   const replacement = await replacementResponse.json();
   const repairedCommit = await submitArchive(client, {
     requestId: "e2e:archive:resource-history:repaired",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
@@ -960,7 +959,7 @@ async function readArchiveCommit(client: ArchiveClient, commitId: string) {
 async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   const baseline = await submitArchive(client, {
     requestId: "e2e:archive:atomic-baseline",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "atomic-baseline" },
@@ -1001,7 +1000,7 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   const emptyFailureResponse = await client.archives.$post({
     json: {
       requestId: "e2e:archive:empty-failure",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "empty-failure" },
@@ -1028,7 +1027,7 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   const unsafeNumberResponse = await client.archives.$post({
     json: {
       requestId: "e2e:archive:unsafe-json-number",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "unsafe-json-number" },
@@ -1067,7 +1066,7 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   };
   const invalidBatch = {
     requestId: "e2e:archive:atomic-invalid",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       validAtomicItem,
       {
@@ -1101,7 +1100,7 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
 
   const acceptedAtomic = await submitArchive(client, {
     requestId: "e2e:archive:atomic-retry",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [validAtomicItem],
   });
   assert.equal(
@@ -1116,7 +1115,7 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
 
   const partialCommit = await submitArchive(client, {
     requestId: "e2e:archive:partial-capture",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "partial-capture" },
@@ -1152,7 +1151,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   };
   const foreignTargetCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:foreign-target",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [
       {
         sourceKey: foreignTarget,
@@ -1190,7 +1189,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   };
   const firstCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:same-batch",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     observedAt: "2026-10-28T04:20:00.000Z",
     items: [
       {
@@ -1270,7 +1269,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const firstOutgoingPage = await readArchiveRelations(
     client,
     fromItem.itemId,
-    { direction: "outgoing", binId: "rss-main", limit: "2" },
+    { direction: "outgoing", binId: "binny-runs-one", limit: "2" },
   );
   assert.deepEqual(firstOutgoingPage.snapshot, {
     asOf: firstCommit.archiveSeq,
@@ -1308,7 +1307,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const lateRelationCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:late-page-edge",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     observedAt: "2026-10-28T03:59:00.000Z",
     items: [],
     relations: [
@@ -1329,7 +1328,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     fromItem.itemId,
     {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       cursor: firstOutgoingPage.nextCursor,
       limit: "2",
     },
@@ -1355,7 +1354,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const currentOutgoingPage = await readArchiveRelations(
     client,
     fromItem.itemId,
-    { direction: "outgoing", binId: "rss-main", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-one", limit: "10" },
   );
   assert.ok(
     currentOutgoingPage.relations.some(
@@ -1388,7 +1387,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const incomingLoop = await readArchiveRelations(client, fromItem.itemId, {
     direction: "incoming",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     asOf: firstCommit.archiveSeq,
     limit: "10",
   });
@@ -1404,7 +1403,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const relationOnlyCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:only-update",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     observedAt: "2026-10-28T04:20:00.000Z",
     items: [],
     relations: [{ relationId: "e2e:relation:01-forward", value: secondState }],
@@ -1419,7 +1418,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const noRelationChangeCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:omission-does-not-withdraw",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: from,
@@ -1436,7 +1435,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const relationAfterOmission = await readArchiveRelations(
     client,
     fromItem.itemId,
-    { direction: "outgoing", binId: "rss-main", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-one", limit: "10" },
   );
   const stillActive = relationAfterOmission.relations.find(
     ({ relationId }) => relationId === "e2e:relation:01-forward",
@@ -1457,7 +1456,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     fromItem.itemId,
     {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: firstCommit.archiveSeq,
       limit: "10",
     },
@@ -1474,7 +1473,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const secondaryObservation = await submitArchive(client, {
     requestId: "e2e:archive:relation:secondary-observation",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [],
     relations: [{ relationId: "e2e:relation:01-forward", value: secondState }],
   });
@@ -1482,7 +1481,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const secondaryRelations = await readArchiveRelations(
     client,
     fromItem.itemId,
-    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-two", limit: "10" },
   );
   const secondaryForward = secondaryRelations.relations.find(
     ({ relationId }) => relationId === "e2e:relation:01-forward",
@@ -1509,7 +1508,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const [concurrentMain, concurrentSecondary] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:relation:concurrent-main",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [],
       relations: [
         {
@@ -1526,7 +1525,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     }),
     submitArchive(client, {
       requestId: "e2e:archive:relation:concurrent-secondary",
-      binId: "rss-secondary",
+      binId: "binny-runs-two",
       items: [],
       relations: [
         {
@@ -1553,12 +1552,12 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     await Promise.all([
       readArchiveRelations(client, fromItem.itemId, {
         direction: "outgoing",
-        binId: "rss-main",
+        binId: "binny-runs-one",
         limit: "100",
       }),
       readArchiveRelations(client, fromItem.itemId, {
         direction: "outgoing",
-        binId: "rss-secondary",
+        binId: "binny-runs-two",
         limit: "100",
       }),
     ]);
@@ -1584,7 +1583,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 
   const withdrawalCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation:withdraw-main",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [{ relationId: "e2e:relation:01-forward", value: null }],
   });
@@ -1592,7 +1591,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   assert.equal(withdrawalCommit.items.length, 0);
   const afterWithdrawal = await readArchiveRelations(client, fromItem.itemId, {
     direction: "outgoing",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     limit: "10",
   });
   assert.equal(
@@ -1604,7 +1603,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const afterOtherBinWithdrawal = await readArchiveRelations(
     client,
     fromItem.itemId,
-    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-two", limit: "10" },
   );
   assert.equal(
     afterOtherBinWithdrawal.relations.find(
@@ -1616,7 +1615,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const changedEndpoint = await client.archives.$post({
     json: {
       requestId: "e2e:archive:relation:changed-endpoint",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [],
       relations: [
         {
@@ -1643,7 +1642,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const invalidRelationBatch = await client.archives.$post({
     json: {
       requestId: "e2e:archive:relation:atomic-invalid",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
@@ -1687,7 +1686,7 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   }
   const validRetryAfterRejection = await submitArchive(client, {
     requestId: "e2e:archive:relation:atomic-invalid",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
@@ -1707,12 +1706,12 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
   const rejectedRelationRead = await readArchiveRelations(
     client,
     validRetryAfterRejection.items[0]!.itemId,
-    { direction: "outgoing", binId: "rss-main", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-one", limit: "10" },
   );
   assert.deepEqual(rejectedRelationRead.relations, []);
 
   const timeline = await readArchiveTimeline(client, fromItem.itemId, {
-    binId: "rss-main",
+    binId: "binny-runs-one",
     limit: "100",
   });
   const initialEvents = timeline.events.filter(
@@ -1795,7 +1794,7 @@ async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   };
   const retryRequest = {
     requestId: "e2e:archive:idempotent-retry",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [retryItem],
   };
   const firstRetryCommit = await submitArchive(client, retryRequest);
@@ -1884,7 +1883,7 @@ async function verifyArchivePrototypeKeys(
   };
   const firstRequest = {
     requestId: "e2e:archive:prototype-json:first",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [state],
   };
   const first = await submitArchive(client, firstRequest);
@@ -1910,7 +1909,7 @@ async function verifyArchivePrototypeKeys(
 
   const firstConflictRequest = {
     requestId: "e2e:archive:prototype-json:conflict",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "prototype-json-conflict" },
@@ -1971,7 +1970,7 @@ async function verifyPersistableTextBoundary(
   const invalidArchiveBody = await client.archives.$post({
     json: {
       requestId: "e2e:archive:postgres-text-nul",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "postgres-text-nul" },
@@ -1994,7 +1993,7 @@ async function verifyPersistableTextBoundary(
   const invalidArchiveKey = await client.archives.$post({
     json: {
       requestId: "e2e:archive:postgres-text-key-nul",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "postgres-text-key-nul" },
@@ -2015,123 +2014,9 @@ async function verifyPersistableTextBoundary(
     "键中含空字符的归档属性",
   );
 
-  const sourceAdapter = {
-    id: "text-boundary",
-    version: "1.0.0",
-    configSchema: { type: "object" },
-    actions: {
-      check: {
-        description: "检查输入是否处于可用状态",
-        params: { type: "object" },
-        output: { type: "object" },
-      },
-      collect: {
-        description: "采集验证资料",
-        params: { type: "object" },
-        output: { type: "object" },
-      },
-    },
-    environment: {
-      browser: { required: false, profileReuseAfterRestart: false },
-    },
-  };
-  const binInput = {
-    id: "e2e-text-boundary-invalid",
-    sourceAdapter,
-    identityId: "text-boundary",
-    config: { value: "正常中文🌿" },
-  };
-  const invalidBins: {
-    readonly label: string;
-    readonly input: BinCreateRequest;
-    readonly path: readonly (string | number)[];
-  }[] = [
-    {
-      label: "身份标识中的空字符",
-      input: { ...binInput, identityId: "a\u0000b" },
-      path: ["identityId"],
-    },
-    {
-      label: "身份标识中的未配对代理项",
-      input: { ...binInput, identityId: "a\ud800b" },
-      path: ["identityId"],
-    },
-    {
-      label: "配置字符串中的空字符",
-      input: { ...binInput, config: { value: "a\u0000b" } },
-      path: ["config", "value"],
-    },
-    {
-      label: "配置字符串中的未配对代理项",
-      input: { ...binInput, config: { value: "a\ud800b" } },
-      path: ["config", "value"],
-    },
-    {
-      label: "配置键中的空字符",
-      input: {
-        ...binInput,
-        config: { ["bad\u0000key"]: "value" },
-      },
-      path: ["config", "bad\u0000key"],
-    },
-    {
-      label: "信源适配器版本中的空字符",
-      input: {
-        ...binInput,
-        sourceAdapter: { ...sourceAdapter, version: "a\u0000b" },
-      },
-      path: ["sourceAdapter", "version"],
-    },
-    {
-      label: "信源适配器 JSON Schema 中的空字符",
-      input: {
-        ...binInput,
-        sourceAdapter: {
-          ...sourceAdapter,
-          configSchema: { type: "object", description: "a\u0000b" },
-        },
-      },
-      path: ["sourceAdapter", "configSchema", "description"],
-    },
-  ];
-
-  for (const testCase of invalidBins) {
-    const response = await client.bins.$post({ json: testCase.input });
-    await expectUnsupportedPostgresText(
-      response,
-      testCase.path,
-      testCase.label,
-    );
-  }
-
-  const validBinInput = {
-    ...binInput,
-    id: "e2e-text-boundary-" + process.pid.toString(10),
-    sourceAdapter: { ...sourceAdapter, version: "版本 1.0 🌿" },
-    identityId: "身份🌿",
-    config: { value: "配置🌿" },
-  };
-  const validBinResponse = await client.bins.$post({ json: validBinInput });
-  if (validBinResponse.status !== 201) {
-    throw new Error(
-      "合法中文和 emoji 应能持久化：" + (await validBinResponse.text()),
-    );
-  }
-  const validBin = await validBinResponse.json();
-  assert.equal(validBin.identityId, validBinInput.identityId);
-  assert.equal(
-    validBin.sourceAdapter.version,
-    validBinInput.sourceAdapter.version,
-  );
-  assert.deepEqual(validBin.config, validBinInput.config);
-  const removed = await client.bins[":binId"].$delete({
-    param: { binId: validBinInput.id },
-  });
-  assert.equal(removed.status, 200);
-
   const validArchive = await submitArchive(client, {
     requestId: "e2e:archive:postgres-text-valid",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "postgres-text-valid" },
@@ -2168,7 +2053,7 @@ async function verifyPersistableTextBoundary(
   const invalidRelationId = await client.archives.$post({
     json: {
       requestId: "e2e:archive:relation-postgres-text-nul-id",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [],
       relations: [{ relationId: "relation\u0000id", value: relationValue }],
     },
@@ -2182,7 +2067,7 @@ async function verifyPersistableTextBoundary(
   const invalidRelationProperties = await client.archives.$post({
     json: {
       requestId: "e2e:archive:relation-postgres-text-surrogate-key",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [],
       relations: [
         {
@@ -2232,7 +2117,7 @@ async function verifyArchiveABA(
   };
   const abaFirstRequest = {
     requestId: "e2e:archive:aba:first",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "run-a1",
     sourceAdapterVersion: "rss@1.0.0",
     observedAt: "2026-10-28T04:01:00.000Z",
@@ -2246,7 +2131,7 @@ async function verifyArchiveABA(
   const abaFirst = await submitArchive(client, abaFirstRequest);
   const abaSecond = await submitArchive(client, {
     requestId: "e2e:archive:aba:second",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "run-a2",
     sourceAdapterVersion: "rss@1.1.0",
     observedAt: "2026-10-28T04:01:00.000Z",
@@ -2263,7 +2148,7 @@ async function verifyArchiveABA(
   });
   const abaThird = await submitArchive(client, {
     requestId: "e2e:archive:aba:third",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "run-a3",
     sourceAdapterVersion: "rss@2.0.0",
     observedAt: "2026-10-28T04:03:00.000Z",
@@ -2334,7 +2219,7 @@ async function verifyArchiveABA(
 
   const historicalViewResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: abaThirdItem.itemId },
-    query: { binId: "rss-main", asOf: abaSecond.archiveSeq },
+    query: { binId: "binny-runs-one", asOf: abaSecond.archiveSeq },
   });
   if (historicalViewResponse.status !== 200) {
     throw new Error(
@@ -2362,7 +2247,7 @@ async function verifyArchiveABA(
   const historicalTimeline = await readArchiveTimeline(
     client,
     abaThirdItem.itemId,
-    { binId: "rss-main", asOf: abaSecond.archiveSeq, limit: "10" },
+    { binId: "binny-runs-one", asOf: abaSecond.archiveSeq, limit: "10" },
   );
   assert.deepEqual(historicalTimeline.snapshot, {
     asOf: abaSecond.archiveSeq,
@@ -2380,7 +2265,7 @@ async function verifyArchiveABA(
   assert.ok(firstHistoricalItemEvent);
   if (firstHistoricalItemEvent?.kind === "item") {
     assert.equal(firstHistoricalItemEvent.commitId, abaFirst.commitId);
-    assert.equal(firstHistoricalItemEvent.binId, "rss-main");
+    assert.equal(firstHistoricalItemEvent.binId, "binny-runs-one");
     assert.equal(firstHistoricalItemEvent.runId, "run-a1");
   }
   assert.equal(
@@ -2410,7 +2295,7 @@ async function verifyArchiveABA(
   const firstTimelinePage = await readArchiveTimeline(
     client,
     abaThirdItem.itemId,
-    { binId: "rss-main", limit: "1" },
+    { binId: "binny-runs-one", limit: "1" },
   );
   assert.equal(firstTimelinePage.snapshot.mode, "current");
   assert.equal(firstTimelinePage.snapshot.asOf, abaThird.archiveSeq);
@@ -2425,7 +2310,7 @@ async function verifyArchiveABA(
   const [lateCommit, secondTimelinePage] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:aba:late-repeat",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       sourceAdapterVersion: "rss@2.1.0",
       observedAt: "2026-10-28T03:59:00.000Z",
       items: [abaA],
@@ -2464,7 +2349,7 @@ async function verifyArchiveABA(
   const currentTimeline = await readArchiveTimeline(
     client,
     abaThirdItem.itemId,
-    { binId: "rss-main", limit: "10" },
+    { binId: "binny-runs-one", limit: "10" },
   );
   assert.deepEqual(
     currentTimeline.events
@@ -2553,7 +2438,7 @@ async function verifyConcurrentArchiveIdentity(
   const [mainCommit, secondaryCommit] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:cross-bin:main",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: concurrentSourceKey,
@@ -2569,7 +2454,7 @@ async function verifyConcurrentArchiveIdentity(
     }),
     submitArchive(client, {
       requestId: "e2e:archive:cross-bin:secondary",
-      binId: "rss-secondary",
+      binId: "binny-runs-two",
       items: [
         {
           sourceKey: concurrentSourceKey,
@@ -2598,17 +2483,17 @@ async function verifyConcurrentArchiveIdentity(
     mainConcurrentItem.itemId,
   );
   assert.deepEqual(concurrentRead.views.map(({ binId }) => binId).toSorted(), [
-    "rss-main",
-    "rss-secondary",
+    "binny-runs-one",
+    "binny-runs-two",
   ]);
   assert.equal(concurrentRead.observations.length, 2);
   assert.equal(
-    concurrentRead.views.find(({ binId }) => binId === "rss-main")?.state.body
-      ?.text,
+    concurrentRead.views.find(({ binId }) => binId === "binny-runs-one")?.state
+      .body?.text,
     "main view",
   );
   assert.equal(
-    concurrentRead.views.find(({ binId }) => binId === "rss-secondary")?.state
+    concurrentRead.views.find(({ binId }) => binId === "binny-runs-two")?.state
       .body?.text,
     "secondary view",
   );
@@ -2616,12 +2501,12 @@ async function verifyConcurrentArchiveIdentity(
 
   const selectedMain = await client.archives.items[":itemId"].$get({
     param: { itemId: mainConcurrentItem.itemId },
-    query: { binId: "rss-main", asOf: mainCommit.archiveSeq },
+    query: { binId: "binny-runs-one", asOf: mainCommit.archiveSeq },
   });
   assert.equal(selectedMain.status, 200);
   const selectedMainRead = await selectedMain.json();
   assert.equal(selectedMainRead.views.length, 1);
-  assert.equal(selectedMainRead.views[0]?.binId, "rss-main");
+  assert.equal(selectedMainRead.views[0]?.binId, "binny-runs-one");
   assert.equal(selectedMainRead.views[0]?.state.body?.text, "main view");
   assert.equal(selectedMainRead.observations.length, 1);
   assert.equal(selectedMainRead.revisions.length, 1);
@@ -2774,7 +2659,7 @@ async function verifySearchRoute(
     {
       path: "/archives/search",
       request: {
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         where: {
           type: "json",
           field: "properties",
@@ -2789,7 +2674,7 @@ async function verifySearchRoute(
     {
       path: "/archives/search",
       request: {
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         "中文。": 1,
       },
       message: "请求包含未支持的字段。",
@@ -2810,7 +2695,7 @@ async function verifySearchRoute(
 
   const unicodeCommit = await submitArchive(client, {
     requestId: "e2e:archive:search-unicode",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-unicode" },
@@ -2831,14 +2716,14 @@ async function verifySearchRoute(
   const unicodeItem = unicodeCommit.items[0];
   assert.ok(unicodeItem);
   const query = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     text: { kind: "literal" as const, value: "正文 A" },
     limit: 10,
   };
   assert.equal(searchSchemas.apiInput(query), true);
   assert.equal(searchSchemas.standardInput(query), true);
   const aggregateRequest = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     text: { kind: "literal" as const, value: "正文 A" },
     unit: "item" as const,
     groupBy: [],
@@ -2871,7 +2756,7 @@ async function verifySearchRoute(
   assert.ok(result);
   assert.equal(result.itemId, itemId);
   assert.equal(result.matches[0]?.revisionId, revisionId);
-  assert.equal(result.matches[0]?.binId, "rss-main");
+  assert.equal(result.matches[0]?.binId, "binny-runs-one");
   assert.equal(result.matches[0]?.sourceRef, "https://example.test/aba-item");
   assert.equal(result.matches[0]?.completeness, "complete");
   assert.deepEqual(result.matches[0]?.hit?.position, {
@@ -2886,7 +2771,7 @@ async function verifySearchRoute(
   });
 
   const regexRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     text: { kind: "regex", pattern: "\\mA\\M" },
     limit: 10,
   };
@@ -2906,7 +2791,7 @@ async function verifySearchRoute(
 
   const unicodeSearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: "短串" },
       limit: 10,
     },
@@ -2929,7 +2814,7 @@ async function verifySearchRoute(
   });
 
   const composedRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     text: { kind: "literal", value: "短串" },
     where: {
       type: "and",
@@ -2997,7 +2882,7 @@ async function verifySearchRoute(
 
   const htmlOnlySearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: "HTML-only phrase" },
       limit: 10,
     },
@@ -3008,7 +2893,7 @@ async function verifySearchRoute(
 
   const currentOldText = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: "正文 B" },
       limit: 10,
     },
@@ -3019,7 +2904,7 @@ async function verifySearchRoute(
 
   const historicalText = await client.archives.search.$post({
     json: {
-      scope: { kind: "asOf", binId: "rss-main", asOf: historicalAsOf },
+      scope: { kind: "asOf", binId: "binny-runs-one", asOf: historicalAsOf },
       text: { kind: "literal", value: "正文 B" },
       limit: 10,
     },
@@ -3040,7 +2925,7 @@ async function verifySearchRoute(
     json: {
       scope: {
         kind: "revisions",
-        binId: "rss-main",
+        binId: "binny-runs-one",
         asOf: historicalAsOf,
       },
       text: { kind: "literal", value: "正文 B" },
@@ -3063,7 +2948,7 @@ async function verifySearchRoute(
     json: {
       scope: {
         kind: "observations",
-        binId: "rss-main",
+        binId: "binny-runs-one",
         asOf: historicalAsOf,
       },
       text: { kind: "literal", value: "正文 B" },
@@ -3089,7 +2974,7 @@ async function verifySearchRoute(
 
   const invalidRegex = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "regex", pattern: "(" },
       limit: 10,
     },
@@ -3102,7 +2987,7 @@ async function verifySearchRoute(
 
   const invalidRegexInCondition = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "or",
         conditions: [
@@ -3130,7 +3015,7 @@ async function verifySearchRoute(
 
   const invalidRegexAfterTopLevel = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "regex", pattern: "(?i)^正文 a" },
       where: {
         type: "and",
@@ -3162,7 +3047,7 @@ async function verifySearchRoute(
 
   const validRegexCombination = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "regex", pattern: "(?i)^正文 a" },
       where: {
         type: "or",
@@ -3200,7 +3085,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   const sourceKey = { namespace: "e2e", key: "search-cross-view" };
   const primary = await submitArchive(client, {
     requestId: "e2e:archive:search-cross-view:main",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "search-view-left",
     items: [
       {
@@ -3216,7 +3101,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   });
   const secondary = await submitArchive(client, {
     requestId: "e2e:archive:search-cross-view:secondary",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     runId: "search-view-right",
     items: [
       {
@@ -3271,7 +3156,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.equal(matchedSourcePage.results[0]?.itemId, primary.items[0]?.itemId);
   assert.deepEqual(
     matchedSourcePage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-main"],
+    ["binny-runs-one"],
   );
 
   const asOfAcrossBins = await client.archives.search.$post({
@@ -3291,12 +3176,12 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.equal(asOfAcrossBinsPage.results[0]?.itemId, primary.items[0]?.itemId);
   assert.deepEqual(
     asOfAcrossBinsPage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-main"],
+    ["binny-runs-one"],
   );
 
   const fieldOnlySearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "field",
         field: "sourceKey.key",
@@ -3345,7 +3230,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.ok(nestedOrResult);
   assert.deepEqual(
     nestedOrResult.matches.map(({ binId }) => binId),
-    ["rss-main", "rss-secondary"],
+    ["binny-runs-one", "binny-runs-two"],
   );
   assert.ok(nestedOrResult.matches[0]?.hit);
   assert.equal(nestedOrResult.matches[1]?.hit, undefined);
@@ -3382,7 +3267,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.equal(nestedNotPage.results[0]?.itemId, primary.items[0]?.itemId);
   assert.deepEqual(
     nestedNotPage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-secondary"],
+    ["binny-runs-two"],
   );
   assert.equal(nestedNotPage.results[0]?.matches[0]?.hit, undefined);
 
@@ -3399,12 +3284,12 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   const [sharedMain, sharedSecondary] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:search-shared:main",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [sharedState],
     }),
     submitArchive(client, {
       requestId: "e2e:archive:search-shared:secondary",
-      binId: "rss-secondary",
+      binId: "binny-runs-two",
       items: [sharedState],
     }),
   ]);
@@ -3427,7 +3312,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.equal(sharedPage.results[0]?.itemId, sharedMain.items[0]?.itemId);
   assert.deepEqual(
     sharedPage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-main", "rss-secondary"],
+    ["binny-runs-one", "binny-runs-two"],
   );
 
   const sharedRevisionHistory = await client.archives.search.$post({
@@ -3451,7 +3336,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   );
   assert.deepEqual(
     sharedRevisionPage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-main", "rss-secondary"],
+    ["binny-runs-one", "binny-runs-two"],
   );
 
   const sharedObservationHistory = await client.archives.search.$post({
@@ -3497,12 +3382,12 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     [...sharedObservationPage.results, ...sharedObservationSecondPage.results]
       .map(({ matches }) => matches[0]?.binId)
       .toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
-    ["rss-main", "rss-secondary"],
+    ["binny-runs-one", "binny-runs-two"],
   );
 
   const complete = await submitArchive(client, {
     requestId: "e2e:archive:search-latest-partial:complete",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-latest-partial" },
@@ -3517,7 +3402,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   });
   const partial = await submitArchive(client, {
     requestId: "e2e:archive:search-latest-partial:partial",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-latest-partial" },
@@ -3532,7 +3417,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   });
   const stalePartialSearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: "旧完整版本onlyneedle" },
       limit: 10,
     },
@@ -3542,7 +3427,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   assert.deepEqual((await stalePartialSearch.json()).results, []);
   const currentPartialSearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       text: { kind: "literal", value: "最新部分版本onlyneedle" },
       limit: 10,
     },
@@ -3566,7 +3451,7 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     json: {
       scope: {
         kind: "asOf",
-        binId: "rss-main",
+        binId: "binny-runs-one",
         asOf: complete.archiveSeq,
       },
       text: { kind: "literal", value: "旧完整版本onlyneedle" },
@@ -3612,13 +3497,13 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const [primary, secondary] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:aggregation-shared-p:main",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       runId: "aggregation-primary",
       items: [sharedState],
     }),
     submitArchive(client, {
       requestId: "e2e:archive:aggregation-shared-p:secondary",
-      binId: "rss-secondary",
+      binId: "binny-runs-two",
       runId: "aggregation-secondary",
       items: [sharedState],
     }),
@@ -3626,7 +3511,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   assert.equal(primary.items[0]?.itemId, secondary.items[0]?.itemId);
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-distinct-q",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "aggregation-distinct-q" },
@@ -3644,7 +3529,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const thirdKey = "aggregation-third-" + runId;
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-third:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: thirdKey },
@@ -3783,7 +3668,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   assert.ok(firstPage.nextCursor);
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-late:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "aggregation-late-" + runId },
@@ -3860,7 +3745,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   ];
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-decimals:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: decimalKeys.map((key, index) => ({
       sourceKey: { namespace: "e2e", key },
       properties: { price: index === 0 ? 0.1 : 0.2 },
@@ -3872,7 +3757,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     })),
   });
   const exactDecimal = await aggregate({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     unit: "item",
     where: {
       type: "field",
@@ -3975,7 +3860,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const valueKey = "aggregation-value-" + runId;
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-null-missing:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: nullKey },
@@ -3999,7 +3884,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     })),
   });
   const nullMissing = await aggregate({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     unit: "item",
     where: {
       type: "field",
@@ -4074,8 +3959,8 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     key: "aggregation-relation-target-" + runId,
   };
   for (const [binId, weight] of [
-    ["rss-main", 10],
-    ["rss-secondary", 20],
+    ["binny-runs-one", 10],
+    ["binny-runs-two", 20],
   ] as const) {
     await submitArchive(client, {
       requestId: "e2e:archive:aggregation-relation:" + runId + ":" + binId,
@@ -4219,7 +4104,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   for (const [index, cycle] of ["A", "B", "A"].entries()) {
     const commit = await submitArchive(client, {
       requestId: "e2e:archive:aggregation-aba:" + runId + ":" + index,
-      binId: "rss-main",
+      binId: "binny-runs-one",
       runId: "aggregation-aba-" + runId + "-" + index,
       items: [
         {
@@ -4248,7 +4133,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     value: cycleKey,
   };
   const revisionHistory = await aggregate({
-    scope: { kind: "revisions", binId: "rss-main" },
+    scope: { kind: "revisions", binId: "binny-runs-one" },
     unit: "revision",
     where: abaWhere,
     groupBy: [],
@@ -4256,7 +4141,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   });
   assert.equal(revisionHistory.groups[0]?.metrics[0]?.value, "2");
   const observationHistory = await aggregate({
-    scope: { kind: "observations", binId: "rss-main" },
+    scope: { kind: "observations", binId: "binny-runs-one" },
     unit: "observation",
     where: abaWhere,
     groupBy: [],
@@ -4268,7 +4153,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const submitAt = async (suffix: string, observedAt: string) =>
     submitArchive(client, {
       requestId: "e2e:archive:aggregation-time:" + runId + ":" + suffix,
-      binId: "rss-main",
+      binId: "binny-runs-one",
       runId: "aggregation-time-" + runId + "-" + suffix,
       observedAt,
       items: [
@@ -4289,7 +4174,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   );
   await submitAt("tokyo-after", "2026-01-01T16:00:00.000Z");
   const tokyoBuckets = await aggregate({
-    scope: { kind: "observations", binId: "rss-main" },
+    scope: { kind: "observations", binId: "binny-runs-one" },
     unit: "observation",
     where: {
       type: "field",
@@ -4326,7 +4211,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const historicalBucket = await aggregate({
     scope: {
       kind: "asOf",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: tokyoFirstObservation.archiveSeq,
     },
     unit: "item",
@@ -4359,7 +4244,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const dstKey = "aggregation-dst-" + runId;
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-dst:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "aggregation-dst-" + runId,
     observedAt: "2026-03-08T12:00:00.000Z",
     items: [
@@ -4376,7 +4261,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   });
   const dstBucket = async (grain: "day" | "week" | "month") =>
     aggregate({
-      scope: { kind: "observations", binId: "rss-main" },
+      scope: { kind: "observations", binId: "binny-runs-one" },
       unit: "observation",
       where: {
         type: "field",
@@ -4417,7 +4302,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   });
   const invalidTimeZone = await client.archives.aggregate.$post({
     json: archiveAggregationInputSchema.parse({
-      scope: { kind: "observations", binId: "rss-main" },
+      scope: { kind: "observations", binId: "binny-runs-one" },
       unit: "observation",
       where: {
         type: "field",
@@ -4446,7 +4331,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   }
 
   const relationCountFilter = await aggregate({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     unit: "item",
     where: {
       type: "and",
@@ -4479,7 +4364,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   const pathEnd = { namespace: "e2e", key: "aggregation-path-end-" + runId };
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-path:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: (
       [
         [pathRoot, "有限路径根"],
@@ -4517,7 +4402,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     ],
   });
   const finitePathFilter = await aggregate({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     unit: "item",
     text: { kind: "literal", value: "有限路径根" },
     where: {
@@ -4535,7 +4420,7 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
 
   await submitArchive(client, {
     requestId: "e2e:archive:aggregation-budget:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: {
@@ -4585,7 +4470,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   const secondOrderKey = "search-result-id-order-second";
   const firstOrderItem = await submitArchive(client, {
     requestId: "e2e:archive:search-result-id-order-first",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: firstOrderKey },
@@ -4600,7 +4485,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   });
   const secondOrderItem = await submitArchive(client, {
     requestId: "e2e:archive:search-result-id-order-second",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: secondOrderKey },
@@ -4625,7 +4510,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   // 正文变化但保留命中词，确保小 ID 项的最新观察序号更大。
   await submitArchive(client, {
     requestId: "e2e:archive:search-result-id-order-later-observation",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: smallerResultKey },
@@ -4639,7 +4524,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     ],
   });
   const resultIdOrderQuery = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     text: { kind: "literal" as const, value: resultIdOrderNeedle },
     orderBy: [
       { field: "sourceKey.namespace" as const, direction: "asc" as const },
@@ -4692,7 +4577,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
 
   const pageA = await submitArchive(client, {
     requestId: "e2e:archive:search-page-a",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "search-page-run",
     items: [
       {
@@ -4710,7 +4595,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   });
   const pageB = await submitArchive(client, {
     requestId: "e2e:archive:search-page-b",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     runId: "search-page-run",
     items: [
       {
@@ -4728,7 +4613,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   });
   const pageNullTime = await submitArchive(client, {
     requestId: "e2e:archive:search-page-null-time",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-null-time" },
@@ -4743,7 +4628,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     ],
   });
   const baseQuery = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     text: { kind: "literal" as const, value: "稳定分页唯一needle" },
     select: [
       "runId" as const,
@@ -4792,7 +4677,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
   const [pageC, secondResponse, concurrentSecondResponse] = await Promise.all([
     submitArchive(client, {
       requestId: "e2e:archive:search-page-c",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [
         {
           sourceKey: { namespace: "e2e", key: "search-page-c" },
@@ -4863,7 +4748,7 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
 
   await submitArchive(client, {
     requestId: "e2e:archive:search-wide-regex-budget",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-wide-regex-budget" },
@@ -4911,7 +4796,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     select: ArchiveSearchInput["select"] = ["sourceKey"],
   ) =>
     searchJsonPage({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "and",
         conditions: [
@@ -4948,7 +4833,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   assert.equal(Object.hasOwn(prototypeProperties, "__proto__"), true);
   await submitArchive(client, {
     requestId: "e2e:archive:search-json-path-filter",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: numberLow },
@@ -5011,7 +4896,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
 
   const schemas = compilePublishedSchemas();
   const query = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     where: {
       type: "and" as const,
       conditions: [
@@ -5273,7 +5158,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   );
 
   const nestedPathPage = await searchJsonPage({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -5320,7 +5205,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   );
 
   const prototypePage = await searchJsonPage({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -5402,7 +5287,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   assert.equal(Object.hasOwn(projectedNestedValue, "__proto__"), true);
 
   const numericSortPage = await searchJsonPage({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -5426,7 +5311,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   );
 
   const stringSortPage = await searchJsonPage({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -5450,7 +5335,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   );
 
   const booleanSortPage = await searchJsonPage({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -5482,7 +5367,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   ];
   const cursorCommit = await submitArchive(client, {
     requestId: "e2e:archive:search-json-cursor-delete:" + cursorRunId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: cursorKeys[0]! },
@@ -5527,7 +5412,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
   );
   assert.ok(cursorAnchor);
   const cursorQuery = {
-    scope: { kind: "current" as const, binId: "rss-main" },
+    scope: { kind: "current" as const, binId: "binny-runs-one" },
     where: {
       type: "field" as const,
       field: "sourceKey.key" as const,
@@ -5566,7 +5451,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     ...cursorQuery,
     scope: {
       kind: "asOf",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: cursorFirstPage.snapshot.asOf,
     },
     limit: 10,
@@ -5630,7 +5515,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
 
   const budgetPage = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "json",
         field: "properties",
@@ -5650,7 +5535,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
 
   const unsafeNumberPage = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "json",
         field: "properties",
@@ -5666,7 +5551,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
 
   const reversedRangePage = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "json",
         field: "properties",
@@ -5686,7 +5571,7 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "json",
         field: "properties",
@@ -5745,7 +5630,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   const fixtureCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation-query:same-target",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: rootSplit,
@@ -5965,7 +5850,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:path-endpoints",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [pathUnknown, pathForeign].map((sourceKey) => ({
       sourceKey,
       body: { searchText: "只在次要来源观察的路径端点" },
@@ -6000,7 +5885,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   });
   const pathCommit = await submitArchive(client, {
     requestId: "e2e:archive:relation-query:bounded-paths",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       { sourceKey: pathRoot, searchText: "有限路径根" },
       { sourceKey: pathEmpty, searchText: "无路径根" },
@@ -6112,7 +5997,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   });
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:path-cross-bin-second",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [],
     relations: [
       pathRelation(
@@ -6125,7 +6010,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   });
 
   const query: ArchiveSearchRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "relation",
       direction: "outgoing",
@@ -6167,7 +6052,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   const searchDirectionRoot = (filter: ArchiveSearchFilter) =>
     search({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "and",
         conditions: [
@@ -6191,7 +6076,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const incomingRelation = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6218,7 +6103,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ["split-root"],
   );
   const eitherRelation = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6246,7 +6131,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const independentExists = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6292,7 +6177,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const countMatches = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6465,7 +6350,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.deepEqual(incomingTextNotExists.results, []);
 
   const notExists = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6508,7 +6393,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:rename-edge",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [
       {
@@ -6524,7 +6409,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ],
   });
   const currentRenamedRelation = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6544,7 +6429,11 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.deepEqual(currentRenamedRelation.results, []);
 
   const historicalRelation = await search({
-    scope: { kind: "asOf", binId: "rss-main", asOf: fixtureCommit.archiveSeq },
+    scope: {
+      kind: "asOf",
+      binId: "binny-runs-one",
+      asOf: fixtureCommit.archiveSeq,
+    },
     where: {
       type: "and",
       conditions: [
@@ -6566,7 +6455,11 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ["split-root"],
   );
   const historicalExpansion = await search({
-    scope: { kind: "asOf", binId: "rss-main", asOf: fixtureCommit.archiveSeq },
+    scope: {
+      kind: "asOf",
+      binId: "binny-runs-one",
+      asOf: fixtureCommit.archiveSeq,
+    },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -6597,7 +6490,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:foreign-target",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [
       {
         sourceKey: foreignTarget,
@@ -6617,7 +6510,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   };
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:foreign-edge",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: foreignRoot,
@@ -6643,7 +6536,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ],
   });
   const noCrossBinTarget = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "and",
       conditions: [
@@ -6672,7 +6565,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.deepEqual(noCrossBinTarget.results, []);
 
   const unknownTargetExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -6703,7 +6596,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
 
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:second-bin-root-view",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [
       {
         sourceKey: rootSplit,
@@ -6718,7 +6611,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   });
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:second-bin-cites-edge",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [],
     relations: [
       {
@@ -6806,13 +6699,13 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.equal(expandedPage.results[0]?.sourceKey?.key, "split-root");
   assert.deepEqual(
     expandedPage.results[0]?.matches.map(({ binId }) => binId),
-    ["rss-main", "rss-secondary"],
+    ["binny-runs-one", "binny-runs-two"],
   );
   const mainMatch = expandedPage.results[0]?.matches.find(
-    ({ binId }) => binId === "rss-main",
+    ({ binId }) => binId === "binny-runs-one",
   );
   const secondaryMatch = expandedPage.results[0]?.matches.find(
-    ({ binId }) => binId === "rss-secondary",
+    ({ binId }) => binId === "binny-runs-two",
   );
   const mainAllExpansion = mainMatch?.expansions.find(
     ({ key }) => key === "all",
@@ -6871,7 +6764,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const pagedExpansionQuery: ArchiveSearchRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -6912,7 +6805,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "field",
         field: "sourceKey.key",
@@ -6954,14 +6847,14 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
 
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:withdraw-edge",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [
       { relationId: "e2e:relation-query:withdrawn-edge", value: null },
     ],
   });
   const withdrawnExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -6990,7 +6883,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
   assert.equal(hardDeleteResponse.status, 200);
   const deletedGapExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -7019,7 +6912,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     filter: ArchiveSearchFilter,
     scope: ArchiveSearchRequest["scope"] = {
       kind: "current",
-      binId: "rss-main",
+      binId: "binny-runs-one",
     },
   ) =>
     search({
@@ -7084,7 +6977,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const twoHopExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [
       {
@@ -7127,7 +7020,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: pathRootFilter,
       expandPaths: [
         {
@@ -7162,7 +7055,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     "e2e:relation-query:prefix:Aedge",
   ];
   const completeSortExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [
       {
@@ -7185,7 +7078,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.equal(completeSortedPaths.hasMore, false);
 
   const limitedSortExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [
       {
@@ -7208,7 +7101,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   assert.equal(limitedSortedPaths.hasMore, true);
 
   const unknownPath = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [
       {
@@ -7302,7 +7195,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     [pathRoot.key],
   );
   const mixedExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [{ key: "mixed", steps: incomingEitherSteps, limit: 10 }],
     select: ["sourceKey"],
@@ -7362,7 +7255,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     [pathRoot.key],
   );
   const repeatedCycleExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [{ key: "cycle", steps: repeatedCycleSteps, limit: 10 }],
     select: ["sourceKey"],
@@ -7395,7 +7288,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     [pathRoot.key],
   );
   const selfLoopExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [{ key: "self", steps: selfLoopSteps, limit: 10 }],
     select: ["sourceKey"],
@@ -7431,7 +7324,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     [pathRoot.key],
   );
   const externalExpansion = await search({
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: pathRootFilter,
     expandPaths: [
       {
@@ -7480,7 +7373,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
 
   const invalidPathThroughClient = await client.archives.search.$post({
     json: {
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "path",
         steps: [],
@@ -7502,7 +7395,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "path",
         steps: [{ direction: "outgoing" }, { direction: "sideways" }],
@@ -7528,7 +7421,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: {
         type: "path",
         steps: [
@@ -7563,7 +7456,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      scope: { kind: "current", binId: "rss-main" },
+      scope: { kind: "current", binId: "binny-runs-one" },
       where: pathRootFilter,
       expandPaths: [
         {
@@ -7600,7 +7493,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
 
   const historicalPathScope = {
     kind: "asOf",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     asOf: pathCommit.archiveSeq,
   } as const;
   const historicalPath = await searchPathRoot(twoHopPath, historicalPathScope);
@@ -7610,7 +7503,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
   const historicalRevisionPath = await searchPathRoot(twoHopPath, {
     kind: "revisions",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     asOf: pathCommit.archiveSeq,
   });
   assert.equal(historicalRevisionPath.unit, "revision");
@@ -7642,7 +7535,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:path-current-change",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: pathD,
@@ -7690,7 +7583,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   );
 
   const rootPageQuery: ArchiveSearchRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -7745,7 +7638,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
   }));
   await submitArchive(client, {
     requestId: "e2e:archive:relation-query:path-budget-fanout",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: fanoutKeys.map((sourceKey) => ({
       sourceKey,
       body: { searchText: "有限路径预算扇出图" },
@@ -7767,7 +7660,7 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     ),
   });
   const fanoutRootQuery: ArchiveSearchRequest = {
-    scope: { kind: "current", binId: "rss-main" },
+    scope: { kind: "current", binId: "binny-runs-one" },
     where: {
       type: "field",
       field: "sourceKey.key",
@@ -7853,7 +7746,7 @@ async function verifyHardDeleteEntryPoint(
   ];
   const firstRequest: ArchiveSubmission = {
     requestId: "e2e:archive:hard-delete:first:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: targetKey,
@@ -7941,7 +7834,7 @@ async function verifyHardDeleteEntryPoint(
 
   const secondCommit = await submitArchive(client, {
     requestId: "e2e:archive:hard-delete:secondary:" + runId,
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [
       {
         sourceKey: targetKey,
@@ -7974,8 +7867,8 @@ async function verifyHardDeleteEntryPoint(
   }
   const beforeDelete = await beforeDeleteResponse.json();
   assert.deepEqual(beforeDelete.views.map(({ binId }) => binId).toSorted(), [
-    "rss-main",
-    "rss-secondary",
+    "binny-runs-one",
+    "binny-runs-two",
   ]);
   assert.equal(beforeDelete.revisions.length, 2);
 
@@ -8079,7 +7972,7 @@ async function verifyHardDeleteEntryPoint(
     ["incoming", relationIds[0]],
   ] as const) {
     const page = await readArchiveRelations(client, owner.itemId, {
-      binId: "rss-main",
+      binId: "binny-runs-one",
       direction,
       asOf: firstCommit.archiveSeq,
       limit: "100",
@@ -8139,7 +8032,10 @@ async function verifyHardDeleteEntryPoint(
       ({ sourceKey }) => sourceKey?.key,
     );
   };
-  const currentMainScope = { kind: "current", binId: "rss-main" } as const;
+  const currentMainScope = {
+    kind: "current",
+    binId: "binny-runs-one",
+  } as const;
   assert.deepEqual(
     await matchingOwnerKeys(currentMainScope, deletedOwnerRelation),
     [],
@@ -8152,7 +8048,7 @@ async function verifyHardDeleteEntryPoint(
     await matchingOwnerKeys(
       {
         kind: "asOf",
-        binId: "rss-main",
+        binId: "binny-runs-one",
         asOf: firstCommit.archiveSeq,
       },
       deletedOwnerRelation,
@@ -8247,7 +8143,7 @@ async function verifyHardDeleteEntryPoint(
 
   const freshCommit = await submitArchive(client, {
     requestId: "e2e:archive:hard-delete:fresh:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [
       {
         sourceKey: targetKey,
@@ -8272,7 +8168,7 @@ async function verifyHardDeleteEntryPoint(
   const reusedRelationId = relationIds[1]!;
   const secondaryRelationCommit = await submitArchive(client, {
     requestId: "e2e:archive:hard-delete:secondary-relation:" + runId,
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [],
     relations: [
       {
@@ -8291,7 +8187,7 @@ async function verifyHardDeleteEntryPoint(
     owner.itemId,
     {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       limit: "10",
     },
   );
@@ -8305,7 +8201,7 @@ async function verifyHardDeleteEntryPoint(
 
   const secondaryRelation = await readArchiveRelations(client, owner.itemId, {
     direction: "outgoing",
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     limit: "10",
   });
   const secondaryObservedRelation = secondaryRelation.relations.find(
@@ -8325,7 +8221,7 @@ async function verifyHardDeleteEntryPoint(
 
   const oldMainSnapshot = await readArchiveRelations(client, owner.itemId, {
     direction: "outgoing",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     asOf: firstCommit.archiveSeq,
     limit: "10",
   });
@@ -8336,7 +8232,7 @@ async function verifyHardDeleteEntryPoint(
 
   const mainReobservation = await submitArchive(client, {
     requestId: "e2e:archive:hard-delete:main-reobservation:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [
       {
@@ -8374,7 +8270,7 @@ async function verifyHardDeleteEntryPoint(
   do {
     const page = await readArchiveRelations(client, owner.itemId, {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       ...(cursor === undefined ? {} : { cursor }),
       limit: "1",
     });
@@ -8395,7 +8291,7 @@ async function verifyHardDeleteEntryPoint(
   const restoredMainRelation = (
     await readArchiveRelations(client, owner.itemId, {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       limit: "10",
     })
   ).relations.find(({ relationId }) => relationId === reusedRelationId);
@@ -8424,7 +8320,7 @@ async function verifyHardDeleteEntryPoint(
     owner.itemId,
     {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: firstCommit.archiveSeq,
       limit: "10",
     },
@@ -8495,7 +8391,7 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   ];
   const commit = await submitArchive(client, {
     requestId: "e2e:archive:cascade:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: keys.map((sourceKey) => {
       const resources =
         sourceKey.key === rootKey.key || sourceKey.key === unrelatedKey.key
@@ -8628,13 +8524,13 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   });
   await submitArchive(client, {
     requestId: "e2e:archive:cascade:secondary:" + runId,
-    binId: "rss-secondary",
+    binId: "binny-runs-two",
     items: [],
     relations: [{ relationId: relationIds.forward, value: forwardState(true) }],
   });
   await submitArchive(client, {
     requestId: "e2e:archive:cascade:main-update:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [
       { relationId: relationIds.forward, value: forwardState(false) },
@@ -8651,7 +8547,7 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   });
   await submitArchive(client, {
     requestId: "e2e:archive:cascade:main-withdrawal:" + runId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [],
     relations: [
       { relationId: relationIds.forward, value: null },
@@ -8660,7 +8556,7 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   });
   const mainCurrentRelations = await readArchiveRelations(client, rootItemId, {
     direction: "outgoing",
-    binId: "rss-main",
+    binId: "binny-runs-one",
     limit: "100",
   });
   assert.equal(
@@ -8685,7 +8581,7 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
   const secondaryCurrentRelations = await readArchiveRelations(
     client,
     rootItemId,
-    { direction: "outgoing", binId: "rss-secondary", limit: "10" },
+    { direction: "outgoing", binId: "binny-runs-two", limit: "10" },
   );
   const oldBinDeclaration = secondaryCurrentRelations.relations.find(
     ({ relationId }) => relationId === relationIds.forward,
@@ -8803,7 +8699,7 @@ async function verifyConcurrentCascadeWrites(
     const relationId = "e2e:cascade-race:" + runId + ":original";
     const firstCommit = await submitArchive(client, {
       requestId: "e2e:archive:cascade-race:first:" + runId,
-      binId: "rss-main",
+      binId: "binny-runs-one",
       items: [rootKey, targetKey].map((sourceKey) => ({
         sourceKey,
         body: { text: sourceKey.key },
@@ -8838,7 +8734,7 @@ async function verifyConcurrentCascadeWrites(
       mutation === "submission"
         ? {
             requestId: "e2e:archive:cascade-race:new-edge:" + runId,
-            binId: "rss-main",
+            binId: "binny-runs-one",
             items: [],
             relations: [
               {
@@ -8854,7 +8750,7 @@ async function verifyConcurrentCascadeWrites(
           }
         : {
             requestId: "e2e:archive:cascade-race:withdraw:" + runId,
-            binId: "rss-main",
+            binId: "binny-runs-one",
             items: [],
             relations: [{ relationId, value: null }],
           };
@@ -8948,7 +8844,7 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
   };
   const cliCascadeCommit = await submitArchive(client, {
     requestId: "e2e:archive:cli-cascade:" + cliCascadeRunId,
-    binId: "rss-main",
+    binId: "binny-runs-one",
     items: [cliCascadeRootKey, cliCascadeTargetKey].map((sourceKey) => ({
       sourceKey,
       body: { text: sourceKey.key },
@@ -9009,7 +8905,7 @@ async function verifyArchivePersistence(
   );
   assert.deepEqual(
     persistedArchive.views.map(({ binId }) => binId),
-    ["rss-main"],
+    ["binny-runs-one"],
   );
   assert.equal(persistedArchive.views[0]?.state.body?.markdown, "正文 A🌿");
 
@@ -9145,7 +9041,7 @@ async function verifyArchivePersistence(
 
   const historicalResponse = await client.archives.items[":itemId"].$get({
     param: { itemId: archive.itemId },
-    query: { binId: "rss-main", asOf: archive.historicalAsOf },
+    query: { binId: "binny-runs-one", asOf: archive.historicalAsOf },
   });
   if (historicalResponse.status !== 200) {
     throw new Error(
@@ -9156,7 +9052,7 @@ async function verifyArchivePersistence(
   assert.equal(historicalItem.views[0]?.state.body?.markdown, "正文 B");
 
   const firstTimelinePage = await readArchiveTimeline(client, archive.itemId, {
-    binId: "rss-main",
+    binId: "binny-runs-one",
     limit: "1",
   });
   assert.ok(firstTimelinePage.nextCursor);
@@ -9174,7 +9070,7 @@ async function verifyArchivePersistence(
     archive.relationItemId,
     {
       direction: "outgoing",
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: archive.relationAsOf,
       limit: "10",
     },
@@ -9183,7 +9079,7 @@ async function verifyArchivePersistence(
     client,
     archive.relationItemId,
     {
-      binId: "rss-main",
+      binId: "binny-runs-one",
       asOf: archive.relationAsOf,
       limit: "100",
     },

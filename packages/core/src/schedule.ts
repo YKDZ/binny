@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import {
-  binConfigurationSettingsSchema,
   jsonObjectSchema,
   scheduleCreateInputSchema,
   scheduleLastErrorSchema,
@@ -21,8 +21,11 @@ import {
 import { CronExpressionParser } from "cron-parser";
 import { and, eq, lte, sql } from "drizzle-orm";
 
-import { validateSourceAdapterActionParameters } from "./bin-configuration.ts";
 import { createQueuedRunInTransaction } from "./manual-run.ts";
+import {
+  actionInputSnapshotStillCurrent,
+  preflightActionInput,
+} from "./runtime-action-validation.ts";
 
 type ScheduleStore = ScheduleOperations & {
   readonly processDueSchedules: () => Promise<void>;
@@ -129,48 +132,6 @@ function toSchedule(row: typeof schedules.$inferSelect): Schedule {
   });
 }
 
-function scheduleActionError(
-  bin: {
-    readonly id: string;
-    readonly sourceAdapter: unknown;
-    readonly identityId: string;
-    readonly config: unknown;
-  },
-  action: string,
-  params: unknown,
-): ScheduleApiError | undefined {
-  const configuredBin = binConfigurationSettingsSchema.parse(bin);
-  const checkedParams = jsonObjectSchema.safeParse(params);
-  if (!checkedParams.success) {
-    return {
-      code: "invalid_input",
-      message: "计划参数必须是 JSON 对象。",
-      path: ["params"],
-    };
-  }
-  const result = validateSourceAdapterActionParameters(
-    configuredBin.sourceAdapter,
-    action,
-    checkedParams.data,
-  );
-  if (result.ok) return undefined;
-  if (
-    result.code === "action_not_found" ||
-    result.code === "invalid_action_parameters"
-  ) {
-    return {
-      code: result.code,
-      message: result.message,
-      ...(result.path === undefined ? {} : { path: [...result.path] }),
-    };
-  }
-  return {
-    code: "invalid_input",
-    message: result.message,
-    ...(result.path === undefined ? {} : { path: [...result.path] }),
-  };
-}
-
 function readBinForRun(transaction: Transaction, binId: string) {
   return transaction
     .select({
@@ -178,6 +139,7 @@ function readBinForRun(transaction: Transaction, binId: string) {
       sourceAdapter: binConfigurations.sourceAdapter,
       identityId: binConfigurations.identityId,
       config: binConfigurations.config,
+      configNativeValid: binConfigurations.configNativeValid,
       status: binConfigurations.status,
     })
     .from(binConfigurations)
@@ -237,27 +199,47 @@ export function createScheduleStore(database: Database): ScheduleStore {
       const checked = scheduleCreateInputSchema.safeParse(input);
       if (!checked.success) return inputFailure(checked.error);
       const scheduleId = randomUUID();
+      const initialNextDue = computeNextDue(
+        checked.data.expression,
+        checked.data.timeZone,
+        scheduleId,
+        new Date(),
+      );
+      if (!initialNextDue.ok)
+        return { ok: false, status: 400, error: initialNextDue.error };
+      const preflight = await preflightActionInput(
+        database,
+        binId,
+        checked.data.action,
+        checked.data.params,
+      );
+      if (!preflight.ok) return preflight;
+      const nextDue = computeNextDue(
+        checked.data.expression,
+        checked.data.timeZone,
+        scheduleId,
+        new Date(),
+      );
+      if (!nextDue.ok) return { ok: false, status: 400, error: nextDue.error };
+
       return await database.transaction(async (transaction) => {
         const [bin] = await readBinForRun(transaction, binId);
         if (bin === undefined) {
           return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
         }
-        const actionError = scheduleActionError(
-          bin,
-          checked.data.action,
-          checked.data.params,
-        );
-        if (actionError !== undefined) {
-          return { ok: false, status: 400, error: actionError };
+        if (
+          !(await actionInputSnapshotStillCurrent(
+            transaction,
+            preflight.snapshot,
+          ))
+        ) {
+          return failure(
+            409,
+            "action_input_changed",
+            "长期配置或运行器在计划参数原生校验期间发生变化，请重新提交。",
+            ["params"],
+          );
         }
-        const nextDue = computeNextDue(
-          checked.data.expression,
-          checked.data.timeZone,
-          scheduleId,
-          new Date(),
-        );
-        if (!nextDue.ok)
-          return { ok: false, status: 400, error: nextDue.error };
         const [row] = await transaction
           .insert(schedules)
           .values({
@@ -279,6 +261,59 @@ export function createScheduleStore(database: Database): ScheduleStore {
     async updateSchedule(binId, scheduleId, input) {
       const checked = scheduleUpdateInputSchema.safeParse(input);
       if (!checked.success) return inputFailure(checked.error);
+      const initial = await database.transaction(async (transaction) => {
+        const [bin] = await readBinForRun(transaction, binId);
+        if (bin === undefined) return { error: "bin_not_found" as const };
+        const [current] = await transaction
+          .select()
+          .from(schedules)
+          .where(
+            and(
+              eq(schedules.binId, binId),
+              eq(schedules.scheduleId, scheduleId),
+            ),
+          )
+          .limit(1);
+        return current === undefined
+          ? { error: "schedule_not_found" as const }
+          : { current };
+      });
+      if ("error" in initial) {
+        return initial.error === "bin_not_found"
+          ? failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"])
+          : failure(404, "schedule_not_found", "没有找到这个采集计划。", [
+              "scheduleId",
+            ]);
+      }
+
+      const hasInputChange =
+        checked.data.action !== undefined || checked.data.params !== undefined;
+      const initialUpdated = {
+        expression: checked.data.expression ?? initial.current.expression,
+        timeZone: checked.data.timeZone ?? initial.current.timeZone,
+        action: checked.data.action ?? initial.current.action,
+        params:
+          checked.data.params ?? jsonObjectSchema.parse(initial.current.params),
+      };
+      const initialNextDue = computeNextDue(
+        initialUpdated.expression,
+        initialUpdated.timeZone,
+        initial.current.scheduleId,
+        new Date(),
+      );
+      if (!initialNextDue.ok)
+        return { ok: false, status: 400, error: initialNextDue.error };
+
+      const preflight = hasInputChange
+        ? await preflightActionInput(
+            database,
+            binId,
+            initialUpdated.action,
+            initialUpdated.params,
+          )
+        : undefined;
+      if (preflight !== undefined && !preflight.ok) return preflight;
+
       return await database.transaction(async (transaction) => {
         const [bin] = await readBinForRun(transaction, binId);
         if (bin === undefined) {
@@ -301,20 +336,29 @@ export function createScheduleStore(database: Database): ScheduleStore {
             "scheduleId",
           ]);
         }
+        if (
+          hasInputChange &&
+          (preflight === undefined ||
+            current.action !== initial.current.action ||
+            !isDeepStrictEqual(current.params, initial.current.params) ||
+            !(await actionInputSnapshotStillCurrent(
+              transaction,
+              preflight.snapshot,
+            )))
+        ) {
+          return failure(
+            409,
+            "action_input_changed",
+            "计划参数、长期配置或运行器在原生校验期间发生变化，请重新提交。",
+            ["params"],
+          );
+        }
         const updated = {
           expression: checked.data.expression ?? current.expression,
           timeZone: checked.data.timeZone ?? current.timeZone,
           action: checked.data.action ?? current.action,
           params: checked.data.params ?? current.params,
         };
-        const actionError = scheduleActionError(
-          bin,
-          updated.action,
-          updated.params,
-        );
-        if (actionError !== undefined) {
-          return { ok: false, status: 400, error: actionError };
-        }
         const nextDue = computeNextDue(
           updated.expression,
           updated.timeZone,

@@ -116,6 +116,7 @@ export interface SourceAdapterContext<TConfig = unknown> {
   readonly binId: string;
   readonly identityId: string;
   readonly runId: string;
+  readonly referenceTime: string;
   readonly sourceAdapterVersion: string;
   readonly config: TConfig;
   readonly signal: AbortSignal;
@@ -126,6 +127,14 @@ export interface SourceAdapterContext<TConfig = unknown> {
   readonly resources: {
     upload(body: BodyInit, mediaType: string): Promise<ArchiveResourceUpload>;
   };
+}
+
+/** 按 SDK 原生 schema 异步解析原始配置或动作参数，保留 defaults/refinements/transforms。 */
+export async function parseSourceAdapterInput<TSchema extends z.ZodType>(
+  schema: TSchema,
+  input: unknown,
+) {
+  return await schema.safeParseAsync(input);
 }
 
 export type SourceAdapterEnvironment = SourceAdapterManifest["environment"];

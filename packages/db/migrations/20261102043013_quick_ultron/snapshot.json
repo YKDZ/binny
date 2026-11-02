@@ -1,0 +1,76 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "68770070-9dc1-4bf6-a857-47fecc1f8c23",
+  "prevIds": [
+    "35e414f9-2638-4191-975a-ec4bb2adc96a",
+    "6b8138dc-8fc2-47e0-9b17-e2a8216f5364"
+  ],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "config_native_valid"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.config_native_valid",
+        "n|col|public.bin_configurations.config_native_valid",
+        "e|col|public.bin_configurations.config_native_valid"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "runtime_control_url"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.runtime_control_url",
+        "n|col|public.runtime_connections.runtime_control_url",
+        "e|col|public.runtime_connections.runtime_control_url"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "config_native_valid",
+        "type": "boolean",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "true",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "runtime_control_url",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}

@@ -1177,7 +1177,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
   );
 
   const manifest = await createSdkManifest();
-  await createRssBin(baseUrl, "rss-main", manifest, {
+  await createLegacyRssBin(baseUrl, "rss-main", manifest, {
     userAgent: "Binny E2E",
     key: "az",
   });
@@ -1291,7 +1291,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     "升级没有应用浏览器空闲策略迁移。",
   );
 
-  // 先通过公开读取验证旧持久行；后续才发送新协议心跳或 PATCH 修复配置。
+  // 先通过公开读取验证旧持久行，再确认不兼容的旧运行器仍保持离线。
   const oldEmptyReasonResponse = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
   );
@@ -1463,91 +1463,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     assert.equal(oldBin.browserIdleTimeoutSeconds, null);
   }
 
-  const newEmptyReasonCreate = await fetch(`${baseUrl}/bins`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "binny-database-upgrade-new-empty-reason",
-      sourceAdapter: legacyBrowserWithEmptyReason,
-      identityId: "identity-binny-database-upgrade-new-empty-reason",
-      config: {},
-    }),
-  });
-  assert.equal(newEmptyReasonCreate.status, 400);
-  const newEmptyReasonCreateError = (await newEmptyReasonCreate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(newEmptyReasonCreateError.error.code, "invalid_input");
-  assert.deepEqual(newEmptyReasonCreateError.error.path, [
-    "sourceAdapter",
-    "environment",
-    "browser",
-    "profileReuseUnavailableReason",
-  ]);
-
-  const emptyReasonUpdate = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: legacyBrowserWithEmptyReason }),
-    },
-  );
-  assert.equal(emptyReasonUpdate.status, 400);
-  const emptyReasonUpdateError = (await emptyReasonUpdate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(emptyReasonUpdateError.error.code, "invalid_input");
-  assert.deepEqual(emptyReasonUpdateError.error.path, [
-    "sourceAdapter",
-    "environment",
-    "browser",
-    "profileReuseUnavailableReason",
-  ]);
-
-  const repairedEmptyReasonManifest = {
-    ...legacyBrowserWithEmptyReason,
-    environment: {
-      browser: {
-        ...legacyBrowserWithEmptyReason.environment.browser,
-        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
-      },
-    },
-  };
-  const repairedEmptyReasonResponse = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: repairedEmptyReasonManifest }),
-    },
-  );
-  assert.equal(
-    repairedEmptyReasonResponse.status,
-    200,
-    await repairedEmptyReasonResponse.clone().text(),
-  );
-  const repairedEmptyReasonBin = (await repairedEmptyReasonResponse.json()) as {
-    readonly browserIdleTimeoutSeconds: number | null;
-    readonly sourceAdapter: {
-      readonly environment: {
-        readonly browser: { readonly profileReuseUnavailableReason?: string };
-      };
-    };
-  };
-  assert.equal(repairedEmptyReasonBin.browserIdleTimeoutSeconds, null);
-  assert.equal(
-    repairedEmptyReasonBin.sourceAdapter.environment.browser
-      .profileReuseUnavailableReason,
-    "经公开配置修正后的兼容原因。",
-  );
-
   const upgradedRuntimeHeartbeat = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-empty-reason/runtime/heartbeat`,
     {
@@ -1560,7 +1475,7 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
         ownerLockAcquired: true,
         activeRunId: null,
         claimInFlight: false,
-        sourceAdapter: repairedEmptyReasonManifest,
+        sourceAdapter: legacyBrowserWithEmptyReason,
         environment: {
           kind: "browser",
           browser: {
@@ -1641,33 +1556,6 @@ async function verifyDatabasePackageUpgrade(): Promise<void> {
     readonly browserIdleTimeoutSeconds: number | null;
   };
   assert.equal(oldRuntimePolicy.browserIdleTimeoutSeconds, null);
-
-  const repairedLegacyManifest = {
-    ...legacyBrowserWithoutReason,
-    environment: {
-      browser: {
-        ...legacyBrowserWithoutReason.environment.browser,
-        profileReuseUnavailableReason: "经公开配置修正后的兼容原因。",
-      },
-    },
-  };
-  const repairedLegacyResponse = await fetch(
-    `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
-    {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceAdapter: repairedLegacyManifest }),
-    },
-  );
-  assert.equal(
-    repairedLegacyResponse.status,
-    200,
-    await repairedLegacyResponse.clone().text(),
-  );
-  const repairedLegacyBin = (await repairedLegacyResponse.json()) as {
-    readonly browserIdleTimeoutSeconds: number | null;
-  };
-  assert.equal(repairedLegacyBin.browserIdleTimeoutSeconds, null);
 
   const incompatibleLegacyUpdate = await fetch(
     `${baseUrl}/bins/binny-database-upgrade-browser-no-reason`,
@@ -2339,8 +2227,8 @@ async function verifyResourceStorageInterruptions(
 async function validateApiInput(): Promise<void> {
   const probe = [
     "(async () => {",
-    'const bodies = [JSON.stringify({ id: 7 }), "{"];',
-    'const responses = await Promise.all(bodies.map((body) => fetch("http://127.0.0.1:3000/bins", { method: "POST", headers: { "content-type": "application/json" }, body })));',
+    'const bodies = [JSON.stringify({ identityId: 7 }), "{"];',
+    'const responses = await Promise.all(bodies.map((body) => fetch("http://127.0.0.1:3000/bins/binny-runs-one", { method: "PATCH", headers: { "content-type": "application/json" }, body })));',
     "const results = await Promise.all(responses.map(async (response) => ({ status: response.status, body: await response.json() })));",
     "process.stdout.write(JSON.stringify(results));",
     "})().catch((error) => { console.error(error); process.exitCode = 1; });",
@@ -2366,7 +2254,7 @@ async function validateApiInput(): Promise<void> {
   assert.ok(invalidField !== undefined && malformedJson !== undefined);
   assert.equal(invalidField.status, 400);
   assert.equal(invalidField.body.error.code, "invalid_input");
-  assert.deepEqual(invalidField.body.error.path, ["id"]);
+  assert.deepEqual(invalidField.body.error.path, ["identityId"]);
   assert.match(invalidField.body.error.message, /字段|标识/u);
   assert.equal(malformedJson.status, 400);
   assert.equal(malformedJson.body.error.code, "invalid_input");
@@ -2438,6 +2326,41 @@ async function waitForRuntime(baseUrl: string, binId: string): Promise<void> {
     await wait(100);
   }
   assert.fail(`bin ${binId} 的运行器没有上线。`);
+}
+
+async function waitForBinRegistration(
+  baseUrl: string,
+  binId: string,
+): Promise<{
+  readonly id: string;
+  readonly identityId: string;
+  readonly config: Record<string, unknown>;
+  readonly sourceAdapter: { readonly id: string; readonly version: string };
+  readonly execution: { readonly status: string };
+}> {
+  const deadline = Date.now() + 30_000;
+  let lastResponse = "尚未查询。";
+  while (Date.now() < deadline) {
+    const response = await fetch(
+      `${baseUrl}/bins/${encodeURIComponent(binId)}`,
+    );
+    if (response.status === 200) {
+      return (await response.json()) as {
+        readonly id: string;
+        readonly identityId: string;
+        readonly config: Record<string, unknown>;
+        readonly sourceAdapter: {
+          readonly id: string;
+          readonly version: string;
+        };
+        readonly execution: { readonly status: string };
+      };
+    }
+    lastResponse = `${response.status} ${await response.text()}`;
+    if (response.status !== 404) throw new Error(lastResponse);
+    await wait(100);
+  }
+  throw new Error(`运行器没有自动登记 bin ${binId}：${lastResponse}`);
 }
 
 type RssRequestRecord = {
@@ -2684,21 +2607,25 @@ async function createLinuxdoBin(
   service = "runtime-linuxdo",
   identityId = "binny-integration-profile",
 ): Promise<void> {
-  const created = cliData<{ readonly id: string }>(
+  const registered = await waitForBinRegistration(baseUrl, binId);
+  const runtimeManifest = await linuxdoRuntimeManifest(service);
+  assert.equal(
+    registered.sourceAdapter.version,
+    rssManifestVersion(runtimeManifest),
+  );
+  const configured = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
       "bin",
-      "create",
+      "update",
       binId,
-      "--source-adapter",
-      JSON.stringify(await linuxdoRuntimeManifest(service)),
       "--identity",
       identityId,
       "--config",
       JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
     ]),
-    "created",
+    "updated",
   );
-  assert.equal(created.id, binId);
+  assert.equal(configured.id, binId);
   await waitForRuntime(baseUrl, binId);
 }
 
@@ -3748,30 +3675,48 @@ async function buildRssImageUpdate(
   };
 }
 
+async function createLegacyRssBin(
+  baseUrl: string,
+  binId: string,
+  manifest: unknown,
+  config: unknown,
+): Promise<void> {
+  const response = await fetch(baseUrl + "/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: binId,
+      sourceAdapter: manifest,
+      identityId: binId + "-identity",
+      config,
+    }),
+  });
+  assert.equal(response.status, 201, await response.clone().text());
+}
+
 async function createRssBin(
   baseUrl: string,
   binId: string,
   manifest: unknown,
   config: unknown,
 ): Promise<void> {
-  const manifestJson = JSON.stringify(manifest);
+  const registered = await waitForBinRegistration(baseUrl, binId);
+  assert.equal(registered.sourceAdapter.version, rssManifestVersion(manifest));
   const configJson = JSON.stringify(config);
-  assert.ok(manifestJson !== undefined && configJson !== undefined);
-  const created = cliData<{ readonly id: string }>(
+  assert.ok(configJson !== undefined);
+  const updated = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
       "bin",
-      "create",
+      "update",
       binId,
-      "--source-adapter",
-      manifestJson,
       "--identity",
       binId + "-identity",
       "--config",
       configJson,
     ]),
-    "created",
+    "updated",
   );
-  assert.equal(created.id, binId);
+  assert.equal(updated.id, binId);
 }
 
 async function updateRssBinSourceAdapter(
@@ -3779,21 +3724,8 @@ async function updateRssBinSourceAdapter(
   binId: string,
   manifest: unknown,
 ): Promise<void> {
-  const updated = cliData<{
-    readonly id: string;
-    readonly sourceAdapter: { readonly version: string };
-  }>(
-    await cli(baseUrl, [
-      "bin",
-      "update",
-      binId,
-      "--source-adapter",
-      JSON.stringify(manifest),
-    ]),
-    "updated",
-  );
-  assert.equal(updated.id, binId);
-  assert.equal(updated.sourceAdapter.version, rssManifestVersion(manifest));
+  const registered = await waitForBinRegistration(baseUrl, binId);
+  assert.equal(registered.sourceAdapter.version, rssManifestVersion(manifest));
 }
 
 async function rebuildRssRuntimeWithComposeWatch(
@@ -4281,6 +4213,8 @@ async function runtimeProcessSnapshot(service: string): Promise<
 type ManualRunCliState = {
   readonly runId: string;
   readonly binId: string;
+  readonly createdAt: string;
+  readonly referenceTime: string;
   readonly action: string;
   readonly trigger:
     | { readonly kind: "manual" }
@@ -4663,27 +4597,29 @@ async function manualRunsCliStep(
   manifest: unknown,
   heartbeatProxy: HeartbeatDelayProxy,
 ): Promise<void> {
-  const manifestJson = JSON.stringify(manifest);
-  assert.ok(manifestJson !== undefined);
   for (const binId of ["binny-runs-one", "binny-runs-two"]) {
-    const created = cliData<{
+    const registered = await waitForBinRegistration(baseUrl, binId);
+    assert.equal(
+      registered.sourceAdapter.version,
+      rssManifestVersion(manifest),
+    );
+    const configured = cliData<{
       readonly id: string;
-      readonly execution: unknown;
+      readonly config: { readonly section: string };
     }>(
       await cli(baseUrl, [
         "bin",
-        "create",
+        "update",
         binId,
-        "--source-adapter",
-        manifestJson,
         "--identity",
         binId + "-identity",
         "--config",
         JSON.stringify({ section: "initial" }),
       ]),
-      "created",
+      "updated",
     );
-    assert.equal(created.id, binId);
+    assert.equal(configured.id, binId);
+    assert.deepEqual(configured.config, { section: "initial" });
   }
 
   await Promise.all([
@@ -4700,10 +4636,30 @@ async function manualRunsCliStep(
     gateKey,
     sourceKey: "cli-created-item",
   };
+  const invalidNativeParams = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny-runs-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        ...parameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  assert.deepEqual(invalidNativeParams.path, ["params", "gateKey"]);
   const triggered = cliData<{
     readonly runId: string;
     readonly status: string;
     readonly binId: string;
+    readonly createdAt: string;
+    readonly referenceTime: string;
   }>(
     await cli(baseUrl, [
       "run",
@@ -4717,6 +4673,7 @@ async function manualRunsCliStep(
   );
   assert.equal(triggered.status, "queued");
   assert.equal(triggered.binId, "binny-runs-one");
+  assert.equal(triggered.referenceTime, triggered.createdAt);
   await waitForSourceArrival(
     sourceControlUrl,
     gateKey,
@@ -4761,12 +4718,23 @@ async function manualRunsCliStep(
   const item = cliData<{
     readonly views: readonly {
       readonly state: {
-        readonly metadata?: { readonly section?: unknown };
+        readonly metadata?: {
+          readonly section?: unknown;
+          readonly adapterLabel?: unknown;
+          readonly actionLabel?: unknown;
+          readonly referenceTime?: unknown;
+        };
         readonly body?: { readonly text?: string };
       };
     }[];
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
   assert.equal(item.views[0]?.state.metadata?.section, "initial");
+  assert.equal(item.views[0]?.state.metadata?.adapterLabel, "runtime!");
+  assert.equal(item.views[0]?.state.metadata?.actionLabel, "collect!");
+  assert.equal(
+    item.views[0]?.state.metadata?.referenceTime,
+    triggered.referenceTime,
+  );
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
 
   const checkGateKey = "check-cli-check-unknown";
@@ -5088,6 +5056,45 @@ async function manualRunsCliStep(
     ownerBeforeStorageFailure.runtimeId,
     "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
   );
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny-runs-one",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: "cli-offline-action-input",
+        sourceKey: "cli-offline-action-input",
+      }),
+    ]),
+    "runtime_action_validation_unavailable",
+  );
+  const offlineScheduleInput = cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      "binny-runs-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: "cli-offline-schedule-input",
+        sourceKey: "cli-offline-schedule-input",
+      }),
+    ]),
+    "runtime_action_validation_unavailable",
+  );
+  assert.equal(
+    offlineScheduleInput.code,
+    "runtime_action_validation_unavailable",
+  );
   await compose([
     "run",
     "--rm",
@@ -5109,6 +5116,37 @@ async function manualRunsCliStep(
     gateKey: "schedule-cli-schedule",
     sourceKey: "schedule-cli-schedule-item",
   };
+  const schedulesBeforeNativeRejection = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "create",
+      "binny-runs-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--params",
+      JSON.stringify({
+        ...scheduleParameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  const schedulesAfterNativeRejection = cliData<{
+    readonly schedules: readonly { readonly scheduleId: string }[];
+  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  assert.deepEqual(
+    schedulesAfterNativeRejection.schedules.map(({ scheduleId }) => scheduleId),
+    schedulesBeforeNativeRejection.schedules.map(
+      ({ scheduleId }) => scheduleId,
+    ),
+  );
   const createdSchedule = cliData<{
     readonly scheduleId: string;
     readonly expression: string;
@@ -5143,6 +5181,34 @@ async function manualRunsCliStep(
       ({ scheduleId }) => scheduleId === createdSchedule.scheduleId,
     ),
   );
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "schedule",
+      "update",
+      "binny-runs-one",
+      createdSchedule.scheduleId,
+      "--params",
+      JSON.stringify({
+        ...scheduleParameters,
+        gateKey: "native-refine-reject",
+      }),
+    ]),
+    "invalid_action_parameters",
+  );
+  const preservedSchedule = cliData<{
+    readonly action: string;
+    readonly params: { readonly gateKey: string };
+  }>(
+    await cli(baseUrl, [
+      "schedule",
+      "get",
+      "binny-runs-one",
+      createdSchedule.scheduleId,
+    ]),
+    "found",
+  );
+  assert.equal(preservedSchedule.action, "collect");
+  assert.equal(preservedSchedule.params.gateKey, "schedule-cli-schedule");
   const updatedSchedule = cliData<{
     readonly expression: string;
     readonly timeZone: string;
@@ -5232,6 +5298,7 @@ async function manualRunsHttpStep(
       env: {
         BINNY_E2E_BASE_URL: baseUrl,
         BINNY_RUNS_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
+        BINNY_RUNS_RUNTIME_CONTROL_URL: "http://runtime-fifteen-one:8080",
         BINNY_RUNS_SOURCE_ADAPTER_MANIFEST: JSON.stringify(manifest),
       },
     },
@@ -5258,6 +5325,8 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server=2",
     "server",
   ]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   await waitForApiAndDatabase(baseUrl);
 
   const collectSchedule = cliData<{
@@ -5360,6 +5429,12 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   await compose(["stop", "server"]);
   await wait(65_000);
   await compose(["start", "server"]);
+  const apiUrlBeforeRestart = baseUrl;
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  process.stdout.write(
+    `计划服务端点重启后刷新：${apiUrlBeforeRestart} -> ${baseUrl}\n`,
+  );
   await waitForApiAndDatabase(baseUrl);
   await waitForRuntime(baseUrl, binId);
 
@@ -5399,6 +5474,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   if (firstRun.trigger.kind === "schedule") {
     assert.equal(firstRun.trigger.scheduleId, firstScheduleId);
     assert.equal(firstRun.trigger.scheduledFor, scheduledFor);
+    assert.equal(firstRun.referenceTime, firstRun.trigger.scheduledFor);
   }
 
   const resumedCollectSchedule = await waitFor(
@@ -5487,6 +5563,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   if (secondRun.trigger.kind === "schedule") {
     assert.equal(secondRun.trigger.scheduleId, secondScheduleId);
     assert.equal(secondRun.trigger.scheduledFor, scheduledFor);
+    assert.equal(secondRun.referenceTime, secondRun.trigger.scheduledFor);
   }
   const secondDisposition =
     secondGateKey === collectGateKey ? "material" : "available";
@@ -5591,10 +5668,11 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     "server",
   ]);
   composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
   process.stdout.write(
     "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
-  return apiBaseUrl();
+  return baseUrl;
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -5744,244 +5822,117 @@ async function manualRunControllerPartitionStep(): Promise<void> {
 }
 
 async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
-  const manifest = await createSdkManifest();
-  const manifestJson = JSON.stringify(manifest);
-  const initialConfig = JSON.stringify({ userAgent: "Binny E2E", key: "az" });
-
-  const emptyList = cliData<{ readonly bins: readonly unknown[] }>(
-    await cli(baseUrl, ["bin", "list"]),
-    "listed",
-  );
-  assert.deepEqual(emptyList.bins, []);
-
-  const created = cliData<{
-    readonly id: string;
-    readonly identityId: string;
-    readonly status: string;
-    readonly execution: { readonly status: string };
-  }>(
-    await cli(baseUrl, [
-      "bin",
-      "create",
-      "rss-main",
-      "--source-adapter",
-      manifestJson,
-      "--identity",
-      "account-one",
-      "--config",
-      initialConfig,
-    ]),
-    "created",
-  );
-  assert.equal(created.id, "rss-main");
-  assert.equal(created.identityId, "account-one");
-  assert.equal(created.status, "active");
-  assert.equal(created.execution.status, "offline");
+  const binId = "binny-runs-one";
+  const registered = await waitForBinRegistration(baseUrl, binId);
+  assert.equal(registered.id, binId);
+  assert.equal(registered.identityId, binId);
+  assert.deepEqual(registered.config, {});
+  assert.equal(registered.execution.status, "incompatible");
 
   const discovered = cliData<{
     readonly actions: Readonly<Record<string, unknown>>;
-    readonly environment: { readonly browser: { readonly required: boolean } };
     readonly execution: { readonly status: string };
-  }>(await cli(baseUrl, ["bin", "actions", "rss-main"]), "discovered");
-  assert.deepEqual(Object.keys(discovered.actions), ["check", "collect"]);
-  assert.equal(discovered.environment.browser.required, false);
-  assert.equal(discovered.execution.status, "offline");
+  }>(await cli(baseUrl, ["bin", "actions", binId]), "discovered");
+  assert.ok("check" in discovered.actions);
+  assert.ok("collect" in discovered.actions);
+  assert.ok("discover" in discovered.actions);
+  assert.equal(discovered.execution.status, "incompatible");
+
+  const blockedRun = await fetch(`${baseUrl}/bins/${binId}/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "collect", params: {} }),
+  });
+  assert.equal(blockedRun.status, 400);
+  const blockedBody = (await blockedRun.json()) as {
+    readonly error: { readonly code: string };
+  };
+  assert.equal(blockedBody.error.code, "invalid_configuration");
+
+  const rejectedNativeConfig = await fetch(`${baseUrl}/bins/${binId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ config: { section: "forbidden" } }),
+  });
+  assert.equal(rejectedNativeConfig.status, 400);
+  const rejectedBody = (await rejectedNativeConfig.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(rejectedBody.error.code, "invalid_configuration");
+  assert.deepEqual(rejectedBody.error.path, ["config", "section"]);
+  const unchanged = await waitForBinRegistration(baseUrl, binId);
+  assert.deepEqual(unchanged.config, {});
+
+  const acceptedNativeConfig = await fetch(`${baseUrl}/bins/${binId}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      identityId: "account-one",
+      config: { section: "initial" },
+    }),
+  });
+  assert.equal(acceptedNativeConfig.status, 200);
+  const acceptedBody = (await acceptedNativeConfig.json()) as {
+    readonly id: string;
+    readonly identityId: string;
+    readonly config: Record<string, unknown>;
+    readonly execution: { readonly status: string };
+  };
+  assert.equal(acceptedBody.id, binId);
+  assert.equal(acceptedBody.identityId, "account-one");
+  assert.deepEqual(acceptedBody.config, { section: "initial" });
+  assert.equal(acceptedBody.execution.status, "online");
 
   cliFailure(
     await cli(baseUrl, [
       "bin",
-      "create",
-      "rss-main",
-      "--source-adapter",
-      manifestJson,
-      "--identity",
-      "duplicate-account",
+      "update",
+      binId,
       "--config",
-      initialConfig,
-    ]),
-    "bin_already_exists",
-  );
-
-  const invalidConfiguration = cliFailure<{
-    readonly code: string;
-    readonly message: string;
-    readonly path?: readonly (string | number)[];
-  }>(
-    await cli(baseUrl, [
-      "bin",
-      "create",
-      "rss-invalid-config",
-      "--source-adapter",
-      manifestJson,
-      "--identity",
-      "account-invalid-config",
-      "--config",
-      "{}",
+      JSON.stringify({ section: "forbidden" }),
     ]),
     "invalid_configuration",
   );
-  assert.deepEqual(invalidConfiguration.path, ["config", "userAgent"]);
-  assert.match(invalidConfiguration.message, /长期配置/u);
+  const unchangedAfterCliFailure = cliData<{
+    readonly config: Record<string, unknown>;
+  }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  assert.deepEqual(unchangedAfterCliFailure.config, { section: "initial" });
 
-  const invalidRegexCreate = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "rss-regex-invalid",
-      sourceAdapter: manifest,
-      identityId: "account-regex-invalid",
-      config: { userAgent: "Binny E2E", key: "ab" },
-    }),
-  });
-  assert.equal(invalidRegexCreate.status, 400);
-  const invalidRegexCreateBody = (await invalidRegexCreate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(invalidRegexCreateBody.error.code, "invalid_configuration");
-  assert.deepEqual(invalidRegexCreateBody.error.path, ["config", "key"]);
-  assert.match(invalidRegexCreateBody.error.message, /长期配置/u);
-
-  const validRegexCreate = await fetch(baseUrl + "/bins", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: "rss-regex",
-      sourceAdapter: manifest,
-      identityId: "account-regex",
-      config: { userAgent: "Binny E2E", key: "az" },
-    }),
-  });
-  assert.equal(validRegexCreate.status, 201);
-  const validRegexCreateBody = (await validRegexCreate.json()) as {
-    readonly config: { readonly key: string };
-  };
-  assert.equal(validRegexCreateBody.config.key, "az");
-
-  const invalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      config: { userAgent: "Binny E2E", key: "bz" },
-    }),
-  });
-  assert.equal(invalidRegexUpdate.status, 400);
-  const invalidRegexUpdateBody = (await invalidRegexUpdate.json()) as {
-    readonly error: {
-      readonly code: string;
-      readonly path?: readonly (string | number)[];
-    };
-  };
-  assert.equal(invalidRegexUpdateBody.error.code, "invalid_configuration");
-  assert.deepEqual(invalidRegexUpdateBody.error.path, ["config", "key"]);
-
-  const afterInvalidRegexUpdate = await fetch(baseUrl + "/bins/rss-regex");
-  assert.equal(afterInvalidRegexUpdate.status, 200);
-  const afterInvalidRegexUpdateBody =
-    (await afterInvalidRegexUpdate.json()) as {
-      readonly config: { readonly key: string };
-    };
-  assert.equal(afterInvalidRegexUpdateBody.config.key, "az");
-
-  const validRegexUpdate = await fetch(baseUrl + "/bins/rss-regex", {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      config: { userAgent: "Binny E2E updated", key: "aaz" },
-    }),
-  });
-  assert.equal(validRegexUpdate.status, 200);
-  const validRegexUpdateBody = (await validRegexUpdate.json()) as {
-    readonly config: { readonly key: string };
-  };
-  assert.equal(validRegexUpdateBody.config.key, "aaz");
-
-  const secondary = cliData<{
-    readonly id: string;
-    readonly identityId: string;
-  }>(
-    await cli(baseUrl, [
-      "bin",
-      "create",
-      "rss-secondary",
-      "--source-adapter",
-      manifestJson,
-      "--identity",
-      "account-two",
-      "--config",
-      initialConfig,
-    ]),
-    "created",
-  );
-  assert.equal(secondary.id, "rss-secondary");
-  assert.equal(secondary.identityId, "account-two");
-
-  const listed = cliData<{
-    readonly bins: readonly {
-      readonly id: string;
-      readonly identityId: string;
-    }[];
-  }>(await cli(baseUrl, ["bin", "list"]), "listed");
-  assert.equal(listed.bins.length, 3);
-  assert.deepEqual(listed.bins.map(({ identityId }) => identityId).toSorted(), [
-    "account-one",
-    "account-regex",
-    "account-two",
-  ]);
-
-  const updatedConfig = JSON.stringify({
-    userAgent: "Binny E2E updated",
-    key: "aaz",
-  });
   const updated = cliData<{
     readonly identityId: string;
-    readonly config: { readonly userAgent: string };
+    readonly config: Record<string, unknown>;
   }>(
     await cli(baseUrl, [
       "bin",
       "update",
-      "rss-main",
+      binId,
       "--identity",
       "account-primary",
       "--config",
-      updatedConfig,
+      JSON.stringify({ section: "initial" }),
     ]),
     "updated",
   );
   assert.equal(updated.identityId, "account-primary");
-  assert.equal(updated.config.userAgent, "Binny E2E updated");
-
-  cliFailure(
-    await cli(baseUrl, ["bin", "update", "rss-main", "--config", "{}"]),
-    "invalid_configuration",
-  );
-  const afterRejectedUpdate = cliData<{
-    readonly identityId: string;
-    readonly config: { readonly userAgent: string };
-  }>(await cli(baseUrl, ["bin", "get", "rss-main"]), "found");
-  assert.equal(afterRejectedUpdate.identityId, "account-primary");
-  assert.equal(afterRejectedUpdate.config.userAgent, "Binny E2E updated");
-
-  const disabled = cliData<{ readonly status: string }>(
-    await cli(baseUrl, ["bin", "disable", "rss-main"]),
-    "disabled",
-  );
-  assert.equal(disabled.status, "disabled");
-
-  return;
+  assert.deepEqual(updated.config, { section: "initial" });
 }
 
 async function verifyRestartAndRemoval(
   baseUrl: string,
   archive: string,
   sdkResource: string,
-  retainedBinIds: readonly string[],
 ): Promise<string> {
+  const beforeRestart = cliData<{
+    readonly status: string;
+    readonly identityId: string;
+    readonly config: Record<string, unknown>;
+  }>(await cli(baseUrl, ["bin", "get", "binny-runs-one"]), "found");
+  assert.equal(beforeRestart.status, "active");
   const disabled = cliData<{ readonly status: string }>(
-    await cli(baseUrl, ["bin", "disable", "rss-main"]),
+    await cli(baseUrl, ["bin", "disable", "binny-runs-one"]),
     "disabled",
   );
   assert.equal(disabled.status, "disabled");
@@ -5995,45 +5946,17 @@ async function verifyRestartAndRemoval(
   const persisted = cliData<{
     readonly status: string;
     readonly identityId: string;
-    readonly config: { readonly userAgent: string };
-  }>(await cli(baseUrl, ["bin", "get", "rss-main"]), "found");
+    readonly config: Record<string, unknown>;
+  }>(await cli(baseUrl, ["bin", "get", "binny-runs-one"]), "found");
   assert.equal(persisted.status, "disabled");
-  assert.equal(persisted.identityId, "account-primary");
-  assert.equal(persisted.config.userAgent, "Binny E2E updated");
-
-  const persistedRegexConfiguration = cliData<{
-    readonly config: { readonly userAgent: string; readonly key: string };
-  }>(await cli(baseUrl, ["bin", "get", "rss-regex"]), "found");
-  assert.equal(
-    persistedRegexConfiguration.config.userAgent,
-    "Binny E2E updated",
-  );
-  assert.equal(persistedRegexConfiguration.config.key, "aaz");
+  assert.equal(persisted.identityId, beforeRestart.identityId);
+  assert.deepEqual(persisted.config, beforeRestart.config);
 
   const enabled = cliData<{ readonly status: string }>(
-    await cli(baseUrl, ["bin", "enable", "rss-main"]),
+    await cli(baseUrl, ["bin", "enable", "binny-runs-one"]),
     "enabled",
   );
   assert.equal(enabled.status, "active");
-
-  const removed = cliData<{ readonly removed: boolean; readonly id: string }>(
-    await cli(baseUrl, ["bin", "remove", "rss-main"]),
-    "removed",
-  );
-  assert.deepEqual(removed, { removed: true, id: "rss-main" });
-
-  cliData(await cli(baseUrl, ["bin", "remove", "rss-regex"]), "removed");
-
-  cliFailure(await cli(baseUrl, ["bin", "get", "rss-main"]), "bin_not_found");
-  cliFailure(await cli(baseUrl, ["bin", "get", "rss-regex"]), "bin_not_found");
-  cliData(await cli(baseUrl, ["bin", "remove", "rss-secondary"]), "removed");
-  const remaining = cliData<{
-    readonly bins: readonly { readonly id: string }[];
-  }>(await cli(baseUrl, ["bin", "list"]), "listed");
-  assert.deepEqual(
-    remaining.bins.map(({ id }) => id).toSorted(),
-    retainedBinIds.toSorted(),
-  );
   const archiveState = await archiveHttpStep(
     "after-restart",
     baseUrl,
@@ -6069,7 +5992,7 @@ async function verifyRestartAndRemoval(
       "item",
       itemId,
       "--bin",
-      "rss-main",
+      "binny-runs-one",
       "--as-of",
       historicalAsOf,
     ]),
@@ -6149,7 +6072,7 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         text: { kind: "literal", value: "正文 A" },
         limit: 10,
       }),
@@ -6163,7 +6086,8 @@ async function verifyRestartAndRemoval(
   assert.ok(cliSearchResult);
   assert.ok(
     cliSearchResult.matches.some(
-      (match) => match.binId === "rss-main" && match.revisionId === revisionId,
+      (match) =>
+        match.binId === "binny-runs-one" && match.revisionId === revisionId,
     ),
   );
 
@@ -6186,7 +6110,7 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         where: {
           type: "and",
           conditions: [
@@ -6263,7 +6187,7 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         where: {
           type: "and",
           conditions: [
@@ -6331,7 +6255,7 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         where: {
           type: "and",
           conditions: [
@@ -6400,7 +6324,7 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "rss-main" },
+        scope: { kind: "current", binId: "binny-runs-one" },
         where: {
           type: "path",
           steps: [],
@@ -6466,7 +6390,7 @@ async function verifyRestartAndRemoval(
       "timeline",
       itemId,
       "--bin",
-      "rss-main",
+      "binny-runs-one",
       "--limit",
       "1",
     ]),
@@ -6493,7 +6417,7 @@ async function verifyRestartAndRemoval(
       "relations",
       relationItemId,
       "--bin",
-      "rss-main",
+      "binny-runs-one",
       "--direction",
       "outgoing",
       "--as-of",
@@ -6510,7 +6434,7 @@ async function verifyRestartAndRemoval(
       "timeline",
       relationItemId,
       "--bin",
-      "rss-main",
+      "binny-runs-one",
       "--as-of",
       relationAsOf,
       "--limit",
@@ -7410,7 +7334,6 @@ async function runRssAcceptance(
 
   await compose(["stop", "--timeout", "30", "runtime-rss"]);
   assert.equal(await containerStatus(oldRuntimeContainerId), "exited");
-  await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", activeManifest);
   const interruptedResult = await waitFor(
     async () =>
       cliData<RssManualRun>(
@@ -7449,6 +7372,7 @@ async function runRssAcceptance(
   );
   await waitForRuntimeHealth("runtime-rss");
   await waitForRuntime(baseUrl, "binny-rss-one");
+  await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", activeManifest);
   const persistedInterruptedRun = cliData<RssManualRun>(
     await cli(baseUrl, ["run", "get", "binny-rss-one", interruptedRun.runId]),
     "found",
@@ -7856,13 +7780,13 @@ async function runRssAcceptance(
   if (!preserveCapacityProject) {
     const watchVersion = rssManifestVersion(activeManifest) + "-watch";
     const watchManifest = rssManifestWithVersion(activeManifest, watchVersion);
-    await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", watchManifest);
     activeManifest = watchManifest;
     const watchedUpdate = await rebuildRssRuntimeWithComposeWatch(
       baseUrl,
       imageUpdate,
       watchVersion,
     );
+    await updateRssBinSourceAdapter(baseUrl, "binny-rss-one", activeManifest);
     assert.notEqual(watchedUpdate.imageId, imageUpdate.candidateImageId);
     assert.equal(await imageId(rssRuntimeImageName), watchedUpdate.imageId);
     watchUpdateEvidence = { version: watchVersion, ...watchedUpdate };
@@ -7921,7 +7845,6 @@ async function runRssAcceptance(
   assert.deepEqual(secondBinItemV5.sourceKey, rssItemV1.sourceKey);
 
   await source.setRssVersion(6);
-  await updateRssBinSourceAdapter(baseUrl, "binny-rss-two", activeManifest);
   const secondOldImageId = await containerImageId("runtime-rss-two");
   await compose([
     "up",
@@ -7941,6 +7864,7 @@ async function runRssAcceptance(
   );
   await waitForRuntimeHealth("runtime-rss-two");
   await waitForRuntime(baseUrl, "binny-rss-two");
+  await updateRssBinSourceAdapter(baseUrl, "binny-rss-two", activeManifest);
   const separateBinRestart = await triggerRssAction(
     baseUrl,
     "binny-rss-two",
@@ -8838,30 +8762,13 @@ async function main(): Promise<void> {
         rssControlSource,
         rssImageUpdate,
       );
-      for (const binId of ["binny-runs-one", "binny-runs-two"]) {
-        const removed = cliData<{
-          readonly removed: boolean;
-          readonly id: string;
-        }>(await cli(baseUrl, ["bin", "remove", binId]), "removed");
-        assert.deepEqual(removed, { removed: true, id: binId });
-      }
-      const enabled = cliData<{ readonly status: string }>(
-        await cli(baseUrl, ["bin", "enable", "rss-main"]),
-        "enabled",
-      );
-      assert.equal(enabled.status, "active");
       const archive = await archiveHttpStep("submit", baseUrl);
       await archiveQueryValidationCliStep(baseUrl);
       await archiveAggregationCliStep(baseUrl);
       await archiveSearchPaginationCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-      baseUrl = await verifyRestartAndRemoval(
-        baseUrl,
-        archive,
-        sdkResource,
-        rssAcceptance.binIds,
-      );
+      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
       process.stdout.write(
         "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
       );

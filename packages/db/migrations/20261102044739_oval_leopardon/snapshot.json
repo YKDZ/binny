@@ -1,0 +1,37 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "81e286ac-a923-47c5-bb5f-bc603f48ea1b",
+  "prevIds": ["68770070-9dc1-4bf6-a857-47fecc1f8c23"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "reference_time"],
+      "writes": [
+        "s|col|public.manual_runs.reference_time",
+        "n|col|public.manual_runs.reference_time",
+        "e|col|public.manual_runs.reference_time"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "reference_time",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}

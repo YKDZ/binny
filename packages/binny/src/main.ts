@@ -28,7 +28,6 @@ import {
   serviceMetadataSchema,
   archiveTimelinePageSchema,
   binConfigurationSchema,
-  binCreateInputSchema,
   binErrorSchema,
   binIdSchema,
   browserIdleTimeoutSecondsSchema,
@@ -123,9 +122,6 @@ const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
 const cliArchiveAggregationInputSchema = withArchiveJsonSchemaProjection(
   z.object({ query: postgresTextSchema.min(1) }).strict(),
 );
-const sourceAdapterTextSchema = withPostgresJsonSchemaProjection(
-  jsonTextSchema.pipe(sourceAdapterManifestSchema),
-);
 const browserIdleTimeoutOptionSchema = z.string();
 
 function parseBrowserIdleTimeoutOption(
@@ -198,6 +194,17 @@ function parsedApiUrl(invocation: unknown): string | undefined {
   return invocation.input.apiUrl;
 }
 
+function stripApiUrlFromHandlerInput(handler: unknown): unknown {
+  if (typeof handler !== "function") return handler;
+  return async (context: unknown) => {
+    if (!isRecord(context) || !isRecord(context.input)) {
+      throw new Error("CLI handler input 必须是对象。");
+    }
+    const { apiUrl: _apiUrl, ...input } = context.input;
+    return await Reflect.apply(handler, undefined, [{ ...context, input }]);
+  };
+}
+
 function addApiUrlOption<Commands extends Record<string, unknown>>(
   commands: Commands,
 ): { [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]> } {
@@ -217,6 +224,7 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
             ...(isRecord(definition.fields) ? definition.fields : {}),
             apiUrl: apiUrlOptionField,
           },
+          handler: stripApiUrlFromHandlerInput(definition.handler),
           // safeExtend 会创建新对象；重新绑定投影以保留归档自定义 JSON 节点。
           input: withPostgresJsonSchemaProjection(
             definition.input.safeExtend({
@@ -635,92 +643,6 @@ function createCliContract(identity: CliCommandIdentity) {
           return outcome.data.listed({ bins: [...result.bins] });
         },
       }),
-      ...command("binCreate")({
-        kind: "command",
-        parent: "bin",
-        name: "create",
-        description: "登记信源适配器、访问身份、配置和目标。",
-        fields: {
-          id: { kind: "positional", description: "稳定的 bin 标识" },
-          sourceAdapter: {
-            kind: "valueOption",
-            longOption: "--source-adapter",
-            description: "信源适配器清单 JSON",
-          },
-          identityId: {
-            kind: "valueOption",
-            longOption: "--identity",
-            description: "访问身份标识",
-          },
-          config: {
-            kind: "valueOption",
-            longOption: "--config",
-            description: "长期配置 JSON",
-          },
-          browserIdleTimeoutSeconds: {
-            kind: "valueOption",
-            longOption: "--browser-idle-timeout-seconds",
-            description:
-              "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
-          },
-        },
-        input: withPostgresJsonSchemaProjection(
-          binCreateInputSchema
-            .omit({
-              id: true,
-              sourceAdapter: true,
-              identityId: true,
-              config: true,
-              browserIdleTimeoutSeconds: true,
-            })
-            .extend({
-              id: binIdSchema,
-              sourceAdapter: sourceAdapterTextSchema,
-              identityId: identityIdSchema,
-              config: jsonObjectTextSchema,
-              browserIdleTimeoutSeconds:
-                browserIdleTimeoutOptionSchema.optional(),
-            }),
-        ),
-        success: {
-          kind: "data",
-          variants: {
-            created: {
-              description: "已登记的 bin",
-              exitCode: 0,
-              schema: cliBinConfigurationSchema,
-              text: (bin) => outputText("已登记 bin", bin),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const { browserIdleTimeoutSeconds, ...createInput } = input;
-          const idleTimeout =
-            browserIdleTimeoutSeconds === undefined
-              ? undefined
-              : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
-          if (idleTimeout !== undefined && "error" in idleTimeout)
-            return outcome.failure.apiError(idleTimeout.error);
-          const json =
-            idleTimeout === undefined
-              ? createInput
-              : {
-                  ...createInput,
-                  browserIdleTimeoutSeconds: idleTimeout.value,
-                };
-          const response = await dependencies
-            .createClient()
-            .bins.$post({ json });
-          if (response.status === 201) {
-            return outcome.data.created(await response.json());
-          }
-          if (response.status === 400 || response.status === 409) {
-            return outcome.failure.apiError((await response.json()).error);
-          }
-          throw new Error("服务返回了未声明的创建状态。");
-        },
-      }),
       ...command("binGet")({
         kind: "command",
         parent: "bin",
@@ -791,15 +713,9 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "update",
-        description:
-          "修改访问身份、信源适配器版本、配置、目标或浏览器空闲策略。",
+        description: "修改访问身份、配置或浏览器空闲策略。",
         fields: {
           id: { kind: "positional", description: "bin 标识" },
-          sourceAdapter: {
-            kind: "valueOption",
-            longOption: "--source-adapter",
-            description: "信源适配器清单 JSON",
-          },
           identityId: {
             kind: "valueOption",
             longOption: "--identity",
@@ -821,20 +737,13 @@ function createCliContract(identity: CliCommandIdentity) {
           z
             .object({
               id: binIdSchema,
-              sourceAdapter: sourceAdapterTextSchema.optional(),
               identityId: identityIdSchema.optional(),
               config: jsonObjectTextSchema.optional(),
               browserIdleTimeoutSeconds:
                 browserIdleTimeoutOptionSchema.optional(),
             })
             .refine(
-              ({
-                sourceAdapter,
-                identityId,
-                config,
-                browserIdleTimeoutSeconds,
-              }) =>
-                sourceAdapter !== undefined ||
+              ({ identityId, config, browserIdleTimeoutSeconds }) =>
                 identityId !== undefined ||
                 config !== undefined ||
                 browserIdleTimeoutSeconds !== undefined,

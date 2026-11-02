@@ -18,6 +18,7 @@ import {
   manualRunCompletionSchema,
   runtimeHeartbeatIntervalMs,
   runtimeEnvironmentKindSchema,
+  runtimeControlUrlSchema,
   runtimeProtocolVersion,
   type ManualRunCompletion,
   type ManualRunExecution,
@@ -44,6 +45,9 @@ const sourceAdapterPath =
   process.env.BINNY_SOURCE_ADAPTER_ENTRY ?? "/app/dist/index.js";
 const binId = process.env.BINNY_BIN_ID;
 const apiUrl = process.env.BINNY_API_URL;
+const runtimeControlUrl = runtimeControlUrlSchema.parse(
+  process.env.BINNY_RUNTIME_CONTROL_URL,
+);
 const runtimePort = Number(process.env.BINNY_RUNTIME_PORT ?? "8080");
 const environmentKind = runtimeEnvironmentKindSchema.parse(
   process.env.BINNY_RUNTIME_ENVIRONMENT ?? "lightweight",
@@ -288,6 +292,7 @@ async function sendBrowserPowerEventNow(
         ownerLockAcquired: true,
         activeRunId,
         claimInFlight,
+        runtimeControlUrl,
         sourceAdapter: manifest,
         environment:
           event.event === "not_started"
@@ -776,6 +781,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         action: run.action,
         params: run.params,
         config: run.config,
+        referenceTime: run.referenceTime,
       },
       ...(browserConnection === undefined
         ? {}
@@ -1048,6 +1054,7 @@ async function heartbeat(
         ownerLockAcquired: true,
         activeRunId,
         claimInFlight,
+        runtimeControlUrl,
         ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
         ...(humanSessionEvent === undefined ? {} : { humanSessionEvent }),
         sourceAdapter: manifest,
