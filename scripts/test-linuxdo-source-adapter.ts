@@ -53,6 +53,8 @@ type FixtureState = {
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
+  readonly dailyTopicOverlapCount: number;
+  readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
   readonly replyVersion: number;
@@ -338,6 +340,8 @@ async function sourceState(): Promise<{
     readonly action: string;
     readonly path: string;
     readonly authenticated?: boolean;
+    readonly topicIds?: readonly number[];
+    readonly moreTopicsUrl?: string | null;
   }[];
 }> {
   const response = await fetch(sourceUrl("/__control/state"), {
@@ -350,6 +354,8 @@ async function sourceState(): Promise<{
       readonly action: string;
       readonly path: string;
       readonly authenticated?: boolean;
+      readonly topicIds?: readonly number[];
+      readonly moreTopicsUrl?: string | null;
     }[];
   };
 }
@@ -364,6 +370,14 @@ async function updateFixtureState(
     signal: AbortSignal.timeout(2_000),
   });
   assert.equal(response.status, 200, await response.text());
+}
+
+async function clearSourceEvents(): Promise<void> {
+  const response = await fetch(sourceUrl("/__control/clear-events"), {
+    method: "POST",
+    signal: AbortSignal.timeout(2_000),
+  });
+  assert.equal(response.status, 204);
 }
 
 async function waitForApi(): Promise<void> {
@@ -1826,6 +1840,133 @@ async function verifyDailyCollection(): Promise<void> {
     "日期读取失败后，应保留此前已经提交的主题归档。",
   );
   await updateFixtureState({ invalidCreatedAtTopicIds: [] });
+
+  const dailyParentTarget = {
+    id: "category-45",
+    kind: "category",
+    categoryId: 45,
+    categorySlugPath: "daily",
+  } as const;
+  await updateFixtureState({ dailyTopicOverlapCount: 2 });
+  await clearSourceEvents();
+  const beforeOverlappingPages = await sourceState();
+  const overlappingPages = await trigger(
+    "collect",
+    {
+      targets: [dailyParentTarget],
+      date: "2026-11-01",
+      timeZone: "UTC",
+      maxTopics: 501,
+    },
+    300_000,
+  );
+  const afterOverlappingPages = await sourceState();
+  const parentPageEvents = afterOverlappingPages.events
+    .slice(beforeOverlappingPages.events.length)
+    .filter(
+      ({ action, path }) =>
+        action === "topic-list-payload" &&
+        path.startsWith("/c/daily/45/l/latest.json"),
+    );
+  const parentFirstPage = parentPageEvents.find(
+    ({ path }) =>
+      new URL(path, "http://linuxdo-fixture").searchParams.get("page") === null,
+  );
+  const parentSecondPage = parentPageEvents.find(
+    ({ path }) =>
+      new URL(path, "http://linuxdo-fixture").searchParams.get("page") === "1",
+  );
+  await updateFixtureState({
+    dailyTopicOverlapCount: 1,
+    paginationOrderMutationEnabled: true,
+  });
+  await clearSourceEvents();
+  const beforeChangedOrder = await sourceState();
+  const changedOrder = await trigger("collect", {
+    targets: linuxdoTargets("latest"),
+    date: "2026-11-01",
+    timeZone: "UTC",
+  });
+  const afterChangedOrder = await sourceState();
+  await updateFixtureState({ paginationOrderMutationEnabled: false });
+  const changedOrderPage = afterChangedOrder.events
+    .slice(beforeChangedOrder.events.length)
+    .find(
+      ({ action, path }) =>
+        action === "topic-list-payload" && path.startsWith("/latest.json"),
+    );
+  assert.deepEqual(changedOrderPage?.topicIds, [800001]);
+  assert.ok(changedOrderPage?.moreTopicsUrl?.includes("order=activity"));
+  assert.deepEqual(
+    parentFirstPage?.topicIds?.slice(-2),
+    parentSecondPage?.topicIds?.slice(0, 2),
+    `page1 明确重复上一页末尾的两个主题：${JSON.stringify(parentPageEvents)}`,
+  );
+  assert.ok(
+    overlappingPages.status === "completed" && changedOrder.status === "failed",
+    JSON.stringify({
+      overlappingPages: {
+        status: overlappingPages.status,
+        errorCode: overlappingPages.result?.error?.code,
+        message: overlappingPages.result?.error?.message,
+        completeness: overlappingPages.result?.output?.collectionCompleteness,
+      },
+      changedOrder: {
+        status: changedOrder.status,
+        errorCode: changedOrder.result?.error?.code,
+        completeness: changedOrder.result?.output?.collectionCompleteness,
+        completedScopes: changedOrder.result?.completedScopes,
+        fetchedLaterMatchingTopic: afterChangedOrder.events
+          .slice(beforeChangedOrder.events.length)
+          .some(
+            ({ action, path }) =>
+              action === "topic" && path === "/t/800003.json",
+          ),
+      },
+    }),
+  );
+
+  assert.equal(
+    overlappingPages.status,
+    "completed",
+    JSON.stringify(overlappingPages.result?.error),
+  );
+  assert.equal(
+    overlappingPages.result?.output?.collectionCompleteness,
+    "complete",
+  );
+  assert.ok(
+    overlappingPages.result?.output?.completedScopes?.includes(
+      "target:category-45",
+    ),
+  );
+  assert.equal(changedOrder.status, "failed", JSON.stringify(changedOrder));
+  assert.equal(
+    changedOrder.result?.error?.code,
+    "discourse_topic_list_pagination_invalid",
+    JSON.stringify({ overlappingPages, changedOrder }),
+  );
+  assert.ok(
+    changedOrder.result?.error?.impact?.includes("target:latest"),
+    JSON.stringify(changedOrder),
+  );
+  assert.ok(
+    changedOrder.result?.completedScopes?.includes("post:80000100"),
+    JSON.stringify(changedOrder),
+  );
+  assert.equal(
+    afterChangedOrder.events
+      .slice(beforeChangedOrder.events.length)
+      .some(
+        ({ action, path }) => action === "topic" && path === "/t/800003.json",
+      ),
+    false,
+    "排序改变后不得把日期边界用于跳过后续匹配主题。",
+  );
+  assert.equal(
+    (await searchArchiveItem("排序变更前受控主题 800001")).sourceKey.key,
+    "post:80000100",
+  );
 
   const completeAtLimit = await trigger(
     "collect",

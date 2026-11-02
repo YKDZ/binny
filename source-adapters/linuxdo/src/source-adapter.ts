@@ -765,6 +765,7 @@ function paginationUrl(
   value: string,
   currentUrl: URL,
   target: Extract<ConfiguredTarget, { kind: "latest" | "category" }>,
+  requireCreatedOrder = false,
 ): URL {
   let nextUrl: URL;
   try {
@@ -811,6 +812,22 @@ function paginationUrl(
       message: "Linux.do 列表分页链接超出了所选目标范围。",
       impact: "本次只处理了分页链接前的主题。",
       suggestion: "检查受控目标的 Discourse 列表响应后重新运行 collect。",
+      requiresHuman: false,
+    });
+  }
+  if (
+    requireCreatedOrder &&
+    ((nextUrl.searchParams.has("order") &&
+      nextUrl.searchParams.get("order") !== "created") ||
+      (nextUrl.searchParams.has("ascending") &&
+        nextUrl.searchParams.get("ascending") !== "false"))
+  ) {
+    throw sourceAdapterActionError({
+      code: "discourse_topic_list_pagination_invalid",
+      message: "Linux.do 日期采集分页链接改变了创建时间降序排序。",
+      impact: "本次无法依据该分页顺序确认日期范围已穷尽。",
+      suggestion:
+        "检查列表分页是否保持 order=created&ascending=false 后，以相同固定日期重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -2054,6 +2071,7 @@ async function collectListTarget(
 ): Promise<"complete" | "limited"> {
   const initialUrl = targetListUrl(site, target, maxTopics, dateWindow);
   const visitedPages = new Set<string>();
+  const seenOnTarget = new Set<number>();
   let pageUrl: URL | undefined = initialUrl;
   let previousCreatedAt: number | undefined;
   try {
@@ -2088,7 +2106,8 @@ async function collectListTarget(
         topic,
         createdAt: topicCreatedAt(topic.id, topic.created_at),
       }));
-      for (const { createdAt } of listedTopics) {
+      for (const { topic, createdAt } of listedTopics) {
+        if (seenOnTarget.has(topic.id)) continue;
         if (previousCreatedAt !== undefined && createdAt > previousCreatedAt) {
           throw sourceAdapterActionError({
             code: "discourse_topic_list_order_invalid",
@@ -2100,6 +2119,7 @@ async function collectListTarget(
           });
         }
         previousCreatedAt = createdAt;
+        seenOnTarget.add(topic.id);
       }
       for (const { topic, createdAt } of listedTopics) {
         if (createdAt < dateWindow.startInclusive) {
@@ -2135,7 +2155,7 @@ async function collectListTarget(
         completedScopes.push(targetScope(target));
         return "complete";
       }
-      pageUrl = paginationUrl(topicList.more_topics_url, pageUrl, target);
+      pageUrl = paginationUrl(topicList.more_topics_url, pageUrl, target, true);
     }
     completedScopes.push(targetScope(target));
     return "complete";

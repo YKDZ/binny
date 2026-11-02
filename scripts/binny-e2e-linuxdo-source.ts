@@ -16,6 +16,8 @@ type SourceState = {
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
+  readonly dailyTopicOverlapCount: number;
+  readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
   readonly replyVersion: number;
@@ -31,6 +33,8 @@ type SourceEvent = {
   readonly action: string;
   readonly path: string;
   readonly authenticated?: boolean;
+  readonly topicIds?: readonly number[];
+  readonly moreTopicsUrl?: string | null;
 };
 
 const rootPostId = 240_001;
@@ -72,6 +76,8 @@ let activeState: SourceState = {
   categoriesUnavailable: false,
   categoriesInvalidResponse: false,
   dailyCollectionEnabled: false,
+  dailyTopicOverlapCount: 1,
+  paginationOrderMutationEnabled: false,
   invalidCreatedAtTopicIds: [],
   topicVersion: 1,
   replyVersion: 1,
@@ -112,11 +118,20 @@ function isAuthenticated(
     .some((value) => value.trim() === "binny-discovery_session=fixture");
 }
 
-function record(action: string, path: string, authenticated?: boolean): void {
+function record(
+  action: string,
+  path: string,
+  authenticated?: boolean,
+  pagination?: {
+    readonly topicIds: readonly number[];
+    readonly moreTopicsUrl: string | null;
+  },
+): void {
   events.push({
     action,
     path,
     ...(authenticated === undefined ? {} : { authenticated }),
+    ...(pagination === undefined ? {} : pagination),
   });
   if (events.length > 10_000) events.shift();
 }
@@ -214,6 +229,34 @@ function legacyTopicCreatedAt(topicId: number): string {
 }
 
 function discoveredTopic(topicId: number): Record<string, unknown> {
+  const paginationTopic = paginationOrderTopicDetails(topicId);
+  if (paginationTopic !== undefined) {
+    const postId = topicId * 100;
+    const topicName = "排序变更前受控主题 " + String(topicId);
+    return {
+      id: topicId,
+      title: topicName,
+      slug: "pagination-order-topic-" + String(topicId),
+      created_at: paginationTopic.createdAt,
+      category_id: 42,
+      post_stream: {
+        posts: [
+          {
+            id: postId,
+            topic_id: topicId,
+            post_number: 1,
+            username: "fixture-pagination-author",
+            name: "分页排序示例作者",
+            created_at: paginationTopic.createdAt,
+            updated_at: paginationTopic.createdAt,
+            cooked: "<p>" + topicName + " 的正文。</p>",
+          },
+        ],
+        stream: [postId],
+      },
+    };
+  }
+
   const dailyTopic = dailyTopicDetails(topicId);
   if (dailyTopic !== undefined) {
     const postId = topicId * 100;
@@ -302,6 +345,28 @@ function discoveredTopicList(
   childCategory = false,
   categoryId?: number,
 ): Record<string, unknown> {
+  if (activeState.paginationOrderMutationEnabled && !category) {
+    const rows = [
+      { id: 800_001, createdAt: "2026-11-01T09:00:00.000Z" },
+      { id: 800_002, createdAt: "2026-10-31T23:00:00.000Z" },
+      { id: 800_003, createdAt: "2026-11-01T08:00:00.000Z" },
+    ];
+    const row = rows[page];
+    const moreTopicsUrl =
+      page < rows.length - 1
+        ? "/latest.json?page=" +
+          String(page + 1) +
+          "&order=activity&ascending=false"
+        : undefined;
+    return {
+      topic_list: {
+        topics:
+          row === undefined ? [] : [{ id: row.id, created_at: row.createdAt }],
+        more_topics_url: moreTopicsUrl,
+      },
+    };
+  }
+
   if (activeState.dailyCollectionEnabled) {
     const pathname =
       categoryId === 45
@@ -319,7 +384,8 @@ function discoveredTopicList(
         : categoryId === undefined
           ? dailyTopicsForAllVisibleCategories()
           : [];
-    const offset = page === 0 ? 0 : page * (perPage === 1 ? 1 : perPage - 1);
+    const overlapCount = perPage === 1 ? 0 : activeState.dailyTopicOverlapCount;
+    const offset = page === 0 ? 0 : page * (perPage - overlapCount);
     const pageRows = rows.slice(offset, offset + perPage);
     const hasMore = offset + perPage < rows.length;
     return topicListResponse(
@@ -416,6 +482,18 @@ function dailyTopicsForCategory(categoryId: number) {
   return [];
 }
 
+function paginationOrderTopicDetails(
+  topicId: number,
+): { readonly id: number; readonly createdAt: string } | undefined {
+  const topics = new Map([
+    [800_001, "2026-11-01T09:00:00.000Z"],
+    [800_002, "2026-10-31T23:00:00.000Z"],
+    [800_003, "2026-11-01T08:00:00.000Z"],
+  ]);
+  const createdAt = topics.get(topicId);
+  return createdAt === undefined ? undefined : { id: topicId, createdAt };
+}
+
 function dailyTopicsForAllVisibleCategories() {
   return [
     ...dailyTopicsForCategory(45),
@@ -498,8 +576,17 @@ function updateState(value: unknown): boolean {
     "categoriesUnavailable",
     "categoriesInvalidResponse",
     "dailyCollectionEnabled",
+    "paginationOrderMutationEnabled",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
+  }
+  if (
+    "dailyTopicOverlapCount" in updates &&
+    (!Number.isSafeInteger(updates.dailyTopicOverlapCount) ||
+      Number(updates.dailyTopicOverlapCount) < 1 ||
+      Number(updates.dailyTopicOverlapCount) > 99)
+  ) {
+    return false;
   }
   for (const key of [
     "omittedPostIds",
@@ -546,6 +633,12 @@ const server = createServer((request, response) => {
     }
     if (request.method === "GET" && pathname === "/__control/state") {
       sendJson(response, 200, { state: activeState, events: [...events] });
+      return;
+    }
+    if (request.method === "POST" && pathname === "/__control/clear-events") {
+      events.length = 0;
+      response.writeHead(204);
+      response.end();
       return;
     }
     if (request.method === "POST" && pathname === "/__control/state") {
@@ -758,17 +851,29 @@ const server = createServer((request, response) => {
         sendJson(response, 200, {});
         return;
       }
-      sendJson(
-        response,
-        200,
-        discoveredTopicList(
-          topicListMatch.category,
-          listPage,
-          Number(url.searchParams.get("per_page") ?? "30"),
-          topicListMatch.childCategory,
-          topicListMatch.categoryId,
-        ),
+      const responseBody = discoveredTopicList(
+        topicListMatch.category,
+        listPage,
+        Number(url.searchParams.get("per_page") ?? "30"),
+        topicListMatch.childCategory,
+        topicListMatch.categoryId,
       );
+      const listedTopics = responseBody as {
+        readonly topic_list: {
+          readonly topics: readonly { readonly id: number }[];
+          readonly more_topics_url?: string | null;
+        };
+      };
+      record(
+        "topic-list-payload",
+        pathname + "?" + url.searchParams.toString(),
+        authenticated,
+        {
+          topicIds: listedTopics.topic_list.topics.map(({ id }) => id),
+          moreTopicsUrl: listedTopics.topic_list.more_topics_url ?? null,
+        },
+      );
+      sendJson(response, 200, responseBody);
       return;
     }
     const postsMatch = /^\/t\/(\d+)\/posts\.json$/u.exec(pathname);
