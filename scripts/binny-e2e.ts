@@ -5309,6 +5309,13 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
       "removed",
     );
     recoveryScheduleRemoved = true;
+    const cancelledRecoveryRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "cancel", binId, recoveryRun.runId]),
+      "cancellation",
+    );
+    assert.equal(cancelledRecoveryRun.runId, recoveryRun.runId);
+    assert.equal(cancelledRecoveryRun.status, "cancelled");
+    assert.ok(cancelledRecoveryRun.stopConfirmedAt);
   } finally {
     if (serverAPaused) {
       const unpausedServer = await run(
