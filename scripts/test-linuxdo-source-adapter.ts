@@ -796,7 +796,7 @@ async function verifyCategoryDiscovery(): Promise<void> {
       ),
   );
   const archived = await searchArchiveItem("发现主题 2499");
-  assert.equal(archived.sourceKey.key, "topic:2499");
+  assert.equal(archived.sourceKey.key, "post:249900");
   assert.equal(binState(archived).capture.scope.topicId, 2499);
 }
 
