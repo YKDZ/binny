@@ -92,11 +92,24 @@ const checkParamsSchema = z
       });
     }
   });
+const collectionDateSchema = z
+  .string()
+  .regex(/^(?:today|yesterday|\d{4}-\d{2}-\d{2})$/u)
+  .refine(
+    (value) =>
+      value === "today" || value === "yesterday" || isValidCalendarDate(value),
+    "日期必须是 today、yesterday 或有效的 YYYY-MM-DD。",
+  );
+const collectionTimeZoneSchema = z
+  .string()
+  .min(1, "必须提供 IANA 时区。")
+  .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。");
 const collectParamsSchema = z
   .object({
     topicId: topicIdSchema.optional(),
     targets: actionTargetsSchema.optional(),
-    createdAfter: z.iso.datetime().optional(),
+    date: collectionDateSchema,
+    timeZone: collectionTimeZoneSchema,
     maxTopics: z.number().int().min(1).max(500).optional(),
   })
   .strict()
@@ -718,7 +731,7 @@ function targetListUrl(
   site: ReturnType<typeof siteFromConfig>,
   target: Extract<ConfiguredTarget, { kind: "latest" | "category" }>,
   maxTopics: number,
-  createdAfter: string | undefined,
+  dateWindow?: CollectionDateWindow,
 ): URL {
   const pathname =
     target.kind === "latest"
@@ -729,7 +742,7 @@ function targetListUrl(
           .join("/")}/${String(target.categoryId)}/l/latest.json`;
   const url = new URL(pathname, site.origin);
   url.searchParams.set("per_page", String(Math.min(maxTopics, 100)));
-  if (createdAfter !== undefined) {
+  if (dateWindow !== undefined) {
     url.searchParams.set("order", "created");
     url.searchParams.set("ascending", "false");
   }
@@ -1770,23 +1783,151 @@ async function collectTopicContent(
   }
 }
 
-function topicMatchesCutoff(
+type CollectionDateWindow = {
+  readonly startInclusive: number;
+  readonly endExclusive: number;
+};
+
+function isValidCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+  );
+}
+
+function isValidTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function localDateKey(date: Date, formatter: Intl.DateTimeFormat): string {
+  const parts = new Map(
+    formatter
+      .formatToParts(date)
+      .map(({ type, value }) => [type, value] as const),
+  );
+  const year = parts.get("year");
+  const month = parts.get("month");
+  const day = parts.get("day");
+  if (year === undefined || month === undefined || day === undefined) {
+    throw new Error("无法读取 IANA 时区的本地日历日期。");
+  }
+  return `${year.padStart(4, "0")}-${month}-${day}`;
+}
+
+function shiftCalendarDate(value: string, days: number): string {
+  const date = new Date(`${value}T12:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function localDateStart(
+  value: string,
+  formatter: Intl.DateTimeFormat,
+): Date | undefined {
+  const center = Date.parse(`${value}T12:00:00.000Z`);
+  const spanMs = 36 * 60 * 60 * 1000;
+  let lower = center - spanMs;
+  let upper = center + spanMs;
+  if (
+    localDateKey(new Date(lower), formatter) >= value ||
+    localDateKey(new Date(upper), formatter) < value
+  ) {
+    return undefined;
+  }
+
+  while (upper - lower > 1) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (localDateKey(new Date(middle), formatter) >= value) upper = middle;
+    else lower = middle;
+  }
+  if (localDateKey(new Date(upper), formatter) !== value) return undefined;
+  return new Date(upper);
+}
+
+function collectionDateWindow(
+  params: Pick<CollectParams, "date" | "timeZone">,
+  referenceTime: string,
+): CollectionDateWindow {
+  const formatter = new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
+    timeZone: params.timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const referenceMilliseconds = Date.parse(referenceTime);
+  if (!Number.isFinite(referenceMilliseconds)) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_reference_time_invalid",
+      message: "本次运行没有有效的固定 referenceTime。",
+      impact: "无法确定 Linux.do 的日期范围，因此没有访问信源。",
+      suggestion: "重新创建动作运行；如果问题持续，请检查运行快照。",
+      requiresHuman: false,
+    });
+  }
+
+  const referenceDate = new Date(referenceMilliseconds);
+  const today = localDateKey(referenceDate, formatter);
+  const selectedDate =
+    params.date === "today"
+      ? today
+      : params.date === "yesterday"
+        ? shiftCalendarDate(today, -1)
+        : params.date;
+  if (selectedDate > today) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_collection_date_in_future",
+      message: "未来日期不能作为完整自然日采集。",
+      impact: "本次未访问 Linux.do，也没有归档资料。",
+      suggestion: "选择当天、前一天或已经结束的指定日期。",
+      requiresHuman: false,
+    });
+  }
+
+  const start = localDateStart(selectedDate, formatter);
+  const isCurrentDate = selectedDate === today;
+  const end = isCurrentDate
+    ? referenceDate
+    : localDateStart(shiftCalendarDate(selectedDate, 1), formatter);
+  if (start === undefined || end === undefined) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_collection_date_unavailable",
+      message: `日期 ${selectedDate} 在时区 ${params.timeZone} 中没有完整的自然日范围。`,
+      impact: "本次未访问 Linux.do，也没有归档资料。",
+      suggestion: "选择该时区存在的自然日，或使用其他 IANA 时区。",
+      requiresHuman: false,
+    });
+  }
+  return {
+    startInclusive: start.getTime(),
+    endExclusive: end.getTime(),
+  };
+}
+
+function topicMatchesDateWindow(
   topicId: number,
   createdAt: string | undefined,
-  createdAfter: string | undefined,
+  dateWindow: CollectionDateWindow,
 ): boolean {
-  if (createdAfter === undefined) return true;
   const created = createdAt === undefined ? Number.NaN : Date.parse(createdAt);
   if (!Number.isFinite(created)) {
     throw sourceAdapterActionError({
       code: "discourse_topic_created_at_invalid",
-      message: `主题 ${String(topicId)} 没有有效的创建时间，无法应用 createdAfter。`,
+      message: `主题 ${String(topicId)} 没有有效的创建时间，无法应用日期范围。`,
       impact: "本次无法确认该主题是否位于所选时间范围。",
       suggestion: "检查 Discourse 列表中的 created_at 后重新运行。",
       requiresHuman: false,
     });
   }
-  return created >= Date.parse(createdAfter);
+  return (
+    created >= dateWindow.startInclusive && created < dateWindow.endExclusive
+  );
 }
 
 type DiscoveryProgress = {
@@ -1801,11 +1942,11 @@ async function collectListTarget(
   site: ReturnType<typeof siteFromConfig>,
   target: Extract<ConfiguredTarget, { kind: "latest" | "category" }>,
   maxTopics: number,
-  createdAfter: string | undefined,
+  dateWindow: CollectionDateWindow,
   progress: DiscoveryProgress,
   completedScopes: string[],
 ): Promise<"complete" | "limited"> {
-  const initialUrl = targetListUrl(site, target, maxTopics, createdAfter);
+  const initialUrl = targetListUrl(site, target, maxTopics, dateWindow);
   const visitedPages = new Set<string>();
   let pageUrl: URL | undefined = initialUrl;
   while (pageUrl !== undefined) {
@@ -1825,10 +1966,10 @@ async function collectListTarget(
       if (progress.seenTopicIds.has(listedTopic.id)) continue;
       progress.seenTopicIds.add(listedTopic.id);
       if (
-        !topicMatchesCutoff(
+        !topicMatchesDateWindow(
           listedTopic.id,
           listedTopic.created_at,
-          createdAfter,
+          dateWindow,
         )
       ) {
         continue;
@@ -1913,6 +2054,7 @@ async function collectTopic(
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
   try {
+    const dateWindow = collectionDateWindow(params, context.referenceTime);
     return await withSharedBrowser(context, async ({ page, request }) => {
       const session = await readSessionAccess(page, site, context.signal);
       if (session.kind === "unavailable") {
@@ -1927,15 +2069,13 @@ async function collectTopic(
         );
         if (access.kind === "unavailable") throw failureFromAccess(access);
         if (
-          !topicMatchesCutoff(
+          !topicMatchesDateWindow(
             params.topicId,
             access.topic.created_at,
-            params.createdAfter,
+            dateWindow,
           )
         ) {
-          completedScopes.push(
-            `${topicScope(params.topicId)}:filtered:createdAfter`,
-          );
+          completedScopes.push(`${topicScope(params.topicId)}:filtered:date`);
           return { completedScopes };
         }
         await collectTopicContent(
@@ -1977,15 +2117,13 @@ async function collectTopic(
           );
           if (access.kind === "unavailable") throw failureFromAccess(access);
           if (
-            !topicMatchesCutoff(
+            !topicMatchesDateWindow(
               target.topicId,
               access.topic.created_at,
-              params.createdAfter,
+              dateWindow,
             )
           ) {
-            completedScopes.push(
-              `${targetScope(target)}:filtered:createdAfter`,
-            );
+            completedScopes.push(`${targetScope(target)}:filtered:date`);
             continue;
           }
           if (progress.collectedTopics >= maxTopics) {
@@ -2015,7 +2153,7 @@ async function collectTopic(
           site,
           target,
           maxTopics,
-          params.createdAfter,
+          dateWindow,
           progress,
           completedScopes,
         );

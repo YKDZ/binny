@@ -19,7 +19,19 @@ export type LinuxdoCommandRunner = (
 
 export type LinuxdoManualRun = {
   readonly runId: string;
-  readonly status: "queued" | "running" | "completed" | "failed";
+  readonly status:
+    | "queued"
+    | "executing"
+    | "cancelling"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  readonly referenceTime?: string;
+  readonly trigger?: {
+    readonly kind: string;
+    readonly scheduleId?: string;
+    readonly scheduledFor?: string;
+  };
   readonly result?: {
     readonly output?: {
       readonly completedScopes?: readonly string[];
@@ -359,7 +371,7 @@ export async function linuxdoUserJourney(input: {
     cli,
     binId,
     "collect",
-    { topicId },
+    { topicId, date: "2026-10-28", timeZone: "UTC" },
   );
   assert.equal(loginRequiredCollection.status, "failed");
   assert.equal(loginRequiredCollection.result?.error?.code, "login_required");
@@ -488,6 +500,8 @@ export async function linuxdoUserJourney(input: {
 
   const firstCollection = await triggerLinuxdoRun(cli, binId, "collect", {
     topicId,
+    date: "2026-10-28",
+    timeZone: "UTC",
   });
   assert.equal(
     firstCollection.status,
