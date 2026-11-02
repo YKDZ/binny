@@ -26,6 +26,7 @@
     "format:write": "oxfmt --write .",
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
+    "test": "node --conditions=source --test --test-reporter=spec 'test/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
     "build:fixture": "rm -rf fixture-dist && tsc -p tsconfig.fixture.json --pretty false"
