@@ -6,6 +6,8 @@ import {
 import type { Server } from "node:net";
 
 import {
+  runtimeActionParametersValidationInputSchema,
+  runtimeActionParametersValidationPath,
   runtimeConfigurationValidationInputSchema,
   runtimeConfigurationValidationPath,
   runtimeProtocolVersion,
@@ -120,6 +122,86 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
             error: {
               code: "invalid_configuration",
               message: issue?.message ?? "长期配置不符合信源适配器声明。",
+              ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
+            },
+          });
+          return;
+        }
+
+        sendJson(response, 200, { valid: true });
+        return;
+      }
+
+      if (
+        request.method === "POST" &&
+        new URL(request.url ?? "/", "http://runtime.internal").pathname ===
+          runtimeActionParametersValidationPath
+      ) {
+        let body: unknown;
+        try {
+          body = await readJson(request);
+        } catch {
+          sendJson(response, 400, {
+            error: {
+              code: "invalid_input",
+              message: "请求正文必须是有效 JSON。",
+            },
+          });
+          return;
+        }
+
+        const checked =
+          runtimeActionParametersValidationInputSchema.safeParse(body);
+        if (!checked.success) {
+          const issue = checked.error.issues[0];
+          sendJson(response, 400, {
+            error: {
+              code: "invalid_input",
+              message: issue?.message ?? "动作参数验证请求格式无效。",
+              ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
+            },
+          });
+          return;
+        }
+
+        if (
+          checked.data.sourceAdapterId !== manifest.sourceAdapter.id ||
+          checked.data.sourceAdapterVersion !== manifest.sourceAdapter.version
+        ) {
+          sendJson(response, 409, {
+            valid: false,
+            error: {
+              code: "source_adapter_version_mismatch",
+              message: "动作参数验证请求与当前运行器的信源适配器版本不一致。",
+            },
+          });
+          return;
+        }
+
+        const action = options.sourceAdapter.actions[checked.data.action];
+        if (action === undefined) {
+          sendJson(response, 422, {
+            valid: false,
+            error: {
+              code: "action_not_found",
+              message: "当前运行器没有请求的动作。",
+              path: ["action"],
+            },
+          });
+          return;
+        }
+
+        const parsed = await parseSourceAdapterInput(
+          action.params,
+          checked.data.params,
+        );
+        if (!parsed.success) {
+          const issue = parsed.error.issues[0];
+          sendJson(response, 422, {
+            valid: false,
+            error: {
+              code: "invalid_action_parameters",
+              message: issue?.message ?? "动作参数不符合信源适配器声明。",
               ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
             },
           });

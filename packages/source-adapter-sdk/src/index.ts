@@ -116,6 +116,7 @@ export interface SourceAdapterContext<TConfig = unknown> {
   readonly binId: string;
   readonly identityId: string;
   readonly runId: string;
+  readonly referenceTime: string;
   readonly sourceAdapterVersion: string;
   readonly config: TConfig;
   readonly signal: AbortSignal;

@@ -40,6 +40,27 @@ const diagnosticOutputSchema = z.object({
     }),
   ),
 });
+const collectParamsSchema = z
+  .object({
+    sourceUrl: z.url(),
+    gateKey: z.string().min(1),
+    sourceKey: z.string().min(1),
+    actionLabel: z
+      .string()
+      .default("collect")
+      .transform((value) => value + "!"),
+    invalidOutput: z.boolean().optional(),
+    waitBeforeSourceMs: z.number().int().min(0).max(60_000).optional(),
+    waitAfterCommitMs: z.number().int().min(0).max(60_000).optional(),
+    validationDelayMs: z.number().int().min(0).max(10_000).optional(),
+  })
+  .refine(
+    async ({ gateKey, validationDelayMs }) => {
+      if (validationDelayMs !== undefined) await delay(validationDelayMs);
+      return gateKey !== "native-refine-reject";
+    },
+    { path: ["gateKey"], message: "受控动作参数 refine 拒绝该标记。" },
+  );
 
 export default defineSourceAdapter({
   id: "binny-runs.manual-run-fixture",
@@ -108,14 +129,7 @@ export default defineSourceAdapter({
     }),
     collect: defineSourceAdapterAction(configurationSchema, {
       description: "从受控信源解析并提交资料。",
-      params: z.object({
-        sourceUrl: z.url(),
-        gateKey: z.string().min(1),
-        sourceKey: z.string().min(1),
-        invalidOutput: z.boolean().optional(),
-        waitBeforeSourceMs: z.number().int().min(0).max(60_000).optional(),
-        waitAfterCommitMs: z.number().int().min(0).max(60_000).optional(),
-      }),
+      params: collectParamsSchema,
       output: z.object({ completedScopes: z.array(z.string()) }),
       async execute(context, params) {
         if (params.waitBeforeSourceMs !== undefined)
@@ -176,6 +190,9 @@ export default defineSourceAdapter({
               metadata: {
                 title: source.title,
                 section: context.config.section,
+                adapterLabel: context.config.label,
+                actionLabel: params.actionLabel,
+                referenceTime: context.referenceTime,
               },
               body: { text: source.text },
               capture: {
