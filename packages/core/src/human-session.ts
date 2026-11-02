@@ -380,7 +380,7 @@ export async function applyRuntimeHumanSessionHeartbeat(
       reservation === undefined ||
       reservation.status === "stopping" ||
       reservation.status === "unknown" ||
-      (reservation.requiresReservationId && !options.supportsReservationId)
+      !options.supportsReservationId
     )
       return undefined;
     const tunnelToken = randomBytes(32).toString("base64url");

@@ -148,10 +148,6 @@ export const browserCapacityReservations = pgTable(
     binId: text("bin_id").notNull(),
     runtimeId: text("runtime_id").notNull(),
     ownerGeneration: bigint("owner_generation", { mode: "bigint" }).notNull(),
-    // 迁移前创建的旧 controller 不认识尝试 ID；新预约始终要求精确确认。
-    requiresReservationId: boolean("requires_reservation_id")
-      .notNull()
-      .default(true),
     status: text("status", {
       enum: browserCapacityReservationStates,
     }).notNull(),

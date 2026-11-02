@@ -1,12 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { runtimeEnvironmentStoredSchema } from "@binny/contracts";
 import {
   browserCapacityCoordinator,
   browserCapacityReservations,
   humanSessions,
   manualRuns,
-  runtimeConnections,
   type Database,
   type Transaction,
 } from "@binny/db";
@@ -38,7 +36,6 @@ export type BrowserCapacityAdmission =
 export type BrowserCapacityReservation = {
   readonly reservationId: string;
   readonly status: BrowserCapacityState;
-  readonly requiresReservationId: boolean;
 };
 
 export type BrowserCapacityQueueReason =
@@ -47,7 +44,7 @@ export type BrowserCapacityQueueReason =
   | "runtime_protocol_outdated";
 
 export type BrowserCapacityCoordinator = {
-  /** 迁移后按旧 runtime 的真实 power 快照接续仍占用中的浏览器。 */
+  /** 初始化跨 bin 容量协调锁。 */
   initialize(database: Database): Promise<void>;
   /** 同一事务中串行检查部署总数并预约；仅同一 owner 的启动中或就绪浏览器可复用。 */
   reserve(
@@ -67,13 +64,6 @@ export type BrowserCapacityCoordinator = {
     reservationId: string,
     status: BrowserCapacityPowerStatus,
   ): Promise<boolean>;
-  /** 仅兼容迁移前仍在运行且不认识 reservationId 的正式 controller。 */
-  reportLegacyPower(
-    transaction: Transaction,
-    owner: BrowserCapacityOwner,
-    status: BrowserCapacityPowerStatus,
-    previousStatus: BrowserCapacityPowerStatus | "unavailable" | undefined,
-  ): Promise<boolean | undefined>;
   /** 仅明确未发出启动动作时释放尚未离开 reserved 的预约。 */
   confirmNotStarted(
     transaction: Transaction,
@@ -106,24 +96,6 @@ function sameOwner(
     row.runtimeId === owner.runtimeId &&
     row.ownerGeneration === BigInt(owner.ownerGeneration)
   );
-}
-
-function legacyReservationStatus(
-  environment: unknown,
-): Exclude<BrowserCapacityState, "reserved"> | undefined {
-  const snapshot = runtimeEnvironmentStoredSchema.safeParse(environment);
-  if (!snapshot.success || !snapshot.data.browser.available) return undefined;
-  const status = snapshot.data.browser.power?.status;
-  if (status === "stopped") return undefined;
-  if (
-    status === "starting" ||
-    status === "ready" ||
-    status === "stopping" ||
-    status === "unknown"
-  )
-    return status;
-  // 旧持久快照未记录 power 时不能假定进程已退出。
-  return "unknown";
 }
 
 function canAdvance(
@@ -223,33 +195,6 @@ export function createBrowserCapacityCoordinator(
             target: browserCapacityCoordinator.coordinatorId,
           });
         await lockCapacity(transaction);
-
-        const runtimes = await transaction
-          .select({
-            binId: runtimeConnections.binId,
-            runtimeId: runtimeConnections.runtimeId,
-            ownerGeneration: runtimeConnections.ownerGeneration,
-            environment: runtimeConnections.environment,
-          })
-          .from(runtimeConnections);
-        for (const runtime of runtimes) {
-          if (runtime.ownerGeneration < 1n) continue;
-          const status = legacyReservationStatus(runtime.environment);
-          if (status === undefined) continue;
-          await transaction
-            .insert(browserCapacityReservations)
-            .values({
-              reservationId: randomUUID(),
-              binId: runtime.binId,
-              runtimeId: runtime.runtimeId,
-              ownerGeneration: runtime.ownerGeneration,
-              requiresReservationId: false,
-              status,
-            })
-            .onConflictDoNothing({
-              target: browserCapacityReservations.binId,
-            });
-        }
       });
     },
 
@@ -260,7 +205,6 @@ export function createBrowserCapacityCoordinator(
         : {
             reservationId: current.reservationId,
             status: current.status,
-            requiresReservationId: current.requiresReservationId,
           };
     },
 
@@ -272,8 +216,6 @@ export function createBrowserCapacityCoordinator(
           sameOwner(current, owner) &&
           (current.status === "starting" || current.status === "ready")
         ) {
-          if (current.requiresReservationId && !supportsReservationId)
-            return { kind: "runtime_protocol_outdated" };
           return {
             kind: "reserved",
             reservationId: current.reservationId,
@@ -383,39 +325,6 @@ export function createBrowserCapacityCoordinator(
       return true;
     },
 
-    async reportLegacyPower(transaction, owner, status, previousStatus) {
-      const [reservation] = await transaction
-        .select({
-          reservationId: browserCapacityReservations.reservationId,
-          status: browserCapacityReservations.status,
-        })
-        .from(browserCapacityReservations)
-        .where(
-          and(
-            eq(browserCapacityReservations.binId, owner.binId),
-            eq(browserCapacityReservations.runtimeId, owner.runtimeId),
-            eq(
-              browserCapacityReservations.ownerGeneration,
-              BigInt(owner.ownerGeneration),
-            ),
-            eq(browserCapacityReservations.requiresReservationId, false),
-          ),
-        )
-        .limit(1);
-      if (reservation === undefined) return undefined;
-      if (
-        status === "stopped" &&
-        (previousStatus !== "stopping" || reservation.status !== "stopping")
-      )
-        return false;
-      return await coordinator.reportPower(
-        transaction,
-        owner,
-        reservation.reservationId,
-        status,
-      );
-    },
-
     async confirmNotStarted(transaction, owner, reservationId) {
       const previous = await transaction
         .select()
@@ -487,9 +396,7 @@ export function createBrowserCapacityCoordinator(
           (current.status !== "starting" && current.status !== "ready")
         )
           return "bin_busy";
-        return current.requiresReservationId && !supportsReservationId
-          ? "runtime_protocol_outdated"
-          : undefined;
+        return supportsReservationId ? undefined : "runtime_protocol_outdated";
       }
       if (!supportsReservationId) return "runtime_protocol_outdated";
       return (await activeCount(transaction)) >= maxActiveBrowsers
