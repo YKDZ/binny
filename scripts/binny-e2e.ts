@@ -753,29 +753,64 @@ async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
     );
     assert.equal(unknownKey.message, "请求包含未支持的字段。");
     assert.equal(unknownKey.path, undefined);
-  }
 
-  const customIssueRequest = JSON.stringify({
-    scope: { kind: "current", binId: "rss-main" },
-    where: {
-      type: "json",
-      field: "properties",
-      path: ["x"],
-      operator: "eq",
-      value: 1,
-    },
-  });
-  for (const command of ["search", "aggregate"] as const) {
-    const customIssue = cliFailure<{
+    const missingValueType = cliFailure<{
       readonly code: string;
       readonly message: string;
       readonly path?: readonly (string | number)[];
     }>(
-      await cli(baseUrl, ["archive", command, "--query", customIssueRequest]),
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+          where: {
+            type: "json",
+            field: "properties",
+            path: ["x"],
+            operator: "eq",
+            value: 1,
+          },
+        }),
+      ]),
       "invalid_input",
     );
-    assert.equal(customIssue.message, "JSON 路径比较必须声明预期 JSON 类型。");
-    assert.deepEqual(customIssue.path, ["where", "valueType"]);
+    assert.equal(missingValueType.message, "字段值不符合要求。");
+    assert.deepEqual(missingValueType.path, ["where", "valueType"]);
+
+    const reversedRange = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        command,
+        "--query",
+        JSON.stringify({
+          ...validRequest,
+          ...(command === "search"
+            ? { text: { kind: "literal", value: "x" } }
+            : {}),
+          where: {
+            type: "json",
+            field: "properties",
+            path: ["x"],
+            valueType: "number",
+            operator: "between",
+            lower: 2,
+            upper: 1,
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.equal(reversedRange.message, "JSON 数值范围上界不能早于下界。");
+    assert.deepEqual(reversedRange.path, ["where", "upper"]);
   }
 }
 
