@@ -1,3 +1,5 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import {
   archivedMedia,
   archiveResourceManifest,
@@ -536,7 +538,27 @@ async function fetchInPage(
   validJson?: (value: unknown) => boolean,
   validMedia?: (response: PageFetchResponse) => boolean,
 ): Promise<PageFetchResponse> {
-  const response = await fetchInPageOnce(page, url, accept, body);
+  const initialDeadline = performance.now() + 30_000;
+  let response: PageFetchResponse;
+  while (true) {
+    const remaining = () => Math.ceil(initialDeadline - performance.now());
+    if (remaining() <= 0) throw new Error("页面读取时间已耗尽。");
+    try {
+      response = await fetchInPageOnce(page, url, accept, body, remaining());
+      break;
+    } catch (error) {
+      if (
+        page.isClosed() ||
+        !(error instanceof Error) ||
+        !error.message.includes("Execution context was destroyed") ||
+        remaining() <= 0
+      )
+        throw error;
+      // DOM 就绪后仍可能继续导航；所有重读共用初次读取期限。
+      await page.waitForLoadState("domcontentloaded", { timeout: remaining() });
+      await delay(Math.max(0, Math.min(50, remaining())));
+    }
+  }
   if (response.mitigated !== "challenge") return response;
   const recovery = pageRecovery.get(page);
   if (recovery === undefined) return response;
@@ -568,6 +590,15 @@ async function fetchInPage(
     : result;
 }
 
+/** 人工复核提示沿用既有语义；它不作为自动点击的挑战识别依据。 */
+function requiresPageReview(response: JsonResponse): boolean {
+  return (
+    response.status === 200 ||
+    response.status === 403 ||
+    ("recoveryFailure" in response && response.recoveryFailure !== undefined)
+  );
+}
+
 function responseProblemMessage(
   response: JsonResponse,
   message: string,
@@ -587,7 +618,8 @@ async function fetchInPageOnce(
   return await page.evaluate(
     async ({ href, acceptHeader, bodyType, expiresAt }) => {
       const controller = new AbortController();
-      const remaining = expiresAt - Date.now();
+      const remaining =
+        expiresAt - (performance.timeOrigin + performance.now());
       if (remaining <= 0)
         throw new DOMException("请求期限已到。", "TimeoutError");
       const timeout = window.setTimeout(() => controller.abort(), remaining);
@@ -626,7 +658,8 @@ async function fetchInPageOnce(
       href: url.href,
       acceptHeader: accept,
       bodyType: body,
-      expiresAt: Date.now() + timeoutMs,
+      // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
+      expiresAt: performance.timeOrigin + performance.now() + timeoutMs,
     },
   );
 }
@@ -720,7 +753,7 @@ async function readSessionAccess(
     };
   }
   if (session.kind !== "json") {
-    const challenge = session.status === 200 || session.status === 403;
+    const challenge = requiresPageReview(session);
     return {
       kind: "unavailable",
       availability: challenge ? "unknown" : "unavailable",
@@ -799,8 +832,7 @@ async function readTopic(
     });
   }
   if (topicResponse.kind !== "json") {
-    const challenge =
-      topicResponse.status === 200 || topicResponse.status === 403;
+    const challenge = requiresPageReview(topicResponse);
     return accessProblem(topicId, challenge ? "unknown" : "unavailable", {
       code: challenge
         ? "discourse_topic_challenge_response"
@@ -1006,7 +1038,7 @@ async function readTopicListPage(
     });
   }
   if (response.kind !== "json") {
-    const challenge = response.status === 200 || response.status === 403;
+    const challenge = requiresPageReview(response);
     throw sourceAdapterActionError({
       code: challenge
         ? "discourse_target_challenge_response"
@@ -1307,11 +1339,11 @@ async function readVisibleCategories(
   }
   if (response.kind !== "json") {
     throw categoryListFailure(
-      response.status === 200 || response.status === 403
+      requiresPageReview(response)
         ? "discourse_category_list_challenge_response"
         : "discourse_category_list_response_invalid",
       responseProblemMessage(response, "Linux.do 板块列表没有返回有效 JSON。"),
-      response.status === 200 || response.status === 403,
+      requiresPageReview(response),
     );
   }
   if (response.status === 403 || response.status === 404) {
@@ -1543,10 +1575,7 @@ async function readTopicPosts(
       }
       return unresolved.every((id) => ids.has(id));
     });
-    if (
-      response.kind !== "json" &&
-      (response.status === 200 || response.status === 403)
-    ) {
+    if (response.kind !== "json" && requiresPageReview(response)) {
       return {
         posts: [...postsById.values()].toSorted(
           (first, second) => first.post_number - second.post_number,

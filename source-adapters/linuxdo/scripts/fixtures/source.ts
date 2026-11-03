@@ -4,10 +4,13 @@ import { setTimeout as delay } from "node:timers/promises";
 type SourceState = {
   readonly nativeChallenge: boolean;
   readonly nativeChallengeWait: boolean;
+  readonly nativeChallengeNoReload: boolean;
   readonly nativeChallengePersistent: boolean;
   readonly nativeChallengeMedia: boolean;
   readonly nativeChallengePaths: readonly string[];
   readonly nativeChallengeNavigationDelayMs: number;
+  readonly nativeChallengeStatus: number;
+  readonly navigationRace: boolean;
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
@@ -72,10 +75,13 @@ const jsonAttachmentBytes = Buffer.from(
 let activeState: SourceState = {
   nativeChallenge: false,
   nativeChallengeWait: false,
+  nativeChallengeNoReload: false,
   nativeChallengePersistent: false,
   nativeChallengeMedia: false,
   nativeChallengePaths: [],
   nativeChallengeNavigationDelayMs: 0,
+  nativeChallengeStatus: 403,
+  navigationRace: false,
   challengePage: false,
   challengeTopic: false,
   challengePosts: false,
@@ -106,6 +112,7 @@ let activeState: SourceState = {
   topicListDelayMs: 0,
 };
 const events: SourceEvent[] = [];
+let navigationRequested = false;
 
 function sendJson(
   response: import("node:http").ServerResponse,
@@ -589,6 +596,8 @@ function updateState(value: unknown): boolean {
   for (const key of [
     "nativeChallenge",
     "nativeChallengeWait",
+    "nativeChallengeNoReload",
+    "navigationRace",
     "nativeChallengePersistent",
     "nativeChallengeMedia",
     "challengePage",
@@ -628,6 +637,13 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    "nativeChallengeStatus" in updates &&
+    (!Number.isSafeInteger(updates.nativeChallengeStatus) ||
+      Number(updates.nativeChallengeStatus) < 400 ||
+      Number(updates.nativeChallengeStatus) > 599)
+  )
+    return false;
   if (
     "nativeChallengeNavigationDelayMs" in updates &&
     (!Number.isSafeInteger(updates.nativeChallengeNavigationDelayMs) ||
@@ -670,6 +686,7 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (updates.navigationRace === true) navigationRequested = false;
   activeState = {
     ...activeState,
     ...updates,
@@ -685,6 +702,31 @@ const server = createServer((request, response) => {
 
     if (request.method === "GET" && pathname === "/health") {
       sendJson(response, 200, { process: "ready" });
+      return;
+    }
+    if (request.method === "GET" && pathname === "/__navigation/status") {
+      sendJson(response, 200, { ready: navigationRequested });
+      return;
+    }
+    if (request.method === "GET" && pathname === "/__navigation/ready") {
+      record("navigation-race", pathname, authenticated);
+      activeState = { ...activeState, navigationRace: false };
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end("<!doctype html><html><body>页面导航完成。</body></html>");
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      pathname === "/" &&
+      activeState.navigationRace
+    ) {
+      response.writeHead(200, { "content-type": "text/html" });
+      response.end(`<!doctype html><html><body><script>
+        const timer = setInterval(async () => {
+          const state = await (await fetch('/__navigation/status', {cache: 'no-store'})).json();
+          if (state.ready) { clearInterval(timer); location.replace('/__navigation/ready'); }
+        }, 10);
+      </script></body></html>`);
       return;
     }
     if (request.method === "GET" && pathname === "/__control/state") {
@@ -793,7 +835,7 @@ const server = createServer((request, response) => {
         record("challenge-navigation", pathname, authenticated);
         await delay(activeState.nativeChallengeNavigationDelayMs);
       }
-      response.writeHead(403, {
+      response.writeHead(activeState.nativeChallengeStatus, {
         "content-type": "text/html; charset=utf-8",
         "cf-mitigated": "challenge",
       });
@@ -803,11 +845,11 @@ const server = createServer((request, response) => {
           <script>window._cf_chl_opt = {};
           async function complete(mode) {
             await fetch('/__challenge/complete?mode=' + mode + '&target=' + encodeURIComponent(${JSON.stringify(pathname)}), {method: 'POST'});
-            location.reload();
+            ${activeState.nativeChallengeNoReload ? "document.querySelector('label')?.remove();" : "location.reload();"}
           }
           ${
             activeState.nativeChallengeWait
-              ? "setTimeout(() => complete('wait'), 250);"
+              ? "setTimeout(() => complete('wait'), 1500);"
               : "document.querySelector('input').addEventListener('change', () => complete('click'));"
           }
           </script></body></html>`);
@@ -815,6 +857,10 @@ const server = createServer((request, response) => {
     }
     if (request.method === "GET" && pathname === "/session/current.json") {
       record("session-current", pathname, authenticated);
+      if (activeState.navigationRace) {
+        navigationRequested = true;
+        await delay(5_000);
+      }
       if (activeState.challengePage) {
         response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         response.end("<!doctype html><html><body>受控挑战页面</body></html>");

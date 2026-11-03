@@ -8196,13 +8196,19 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
     assert.equal(resourceVolumeDelta.fileCount, 0);
     assert.equal(resourceVolumeDelta.apparentBytes, 0);
   }
-  const commit = await run("git", ["rev-parse", "HEAD"]);
-  assert.equal(commit.code, 0, commit.stderr);
+  const commit = process.env.BINNY_ACCEPTANCE_COMMIT;
+  assert.ok(
+    commit !== undefined && /^[0-9a-f]{40}$/u.test(commit),
+    "根准备入口应提供提交标识。",
+  );
   const serverImageId = await containerImageId("server");
   const serverBuildImageId = await imageId(activeServerImage);
   const postgresImageId = await containerImageId("postgres");
-  const tree = await run("git", ["rev-parse", "HEAD^{tree}"]);
-  assert.equal(tree.code, 0, tree.stderr);
+  const tree = process.env.BINNY_ACCEPTANCE_TREE;
+  assert.ok(
+    tree !== undefined && /^[0-9a-f]{40}$/u.test(tree),
+    "根准备入口应提供源码树标识。",
+  );
   const delta = {
     sequentialScans: after.sequentialScans - before.sequentialScans,
     sequentialTuplesRead:
@@ -8218,8 +8224,8 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
         {
           project: projectName,
           phase: capacityPhase,
-          commit: commit.stdout.trim(),
-          tree: tree.stdout.trim(),
+          commit,
+          tree,
           serverImageId,
           serverBuildImageId,
           postgresImageId,

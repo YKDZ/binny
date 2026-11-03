@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -46,6 +46,14 @@ try {
     {
       ...process.env,
       BINNY_ACCEPTANCE_BUILD_CONTEXT: context,
+      BINNY_ACCEPTANCE_COMMIT: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+      }).trim(),
+      BINNY_ACCEPTANCE_TREE: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+      }).trim(),
     },
   );
 } finally {

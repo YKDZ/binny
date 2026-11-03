@@ -34,7 +34,7 @@ export class ChallengeRecovery {
     this.signal.throwIfAborted();
     this.failureMessage = undefined;
     if (this.summary.rounds >= 3 || this.summary.elapsedMs >= 90_000) {
-      this.failureMessage = "自动恢复的运行轮次或时间预算已耗尽。";
+      this.failureMessage = `自动恢复的运行轮次或时间预算已耗尽（成功 ${String(this.summary.successes)} 轮）。`;
       return undefined;
     }
     this.summary.rounds += 1;
@@ -68,6 +68,7 @@ export class ChallengeRecovery {
     };
     let result: T | undefined;
     let clicks = 0;
+    let probeAfter = started + 5_000;
     let navigation: CDPSession | undefined;
     let navigating = false;
     let finished = false;
@@ -98,7 +99,16 @@ export class ChallengeRecovery {
       navigating = false;
       while (remaining() > 0) {
         this.signal.throwIfAborted();
-        const html = await within(() => this.page.content());
+        let html: string;
+        try {
+          html = await within(() => this.page.content());
+        } catch (error) {
+          if (!isNavigationTransition(error)) throw error;
+          await delay(Math.min(50, remaining()), undefined, {
+            signal: this.signal,
+          });
+          continue;
+        }
         const challengeVisible =
           /_cf_chl_opt|\/cdn-cgi\/challenge-platform\//u.test(html);
         if (clicks < 2 && challengeVisible) {
@@ -128,7 +138,18 @@ export class ChallengeRecovery {
           signal: this.signal,
         });
         if (remaining() <= 0) break;
-        result = await within(() => read(timeout()));
+        // 脚本可能在验证完成后保留；低频探测兼顾这种页面，避免密集请求。
+        if (challengeVisible && performance.now() < probeAfter) continue;
+        probeAfter = performance.now() + 5_000;
+        try {
+          result = await within(() => read(timeout()));
+        } catch (error) {
+          if (!isNavigationTransition(error)) throw error;
+          await delay(Math.min(50, remaining()), undefined, {
+            signal: this.signal,
+          });
+          continue;
+        }
         this.signal.throwIfAborted();
         if (valid(result)) {
           this.summary.successes += 1;
@@ -162,6 +183,15 @@ export class ChallengeRecovery {
       }
     }
   }
+}
+
+function isNavigationTransition(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /Execution context was destroyed|Unable to retrieve content because the page is navigating|Cannot find context with specified id/u.test(
+      error.message,
+    )
+  );
 }
 
 function isCloudflareFrame(value: string): boolean {

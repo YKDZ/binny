@@ -39,10 +39,13 @@ type ManualRun = LinuxdoManualRun;
 type FixtureState = {
   readonly nativeChallenge: boolean;
   readonly nativeChallengeWait: boolean;
+  readonly nativeChallengeNoReload: boolean;
   readonly nativeChallengePersistent: boolean;
   readonly nativeChallengeMedia: boolean;
   readonly nativeChallengePaths: readonly string[];
   readonly nativeChallengeNavigationDelayMs: number;
+  readonly nativeChallengeStatus: number;
+  readonly navigationRace: boolean;
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
@@ -1487,6 +1490,32 @@ async function assertSignedInCheckFailures(): Promise<void> {
   );
 }
 
+async function verifyNavigationRace(): Promise<void> {
+  const before = await sourceState();
+  const reads = before.events.filter(
+    ({ action }) => action === "session-current",
+  ).length;
+  await updateFixtureState({ navigationRace: true });
+  try {
+    const run = await trigger("check", { topicId: 2401 });
+    assert.equal(run.status, "completed", JSON.stringify(run));
+    assert.equal(
+      checkOutput(run).availability,
+      "available",
+      JSON.stringify(run.result),
+    );
+    const after = await sourceState();
+    assert.ok(after.events.some(({ action }) => action === "navigation-race"));
+    assert.ok(
+      after.events.filter(({ action }) => action === "session-current")
+        .length >=
+        reads + 2,
+    );
+  } finally {
+    await updateFixtureState({ navigationRace: false });
+  }
+}
+
 async function verifyNativeChallengeRecovery(): Promise<void> {
   await updateFixtureState({ nativeChallenge: true });
   const run = await trigger("check", { topicId: 2401 });
@@ -1515,6 +1544,9 @@ async function verifyNativeChallengeRecovery(): Promise<void> {
     nativeChallenge: true,
     nativeChallengeWait: true,
   });
+  const sessionReads = source.events.filter(
+    ({ action }) => action === "session-current",
+  ).length;
   const discovery = await trigger("list-categories", {});
   assert.equal(discovery.status, "completed", JSON.stringify(discovery));
   const discoveryOutput = discovery.result?.output as Record<string, unknown>;
@@ -1530,7 +1562,42 @@ async function verifyNativeChallengeRecovery(): Promise<void> {
     clicks,
   );
   assert.ok(afterWait.events.some(({ action }) => action === "challenge-wait"));
-  await updateFixtureState({ nativeChallengeWait: false });
+  assert.equal(
+    afterWait.events.filter(({ action }) => action === "session-current")
+      .length - sessionReads,
+    4,
+    "自动验证期间不应轮询原 JSON：只包含初次读取、验证导航、组件完成重载及恢复后重读",
+  );
+  await updateFixtureState({
+    nativeChallenge: true,
+    nativeChallengeWait: true,
+    nativeChallengeNoReload: true,
+  });
+  try {
+    const retainedDocument = await trigger("list-categories", {});
+    assert.equal(
+      retainedDocument.status,
+      "completed",
+      JSON.stringify(retainedDocument),
+    );
+    const retainedOutput = retainedDocument.result?.output as Record<
+      string,
+      unknown
+    >;
+    const retainedSummary = retainedOutput.challengeRecovery as typeof summary;
+    assert.equal(retainedSummary.rounds, 1);
+    assert.equal(
+      retainedSummary.successes,
+      1,
+      "保留验证脚本的页面也必须通过原请求重读确认恢复",
+    );
+  } finally {
+    await updateFixtureState({
+      nativeChallenge: false,
+      nativeChallengeWait: false,
+      nativeChallengeNoReload: false,
+    });
+  }
 }
 
 async function collectTopic(): Promise<ManualRun> {
@@ -1643,6 +1710,7 @@ async function verifyPersistentChallengeBudget(): Promise<void> {
   await updateFixtureState({
     nativeChallenge: true,
     nativeChallengePersistent: true,
+    nativeChallengeStatus: 503,
   });
   try {
     const run = await trigger("check", { topicId: 2401 });
@@ -1680,6 +1748,7 @@ async function verifyPersistentChallengeBudget(): Promise<void> {
     await updateFixtureState({
       nativeChallenge: false,
       nativeChallengePersistent: false,
+      nativeChallengeStatus: 403,
     });
   }
 }
@@ -3174,6 +3243,8 @@ async function main(): Promise<void> {
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
     await assertSignedInCheckFailures();
     process.stdout.write("挑战页面与指定主题不可用分支通过。\n");
+    await verifyNavigationRace();
+    process.stdout.write("页面导航销毁执行上下文后的有界原请求重读通过。\n");
     await verifyNativeChallengeRecovery();
     process.stdout.write("原生挑战识别、点击与原请求恢复通过。\n");
     await verifyPermissionAfterRecovery();
