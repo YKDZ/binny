@@ -62,6 +62,11 @@ type FixtureState = {
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
   readonly dailyTopicOverlapCount: number;
+  readonly postRangeEnabled: boolean;
+  readonly postRangeAddAfterFirstPage: boolean;
+  readonly postRangeRepeatPage: boolean;
+  readonly postRangeInvalidPage: number | null;
+  readonly postRangePageSize: number;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
@@ -584,7 +589,7 @@ async function trigger(
   timeoutMs?: number,
 ): Promise<ManualRun> {
   const actionParams =
-    action === "collect"
+    action === "collect" && !("postCreatedRange" in params)
       ? { date: "2026-10-28", timeZone: "UTC", ...params }
       : params;
   return await triggerLinuxdoRun(
@@ -833,6 +838,50 @@ async function verifyActionParameterValidation(): Promise<void> {
     [
       {
         targets: linuxdoTargets("latest"),
+        postCreatedRange: {
+          from: "2026-11-03T12:00:00.000Z",
+          to: "2026-11-03T11:00:00.000Z",
+        },
+      },
+      ["params", "postCreatedRange", "to"],
+    ],
+    [
+      {
+        targets: linuxdoTargets("latest"),
+        postCreatedRange: {
+          from: "2026-11-03T11:00:00",
+          to: "2026-11-03T12:00:00.000Z",
+        },
+      },
+      ["params", "postCreatedRange", "from"],
+    ],
+    [
+      {
+        targets: linuxdoTargets("latest"),
+        postCreatedRange: {
+          from: "2026-11-03T11:00:00.000Z",
+          to: "2026-11-03T12:00:00.000Z",
+          maxPages: 0,
+        },
+      },
+      ["params", "postCreatedRange", "maxPages"],
+    ],
+    [
+      {
+        targets: linuxdoTargets("latest"),
+        date: "today",
+        timeZone: "UTC",
+        postCreatedRange: {
+          from: "2026-11-03T11:00:00.000Z",
+          to: "2026-11-03T12:00:00.000Z",
+        },
+      },
+      ["params", "postCreatedRange"],
+    ],
+    [{ targets: linuxdoTargets("latest") }, ["params", "date"]],
+    [
+      {
+        targets: linuxdoTargets("latest"),
         date: "2026-10-28",
         timeZone: "UTC",
         maxTopics: 0,
@@ -892,7 +941,30 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.ok(outputSchema.properties?.categories !== undefined);
 
   const collect = actions.actions.collect;
-  assert.ok(collect?.report !== undefined, "collect 应声明可发现的运行报告。");
+  assert.ok(collect?.params !== undefined);
+  const collectParamsSchema = collect.params as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+  const postCreatedRange = collectParamsSchema.properties?.postCreatedRange as
+    | {
+        readonly properties?: Readonly<Record<string, unknown>>;
+        readonly required?: readonly string[];
+      }
+    | undefined;
+  assert.ok(postCreatedRange !== undefined);
+  assert.deepEqual(postCreatedRange.required, ["from", "to"]);
+  assert.ok(postCreatedRange.properties?.from !== undefined);
+  assert.ok(postCreatedRange.properties?.to !== undefined);
+  assert.equal(
+    (
+      postCreatedRange.properties?.maxPages as
+        | { readonly default?: unknown }
+        | undefined
+    )?.default,
+    20,
+  );
+
+  assert.ok(collect.report !== undefined, "collect 应声明可发现的运行报告。");
   const reportSchema = collect.report as {
     readonly properties?: Readonly<Record<string, unknown>>;
   };
@@ -3054,6 +3126,206 @@ async function verifyDiscovery(): Promise<void> {
   await updateFixtureState({ unavailableTopicIds: [] });
 }
 
+async function verifyPostCreatedRangeCollection(): Promise<void> {
+  await updateFixtureState({
+    dailyCollectionEnabled: false,
+    postRangeEnabled: true,
+    postRangeAddAfterFirstPage: true,
+    postRangeRepeatPage: false,
+    postRangeInvalidPage: null,
+    postRangePageSize: 2,
+    topicVersion: 3,
+    replyVersion: 3,
+    topicCreatedAtOverrides: {
+      2499: "2026-10-28T02:30:00.000Z",
+    },
+  });
+
+  const before = await sourceState();
+  const rangeParams = {
+    targets: linuxdoTargets("latest"),
+    postCreatedRange: {
+      from: "2026-10-28T02:00:00.000Z",
+      to: "2026-10-28T04:00:00.000Z",
+    },
+  };
+  const collected = await trigger("collect", rangeParams);
+  assert.equal(collected.status, "completed", JSON.stringify(collected));
+  assert.equal(
+    collected.result?.output?.collectionCompleteness,
+    "complete",
+    JSON.stringify(collected),
+  );
+  assert.deepEqual(collected.result?.output?.incompleteScopes, []);
+  assert.equal(collected.report?.phase, "completed");
+  assert.equal(collected.report?.discovery, "complete");
+  assert.deepEqual(collected.report?.window, {
+    from: "2026-10-28T02:00:00.000Z",
+    to: "2026-10-28T04:00:00.000Z",
+  });
+  const reportIntent = collected.report?.intent as
+    | { readonly postCreatedRange?: unknown }
+    | undefined;
+  assert.deepEqual(reportIntent?.postCreatedRange, {
+    from: "2026-10-28T02:00:00.000Z",
+    to: "2026-10-28T04:00:00.000Z",
+    maxPages: 20,
+  });
+
+  const feedEvents = (await sourceState()).events
+    .slice(before.events.length)
+    .filter(({ action }) => action === "post-list");
+  const beforeCursors = feedEvents.flatMap(({ path }) => {
+    const value = /[?&]before=(\d+)/u.exec(path)?.[1];
+    return value === undefined ? [] : [Number(value)];
+  });
+  assert.ok(feedEvents.length >= 7, JSON.stringify(feedEvents));
+  assert.ok(beforeCursors.length >= 5, JSON.stringify(beforeCursors));
+  assert.ok(
+    beforeCursors.every(
+      (cursor, index) => index === 0 || cursor < beforeCursors[index - 1]!,
+    ),
+    JSON.stringify(beforeCursors),
+  );
+  const sourceEvents = (await sourceState()).events.slice(before.events.length);
+  assert.ok(
+    sourceEvents.some(
+      ({ action, path, authenticated }) =>
+        action === "topic" && path === "/t/2401.json" && authenticated,
+    ),
+  );
+  assert.ok(
+    sourceEvents.some(
+      ({ action, path, authenticated }) =>
+        action === "topic" && path === "/t/2499.json" && authenticated,
+    ),
+  );
+  assert.ok(
+    !sourceEvents.some(
+      ({ action, path }) =>
+        action === "posts" && path.startsWith("/t/2401/posts.json"),
+    ),
+    "旧主题区间采集不得顺带读取整条主题帖子流。",
+  );
+
+  const oldTopicReply = await searchArchiveItem("区间新增回复内容");
+  assert.equal(oldTopicReply.sourceKey.key, "post:240006");
+  assert.equal(binState(oldTopicReply).capture.completeness, "complete");
+  assert.ok(
+    oldTopicReply.views[0]?.state.resources?.length,
+    "区间回复的媒体应沿正式媒体归档路径保存。",
+  );
+  const newTopic = await searchArchiveItem("发现主题 2499");
+  assert.equal(newTopic.sourceKey.key, "post:249900");
+  const inserted = await searchArchiveItem("扫描期间插入的区间回复");
+  assert.equal(inserted.sourceKey.key, "post:249901");
+  assert.ok(collected.result?.output?.completedScopes?.includes("post:240002"));
+  assert.ok(
+    collected.result?.output?.completedScopes?.includes("context:post:240001"),
+  );
+  assert.ok(
+    !collected.result?.output?.completedScopes?.includes("post:240001"),
+    "区间外主帖仅作为上下文入档。",
+  );
+  const oldRoot = await searchArchiveItem("主题正文版本 3");
+  assert.equal(
+    binState(oldRoot).metadata?.createdAt,
+    "2026-10-28T01:00:00.000Z",
+  );
+  const rootRelations = await readOutgoingRelations(oldRoot.itemId);
+  assert.ok(
+    rootRelations.some(
+      ({ state }) => state?.to.sourceKey?.key === "post:240002",
+    ),
+  );
+  assert.deepEqual(await searchArchiveSourceKeys("终点边界之外的帖子"), []);
+  assert.deepEqual(
+    await searchArchiveSourceKeys("早于起点的旧时间戳帖子甲"),
+    [],
+  );
+  assert.deepEqual(
+    await searchArchiveSourceKeys("早于起点的旧时间戳帖子乙"),
+    [],
+  );
+
+  const stableReply = await searchArchiveItem("回复正文版本 3");
+  assert.equal(stableReply.sourceKey.key, "post:240002");
+  const firstVersions = stableReply.revisions.length;
+  await updateFixtureState({
+    postRangeAddAfterFirstPage: false,
+    replyVersion: 4,
+  });
+  const repeated = await trigger("collect", rangeParams);
+  assert.equal(repeated.status, "completed", JSON.stringify(repeated));
+  assert.equal(
+    repeated.result?.output?.collectionCompleteness,
+    "complete",
+    JSON.stringify(repeated),
+  );
+  const edited = await searchArchiveItem("回复正文版本 4");
+  assert.equal(edited.itemId, stableReply.itemId);
+  assert.equal(edited.sourceKey.key, stableReply.sourceKey.key);
+  assert.equal(edited.revisions.length, firstVersions + 1);
+
+  await updateFixtureState({
+    replyVersion: 3,
+    postRangeRepeatPage: true,
+  });
+  const repeatedPage = await trigger("collect", rangeParams);
+  assert.equal(repeatedPage.status, "completed", JSON.stringify(repeatedPage));
+  assert.equal(repeatedPage.result?.output?.collectionCompleteness, "partial");
+  assert.equal(repeatedPage.report?.discovery, "partial");
+  assert.ok(
+    repeatedPage.result?.output?.incompleteScopes?.some(
+      ({ reasonCode }) => reasonCode === "post_range_cursor_not_advancing",
+    ),
+    JSON.stringify(repeatedPage),
+  );
+  const repeatedPageScopes = repeatedPage.report?.scopes as
+    | readonly { readonly status: string }[]
+    | undefined;
+  assert.ok(repeatedPageScopes?.some(({ status }) => status === "incomplete"));
+
+  await updateFixtureState({
+    postRangeRepeatPage: false,
+    postRangeInvalidPage: 1,
+  });
+  const invalidPage = await trigger("collect", rangeParams);
+  assert.equal(invalidPage.status, "completed", JSON.stringify(invalidPage));
+  assert.equal(invalidPage.result?.output?.collectionCompleteness, "partial");
+  assert.equal(invalidPage.report?.discovery, "failed");
+  assert.ok(
+    invalidPage.result?.output?.incompleteScopes?.some(
+      ({ reasonCode }) => reasonCode === "post_range_response_invalid",
+    ),
+    JSON.stringify(invalidPage),
+  );
+
+  await updateFixtureState({
+    postRangeInvalidPage: null,
+    postRangeAddAfterFirstPage: false,
+  });
+  const pageLimit = await trigger("collect", {
+    ...rangeParams,
+    postCreatedRange: { ...rangeParams.postCreatedRange, maxPages: 2 },
+  });
+  assert.equal(pageLimit.status, "completed", JSON.stringify(pageLimit));
+  assert.equal(pageLimit.result?.output?.collectionCompleteness, "partial");
+  assert.ok(
+    pageLimit.result?.output?.incompleteScopes?.some(
+      ({ reasonCode }) => reasonCode === "post_range_page_limit_reached",
+    ),
+    JSON.stringify(pageLimit),
+  );
+  await updateFixtureState({
+    postRangeEnabled: false,
+    postRangeAddAfterFirstPage: false,
+    postRangeRepeatPage: false,
+    postRangeInvalidPage: null,
+    topicCreatedAtOverrides: {},
+  });
+}
+
 async function verifyDailyCollection(): Promise<void> {
   await updateFixtureState({ dailyCollectionEnabled: true });
 
@@ -3469,6 +3741,10 @@ async function main(): Promise<void> {
     await verifyTopicArchive(journey.firstCollection, journey.itemIds);
     process.stdout.write(
       "主题、回复、关系、媒体、重复、编辑、新回复与有限观察通过。\n",
+    );
+    await verifyPostCreatedRangeCollection();
+    process.stdout.write(
+      "帖子创建时间区间、before分页、扫描期间新增、上下文归档与未知覆盖报告通过。\n",
     );
     await verifyDiscovery();
     process.stdout.write(
