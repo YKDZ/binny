@@ -1,0 +1,88 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "58946d68-9f52-424a-baff-fc96965f6798",
+  "prevIds": ["350f582f-19cd-4190-a722-c5da485d1a76"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "schedules", "overlap_policy"],
+      "writes": [
+        "s|col|public.schedules.overlap_policy",
+        "n|col|public.schedules.overlap_policy",
+        "e|col|public.schedules.overlap_policy"
+      ],
+      "reads": ["n|tbl|public.schedules", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "schedules", "last_skip"],
+      "writes": [
+        "s|col|public.schedules.last_skip",
+        "n|col|public.schedules.last_skip",
+        "e|col|public.schedules.last_skip"
+      ],
+      "reads": ["n|tbl|public.schedules", "n|sch|public"]
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "schedules"],
+      "writes": [
+        "s|ck|public.schedules.schedules_overlap_policy_check",
+        "n|ck|public.schedules.schedules_overlap_policy_check",
+        "e|ck|public.schedules.schedules_overlap_policy_check",
+        "n|con|public.schedules.schedules_overlap_policy_check"
+      ],
+      "reads": [
+        "n|tbl|public.schedules",
+        "n|sch|public",
+        "n|col|public.schedules.overlap_policy"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "overlap_policy",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'queue'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "last_skip",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedules_overlap_policy_check",
+        "value": "\"overlap_policy\" in ('queue', 'skip')",
+        "entityType": "checks"
+      }
+    }
+  ]
+}
