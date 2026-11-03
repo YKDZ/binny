@@ -112,7 +112,7 @@ export type SourceAdapterBrowserConnection = z.infer<
   typeof sourceAdapterBrowserConnectionSchema
 >;
 
-export interface SourceAdapterContext<TConfig = unknown> {
+type SourceAdapterContextBase<TConfig> = {
   readonly binId: string;
   readonly identityId: string;
   readonly runId: string;
@@ -127,7 +127,15 @@ export interface SourceAdapterContext<TConfig = unknown> {
   readonly resources: {
     upload(body: BodyInit, mediaType: string): Promise<ArchiveResourceUpload>;
   };
-}
+};
+
+export type SourceAdapterContext<
+  TConfig = unknown,
+  TReport extends z.ZodType = never,
+> = SourceAdapterContextBase<TConfig> &
+  ([TReport] extends [never]
+    ? object
+    : { readonly report: (report: z.input<TReport>) => Promise<void> });
 
 /** 按 SDK 原生 schema 异步解析原始配置或动作参数，保留 defaults/refinements/transforms。 */
 export async function parseSourceAdapterInput<TSchema extends z.ZodType>(
@@ -139,19 +147,20 @@ export async function parseSourceAdapterInput<TSchema extends z.ZodType>(
 
 export type SourceAdapterEnvironment = SourceAdapterManifest["environment"];
 
-export interface SourceAdapterAction<
+export type SourceAdapterAction<
   TConfig extends z.ZodType = z.ZodType,
   TParams extends z.ZodType = z.ZodType,
   TOutput extends z.ZodType = z.ZodType,
-> {
+  TReport extends z.ZodType = never,
+> = {
   readonly description: string;
   readonly params: TParams;
   readonly output: TOutput;
   execute(
-    context: SourceAdapterContext<z.output<TConfig>>,
+    context: SourceAdapterContext<z.output<TConfig>, TReport>,
     params: z.output<TParams>,
   ): Promise<z.input<TOutput>>;
-}
+} & ([TReport] extends [never] ? object : { readonly report: TReport });
 
 /** 用同一份配置声明、参数 schema 与输出 schema 定义一个可执行动作。 */
 export function defineSourceAdapterAction<
@@ -165,25 +174,59 @@ export function defineSourceAdapterAction<
     readonly params: TParams;
     readonly output: TOutput;
     execute(
-      context: SourceAdapterContext<z.output<TConfig>>,
+      context: SourceAdapterContext<z.output<TConfig>, never>,
       params: z.output<TParams>,
     ): Promise<z.input<TOutput>>;
   },
-): SourceAdapterAction<TConfig, TParams, TOutput> {
+): SourceAdapterAction<TConfig, TParams, TOutput, never>;
+export function defineSourceAdapterAction<
+  TConfig extends z.ZodType,
+  TParams extends z.ZodType,
+  TOutput extends z.ZodType,
+  TReport extends z.ZodType,
+>(
+  configSchema: TConfig,
+  action: {
+    readonly description: string;
+    readonly params: TParams;
+    readonly output: TOutput;
+    readonly report: TReport;
+    execute(
+      context: SourceAdapterContext<z.output<TConfig>, TReport>,
+      params: z.output<TParams>,
+    ): Promise<z.input<TOutput>>;
+  },
+): SourceAdapterAction<TConfig, TParams, TOutput, TReport>;
+export function defineSourceAdapterAction(
+  configSchema: z.ZodType,
+  action: SourceAdapterActionShape,
+): SourceAdapterActionShape {
   void configSchema;
   return action;
 }
+
+// 异构动作先按各自动作 schema 校验，再由运行器统一调用。
+type SourceAdapterActionExecutor = {
+  bivarianceHack(
+    context: SourceAdapterContext,
+    params: unknown,
+  ): Promise<unknown>;
+}["bivarianceHack"];
 
 type SourceAdapterActionShape = {
   readonly description: string;
   readonly params: z.ZodType;
   readonly output: z.ZodType;
-  execute(context: never, params: never): Promise<unknown>;
+  readonly report?: z.ZodType;
+  readonly execute: SourceAdapterActionExecutor;
 };
 
 const sourceAdapterActionErrorType = "binny.source-adapter-action-error";
-export type SourceAdapterRunContext<TConfig = unknown> = Omit<
-  SourceAdapterContext<TConfig>,
+export type SourceAdapterRunContext<
+  TConfig = unknown,
+  TReport extends z.ZodType = z.ZodType,
+> = Omit<
+  SourceAdapterContextBase<TConfig>,
   | "archive"
   | "resources"
   | "binId"
@@ -195,7 +238,9 @@ export type SourceAdapterRunContext<TConfig = unknown> = Omit<
   readonly identityId: string;
   readonly runId: string;
   readonly sourceAdapterVersion: string;
-};
+} & ([TReport] extends [never]
+    ? object
+    : { readonly report: (report: z.input<TReport>) => Promise<void> });
 
 /** 提交失败或需要人工处理时保留稳定代码、影响范围和可执行建议。 */
 export class SourceAdapterActionError extends Error {
@@ -238,12 +283,17 @@ export function sourceAdapterActionError(
 }
 
 /** 给动作提供固定 run/bin/version 的正式 API 归档提交能力。 */
-export function createSourceAdapterContext<TConfig>(
+export function createSourceAdapterContext<
+  TConfig,
+  TReport extends z.ZodType = z.ZodType,
+>(
   client: SourceAdapterApiClient,
-  context: SourceAdapterRunContext<TConfig>,
-): SourceAdapterContext<TConfig> {
+  context: SourceAdapterRunContext<TConfig, TReport>,
+): SourceAdapterContext<TConfig, TReport> {
+  const { browser, ...runContext } = context;
   return {
-    ...context,
+    ...runContext,
+    ...(browser === undefined ? {} : { browser }),
     archive: {
       async submit(input) {
         const response = await client.archives.$post(
@@ -289,7 +339,7 @@ export function createSourceAdapterContext<TConfig>(
         return uploadArchiveResource(client, body, mediaType);
       },
     },
-  };
+  } as SourceAdapterContext<TConfig, TReport>;
 }
 
 export interface SourceAdapterDefinition<
@@ -297,9 +347,9 @@ export interface SourceAdapterDefinition<
   TActions extends Readonly<Record<string, SourceAdapterActionShape>> & {
     readonly check: SourceAdapterActionShape;
     readonly collect: SourceAdapterActionShape;
-  } = Readonly<Record<string, SourceAdapterAction>> & {
-    readonly check: SourceAdapterAction;
-    readonly collect: SourceAdapterAction;
+  } = Readonly<Record<string, SourceAdapterActionShape>> & {
+    readonly check: SourceAdapterActionShape;
+    readonly collect: SourceAdapterActionShape;
   },
 > {
   readonly id: string;
@@ -320,7 +370,10 @@ type TypedSourceAdapterActions<
   readonly [Name in keyof TActions]: SourceAdapterAction<
     TConfig,
     TActions[Name]["params"],
-    TActions[Name]["output"]
+    TActions[Name]["output"],
+    TActions[Name] extends { readonly report: infer TReport extends z.ZodType }
+      ? TReport
+      : never
   >;
 };
 
@@ -328,6 +381,7 @@ type SourceAdapterActionSchema = {
   readonly description: string;
   readonly params: z.ZodType;
   readonly output: z.ZodType;
+  readonly report?: z.ZodType;
 };
 
 export function defineSourceAdapter<
@@ -357,6 +411,9 @@ export function sourceAdapterManifest(
     description: action.description,
     params: z.toJSONSchema(action.params, { io: "input" }),
     output: z.toJSONSchema(action.output, { io: "output" }),
+    ...(action.report === undefined
+      ? {}
+      : { report: z.toJSONSchema(action.report, { io: "output" }) }),
   });
   const actions = Object.fromEntries(
     Object.entries(definition.actions).map(([name, action]) => [

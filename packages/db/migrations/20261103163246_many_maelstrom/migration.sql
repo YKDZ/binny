@@ -1,0 +1,1 @@
+ALTER TABLE "manual_runs" ADD COLUMN "report" jsonb;

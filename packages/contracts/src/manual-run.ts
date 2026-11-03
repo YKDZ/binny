@@ -101,6 +101,15 @@ export const manualRunClaimInputSchema = withPostgresJsonSchemaProjection(
   z.object({ runtimeId: postgresTextSchema.min(1) }).strict(),
 );
 
+export const manualRunReportInputSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      runtimeId: postgresTextSchema.min(1),
+      report: jsonObjectSchema,
+    })
+    .strict(),
+);
+
 export const manualRunCommitLocatorSchema = z
   .object({
     commitId: z.string().uuid(),
@@ -148,6 +157,7 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
       referenceTime: z.iso.datetime(),
       startedAt: z.iso.datetime().optional(),
       finishedAt: z.iso.datetime().optional(),
+      report: jsonObjectSchema.optional(),
       result: manualRunResultSchema.optional(),
     })
     .strict(),
@@ -236,6 +246,11 @@ export type ManualRunOperations = {
     binId: string,
     runId: string,
   ): Promise<ManualRunOperation<ManualRun>>;
+  reportRun(
+    binId: string,
+    runId: string,
+    input: z.infer<typeof manualRunReportInputSchema>,
+  ): Promise<ManualRunOperation<ManualRun>>;
   claimRun(
     binId: string,
     input: z.infer<typeof manualRunClaimInputSchema>,
@@ -250,6 +265,7 @@ export type ManualRunOperations = {
 export const manualRunApiSchemas = {
   trigger: toPostgresJsonSchema(manualRunTriggerInputSchema, "input"),
   claim: toPostgresJsonSchema(manualRunClaimInputSchema, "input"),
+  report: toPostgresJsonSchema(manualRunReportInputSchema, "input"),
   complete: toPostgresJsonSchema(manualRunCompleteInputSchema, "input"),
   claimOutput: toPostgresJsonSchema(manualRunClaimSchema, "output"),
   run: toPostgresJsonSchema(manualRunSchema, "output"),

@@ -80,6 +80,8 @@ const typedActionAdapter = defineSourceAdapter({
       params: transformedParamsSchema,
       output: z.object({ enabled: z.boolean(), total: z.number() }),
       async execute(context, params) {
+        // @ts-expect-error 未声明报告的动作不能发布虚假报告。
+        void context.report;
         const enabled: boolean = context.config.enabled;
         const offset: number = context.config.offset;
         const limit: number = params.limit;
