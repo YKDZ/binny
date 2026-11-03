@@ -21,6 +21,49 @@ async function checkPublicBinContract(): Promise<void> {
     void (await lookup.json()).error.path;
   }
 
+  const actionTable = await client.bins[":binId"].actions.$get({
+    param: { binId },
+    query: {},
+  });
+  if (actionTable.status === 200) {
+    const actions = await actionTable.json();
+    const collectAction = actions.actions.collect;
+    if (collectAction !== undefined) {
+      const description: string = collectAction.description;
+      const report = collectAction.report;
+      void description;
+      void report;
+    }
+    // @ts-expect-error 动作发现不返回配置中的环境声明。
+    void actions.environment;
+    // @ts-expect-error 动作发现不返回实例执行状态。
+    void actions.execution;
+  } else if (actionTable.status === 400 || actionTable.status === 404) {
+    void (await actionTable.json()).error.code;
+  }
+
+  const selectedAction = await client.bins[":binId"].actions.$get({
+    param: { binId },
+    query: { action: "collect" },
+  });
+  if (selectedAction.status === 200) {
+    const selected = await selectedAction.json();
+    const collectAction = selected.actions.collect;
+    if (collectAction !== undefined) {
+      void collectAction.params;
+      void collectAction.output;
+      void collectAction.report;
+    }
+  } else if (selectedAction.status === 400 || selectedAction.status === 404) {
+    void (await selectedAction.json()).error.code;
+  }
+
+  void client.bins[":binId"].actions.$get({
+    param: { binId },
+    // @ts-expect-error 动作发现只接受声明的 action 查询字段。
+    query: { action: "collect", invented: true },
+  });
+
   const updated = await client.bins[":binId"].$patch({
     param: { binId },
     json: { config: { site: "https://example.test" } },

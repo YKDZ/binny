@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { publicApiProtocolVersion } from "@binny/contracts";
+
 import { runCli } from "../../src/main.ts";
 
 const matchingMetadata = {
   product: { name: "Binny", version: "1.2.3" },
-  protocols: { httpApi: 1 },
+  protocols: { httpApi: publicApiProtocolVersion },
   capabilities: [
     "archives.search",
     "archives.aggregate",
@@ -22,6 +24,7 @@ function fakeService(options: {
   const requests: {
     readonly method: string;
     readonly path: string;
+    readonly search: string;
     readonly origin: string;
   }[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
@@ -30,6 +33,7 @@ function fakeService(options: {
     requests.push({
       method: request.method,
       path: url.pathname,
+      search: url.search,
       origin: url.origin,
     });
     if (url.pathname === "/meta") {
@@ -61,6 +65,33 @@ function fakeService(options: {
         unit: "item",
         snapshot: { asOf: "0", mode: "current" },
         results: [],
+      });
+    }
+    if (url.pathname === "/bins/rss-main/actions") {
+      const actionName = url.searchParams.get("action");
+      if (actionName === "missing") {
+        return Response.json(
+          {
+            error: {
+              code: "action_not_found",
+              message: "信源适配器没有声明这个动作。",
+              path: ["action"],
+            },
+          },
+          { status: 404 },
+        );
+      }
+      const action = {
+        description: "读取 feed 中的新内容。",
+        params: { type: "object", properties: {} },
+        output: { type: "object", properties: {} },
+        report: { type: "object", properties: {} },
+      };
+      return Response.json({
+        actions:
+          actionName === null
+            ? { collect: action, discover: action }
+            : { [actionName]: action },
       });
     }
     if (url.pathname === "/bins") return Response.json({ bins: [] });
@@ -226,6 +257,18 @@ void describe("查询服务发现", () => {
     );
   });
 
+  void it("旧版公开 HTTP 协议会在动作声明读取前被拒绝", async () => {
+    const service = fakeService({ httpApiVersion: 1 });
+    const result = await run(["bin", "actions", "rss-main"], service.fetch);
+
+    assert.equal(result.exitCode, 1);
+    assert.match(result.output, /HTTP API 协议/u);
+    assert.deepEqual(
+      service.requests.map(({ method, path }) => [method, path]),
+      [["GET", "/meta"]],
+    );
+  });
+
   void it("不兼容的公开 HTTP 协议会阻止普通读取", async () => {
     const listService = fakeService({ httpApiVersion: 99 });
     const listed = await run(["bin", "list"], listService.fetch);
@@ -272,6 +315,59 @@ void describe("查询服务发现", () => {
       [
         ["GET", "/meta", "http://selected.test"],
         ["GET", "/bins", "http://selected.test"],
+      ],
+    );
+  });
+
+  void it("按 bin actions 可选动作读取声明且不会触发动作运行", async () => {
+    const service = fakeService({});
+    const selected = await run(
+      ["bin", "actions", "rss-main", "collect"],
+      service.fetch,
+    );
+
+    assert.equal(selected.exitCode, 0, selected.output);
+    const selectedWire = JSON.parse(selected.output) as {
+      readonly data: {
+        readonly actions: Readonly<
+          Record<
+            string,
+            {
+              readonly description: string;
+              readonly report?: { readonly type?: string };
+            }
+          >
+        >;
+        readonly execution?: unknown;
+        readonly environment?: unknown;
+      };
+    };
+    assert.deepEqual(Object.keys(selectedWire.data.actions), ["collect"]);
+    assert.equal(
+      selectedWire.data.actions.collect?.description,
+      "读取 feed 中的新内容。",
+    );
+    assert.equal(selectedWire.data.actions.collect?.report?.type, "object");
+    assert.equal(Object.hasOwn(selectedWire.data, "execution"), false);
+    assert.equal(Object.hasOwn(selectedWire.data, "environment"), false);
+
+    const missing = await run(
+      ["bin", "actions", "rss-main", "missing"],
+      service.fetch,
+    );
+    assert.equal(missing.exitCode, 1);
+    assert.match(missing.output, /动作/);
+    assert.deepEqual(
+      service.requests.map(({ method, path, search }) => [
+        method,
+        path,
+        search,
+      ]),
+      [
+        ["GET", "/meta", ""],
+        ["GET", "/bins/rss-main/actions", "?action=collect"],
+        ["GET", "/meta", ""],
+        ["GET", "/bins/rss-main/actions", "?action=missing"],
       ],
     );
   });

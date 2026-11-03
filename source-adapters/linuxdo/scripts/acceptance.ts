@@ -915,6 +915,23 @@ async function verifyActionParameterValidation(): Promise<void> {
 }
 
 async function verifyCategoryActionDiscovery(): Promise<void> {
+  const before = await sourceState();
+  const configuration = cliData<{
+    readonly sourceAdapter: {
+      readonly configSchema: {
+        readonly properties?: Readonly<Record<string, unknown>>;
+      };
+    };
+  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
+  const origin = configuration.sourceAdapter.configSchema.properties?.origin as
+    | {
+        readonly description?: string;
+        readonly examples?: readonly unknown[];
+      }
+    | undefined;
+  assert.match(origin?.description ?? "", /HTTP\(S\).*origin/u);
+  assert.deepEqual(origin?.examples, ["https://linux.do"]);
+
   const actions = cliData<{
     readonly actions: Record<
       string,
@@ -924,7 +941,11 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
         readonly report?: unknown;
       }
     >;
+    readonly environment?: unknown;
+    readonly execution?: unknown;
   }>(await cli(["bin", "actions", "binny-discovery-topic"]), "discovered");
+  assert.equal(Object.hasOwn(actions, "environment"), false);
+  assert.equal(Object.hasOwn(actions, "execution"), false);
   const declaration = actions.actions["list-categories"];
   assert.ok(declaration !== undefined, "动作发现应公开 list-categories。");
   assert.ok(declaration.params !== undefined);
@@ -943,10 +964,22 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   const collect = actions.actions.collect;
   assert.ok(collect?.params !== undefined);
   const collectParamsSchema = collect.params as {
+    readonly description?: string;
     readonly properties?: Readonly<Record<string, unknown>>;
   };
+  assert.match(collectParamsSchema.description ?? "", /date 与 timeZone 成对/u);
+  assert.match(
+    collectParamsSchema.description ?? "",
+    /topicId 与 targets 互斥/u,
+  );
+  assert.match(
+    collectParamsSchema.description ?? "",
+    /targets 省略时使用当前可见板块/u,
+  );
   const postCreatedRange = collectParamsSchema.properties?.postCreatedRange as
     | {
+        readonly description?: string;
+        readonly examples?: readonly unknown[];
         readonly properties?: Readonly<Record<string, unknown>>;
         readonly required?: readonly string[];
       }
@@ -963,6 +996,38 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
     )?.default,
     20,
   );
+  assert.match(postCreatedRange.description ?? "", /date\/timeZone/u);
+  assert.deepEqual(postCreatedRange.examples, [
+    {
+      from: "2026-10-28T02:00:00.000Z",
+      to: "2026-10-28T04:00:00.000Z",
+      maxPages: 20,
+    },
+  ]);
+  const date = collectParamsSchema.properties?.date as
+    | { readonly description?: string; readonly examples?: readonly unknown[] }
+    | undefined;
+  assert.match(date?.description ?? "", /today|YYYY-MM-DD/u);
+  assert.deepEqual(date?.examples, ["today", "2026-10-28"]);
+  const timeZone = collectParamsSchema.properties?.timeZone as
+    | { readonly description?: string; readonly examples?: readonly unknown[] }
+    | undefined;
+  assert.match(timeZone?.description ?? "", /有效名称/u);
+  assert.deepEqual(timeZone?.examples, ["UTC", "Asia/Tokyo"]);
+
+  const singleAction = cliData<{
+    readonly actions: Record<string, { readonly report?: unknown }>;
+    readonly environment?: unknown;
+    readonly execution?: unknown;
+  }>(
+    await cli(["bin", "actions", "binny-discovery-topic", "collect"]),
+    "discovered",
+  );
+  assert.deepEqual(Object.keys(singleAction.actions), ["collect"]);
+  assert.ok(singleAction.actions.collect?.report !== undefined);
+  assert.equal(Object.hasOwn(singleAction, "environment"), false);
+  assert.equal(Object.hasOwn(singleAction, "execution"), false);
+  assert.deepEqual((await sourceState()).events, before.events);
 
   assert.ok(collect.report !== undefined, "collect 应声明可发现的运行报告。");
   const reportSchema = collect.report as {

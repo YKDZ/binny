@@ -72,21 +72,30 @@ export const sourceAdapterActionSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
-const sourceAdapterActionsSchema = z
-  .record(sourceAdapterActionNameSchema, sourceAdapterActionSchema)
-  .and(
-    z.object({
-      check: sourceAdapterActionSchema,
-      collect: sourceAdapterActionSchema,
-    }),
+export const sourceAdapterActionsRecordSchema = z.record(
+  sourceAdapterActionNameSchema,
+  sourceAdapterActionSchema,
+);
+
+/** `bin actions` 可返回完整动作表或只含所选动作的子集。 */
+export const sourceAdapterActionDiscoverySchema =
+  withPostgresJsonSchemaProjection(
+    z.object({ actions: sourceAdapterActionsRecordSchema }).strict(),
   );
+
+const sourceAdapterManifestActionsSchema = sourceAdapterActionsRecordSchema.and(
+  z.object({
+    check: sourceAdapterActionSchema,
+    collect: sourceAdapterActionSchema,
+  }),
+);
 
 const sourceAdapterManifestStoredFieldsSchema = z.object({
   id: sourceAdapterIdSchema,
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: sourceAdapterActionsSchema,
+  actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),
@@ -101,7 +110,7 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: sourceAdapterActionsSchema,
+  actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),

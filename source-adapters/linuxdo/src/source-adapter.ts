@@ -43,7 +43,13 @@ const siteOriginSchema = z.url().refine((value) => {
 }, "站点地址必须是没有路径、查询或凭据的 HTTP(S) origin。");
 
 const sourceAdapterConfigSchema = z
-  .object({ origin: siteOriginSchema })
+  .object({
+    origin: siteOriginSchema
+      .describe(
+        "Linux.do 站点 origin，只填 HTTP(S) 协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
+      )
+      .meta({ examples: ["https://linux.do"] }),
+  })
   .strict();
 const categorySlugPathSchema = z
   .string()
@@ -59,24 +65,45 @@ const categoryReferenceSchema = z
   .object({
     id: targetIdSchema,
     kind: z.literal("category"),
-    categoryId: topicIdSchema,
-    categorySlugPath: categorySlugPathSchema,
+    categoryId: topicIdSchema.describe("Linux.do 板块数字 ID。"),
+    categorySlugPath: categorySlugPathSchema.describe(
+      "板块 URL 中的 slug 路径；多级板块以斜杠分隔。",
+    ),
   })
   .strict();
 const configuredTargetSchema = z.discriminatedUnion("kind", [
-  z.object({ id: targetIdSchema, kind: z.literal("latest") }).strict(),
+  z
+    .object({
+      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+      kind: z.literal("latest").describe("按最新主题流发现主题。"),
+    })
+    .strict(),
   categoryReferenceSchema,
   z
     .object({
-      id: targetIdSchema,
-      kind: z.literal("topic"),
-      topicId: topicIdSchema,
+      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+      kind: z.literal("topic").describe("直接引用一个主题。"),
+      topicId: topicIdSchema.describe("Linux.do 主题数字 ID。"),
     })
     .strict(),
 ]);
 const actionTargetsSchema = z
   .array(configuredTargetSchema)
   .max(100)
+  .describe("显式指定的目标列表，最多 100 项；同一列表中的 id 必须唯一。")
+  .meta({
+    examples: [
+      [{ id: "latest", kind: "latest" }],
+      [
+        {
+          id: "support",
+          kind: "category",
+          categoryId: 4,
+          categorySlugPath: "c/support",
+        },
+      ],
+    ],
+  })
   .superRefine((targets, context) => {
     const ids = new Set<string>();
     for (const [index, target] of targets.entries()) {
@@ -92,8 +119,20 @@ const actionTargetsSchema = z
   });
 const checkParamsSchema = z
   .object({
-    topicId: topicIdSchema.optional(),
+    topicId: topicIdSchema
+      .optional()
+      .describe("只检查此主题；与 targets 互斥。")
+      .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
+  })
+  .describe(
+    "检查登录状态以及指定主题或目标的当前可见范围；topicId 与 targets 互斥。",
+  )
+  .meta({
+    examples: [
+      { topicId: 2401 },
+      { targets: [{ id: "latest", kind: "latest" }] },
+    ],
   })
   .strict()
   .superRefine((params, context) => {
@@ -112,11 +151,19 @@ const collectionDateSchema = z
     (value) =>
       value === "today" || value === "yesterday" || isValidCalendarDate(value),
     "日期必须是 today、yesterday 或有效的 YYYY-MM-DD。",
-  );
+  )
+  .describe(
+    "按触发时固定的参考时间解释的逻辑日期；必须是 today、yesterday 或有效的 YYYY-MM-DD 日期。",
+  )
+  .meta({ examples: ["today", "2026-10-28"] });
 const collectionTimeZoneSchema = z
   .string()
   .min(1, "必须提供 IANA 时区。")
-  .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。");
+  .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。")
+  .describe(
+    "解释 date 的 IANA 时区；必须是有效名称，且与 postCreatedRange 互斥。",
+  )
+  .meta({ examples: ["UTC", "Asia/Tokyo"] });
 const postCreatedRangeSchema = z
   .object({
     from: z.iso
@@ -136,6 +183,16 @@ const postCreatedRangeSchema = z
         "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
       ),
   })
+  .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 模式互斥。")
+  .meta({
+    examples: [
+      {
+        from: "2026-10-28T02:00:00.000Z",
+        to: "2026-10-28T04:00:00.000Z",
+        maxPages: 20,
+      },
+    ],
+  })
   .strict()
   .superRefine((range, context) => {
     if (Date.parse(range.from) >= Date.parse(range.to)) {
@@ -148,16 +205,42 @@ const postCreatedRangeSchema = z
   });
 const collectParamsSchema = z
   .object({
-    topicId: topicIdSchema.optional(),
+    topicId: topicIdSchema
+      .optional()
+      .describe("只处理此主题；与 targets 互斥。")
+      .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
     date: collectionDateSchema
       .optional()
-      .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
+      .describe("按 timeZone 解释的逻辑日期；与 postCreatedRange 互斥。"),
     timeZone: collectionTimeZoneSchema
       .optional()
-      .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
-    postCreatedRange: postCreatedRangeSchema.optional(),
-    maxTopics: z.number().int().positive().safe().optional(),
+      .describe("解释 date 的 IANA 时区；与 postCreatedRange 互斥。"),
+    postCreatedRange: postCreatedRangeSchema
+      .optional()
+      .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 互斥。"),
+    maxTopics: z
+      .number()
+      .int()
+      .positive()
+      .safe()
+      .optional()
+      .describe("本轮主题处理数量上限；省略时不额外限制主题数。")
+      .meta({ examples: [25] }),
+  })
+  .describe(
+    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
+  )
+  .meta({
+    examples: [
+      { date: "today", timeZone: "Asia/Tokyo" },
+      {
+        postCreatedRange: {
+          from: "2026-10-28T02:00:00.000Z",
+          to: "2026-10-28T04:00:00.000Z",
+        },
+      },
+    ],
   })
   .strict()
   .superRefine((params, context) => {

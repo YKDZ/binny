@@ -5849,7 +5849,10 @@ async function manualRunControllerPartitionStep(): Promise<void> {
   }
 }
 
-async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
+async function verifyConfigurationJourney(
+  baseUrl: string,
+  sourceControlUrl: string,
+): Promise<void> {
   const binId = "binny-runs-one";
   const registered = await waitForBinRegistration(baseUrl, binId);
   assert.equal(registered.id, binId);
@@ -5857,14 +5860,59 @@ async function verifyConfigurationJourney(baseUrl: string): Promise<void> {
   assert.deepEqual(registered.config, {});
   assert.equal(registered.execution.status, "incompatible");
 
+  const listRunIds = async (): Promise<readonly string[]> => {
+    const page = cliData<{
+      readonly runs: readonly { readonly runId: string }[];
+    }>(await cli(baseUrl, ["run", "list", binId]), "listed");
+    return page.runs.map(({ runId }) => runId);
+  };
+  const runsBefore = await listRunIds();
+  const sourceArrivalsBefore = await countAllSourceArrivals(sourceControlUrl);
   const discovered = cliData<{
     readonly actions: Readonly<Record<string, unknown>>;
-    readonly execution: { readonly status: string };
+    readonly environment?: unknown;
+    readonly execution?: unknown;
   }>(await cli(baseUrl, ["bin", "actions", binId]), "discovered");
   assert.ok("check" in discovered.actions);
   assert.ok("collect" in discovered.actions);
   assert.ok("discover" in discovered.actions);
-  assert.equal(discovered.execution.status, "incompatible");
+  assert.equal(Object.hasOwn(discovered, "environment"), false);
+  assert.equal(Object.hasOwn(discovered, "execution"), false);
+
+  const selected = cliData<{
+    readonly actions: Readonly<
+      Record<
+        string,
+        {
+          readonly description: string;
+          readonly params: unknown;
+          readonly output: unknown;
+        }
+      >
+    >;
+    readonly execution?: unknown;
+  }>(await cli(baseUrl, ["bin", "actions", binId, "collect"]), "discovered");
+  assert.deepEqual(Object.keys(selected.actions), ["collect"]);
+  assert.equal(typeof selected.actions.collect?.description, "string");
+  assert.ok(selected.actions.collect?.params !== undefined);
+  assert.ok(selected.actions.collect?.output !== undefined);
+  assert.equal(Object.hasOwn(selected, "execution"), false);
+
+  cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, ["bin", "actions", binId, "missing"]),
+    "action_not_found",
+  );
+
+  const bin = cliData<{
+    readonly execution: { readonly status: string };
+  }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  assert.equal(bin.execution.status, "incompatible");
+  assert.deepEqual(await listRunIds(), runsBefore);
+  assert.equal(
+    await countAllSourceArrivals(sourceControlUrl),
+    sourceArrivalsBefore,
+    "动作声明读取不应启动运行或访问来源。",
+  );
 
   const blockedRun = await fetch(`${baseUrl}/bins/${binId}/runs`, {
     method: "POST",
@@ -8787,7 +8835,7 @@ async function main(): Promise<void> {
       assert.ok(activeHeartbeatProxy !== undefined);
       assert.ok(rssControlSource !== undefined);
       await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
-      await verifyConfigurationJourney(baseUrl);
+      await verifyConfigurationJourney(baseUrl, manualRunSourceControlUrl());
       const manualRunManifest = await createRuntimeFixtureManifest();
       await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
       await manualRunControllerPartitionStep();

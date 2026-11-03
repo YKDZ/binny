@@ -23,6 +23,8 @@ import {
   type ArchiveOperations,
   type BinConfiguration,
   type BinConfigurationOperations,
+  sourceAdapterActionDiscoverySchema,
+  sourceAdapterActionNameSchema,
   type ManualRunOperations,
   type ManualRunListOperations,
   type RuntimeConnectionOperations,
@@ -130,16 +132,43 @@ function makeApp(operations: ApiOperations, productVersion: string) {
           return c.json(validationFailure(result.error.issues), 400);
         return undefined;
       }),
+      zValidator(
+        "query",
+        z.object({ action: sourceAdapterActionNameSchema.optional() }).strict(),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
       async (c) => {
         const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
-        const configuration = await withExecution(result.value);
+        const { action } = c.req.valid("query");
+        const actions = result.value.sourceAdapter.actions;
+        if (action === undefined) {
+          return c.json(
+            sourceAdapterActionDiscoverySchema.parse({ actions }),
+            200,
+          );
+        }
+        const declaration = actions[action];
+        if (declaration === undefined) {
+          return c.json(
+            {
+              error: {
+                code: "action_not_found" as const,
+                message: "信源适配器没有声明这个动作。",
+                path: ["action" as const],
+              },
+            },
+            404,
+          );
+        }
         return c.json(
-          {
-            actions: configuration.sourceAdapter.actions,
-            environment: configuration.sourceAdapter.environment,
-            execution: configuration.execution,
-          },
+          sourceAdapterActionDiscoverySchema.parse({
+            actions: { [action]: declaration },
+          }),
           200,
         );
       },

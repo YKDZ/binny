@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { publicApiProtocolVersion } from "@binny/contracts";
+
 import { runCli } from "../../src/main.ts";
 
 void describe("CLI 服务地址", () => {
@@ -14,7 +16,7 @@ void describe("CLI 服务地址", () => {
       if (new URL(received.url).pathname === "/meta") {
         return Response.json({
           product: { name: "Binny", version: "1.2.3" },
-          protocols: { httpApi: 1 },
+          protocols: { httpApi: publicApiProtocolVersion },
           capabilities: [
             "archives.search",
             "archives.aggregate",
