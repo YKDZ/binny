@@ -5,6 +5,7 @@ import {
   sourceAdapterManifestStoredSchema,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
+  manualRunReportInputSchema,
   manualRunErrorSchema,
   manualRunFailureSchema,
   manualRunExecutionSchema,
@@ -69,6 +70,7 @@ const runSelection = {
   completedScopes: manualRuns.completedScopes,
   failure: manualRuns.failure,
   output: manualRuns.output,
+  report: manualRuns.report,
 };
 
 const activeRuns = alias(manualRuns, "active_runs");
@@ -335,6 +337,7 @@ async function rowToRun(
     ...(row.finishedAt === null
       ? {}
       : { finishedAt: row.finishedAt.toISOString() }),
+    ...(row.report === null ? {} : { report: row.report }),
     ...(!hasResult
       ? {}
       : {
@@ -604,6 +607,68 @@ export function createManualRunStore(
 
         const row = await readRun(transaction, binId, runId, browserCapacity);
         if (row === undefined) throw new Error("取消运行后记录意外消失。");
+        return { ok: true, value: await rowToRun(transaction, row) };
+      });
+    },
+
+    async reportRun(binId, runId, input) {
+      const checked = manualRunReportInputSchema.safeParse(input);
+      if (!checked.success) {
+        const issue = checked.error.issues[0];
+        return failure(
+          400,
+          "invalid_input",
+          issue?.message ?? "运行报告格式无效。",
+          issue === undefined ? undefined : pathParts(issue.path),
+        );
+      }
+
+      return await database.transaction(async (transaction) => {
+        await interruptExpiredManualRuns(transaction, binId);
+        const [current] = await transaction
+          .select({
+            status: manualRuns.status,
+            runtimeId: manualRuns.runtimeId,
+          })
+          .from(manualRuns)
+          .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)))
+          .for("update");
+        if (current === undefined)
+          return failure(404, "run_not_found", "没有找到这个运行。", ["runId"]);
+        if (current.status !== "executing" && current.status !== "cancelling")
+          return failure(
+            409,
+            "run_not_executing",
+            "只有仍由运行器执行或正在停止的运行可以更新报告。",
+            ["runId"],
+          );
+        if (current.runtimeId !== checked.data.runtimeId)
+          return failure(
+            409,
+            "runtime_mismatch",
+            "运行器不能更新其他运行器的报告。",
+            ["runtimeId"],
+          );
+        if (
+          !(await isRuntimeOwnerWritable(
+            transaction,
+            binId,
+            checked.data.runtimeId,
+          ))
+        )
+          return failure(
+            409,
+            "runtime_owner_unconfirmed",
+            "运行器尚未确认它仍持有这个 bin 的执行权。",
+            ["runtimeId"],
+          );
+
+        await transaction
+          .update(manualRuns)
+          .set({ report: checked.data.report })
+          .where(and(eq(manualRuns.runId, runId), eq(manualRuns.binId, binId)));
+        const row = await readRun(transaction, binId, runId, browserCapacity);
+        if (row === undefined) throw new Error("运行报告写入后记录意外消失。");
         return { ok: true, value: await rowToRun(transaction, row) };
       });
     },

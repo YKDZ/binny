@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createApiClient } from "@binny/api/client";
 import {
   archiveJsonValueSchema,
+  jsonObjectSchema,
   manualRunExecutionSchema,
   type ManualRunCompletion,
   type ManualRunExecution,
@@ -12,6 +13,7 @@ import {
   parseSourceAdapterInput,
   sourceAdapterManifest,
   isSourceAdapterActionError,
+  sourceAdapterActionError,
   type SourceAdapterDefinition,
 } from "@binny/source-adapter-sdk";
 import {
@@ -68,6 +70,7 @@ function failureFrom(error: unknown) {
 async function executeRun(
   run: ManualRunExecution,
   browser: SourceAdapterBrowserConnection | undefined,
+  runtimeId: string,
 ): Promise<ManualRunCompletion> {
   const manifest = sourceAdapterManifest(activeSourceAdapter);
   const action = activeSourceAdapter.actions[run.action];
@@ -148,6 +151,69 @@ async function executeRun(
       config: configured.data,
       signal: actionAbort.signal,
       ...(browser === undefined ? {} : { browser }),
+      report: async (value: unknown) => {
+        if (action.report === undefined) {
+          throw sourceAdapterActionError({
+            code: "action_report_not_declared",
+            message: "信源适配器尝试更新未声明的运行报告。",
+            impact: "本次运行报告没有更新。",
+            requiresHuman: false,
+          });
+        }
+
+        const parsedReport = await parseSourceAdapterInput(
+          action.report,
+          value,
+        );
+        if (!parsedReport.success) {
+          const issue = parsedReport.error.issues[0];
+          throw sourceAdapterActionError({
+            code: "invalid_action_report",
+            message: "信源适配器运行报告不符合动作声明。",
+            impact: "本次运行报告没有更新。",
+            ...(issue === undefined
+              ? {}
+              : {
+                  path: issue.path.map((part) =>
+                    typeof part === "symbol" ? String(part) : part,
+                  ),
+                }),
+            requiresHuman: false,
+          });
+        }
+
+        const jsonReport = jsonObjectSchema.safeParse(parsedReport.data);
+        if (!jsonReport.success) {
+          throw sourceAdapterActionError({
+            code: "invalid_action_report",
+            message: "信源适配器运行报告不能通过 JSON 对象接口传递。",
+            impact: "本次运行报告没有更新。",
+            requiresHuman: false,
+          });
+        }
+
+        const response = await client.bins[":binId"].runtime.runs[
+          ":runId"
+        ].report.$post({
+          param: { binId: run.binId, runId: run.runId },
+          json: { runtimeId, report: jsonReport.data },
+        });
+        if (response.status === 200) return;
+        if (
+          response.status === 400 ||
+          response.status === 404 ||
+          response.status === 409
+        ) {
+          const result = await response.json();
+          throw sourceAdapterActionError({
+            code: result.error.code,
+            message: result.error.message,
+            impact: "本次运行报告没有更新。",
+            requiresHuman: false,
+          });
+        }
+        throw new Error("运行报告服务返回了未声明的状态。");
+      },
     };
     const result = await action.execute(
       createSourceAdapterContext(client, context),
@@ -221,11 +287,16 @@ process.once("message", (value: unknown) => {
       typeof decoded === "object" && decoded !== null
         ? (decoded as {
             readonly type?: unknown;
+            readonly runtimeId?: unknown;
             readonly run?: unknown;
             readonly browser?: unknown;
           })
         : undefined;
     const checked = manualRunExecutionSchema.safeParse(message?.run);
+    const runtimeId =
+      typeof message?.runtimeId === "string" && message.runtimeId.length > 0
+        ? message.runtimeId
+        : undefined;
     const checkedBrowser =
       message?.browser === undefined
         ? undefined
@@ -233,6 +304,7 @@ process.once("message", (value: unknown) => {
     if (
       message?.type !== "execute" ||
       !checked.success ||
+      runtimeId === undefined ||
       (message.browser !== undefined && !checkedBrowser?.success) ||
       (activeSourceAdapter.environment.browser.required &&
         !checkedBrowser?.success)
@@ -254,6 +326,7 @@ process.once("message", (value: unknown) => {
       const completion = await executeRun(
         checked.data,
         checkedBrowser?.success === true ? checkedBrowser.data : undefined,
+        runtimeId,
       );
       await send({ type: "completion", completion });
     }

@@ -6,6 +6,7 @@ import {
   type HumanSessionOperations,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
+  manualRunReportInputSchema,
   manualRunApiSchemas as contractManualRunApiSchemas,
   scheduleApiSchemas as contractScheduleApiSchemas,
   scheduleCreateInputSchema,
@@ -465,6 +466,33 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       async (c) => {
         const { binId, runId } = c.req.valid("param");
         const result = await operations.runs.completeRun(
+          binId,
+          runId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/bins/:binId/runtime/runs/:runId/report",
+      zValidator(
+        "param",
+        z.object({ binId: binIdSchema, runId: z.string().uuid() }),
+        (result, c) => {
+          if (!result.success)
+            return c.json(validationFailure(result.error.issues), 400);
+          return undefined;
+        },
+      ),
+      zValidator("json", manualRunReportInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const { binId, runId } = c.req.valid("param");
+        const result = await operations.runs.reportRun(
           binId,
           runId,
           c.req.valid("json"),

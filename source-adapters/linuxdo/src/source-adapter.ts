@@ -322,6 +322,90 @@ const collectOutputSchema = z
     incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
   })
   .strict();
+const collectReportSchema = z
+  .object({
+    phase: z
+      .enum([
+        "preparing",
+        "checking-access",
+        "discovering-targets",
+        "collecting",
+        "completed",
+        "failed",
+        "cancelled",
+      ])
+      .describe("当前运行阶段；中断时保留最后一个已持久化阶段。"),
+    referenceTime: z.iso
+      .datetime()
+      .describe("此运行固定使用的时间依据，不随排队或后续运行变化。"),
+    intent: z
+      .object({
+        date: collectionDateSchema.describe("按时区解释的逻辑采集日期。"),
+        timeZone: collectionTimeZoneSchema.describe(
+          "解释逻辑日期的 IANA 时区。",
+        ),
+        target: z
+          .discriminatedUnion("kind", [
+            z
+              .object({ kind: z.literal("topic"), topicId: topicIdSchema })
+              .strict(),
+            z.object({ kind: z.literal("all-visible") }).strict(),
+            z
+              .object({
+                kind: z.literal("targets"),
+                targets: actionTargetsSchema,
+              })
+              .strict(),
+          ])
+          .describe("触发时请求的主题、可见范围或显式目标。"),
+        maxTopics: z
+          .number()
+          .int()
+          .positive()
+          .safe()
+          .optional()
+          .describe("本轮请求的主题数量上限。"),
+      })
+      .strict()
+      .describe("来源访问前记录的运行意图。"),
+    window: z
+      .object({
+        from: z.iso.datetime().describe("实际范围的包含起点。"),
+        to: z.iso.datetime().describe("实际范围的不包含终点。"),
+      })
+      .strict()
+      .optional()
+      .describe("本轮筛选使用的左闭右开创建日期区间。"),
+    discovery: z
+      .enum(["not-started", "in-progress", "complete", "failed"])
+      .describe("动态目标发现的状态；失败时未确认范围不会被补全。"),
+    scopes: z
+      .array(
+        z
+          .object({
+            scope: z
+              .string()
+              .min(1)
+              .describe("本次运行已确认的 Linux.do 目标标识。"),
+            from: z.iso.datetime().describe("该范围的包含起点。"),
+            to: z.iso.datetime().describe("该范围的不包含终点。"),
+            status: z
+              .enum([
+                "unstarted",
+                "in-progress",
+                "completed",
+                "incomplete",
+                "unknown",
+              ])
+              .describe("该范围本轮的最后确认状态。"),
+          })
+          .strict(),
+      )
+      .describe("动态发现并分配的实际范围及其状态。")
+      .readonly(),
+  })
+  .strict();
+type CollectionReport = z.output<typeof collectReportSchema>;
 type CollectionIncompleteScope = z.infer<
   typeof collectionIncompleteScopeSchema
 >;
@@ -2442,12 +2526,38 @@ function failureWithProgress(
 }
 
 async function collectTopic(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: SourceAdapterContext<
+    SourceAdapterConfig,
+    typeof collectReportSchema
+  >,
   params: CollectParams,
 ): Promise<z.output<typeof collectOutputSchema>> {
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
   const incompleteScopes: CollectionIncompleteScope[] = [];
+  let report: CollectionReport = collectReportSchema.parse({
+    phase: "preparing",
+    referenceTime: context.referenceTime,
+    intent: {
+      date: params.date,
+      timeZone: params.timeZone,
+      target:
+        params.topicId !== undefined
+          ? { kind: "topic", topicId: params.topicId }
+          : params.targets === undefined
+            ? { kind: "all-visible" }
+            : { kind: "targets", targets: params.targets },
+      ...(params.maxTopics === undefined
+        ? {}
+        : { maxTopics: params.maxTopics }),
+    },
+    discovery: "not-started",
+    scopes: [],
+  });
+  const publishReport = async (next: CollectionReport) => {
+    report = collectReportSchema.parse(next);
+    await context.report(report);
+  };
   const output = () => ({
     completedScopes,
     collectionCompleteness:
@@ -2457,13 +2567,35 @@ async function collectTopic(
     incompleteScopes,
   });
   try {
+    await context.report(report);
     const dateWindow = collectionDateWindow(params, context.referenceTime);
+    const range = {
+      from: new Date(dateWindow.startInclusive).toISOString(),
+      to: new Date(dateWindow.endExclusive).toISOString(),
+    };
+    await publishReport({
+      ...report,
+      phase: "checking-access",
+      window: range,
+    });
     return await withSharedBrowser(context, async ({ page, request }) => {
       const session = await readSessionAccess(page, site, context.signal);
       if (session.kind === "unavailable") {
         throw failureFromProblem(session.problem);
       }
       if (params.topicId !== undefined) {
+        await publishReport({
+          ...report,
+          phase: "collecting",
+          discovery: "complete",
+          scopes: [
+            {
+              scope: `topic:${String(params.topicId)}`,
+              ...range,
+              status: "in-progress",
+            },
+          ],
+        });
         const access = await readTopic(
           page,
           site,
@@ -2479,6 +2611,14 @@ async function collectTopic(
           )
         ) {
           completedScopes.push(`${topicScope(params.topicId)}:filtered:date`);
+          await publishReport({
+            ...report,
+            phase: "completed",
+            scopes: report.scopes.map((scope) => ({
+              ...scope,
+              status: "completed",
+            })),
+          });
           return output();
         }
         const incomplete = await collectTopicContent(
@@ -2491,24 +2631,67 @@ async function collectTopic(
           access,
         );
         if (incomplete !== undefined) incompleteScopes.push(incomplete);
+        await publishReport({
+          ...report,
+          phase: "completed",
+          scopes: report.scopes.map((scope) => ({
+            ...scope,
+            status: incomplete === undefined ? "completed" : "incomplete",
+          })),
+        });
         return output();
       }
 
-      const categories =
+      let categories: DiscoveredCategory[] = [];
+      if (
         params.targets === undefined ||
         params.targets.some((target) => target.kind === "category")
-          ? await readVisibleCategories(page, site, context.signal)
-          : [];
+      ) {
+        await publishReport({
+          ...report,
+          phase: "discovering-targets",
+          discovery: "in-progress",
+        });
+        categories = await readVisibleCategories(page, site, context.signal);
+      }
       const targets = collectTargets(params.targets, categories);
+      const scopes = targets.map((target) => ({
+        scope: targetScope(target),
+        ...range,
+        status: "unstarted" as const,
+      }));
+      await publishReport({
+        ...report,
+        phase: "collecting",
+        discovery: "complete",
+        scopes,
+      });
       const progress: DiscoveryProgress = {
         seenTopicIds: new Set(),
         collectedTopics: 0,
       };
       for (const [index, target] of targets.entries()) {
         context.signal.throwIfAborted();
+        const scope = targetScope(target);
+        await publishReport({
+          ...report,
+          scopes: report.scopes.map((current) =>
+            current.scope === scope
+              ? { ...current, status: "in-progress" }
+              : current,
+          ),
+        });
         if (target.kind === "topic") {
           if (progress.seenTopicIds.has(target.topicId)) {
             completedScopes.push(targetScope(target));
+            await publishReport({
+              ...report,
+              scopes: report.scopes.map((current) =>
+                current.scope === scope
+                  ? { ...current, status: "completed" }
+                  : current,
+              ),
+            });
             continue;
           }
           progress.seenTopicIds.add(target.topicId);
@@ -2527,6 +2710,14 @@ async function collectTopic(
             )
           ) {
             completedScopes.push(`${targetScope(target)}:filtered:date`);
+            await publishReport({
+              ...report,
+              scopes: report.scopes.map((current) =>
+                current.scope === scope
+                  ? { ...current, status: "completed" }
+                  : current,
+              ),
+            });
             continue;
           }
           if (
@@ -2545,6 +2736,14 @@ async function collectTopic(
                 message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
               });
             }
+            await publishReport({
+              ...report,
+              scopes: report.scopes.map((current) =>
+                current.scope === scope
+                  ? { ...current, status: "incomplete" }
+                  : current,
+              ),
+            });
             break;
           }
           const incomplete = await collectTopicContent(
@@ -2559,6 +2758,18 @@ async function collectTopic(
           if (incomplete !== undefined) incompleteScopes.push(incomplete);
           progress.collectedTopics += 1;
           completedScopes.push(targetScope(target));
+          await publishReport({
+            ...report,
+            scopes: report.scopes.map((current) =>
+              current.scope === scope
+                ? {
+                    ...current,
+                    status:
+                      incomplete === undefined ? "completed" : "incomplete",
+                  }
+                : current,
+            ),
+          });
           continue;
         }
         const result = await collectListTarget(
@@ -2581,12 +2792,47 @@ async function collectTopic(
               message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
             });
           }
+          await publishReport({
+            ...report,
+            scopes: report.scopes.map((current) =>
+              current.scope === scope
+                ? { ...current, status: "incomplete" }
+                : current,
+            ),
+          });
           break;
         }
+        await publishReport({
+          ...report,
+          scopes: report.scopes.map((current) =>
+            current.scope === scope
+              ? {
+                  ...current,
+                  status: incompleteScopes.some(
+                    (incomplete) => incomplete.scope === scope,
+                  )
+                    ? "incomplete"
+                    : "completed",
+                }
+              : current,
+          ),
+        });
       }
+      await publishReport({ ...report, phase: "completed" });
       return output();
     });
   } catch (error) {
+    await publishReport({
+      ...report,
+      phase: context.signal.aborted ? "cancelled" : "failed",
+      discovery:
+        report.discovery === "in-progress" ? "failed" : report.discovery,
+      scopes: report.scopes.map((scope) =>
+        scope.status === "in-progress"
+          ? { ...scope, status: "unknown" }
+          : scope,
+      ),
+    }).catch(() => undefined);
     throw failureWithProgress(error, context, completedScopes);
   }
 }
@@ -2616,6 +2862,7 @@ export const sourceAdapter = defineSourceAdapter({
       description: "发现所选 Linux.do 目标的主题并归档帖子、回复和媒体。",
       params: collectParamsSchema,
       output: collectOutputSchema,
+      report: collectReportSchema,
       execute: collectTopic,
     }),
   },

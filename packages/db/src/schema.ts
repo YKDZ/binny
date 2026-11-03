@@ -641,6 +641,7 @@ export const manualRuns = pgTable(
     completedScopes: jsonb("completed_scopes").notNull().default([]),
     failure: jsonb("failure"),
     output: jsonb("output"),
+    report: jsonb("report"),
     cancelRequestedAt: timestamp("cancel_requested_at", {
       withTimezone: true,
       mode: "date",

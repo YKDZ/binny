@@ -1,0 +1,37 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "350f582f-19cd-4190-a722-c5da485d1a76",
+  "prevIds": ["f2912e4b-e40e-451c-a8da-3e54571a7716"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": ["column", "public", "manual_runs", "report"],
+      "writes": [
+        "s|col|public.manual_runs.report",
+        "n|col|public.manual_runs.report",
+        "e|col|public.manual_runs.report"
+      ],
+      "reads": ["n|tbl|public.manual_runs", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "report",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}

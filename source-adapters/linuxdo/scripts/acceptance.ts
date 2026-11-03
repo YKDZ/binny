@@ -869,7 +869,11 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   const actions = cliData<{
     readonly actions: Record<
       string,
-      { readonly params?: unknown; readonly output?: unknown }
+      {
+        readonly params?: unknown;
+        readonly output?: unknown;
+        readonly report?: unknown;
+      }
     >;
   }>(await cli(["bin", "actions", "binny-discovery-topic"]), "discovered");
   const declaration = actions.actions["list-categories"];
@@ -886,6 +890,18 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
     readonly properties?: Readonly<Record<string, unknown>>;
   };
   assert.ok(outputSchema.properties?.categories !== undefined);
+
+  const collect = actions.actions.collect;
+  assert.ok(collect?.report !== undefined, "collect 应声明可发现的运行报告。");
+  const reportSchema = collect.report as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+  assert.ok(reportSchema.properties?.phase !== undefined);
+  assert.ok(reportSchema.properties?.intent !== undefined);
+  assert.ok(
+    typeof (reportSchema.properties.phase as { readonly description?: unknown })
+      .description === "string",
+  );
 }
 
 async function verifyCategoryDiscovery(): Promise<void> {
@@ -986,6 +1002,37 @@ async function verifyCategoryDiscovery(): Promise<void> {
     unavailable.result?.error?.code,
     "discourse_category_list_request_failed",
   );
+
+  const failedCollection = await trigger("collect", {
+    targets: linuxdoTargets("category"),
+    maxTopics: 1,
+  });
+  assert.equal(
+    failedCollection.status,
+    "failed",
+    JSON.stringify(failedCollection),
+  );
+  assert.equal(
+    failedCollection.result?.error?.code,
+    "discourse_category_list_request_failed",
+  );
+  assert.equal(failedCollection.result?.output, undefined);
+  assert.equal(failedCollection.report?.phase, "failed");
+  assert.equal(failedCollection.report?.discovery, "failed");
+  assert.equal(
+    failedCollection.report?.referenceTime,
+    failedCollection.referenceTime,
+  );
+  assert.deepEqual(failedCollection.report?.intent, {
+    date: "2026-10-28",
+    timeZone: "UTC",
+    target: {
+      kind: "targets",
+      targets: linuxdoTargets("category"),
+    },
+    maxTopics: 1,
+  });
+
   await updateFixtureState({
     categoriesUnavailable: false,
     categoriesInvalidResponse: true,
@@ -1009,6 +1056,22 @@ async function verifyCategoryDiscovery(): Promise<void> {
   assert.ok(
     collection.result?.output?.completedScopes?.includes("target:category-43"),
   );
+  assert.equal(collection.report?.phase, "completed");
+  assert.equal(collection.report?.discovery, "complete");
+  assert.ok(
+    Array.isArray(collection.report?.scopes) &&
+      collection.report.scopes.some(
+        (scope) =>
+          typeof scope === "object" &&
+          scope !== null &&
+          "scope" in scope &&
+          scope.scope === "target:category-43" &&
+          "status" in scope &&
+          scope.status === "completed",
+      ),
+    JSON.stringify(collection.report),
+  );
+  assert.ok(collection.result?.output !== undefined);
   const afterCollection = await sourceState();
   assert.ok(
     afterCollection.events
@@ -1023,6 +1086,144 @@ async function verifyCategoryDiscovery(): Promise<void> {
   const archived = await searchArchiveItem("发现主题 2499");
   assert.equal(archived.sourceKey.key, "post:249900");
   assert.equal(binState(archived).capture.scope.topicId, 2499);
+}
+
+async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
+  const before = await sourceState();
+  const priorTopicLists = before.events.filter(
+    ({ action }) => action === "topic-list",
+  ).length;
+  await updateFixtureState({ topicListDelayMs: 30_000 });
+  try {
+    const queued = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "collect",
+        "--params",
+        JSON.stringify({
+          targets: linuxdoTargets("latest"),
+          date: "2026-10-28",
+          timeZone: "UTC",
+          maxTopics: 1,
+        }),
+      ]),
+      "triggered",
+    );
+    const collecting = await waitFor(
+      async () =>
+        cliData<ManualRun>(
+          await cli(["run", "get", "binny-discovery-topic", queued.runId]),
+          "found",
+        ),
+      ({ status, report }) =>
+        status === "executing" && report?.phase === "collecting",
+      "collect 运行的执行中报告",
+    );
+    assert.equal(collecting.report?.referenceTime, collecting.referenceTime);
+    assert.ok(
+      Array.isArray(collecting.report?.scopes) &&
+        collecting.report.scopes.some(
+          (scope) =>
+            typeof scope === "object" &&
+            scope !== null &&
+            "scope" in scope &&
+            scope.scope === "target:latest" &&
+            "status" in scope &&
+            scope.status === "in-progress",
+        ),
+      JSON.stringify(collecting.report),
+    );
+    await waitForSourceEvent("topic-list", priorTopicLists + 1);
+
+    const bin = cliData<{
+      readonly execution: { readonly runtimeId: string };
+    }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
+    const currentReport = JSON.stringify(collecting.report);
+    const wrongRuntime = await fetch(
+      `${apiUrl()}/bins/binny-discovery-topic/runtime/runs/${queued.runId}/report`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeId: "different-runtime",
+          report: { phase: "tampered" },
+        }),
+      },
+    );
+    assert.equal(wrongRuntime.status, 409);
+    assert.equal(
+      (
+        (await wrongRuntime.json()) as {
+          readonly error: { readonly code: string };
+        }
+      ).error.code,
+      "runtime_mismatch",
+    );
+    const afterWrongRuntime = cliData<ManualRun>(
+      await cli(["run", "get", "binny-discovery-topic", queued.runId]),
+      "found",
+    );
+    assert.equal(JSON.stringify(afterWrongRuntime.report), currentReport);
+
+    const childProcesses = await compose([
+      "exec",
+      "--no-TTY",
+      "runtime-linuxdo",
+      "node",
+      "--input-type=module",
+      "-e",
+      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const parent = /^PPid:\\s+(\\d+)/mu.exec(readFileSync(proc + "/status", "utf8"))?.[1]; const command = readFileSync(proc + "/cmdline").toString(); if (parent === "1" && command.includes("worker")) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
+    ]);
+    const workerPid = Number(childProcesses.stdout.trim());
+    assert.ok(Number.isSafeInteger(workerPid) && workerPid > 1);
+    await compose([
+      "exec",
+      "--no-TTY",
+      "runtime-linuxdo",
+      "node",
+      "-e",
+      `process.kill(${String(workerPid)}, "SIGKILL")`,
+    ]);
+
+    const interrupted = await waitForManualRun(queued.runId);
+    assert.equal(interrupted.status, "failed", JSON.stringify(interrupted));
+    assert.equal(
+      interrupted.result?.error?.code,
+      "source_adapter_process_interrupted",
+    );
+    assert.equal(interrupted.result?.output, undefined);
+    assert.equal(JSON.stringify(interrupted.report), currentReport);
+
+    const terminalUpdate = await fetch(
+      `${apiUrl()}/bins/binny-discovery-topic/runtime/runs/${queued.runId}/report`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeId: bin.execution.runtimeId,
+          report: { phase: "completed", tampered: true },
+        }),
+      },
+    );
+    assert.equal(terminalUpdate.status, 409);
+    assert.equal(
+      (
+        (await terminalUpdate.json()) as {
+          readonly error: { readonly code: string };
+        }
+      ).error.code,
+      "run_not_executing",
+    );
+    const afterTerminalUpdate = cliData<ManualRun>(
+      await cli(["run", "get", "binny-discovery-topic", queued.runId]),
+      "found",
+    );
+    assert.equal(JSON.stringify(afterTerminalUpdate.report), currentReport);
+  } finally {
+    await updateFixtureState({ topicListDelayMs: 0 });
+  }
 }
 
 async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
@@ -1676,9 +1877,13 @@ async function verifyChallengeCancellation(): Promise<void> {
         "run",
         "trigger",
         "binny-discovery-topic",
-        "check",
+        "collect",
         "--params",
-        JSON.stringify({ topicId: 2401 }),
+        JSON.stringify({
+          topicId: 2401,
+          date: "2026-10-28",
+          timeZone: "UTC",
+        }),
       ]),
       "triggered",
     );
@@ -1690,6 +1895,8 @@ async function verifyChallengeCancellation(): Promise<void> {
     );
     const stopped = await waitForManualRun(queued.runId);
     assert.equal(stopped.status, "cancelled", JSON.stringify(stopped));
+    assert.equal(stopped.report?.phase, "cancelled", JSON.stringify(stopped));
+    assert.equal(stopped.result?.output, undefined);
     assert.ok(
       Date.now() - started < 10_000,
       "取消应及时停止恢复，而非等待恢复预算耗尽",
@@ -2832,6 +3039,10 @@ async function verifyDiscovery(): Promise<void> {
   });
   assert.equal(failed.status, "failed", JSON.stringify(failed));
   assert.equal(failed.result?.error?.code, "discourse_topic_unavailable");
+  assert.equal(failed.result?.output, undefined);
+  assert.equal(failed.report?.phase, "failed", JSON.stringify(failed));
+  assert.equal(failed.report?.discovery, "complete", JSON.stringify(failed));
+  assert.ok((failed.result?.commits?.length ?? 0) > 0, JSON.stringify(failed));
   assert.ok(
     failed.result?.completedScopes?.includes("topic:2401"),
     `失败运行应报告已提交的主题范围：${JSON.stringify(failed)}`,
@@ -3266,6 +3477,10 @@ async function main(): Promise<void> {
     await verifyCategoryDiscovery();
     process.stdout.write(
       "板块动作发现、当前身份可见树、错误诊断和直接引用采集通过。\n",
+    );
+    await verifyRunReportAfterWorkerInterruption();
+    process.stdout.write(
+      "运行中报告、错误运行器拒绝、worker 异常退出保留和终结历史保护通过。\n",
     );
     await verifyDailyCollection();
     process.stdout.write(

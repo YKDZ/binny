@@ -68,6 +68,7 @@ export const sourceAdapterActionSchema = withPostgresJsonSchemaProjection(
     description: postgresTextSchema.min(1, "动作说明不能为空。"),
     params: jsonSchemaDocumentSchema,
     output: jsonSchemaDocumentSchema,
+    report: jsonSchemaDocumentSchema.optional(),
   }),
 );
 

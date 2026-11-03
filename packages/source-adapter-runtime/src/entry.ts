@@ -772,6 +772,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
 
     await sendWorkerMessage(worker, {
       type: "execute",
+      runtimeId,
       run: {
         runId: run.runId,
         binId: run.binId,
