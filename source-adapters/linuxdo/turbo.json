@@ -38,6 +38,40 @@
       "inputs": [],
       "outputs": [],
       "tags": ["quality:light"]
+    },
+    "test:acceptance": {
+      "passThroughEnv": [
+        "BINNY_DISCOVERY_PUBLISHED_HOST",
+        "BINNY_DISCOVERY_API_SUBNET",
+        "BINNY_DISCOVERY_RUNTIME_SUBNET",
+        "BINNY_DISCOVERY_CONNECTIONS_SUBNET",
+        "BINNY_DISCOVERY_BROWSER_SUBNET"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/compose.acceptance.yaml",
+        "$TURBO_ROOT$/Dockerfile",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser",
+        "$TURBO_ROOT$/scripts/binny-e2e-test-clock.ts",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/binny/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/package.json",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/core/package.json",
+        "$TURBO_ROOT$/packages/core/src/**",
+        "$TURBO_ROOT$/packages/db/**",
+        "$TURBO_ROOT$/packages/server/package.json",
+        "$TURBO_ROOT$/packages/server/src/**",
+        "$TURBO_ROOT$/packages/tooling-config/**",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/package.json"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["quality:heavy"]
     }
   }
 }

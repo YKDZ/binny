@@ -41,7 +41,8 @@
         "@binny/api#build",
         "@binny/binny#build",
         "@binny/source-adapter-sdk#build",
-        "@binny/source-adapter-rss#build"
+        "@binny/source-adapter-rss#build",
+        "@binny/acceptance#typecheck"
       ],
       "passThroughEnv": [
         "BINNY_E2E_HOST",
@@ -58,11 +59,9 @@
         "pnpm-workspace.yaml",
         "compose.acceptance.yaml",
         "Dockerfile",
-        "scripts/binny-isolated-consumer.ts",
         "scripts/binny-e2e.ts",
         "scripts/binny-e2e-heartbeat-proxy.ts",
         "scripts/binny-image-update-context.ts",
-        "scripts/binny-e2e-linuxdo-journey.ts",
         "scripts/binny-e2e-rss-source.ts",
         "pnpm-lock.yaml",
         "packages/api/package.json",
@@ -84,45 +83,10 @@
         "packages/core/src/**",
         "packages/db/**",
         "packages/server/package.json",
-        "packages/server/src/**"
-      ],
-      "outputs": [],
-      "cache": false,
-      "tags": ["quality:heavy"]
-    },
-    "//#test:linuxdo-source-adapter": {
-      "passThroughEnv": [
-        "BINNY_DISCOVERY_PUBLISHED_HOST",
-        "BINNY_DISCOVERY_API_SUBNET",
-        "BINNY_DISCOVERY_RUNTIME_SUBNET",
-        "BINNY_DISCOVERY_CONNECTIONS_SUBNET",
-        "BINNY_DISCOVERY_BROWSER_SUBNET"
-      ],
-      "inputs": [
-        "compose.acceptance.yaml",
-        "Dockerfile",
-        "packages/source-adapter-runtime/Dockerfile.browser",
-        "scripts/binny-e2e-test-clock.ts",
-        "scripts/test-linuxdo-source-adapter.ts",
-        "scripts/binny-e2e-linuxdo-source.ts",
-        "scripts/binny-e2e-linuxdo-journey.ts",
-        "packages/api/src/**",
-        "packages/binny/src/**",
-        "packages/source-adapter-runtime/package.json",
-        "packages/source-adapter-runtime/src/**",
-        "packages/source-adapter-sdk/src/**",
-        "packages/contracts/src/**",
-        "packages/core/package.json",
-        "packages/core/src/**",
-        "packages/db/**",
-        "packages/server/package.json",
         "packages/server/src/**",
-        "packages/tooling-config/**",
         "source-adapters/linuxdo/package.json",
-        "source-adapters/linuxdo/src/**",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "package.json"
+        "source-adapters/linuxdo/scripts/**",
+        "packages/acceptance/**"
       ],
       "outputs": [],
       "cache": false,

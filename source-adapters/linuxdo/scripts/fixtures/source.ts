@@ -2,6 +2,12 @@ import { createServer } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 
 type SourceState = {
+  readonly nativeChallenge: boolean;
+  readonly nativeChallengeWait: boolean;
+  readonly nativeChallengePersistent: boolean;
+  readonly nativeChallengeMedia: boolean;
+  readonly nativeChallengePaths: readonly string[];
+  readonly nativeChallengeNavigationDelayMs: number;
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
@@ -64,6 +70,12 @@ const jsonAttachmentBytes = Buffer.from(
 );
 
 let activeState: SourceState = {
+  nativeChallenge: false,
+  nativeChallengeWait: false,
+  nativeChallengePersistent: false,
+  nativeChallengeMedia: false,
+  nativeChallengePaths: [],
+  nativeChallengeNavigationDelayMs: 0,
   challengePage: false,
   challengeTopic: false,
   challengePosts: false,
@@ -575,6 +587,10 @@ function updateState(value: unknown): boolean {
     }
   }
   for (const key of [
+    "nativeChallenge",
+    "nativeChallengeWait",
+    "nativeChallengePersistent",
+    "nativeChallengeMedia",
     "challengePage",
     "challengeTopic",
     "challengePosts",
@@ -613,6 +629,13 @@ function updateState(value: unknown): boolean {
     return false;
   }
   if (
+    "nativeChallengeNavigationDelayMs" in updates &&
+    (!Number.isSafeInteger(updates.nativeChallengeNavigationDelayMs) ||
+      Number(updates.nativeChallengeNavigationDelayMs) < 0 ||
+      Number(updates.nativeChallengeNavigationDelayMs) > 60_000)
+  )
+    return false;
+  if (
     "topicListDelayMs" in updates &&
     (!Number.isSafeInteger(updates.topicListDelayMs) ||
       Number(updates.topicListDelayMs) < 0 ||
@@ -621,6 +644,7 @@ function updateState(value: unknown): boolean {
     return false;
   }
   for (const key of [
+    "nativeChallengePaths",
     "omittedPostIds",
     "unavailableMedia",
     "invalidCreatedAtTopicIds",
@@ -688,6 +712,29 @@ const server = createServer((request, response) => {
       sendJson(response, 200, { state: activeState, events: [...events] });
       return;
     }
+    if (request.method === "POST" && pathname === "/__challenge/complete") {
+      record(
+        url.searchParams.get("mode") === "wait"
+          ? "challenge-wait"
+          : "challenge-click",
+        pathname,
+        authenticated,
+      );
+      activeState = {
+        ...activeState,
+        nativeChallenge:
+          activeState.nativeChallenge && activeState.nativeChallengePersistent,
+        nativeChallengeMedia:
+          activeState.nativeChallengeMedia &&
+          activeState.nativeChallengePersistent,
+        nativeChallengePaths: activeState.nativeChallengePaths.filter(
+          (path) => path !== url.searchParams.get("target"),
+        ),
+      };
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     if (request.method === "GET" && pathname === "/login") {
       record("login-page", pathname);
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -726,6 +773,44 @@ const server = createServer((request, response) => {
           "binny-discovery_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
       });
       response.end("<!doctype html><html><body>已退出登录。</body></html>");
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      ((pathname === "/session/current.json" && activeState.nativeChallenge) ||
+        (pathname === photoPath && activeState.nativeChallengeMedia) ||
+        activeState.nativeChallengePaths.includes(pathname))
+    ) {
+      record(
+        pathname === photoPath ? "media" : "session-current",
+        pathname,
+        authenticated,
+      );
+      if (
+        request.headers["sec-fetch-mode"] === "navigate" ||
+        request.headers.accept?.includes("text/html")
+      ) {
+        record("challenge-navigation", pathname, authenticated);
+        await delay(activeState.nativeChallengeNavigationDelayMs);
+      }
+      response.writeHead(403, {
+        "content-type": "text/html; charset=utf-8",
+        "cf-mitigated": "challenge",
+      });
+      response.end(`<!doctype html><html><head><title>Just a moment...</title></head><body>
+          <div id="challenge-running">Cloudflare</div>
+          ${activeState.nativeChallengeWait ? "" : '<label><input type="checkbox">Verify you are human</label>'}
+          <script>window._cf_chl_opt = {};
+          async function complete(mode) {
+            await fetch('/__challenge/complete?mode=' + mode + '&target=' + encodeURIComponent(${JSON.stringify(pathname)}), {method: 'POST'});
+            location.reload();
+          }
+          ${
+            activeState.nativeChallengeWait
+              ? "setTimeout(() => complete('wait'), 250);"
+              : "document.querySelector('input').addEventListener('change', () => complete('click'));"
+          }
+          </script></body></html>`);
       return;
     }
     if (request.method === "GET" && pathname === "/session/current.json") {

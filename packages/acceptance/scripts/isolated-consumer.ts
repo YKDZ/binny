@@ -18,7 +18,7 @@ type ProcessResult = {
 };
 
 type ConsumerOptions = {
-  readonly repositoryRoot: string;
+  readonly artifactRoot: string;
 };
 
 export type CliRunOptions = {
@@ -81,7 +81,7 @@ async function runChecked(
 }
 
 async function packPackage(
-  repositoryRoot: string,
+  artifactRoot: string,
   packageDirectory: string,
   artifactDirectory: string,
 ): Promise<string> {
@@ -89,7 +89,7 @@ async function packPackage(
   await runChecked(
     "pnpm",
     ["pack", "--pack-destination", artifactDirectory],
-    path.join(repositoryRoot, packageDirectory),
+    path.join(artifactRoot, packageDirectory),
   );
   const created = (await readdir(artifactDirectory)).filter(
     (entry) => entry.endsWith(".tgz") && !before.has(entry),
@@ -120,7 +120,7 @@ function consumerEnvironment(apiUrl: string | null): Record<string, string> {
 }
 
 export async function createIsolatedCliConsumer({
-  repositoryRoot,
+  artifactRoot,
 }: ConsumerOptions): Promise<IsolatedCliConsumer> {
   const temporaryRoot = await mkdtemp(
     path.join(tmpdir(), "binny-installed-cli-consumer-"),
@@ -136,9 +136,9 @@ export async function createIsolatedCliConsumer({
       mkdir(consumerDirectory, { recursive: true }),
     ]);
     const packageDirectories = {
-      "@binny/binny": path.join(repositoryRoot, "packages/binny"),
-      "@binny/api": path.join(repositoryRoot, "packages/api"),
-      "@binny/contracts": path.join(repositoryRoot, "packages/contracts"),
+      "@binny/binny": path.join(artifactRoot, "packages/binny"),
+      "@binny/api": path.join(artifactRoot, "packages/api"),
+      "@binny/contracts": path.join(artifactRoot, "packages/contracts"),
     };
     const packageArtifacts = {} as Record<
       keyof typeof packageDirectories,
@@ -147,8 +147,8 @@ export async function createIsolatedCliConsumer({
     for (const [name, directory] of Object.entries(packageDirectories)) {
       packageArtifacts[name as keyof typeof packageDirectories] =
         await packPackage(
-          repositoryRoot,
-          path.relative(repositoryRoot, directory),
+          artifactRoot,
+          path.relative(artifactRoot, directory),
           artifactDirectory,
         );
     }
@@ -225,7 +225,7 @@ export async function createIsolatedCliConsumer({
         "prepare:client-consumer",
         consumerDirectory,
       ],
-      repositoryRoot,
+      artifactRoot,
     );
     await writeFile(
       path.join(consumerDirectory, "tsconfig.json"),
@@ -250,7 +250,7 @@ export async function createIsolatedCliConsumer({
       ) + "\n",
     );
     await runChecked(
-      path.join(repositoryRoot, "node_modules/.bin/tsc"),
+      path.join(artifactRoot, "node_modules/.bin/tsc"),
       ["-p", "tsconfig.json", "--noEmit", "--pretty", "false"],
       consumerDirectory,
     );

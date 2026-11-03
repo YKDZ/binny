@@ -390,7 +390,7 @@ services:
     command:
       - node
       - --conditions=source
-      - scripts/binny-e2e-linuxdo-source.ts
+      - source-adapters/linuxdo/scripts/fixtures/source.ts
     environment:
       BINNY_DISCOVERY_SOURCE_PORT: 8081
     restart: unless-stopped

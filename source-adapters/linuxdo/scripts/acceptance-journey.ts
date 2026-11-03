@@ -199,7 +199,7 @@ export async function triggerLinuxdoRun(
   binId: string,
   action: LinuxdoAction,
   params: Readonly<Record<string, unknown>>,
-  timeoutMs = 90_000,
+  timeoutMs = 180_000,
 ): Promise<LinuxdoManualRun> {
   const queued = cliData<LinuxdoManualRun>(
     await cli([
@@ -220,7 +220,11 @@ export async function triggerLinuxdoRun(
       await cli(["run", "get", binId, queued.runId]),
       "found",
     );
-    if (latest.status === "completed" || latest.status === "failed")
+    if (
+      latest.status === "completed" ||
+      latest.status === "failed" ||
+      latest.status === "cancelled"
+    )
       return latest;
     await delay(100);
   }

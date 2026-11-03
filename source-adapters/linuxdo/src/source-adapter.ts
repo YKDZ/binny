@@ -11,6 +11,17 @@ import {
 import { chromium, type APIRequestContext, type Page } from "patchright-core";
 import { z } from "zod";
 
+import { ChallengeRecovery } from "#/challenge-recovery";
+
+const challengeRecoverySchema = z
+  .object({
+    rounds: z.number().int().nonnegative(),
+    elapsedMs: z.number().int().nonnegative(),
+    successes: z.number().int().nonnegative(),
+  })
+  .strict();
+type ChallengeRecoverySummary = z.output<typeof challengeRecoverySchema>;
+
 const topicIdSchema = z.number().int().safe().positive();
 const targetIdSchema = z
   .string()
@@ -150,7 +161,10 @@ const discoveredCategorySchema: z.ZodType<DiscoveredCategory> = z.lazy(() =>
     .strict(),
 );
 const listCategoriesOutputSchema = z
-  .object({ categories: z.array(discoveredCategorySchema) })
+  .object({
+    categories: z.array(discoveredCategorySchema),
+    challengeRecovery: challengeRecoverySchema,
+  })
   .strict();
 const discourseCategorySchema = z
   .object({
@@ -273,6 +287,7 @@ type DiscourseProblem = {
 };
 const checkOutputSchema = z
   .object({
+    challengeRecovery: challengeRecoverySchema,
     availability: z.enum(["available", "unavailable", "unknown"]),
     scope: z.array(z.string().min(1)),
     basis: z.string().min(1),
@@ -299,6 +314,7 @@ const collectionIncompleteScopeSchema = z
   .strict();
 const collectOutputSchema = z
   .object({
+    challengeRecovery: challengeRecoverySchema,
     completedScopes: z.array(z.string()).readonly(),
     collectionCompleteness: z.enum(["complete", "partial"]),
     incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
@@ -309,8 +325,16 @@ type CollectionIncompleteScope = z.infer<
 >;
 type JsonResponse =
   | { readonly kind: "json"; readonly status: number; readonly value: unknown }
-  | { readonly kind: "nonJson"; readonly status: number }
-  | { readonly kind: "invalidJson"; readonly status: number }
+  | {
+      readonly kind: "nonJson";
+      readonly status: number;
+      readonly recoveryFailure?: string;
+    }
+  | {
+      readonly kind: "invalidJson";
+      readonly status: number;
+      readonly recoveryFailure?: string;
+    }
   | {
       readonly kind: "networkError";
       readonly status: 0;
@@ -341,6 +365,8 @@ type SharedBrowser = {
   readonly request: APIRequestContext;
 };
 type PageFetchResponse = {
+  readonly recoveryFailure?: string;
+  readonly mitigated: string;
   readonly status: number;
   readonly contentType: string;
   readonly body: string;
@@ -369,6 +395,7 @@ type MediaDownload =
 const checkBasis =
   "通过正式持久浏览器的共享身份读取 Discourse 当前会话和指定主题 JSON；检查不下载媒体、不写入归档。";
 const postBatchSize = 100;
+const pageRecovery = new WeakMap<Page, ChallengeRecovery>();
 
 function siteFromConfig(config: SourceAdapterConfig): {
   readonly origin: URL;
@@ -384,7 +411,7 @@ function siteFromConfig(config: SourceAdapterConfig): {
 async function withSharedBrowser<T>(
   context: Pick<SourceAdapterContext, "browser" | "signal">,
   callback: (browser: SharedBrowser) => Promise<T>,
-): Promise<T> {
+): Promise<T & { readonly challengeRecovery: ChallengeRecoverySummary }> {
   const connection = context.browser;
   if (connection === undefined || connection.protocol !== "playwright") {
     throw new Error("Linux.do 采集需要正式浏览器运行器提供 Playwright 连接。");
@@ -402,10 +429,25 @@ async function withSharedBrowser<T>(
       throw new Error("正式浏览器没有暴露持久 context。");
     }
     const page = await persistentContext.newPage();
+    const recovery = new ChallengeRecovery(page, context.signal);
+    pageRecovery.set(page, recovery);
+    const cancel = () => {
+      void page.close({ runBeforeUnload: false }).catch(() => undefined);
+    };
+    context.signal.addEventListener("abort", cancel, { once: true });
     try {
       context.signal.throwIfAborted();
-      return await callback({ page, request: persistentContext.request });
+      const output = await callback({
+        page,
+        request: persistentContext.request,
+      });
+      return {
+        ...output,
+        challengeRecovery: { ...recovery.summary },
+      };
     } finally {
+      context.signal.removeEventListener("abort", cancel);
+      pageRecovery.delete(page);
       await page.close({ runBeforeUnload: false });
     }
   } finally {
@@ -417,12 +459,13 @@ async function readJson(
   page: Page,
   url: URL,
   signal: AbortSignal,
+  valid: (value: unknown) => boolean,
 ): Promise<JsonResponse> {
   signal.throwIfAborted();
   let response: PageFetchResponse;
   try {
     await ensurePageOrigin(page, url, signal);
-    response = await fetchInPage(page, url, "application/json", "text");
+    response = await fetchInPage(page, url, "application/json", "text", valid);
   } catch (error) {
     if (signal.aborted) throw signal.reason;
     return {
@@ -438,7 +481,13 @@ async function readJson(
       contentType,
     )
   ) {
-    return { kind: "nonJson", status: response.status };
+    return {
+      kind: "nonJson",
+      status: response.status,
+      ...(response.recoveryFailure === undefined
+        ? {}
+        : { recoveryFailure: response.recoveryFailure }),
+    };
   }
   try {
     return {
@@ -447,7 +496,13 @@ async function readJson(
       value: JSON.parse(response.body) as unknown,
     };
   } catch {
-    return { kind: "invalidJson", status: response.status };
+    return {
+      kind: "invalidJson",
+      status: response.status,
+      ...(response.recoveryFailure === undefined
+        ? {}
+        : { recoveryFailure: response.recoveryFailure }),
+    };
   }
 }
 
@@ -478,11 +533,64 @@ async function fetchInPage(
   url: URL,
   accept: string,
   body: "text" | "base64",
+  validJson?: (value: unknown) => boolean,
+  validMedia?: (response: PageFetchResponse) => boolean,
+): Promise<PageFetchResponse> {
+  const response = await fetchInPageOnce(page, url, accept, body);
+  if (response.mitigated !== "challenge") return response;
+  const recovery = pageRecovery.get(page);
+  if (recovery === undefined) return response;
+  const restored = await recovery.recover(
+    url,
+    (timeoutMs) => fetchInPageOnce(page, url, accept, body, timeoutMs),
+    (value) => {
+      if (value.status < 200 || value.status >= 300) return false;
+      if (value.mitigated === "challenge") return false;
+      if (body === "base64") {
+        return validMedia?.(value) ?? false;
+      }
+      if (value.status !== 200) return false;
+      if (!/application\/(?:[a-z0-9.+-]*\+)?json/iu.test(value.contentType)) {
+        return false;
+      }
+      try {
+        return validJson?.(JSON.parse(value.body) as unknown) ?? false;
+      } catch {
+        return false;
+      }
+    },
+    (value) => value.mitigated === "challenge",
+  );
+  const result = restored ?? response;
+  return result.mitigated === "challenge" &&
+    recovery.failureMessage !== undefined
+    ? { ...result, recoveryFailure: recovery.failureMessage }
+    : result;
+}
+
+function responseProblemMessage(
+  response: JsonResponse,
+  message: string,
+): string {
+  return "recoveryFailure" in response && response.recoveryFailure !== undefined
+    ? `${message}${response.recoveryFailure}`
+    : message;
+}
+
+async function fetchInPageOnce(
+  page: Page,
+  url: URL,
+  accept: string,
+  body: "text" | "base64",
+  timeoutMs = 30_000,
 ): Promise<PageFetchResponse> {
   return await page.evaluate(
-    async ({ href, acceptHeader, bodyType }) => {
+    async ({ href, acceptHeader, bodyType, expiresAt }) => {
       const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 30_000);
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0)
+        throw new DOMException("请求期限已到。", "TimeoutError");
+      const timeout = window.setTimeout(() => controller.abort(), remaining);
       try {
         const response = await fetch(href, {
           cache: "no-store",
@@ -505,6 +613,7 @@ async function fetchInPage(
           responseBody = btoa(binary);
         }
         return {
+          mitigated: response.headers.get("cf-mitigated") ?? "",
           status: response.status,
           contentType: response.headers.get("content-type") ?? "",
           body: responseBody,
@@ -513,7 +622,12 @@ async function fetchInPage(
         window.clearTimeout(timeout);
       }
     },
-    { href: url.href, acceptHeader: accept, bodyType: body },
+    {
+      href: url.href,
+      acceptHeader: accept,
+      bodyType: body,
+      expiresAt: Date.now() + timeoutMs,
+    },
   );
 }
 
@@ -572,7 +686,12 @@ async function readSessionAccess(
   signal: AbortSignal,
 ): Promise<SessionAccess> {
   const sessionUrl = new URL("/session/current.json", site.origin);
-  const session = await readJson(page, sessionUrl, signal);
+  const session = await readJson(
+    page,
+    sessionUrl,
+    signal,
+    (value) => discourseSessionSchema.safeParse(value).success,
+  );
   if (session.kind === "networkError") {
     return {
       kind: "unavailable",
@@ -609,7 +728,10 @@ async function readSessionAccess(
         code: challenge
           ? "discourse_challenge_response"
           : "linuxdo_session_unavailable",
-        message: "Linux.do 当前会话端点没有返回可识别的 JSON。",
+        message: responseProblemMessage(
+          session,
+          "Linux.do 当前会话端点没有返回可识别的 JSON。",
+        ),
         impact: "本次检查或采集没有确认登录状态。",
         suggestion:
           "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新触发动作。",
@@ -656,7 +778,10 @@ async function readTopic(
   signal: AbortSignal,
 ): Promise<TopicAccess> {
   const topicUrl = new URL(`/t/${String(topicId)}.json`, site.origin);
-  const topicResponse = await readJson(page, topicUrl, signal);
+  const topicResponse = await readJson(page, topicUrl, signal, (value) => {
+    const parsed = discourseTopicSchema.safeParse(value);
+    return parsed.success && parsed.data.id === topicId;
+  });
   if (topicResponse.kind === "networkError") {
     return networkProblem(topicId, topicResponse.message);
   }
@@ -680,7 +805,10 @@ async function readTopic(
       code: challenge
         ? "discourse_topic_challenge_response"
         : "discourse_topic_response_invalid",
-      message: "Linux.do 主题端点没有返回可识别的 JSON。",
+      message: responseProblemMessage(
+        topicResponse,
+        "Linux.do 主题端点没有返回可识别的 JSON。",
+      ),
       impact: "本次检查或采集没有确认主题范围。",
       suggestion:
         "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
@@ -850,7 +978,12 @@ async function readTopicListPage(
   url: URL,
   signal: AbortSignal,
 ): Promise<z.output<typeof topicListResponseSchema>["topic_list"]> {
-  const response = await readJson(page, url, signal);
+  const response = await readJson(
+    page,
+    url,
+    signal,
+    (value) => topicListResponseSchema.safeParse(value).success,
+  );
   if (response.kind === "networkError") {
     throw sourceAdapterActionError({
       code: "linuxdo_source_unreachable",
@@ -878,7 +1011,10 @@ async function readTopicListPage(
       code: challenge
         ? "discourse_target_challenge_response"
         : "discourse_target_response_invalid",
-      message: "Linux.do 列表端点没有返回可识别的 JSON。",
+      message: responseProblemMessage(
+        response,
+        "Linux.do 列表端点没有返回可识别的 JSON。",
+      ),
       impact: "本次没有确认该目标的列表范围。",
       suggestion:
         "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
@@ -1157,7 +1293,12 @@ async function readVisibleCategories(
 ): Promise<DiscoveredCategory[]> {
   const categoriesUrl = new URL("/categories.json", site.origin);
   categoriesUrl.searchParams.set("include_subcategories", "true");
-  const response = await readJson(page, categoriesUrl, signal);
+  const response = await readJson(
+    page,
+    categoriesUrl,
+    signal,
+    (value) => discourseCategoryListSchema.safeParse(value).success,
+  );
   if (response.kind === "networkError") {
     throw categoryListFailure(
       "linuxdo_source_unreachable",
@@ -1169,7 +1310,7 @@ async function readVisibleCategories(
       response.status === 200 || response.status === 403
         ? "discourse_category_list_challenge_response"
         : "discourse_category_list_response_invalid",
-      "Linux.do 板块列表没有返回有效 JSON。",
+      responseProblemMessage(response, "Linux.do 板块列表没有返回有效 JSON。"),
       response.status === 200 || response.status === 403,
     );
   }
@@ -1388,7 +1529,20 @@ async function readTopicPosts(
     for (const postId of unresolved) {
       postsUrl.searchParams.append("post_ids[]", String(postId));
     }
-    const response = await readJson(page, postsUrl, signal);
+    const response = await readJson(page, postsUrl, signal, (value) => {
+      const parsed = topicPostsResponseSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const ids = new Set<number>();
+      for (const value of parsed.data.post_stream.posts) {
+        const post = discoursePostSchema.safeParse(value);
+        if (
+          post.success &&
+          (post.data.topic_id === undefined || post.data.topic_id === topic.id)
+        )
+          ids.add(post.data.id);
+      }
+      return unresolved.every((id) => ids.has(id));
+    });
     if (
       response.kind !== "json" &&
       (response.status === 200 || response.status === 403)
@@ -1405,7 +1559,10 @@ async function readTopicPosts(
           topic.post_stream.isMegaTopic === true,
         challenge: {
           code: "discourse_topic_posts_challenge_response",
-          message: "Linux.do 帖子补取端点没有返回可识别的 JSON。",
+          message: responseProblemMessage(
+            response,
+            "Linux.do 帖子补取端点没有返回可识别的 JSON。",
+          ),
           impact: "本次检查或采集不能确认主题的完整回复范围。",
           suggestion:
             "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
@@ -1587,8 +1744,23 @@ async function downloadMedia(
   try {
     if (mediaUrl.origin === siteOrigin.origin) {
       await ensurePageOrigin(page, mediaUrl, context.signal);
-      const response = await fetchInPage(page, mediaUrl, "*/*", "base64");
+      const response = await fetchInPage(
+        page,
+        mediaUrl,
+        "*/*",
+        "base64",
+        undefined,
+        (value) =>
+          mediaProblem(
+            kind,
+            value.contentType,
+            Buffer.from(value.body, "base64").byteLength,
+          ) === undefined,
+      );
       status = response.status;
+      if (response.recoveryFailure !== undefined) {
+        return { ok: false, reason: response.recoveryFailure };
+      }
       mediaType = response.contentType;
       body = Buffer.from(response.body, "base64");
     } else {
@@ -1616,22 +1788,8 @@ async function downloadMedia(
       .split(";", 1)[0]
       ?.trim()
       .toLowerCase() ?? "application/octet-stream";
-  if (
-    mediaType === "text/html" ||
-    mediaType === "application/xhtml+xml" ||
-    (kind === "image" &&
-      (mediaType.startsWith("text/") ||
-        mediaType === "application/json" ||
-        mediaType.endsWith("+json")))
-  ) {
-    return {
-      ok: false,
-      reason: "媒体端点返回了页面或结构化内容，未取得媒体字节。",
-    };
-  }
-  if (body.byteLength === 0) {
-    return { ok: false, reason: "媒体端点返回了空文件。" };
-  }
+  const problem = mediaProblem(kind, mediaType, body.byteLength);
+  if (problem !== undefined) return { ok: false, reason: problem };
 
   const upload = await context.resources.upload(
     new Blob([Uint8Array.from(body)], { type: mediaType }),
@@ -1640,6 +1798,25 @@ async function downloadMedia(
   return upload.ok
     ? { ok: true, resource: upload.resource }
     : { ok: false, reason: upload.error.message };
+}
+
+function mediaProblem(
+  kind: MediaCandidate["kind"],
+  contentType: string,
+  byteLength: number,
+): string | undefined {
+  const mediaType = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  if (
+    mediaType === "text/html" ||
+    mediaType === "application/xhtml+xml" ||
+    (kind === "image" &&
+      (mediaType.startsWith("text/") ||
+        mediaType === "application/json" ||
+        mediaType.endsWith("+json")))
+  )
+    return "媒体端点返回了页面或结构化内容，未取得媒体字节。";
+  if (byteLength === 0) return "媒体端点返回了空文件。";
+  return undefined;
 }
 
 function modifiedAt(post: DiscoursePost): string | undefined {

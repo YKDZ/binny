@@ -5,7 +5,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 
 import { type Browser, type Page } from "patchright-core";
 
@@ -21,7 +20,7 @@ import {
   type LinuxdoAction,
   type LinuxdoManualRun,
   type LinuxdoViewerBrowser,
-} from "./binny-e2e-linuxdo-journey.ts";
+} from "./acceptance-journey.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -38,6 +37,12 @@ type CliWire<T> = {
 type ManualRun = LinuxdoManualRun;
 
 type FixtureState = {
+  readonly nativeChallenge: boolean;
+  readonly nativeChallengeWait: boolean;
+  readonly nativeChallengePersistent: boolean;
+  readonly nativeChallengeMedia: boolean;
+  readonly nativeChallengePaths: readonly string[];
+  readonly nativeChallengeNavigationDelayMs: number;
   readonly challengePage: boolean;
   readonly challengeTopic: boolean;
   readonly challengePosts: boolean;
@@ -95,6 +100,11 @@ type LinuxdoCheckOutput = {
 
 function checkOutput(run: ManualRun): LinuxdoCheckOutput {
   assert.ok(run.result?.output !== undefined);
+  assert.deepEqual(
+    (run.result.output as Record<string, unknown>).challengeRecovery,
+    { rounds: 0, elapsedMs: 0, successes: 0 },
+    "无可恢复挑战的检查应返回零值恢复摘要",
+  );
   return run.result.output as LinuxdoCheckOutput;
 }
 
@@ -141,15 +151,8 @@ type ArchiveRevision = {
 
 type BrowserSession = LinuxdoBrowserSession;
 
-const repositoryRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-);
-const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
-const clockShimSource = path.join(
-  repositoryRoot,
-  "scripts/binny-e2e-test-clock.ts",
-);
+const composeFile = "compose.acceptance.yaml";
+const clockShimSource = "scripts/binny-e2e-test-clock.ts";
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny-discovery-${suffix}`;
 const serverImage = `${projectName}-server:local`;
@@ -180,11 +183,14 @@ function run(
   extraEnvironment: Readonly<Record<string, string>> = {},
 ): Promise<ProcessResult> {
   return new Promise((resolveResult, reject) => {
-    const child = spawn(command, [...args], {
-      cwd: repositoryRoot,
-      env: { ...process.env, ...environment(), ...extraEnvironment },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(
+      "pnpm",
+      ["--workspace-root", "exec", command, ...args],
+      {
+        env: { ...process.env, ...environment(), ...extraEnvironment },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -1481,10 +1487,201 @@ async function assertSignedInCheckFailures(): Promise<void> {
   );
 }
 
+async function verifyNativeChallengeRecovery(): Promise<void> {
+  await updateFixtureState({ nativeChallenge: true });
+  const run = await trigger("check", { topicId: 2401 });
+  assert.equal(run.status, "completed");
+  const output = run.result?.output as Record<string, unknown>;
+  const source = await sourceState();
+  assert.equal(
+    output.availability,
+    "available",
+    JSON.stringify({ run, events: source.events.slice(-12) }),
+  );
+  const summary = output.challengeRecovery as {
+    rounds: number;
+    elapsedMs: number;
+    successes: number;
+  };
+  assert.equal(summary.rounds, 1);
+  assert.equal(summary.successes, 1);
+  assert.ok(summary.elapsedMs > 0 && summary.elapsedMs <= 30_000);
+  assert.ok(source.events.some(({ action }) => action === "challenge-click"));
+
+  const clicks = source.events.filter(
+    ({ action }) => action === "challenge-click",
+  ).length;
+  await updateFixtureState({
+    nativeChallenge: true,
+    nativeChallengeWait: true,
+  });
+  const discovery = await trigger("list-categories", {});
+  assert.equal(discovery.status, "completed", JSON.stringify(discovery));
+  const discoveryOutput = discovery.result?.output as Record<string, unknown>;
+  const waitSummary = discoveryOutput.challengeRecovery as typeof summary;
+  assert.equal(waitSummary.rounds, 1);
+  assert.equal(waitSummary.successes, 1);
+  assert.ok(waitSummary.elapsedMs > 0 && waitSummary.elapsedMs <= 30_000);
+  assert.ok(Array.isArray(discoveryOutput.categories));
+  const afterWait = await sourceState();
+  assert.equal(
+    afterWait.events.filter(({ action }) => action === "challenge-click")
+      .length,
+    clicks,
+  );
+  assert.ok(afterWait.events.some(({ action }) => action === "challenge-wait"));
+  await updateFixtureState({ nativeChallengeWait: false });
+}
+
 async function collectTopic(): Promise<ManualRun> {
   const run = await trigger("collect", { topicId: 2401 });
   assert.equal(run.status, "completed", JSON.stringify(run));
   return run;
+}
+
+async function verifyPermissionAfterRecovery(): Promise<void> {
+  await updateFixtureState({
+    nativeChallengePaths: ["/t/2401.json"],
+    topicVisible: false,
+  });
+  try {
+    const run = await trigger("check", { topicId: 2401 });
+    assert.equal(run.status, "completed", JSON.stringify(run));
+    const output = run.result?.output as Record<string, unknown>;
+    assert.equal(output.availability, "unavailable");
+    const summary = output.challengeRecovery as {
+      rounds: number;
+      successes: number;
+    };
+    assert.equal(summary.rounds, 1);
+    assert.equal(
+      summary.successes,
+      0,
+      "解除挑战后仍无权限，不应计为原业务读取恢复成功",
+    );
+  } finally {
+    await updateFixtureState({ nativeChallengePaths: [], topicVisible: true });
+  }
+}
+
+async function verifyRunRecoveryBudget(): Promise<void> {
+  await updateFixtureState({
+    nativeChallengePaths: [
+      "/session/current.json",
+      "/t/2401.json",
+      "/t/2401/posts.json",
+      "/latest.json",
+    ],
+  });
+  try {
+    const run = await trigger("check", {
+      targets: linuxdoTargets("pinned", "latest"),
+    });
+    assert.equal(run.status, "completed", JSON.stringify(run));
+    const output = run.result?.output as Record<string, unknown>;
+    assert.equal(output.availability, "unknown");
+    const summary = output.challengeRecovery as {
+      rounds: number;
+      successes: number;
+      elapsedMs: number;
+    };
+    assert.equal(summary.rounds, 3);
+    assert.equal(summary.successes, 3);
+    assert.ok(summary.elapsedMs > 0 && summary.elapsedMs <= 90_000);
+    assert.match(JSON.stringify(output.problems), /恢复.*预算/u);
+  } finally {
+    await updateFixtureState({ nativeChallengePaths: [] });
+  }
+}
+
+async function verifyChallengeCancellation(): Promise<void> {
+  const before = await sourceState();
+  const clicks = before.events.filter(
+    ({ action }) => action === "challenge-click",
+  ).length;
+  await updateFixtureState({
+    nativeChallenge: true,
+    nativeChallengePersistent: true,
+  });
+  try {
+    const queued = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "check",
+        "--params",
+        JSON.stringify({ topicId: 2401 }),
+      ]),
+      "triggered",
+    );
+    await waitForSourceEvent("challenge-click", clicks + 1);
+    const started = Date.now();
+    cliData<ManualRun>(
+      await cli(["run", "cancel", "binny-discovery-topic", queued.runId]),
+      "cancellation",
+    );
+    const stopped = await waitForManualRun(queued.runId);
+    assert.equal(stopped.status, "cancelled", JSON.stringify(stopped));
+    assert.ok(
+      Date.now() - started < 10_000,
+      "取消应及时停止恢复，而非等待恢复预算耗尽",
+    );
+  } finally {
+    await updateFixtureState({
+      nativeChallenge: false,
+      nativeChallengePersistent: false,
+    });
+  }
+}
+
+async function verifyPersistentChallengeBudget(): Promise<void> {
+  const before = await sourceState();
+  const previousClicks = before.events.filter(
+    ({ action }) => action === "challenge-click",
+  ).length;
+  await updateFixtureState({
+    nativeChallenge: true,
+    nativeChallengePersistent: true,
+  });
+  try {
+    const run = await trigger("check", { topicId: 2401 });
+    assert.equal(run.status, "completed", JSON.stringify(run));
+    const output = run.result?.output as Record<string, unknown>;
+    assert.equal(output.availability, "unknown");
+    const summary = output.challengeRecovery as {
+      rounds: number;
+      elapsedMs: number;
+      successes: number;
+    };
+    assert.equal(summary.rounds, 1);
+    assert.equal(summary.successes, 0);
+    assert.match(
+      JSON.stringify(output.problems),
+      /恢复.*预算/u,
+      "恢复耗尽后，诊断应说明自动恢复及预算原因",
+    );
+    assert.ok(
+      summary.elapsedMs >= 29_000 && summary.elapsedMs < 31_500,
+      JSON.stringify(summary),
+    );
+    const after = await sourceState();
+    assert.equal(
+      after.events.filter(({ action }) => action === "challenge-click").length -
+        previousClicks,
+      2,
+    );
+    const failed = await trigger("collect", { topicId: 2401 });
+    assert.equal(failed.status, "failed", JSON.stringify(failed));
+    assert.equal(failed.result?.output, undefined);
+    assert.equal(failed.result?.error?.requiresHuman, true);
+    assert.match(failed.result?.error?.message ?? "", /恢复.*预算/u);
+  } finally {
+    await updateFixtureState({
+      nativeChallenge: false,
+      nativeChallengePersistent: false,
+    });
+  }
 }
 
 async function verifyTopicArchive(
@@ -1818,6 +2015,59 @@ async function verifyTopicArchive(
     backfilledRootState.body?.html,
   );
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
+  await updateFixtureState({
+    nativeChallengeMedia: true,
+    challengeMedia: false,
+  });
+  try {
+    const recoveredMediaRun = await collectTopic();
+    const mediaOutput = recoveredMediaRun.result?.output;
+    assert.ok(mediaOutput !== undefined);
+    const recovery = (mediaOutput as Record<string, unknown>)
+      .challengeRecovery as {
+      rounds: number;
+      successes: number;
+    };
+    assert.equal(recovery.rounds, 1);
+    assert.equal(recovery.successes, 1);
+    const recovered = binState(await readArchiveItem(root.itemId));
+    assert.equal(recovered.capture.completeness, "complete");
+    assert.equal(recovered.resources?.length, 3);
+    assert.ok(recovered.body?.html?.includes('src="binny://resource/'));
+    await updateFixtureState({
+      nativeChallengeMedia: true,
+      nativeChallengeNavigationDelayMs: 35_000,
+    });
+    const navigationTimeout = await collectTopic();
+    const navigationEvents = await sourceState();
+    assert.ok(
+      navigationEvents.events.some(
+        ({ action, path }) =>
+          action === "challenge-navigation" && path.includes("topic-photo.png"),
+      ),
+    );
+    const afterTimeout = binState(await readArchiveItem(root.itemId));
+    assert.equal(afterTimeout.capture.completeness, "partial");
+    assert.equal(
+      afterTimeout.resources?.length,
+      2,
+      "导航超时后仍应能下载其余同源附件",
+    );
+    assert.ok(
+      afterTimeout.capture.missing.some(
+        ({ path }) => path === "body.images[0]",
+      ),
+    );
+    assert.equal(
+      navigationTimeout.result?.output?.collectionCompleteness,
+      "partial",
+    );
+  } finally {
+    await updateFixtureState({
+      nativeChallengeMedia: false,
+      nativeChallengeNavigationDelayMs: 0,
+    });
+  }
 }
 
 function localDateKey(date: Date, timeZone: string): string {
@@ -1855,7 +2105,11 @@ async function waitForManualRun(runId: string): Promise<ManualRun> {
       await cli(["run", "get", "binny-discovery-topic", runId]),
       "found",
     );
-    if (latest.status === "completed" || latest.status === "failed")
+    if (
+      latest.status === "completed" ||
+      latest.status === "failed" ||
+      latest.status === "cancelled"
+    )
       return latest;
     await delay(100);
   }
@@ -2920,6 +3174,16 @@ async function main(): Promise<void> {
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
     await assertSignedInCheckFailures();
     process.stdout.write("挑战页面与指定主题不可用分支通过。\n");
+    await verifyNativeChallengeRecovery();
+    process.stdout.write("原生挑战识别、点击与原请求恢复通过。\n");
+    await verifyPermissionAfterRecovery();
+    process.stdout.write("挑战解除后仍按原请求权限与业务校验判定通过。\n");
+    await verifyPersistentChallengeBudget();
+    process.stdout.write("持续挑战的一轮时间与两次点击上限通过。\n");
+    await verifyChallengeCancellation();
+    process.stdout.write("原生挑战恢复中的取消优先与停止确认通过。\n");
+    await verifyRunRecoveryBudget();
+    process.stdout.write("跨 JSON 读取共享三轮恢复预算通过。\n");
     await verifyTopicArchive(journey.firstCollection, journey.itemIds);
     process.stdout.write(
       "主题、回复、关系、媒体、重复、编辑、新回复与有限观察通过。\n",
