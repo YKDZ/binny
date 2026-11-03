@@ -61,6 +61,7 @@ type FixtureState = {
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
+  readonly dailyParentIncludesChild: boolean;
   readonly dailyTopicOverlapCount: number;
   readonly postRangeEnabled: boolean;
   readonly postRangeAddAfterFirstPage: boolean;

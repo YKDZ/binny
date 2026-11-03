@@ -26,6 +26,7 @@ type SourceState = {
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
+  readonly dailyParentIncludesChild: boolean;
   readonly dailyTopicOverlapCount: number;
   readonly postRangeEnabled: boolean;
   readonly postRangeAddAfterFirstPage: boolean;
@@ -109,6 +110,7 @@ let activeState: SourceState = {
   categoriesUnavailable: false,
   categoriesInvalidResponse: false,
   dailyCollectionEnabled: false,
+  dailyParentIncludesChild: false,
   dailyTopicOverlapCount: 1,
   postRangeEnabled: false,
   postRangeAddAfterFirstPage: false,
@@ -597,6 +599,11 @@ function discoveredTopicList(
         : categoryId === undefined
           ? dailyTopicsForAllVisibleCategories()
           : [];
+    if (categoryId === 45 && activeState.dailyParentIncludesChild) {
+      rows = [...rows, ...dailyTopicsForCategory(46)].toSorted(
+        (first, second) => second.createdAt.localeCompare(first.createdAt),
+      );
+    }
     const overlapCount = perPage === 1 ? 0 : activeState.dailyTopicOverlapCount;
     const offset = page === 0 ? 0 : page * (perPage - overlapCount);
     const pageRows = rows.slice(offset, offset + perPage);
@@ -797,6 +804,7 @@ function updateState(value: unknown): boolean {
     "categoriesUnavailable",
     "categoriesInvalidResponse",
     "dailyCollectionEnabled",
+    "dailyParentIncludesChild",
     "postRangeEnabled",
     "postRangeAddAfterFirstPage",
     "postRangeRepeatPage",
