@@ -53,6 +53,10 @@ type SourceState = {
   readonly rateLimitStatus: 429 | 503;
   readonly retryAfterHeader: string;
   readonly rateLimitRemaining: number;
+  readonly postRangePause: {
+    readonly page: number;
+    readonly milliseconds: number;
+  } | null;
 };
 
 type SourceEvent = {
@@ -140,6 +144,7 @@ let activeState: SourceState = {
   rateLimitStatus: 429,
   retryAfterHeader: "1",
   rateLimitRemaining: 0,
+  postRangePause: null,
 };
 const events: SourceEvent[] = [];
 let navigationRequested = false;
@@ -1041,6 +1046,28 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if ("postRangePause" in updates && updates.postRangePause !== null) {
+    const pause = updates.postRangePause;
+    if (
+      typeof pause !== "object" ||
+      Array.isArray(pause) ||
+      !("page" in pause) ||
+      !("milliseconds" in pause)
+    )
+      return false;
+    const { page, milliseconds } = pause;
+    if (
+      typeof page !== "number" ||
+      !Number.isSafeInteger(page) ||
+      page < 1 ||
+      page > 50 ||
+      typeof milliseconds !== "number" ||
+      !Number.isSafeInteger(milliseconds) ||
+      milliseconds < 1 ||
+      milliseconds > 30_000
+    )
+      return false;
+  }
   if (updates.navigationRace === true) navigationRequested = false;
   postRangeReadCount = 0;
   activeState = {
@@ -1336,7 +1363,10 @@ const server = createServer((request, response) => {
         response.end();
         return;
       }
-      postRangeReadCount += 1;
+      const pageNumber = ++postRangeReadCount;
+      const pause = activeState.postRangePause;
+      if (pause?.page === pageNumber) await delay(pause.milliseconds);
+      if (response.destroyed) return;
       if (activeState.postRangeResponseStatus !== null) {
         response.writeHead(activeState.postRangeResponseStatus, {
           "content-type": "application/json; charset=utf-8",
@@ -1347,7 +1377,7 @@ const server = createServer((request, response) => {
         response.end(JSON.stringify({ errors: ["受控来源暂时限流。"] }));
         return;
       }
-      if (activeState.postRangeInvalidPage === postRangeReadCount) {
+      if (activeState.postRangeInvalidPage === pageNumber) {
         sendJson(response, 200, {});
         return;
       }
@@ -1358,7 +1388,7 @@ const server = createServer((request, response) => {
         return;
       }
       const feed = postRangeFixtures(
-        activeState.postRangeAddAfterFirstPage && postRangeReadCount > 1,
+        activeState.postRangeAddAfterFirstPage && pageNumber > 1,
       );
       const eligible =
         activeState.postRangeRepeatPage && before !== undefined
