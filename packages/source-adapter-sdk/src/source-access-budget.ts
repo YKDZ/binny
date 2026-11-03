@@ -78,11 +78,13 @@ export function createSourceAccessBudget(input: {
   let closed = false;
   let timer: unknown;
 
-  const stopForElapsedTime = () => {
-    if (stopReason !== undefined) return;
-    stopReason = "elapsed-time-limit";
+  const stop = (reason: SourceAccessBudgetStopReason) => {
+    if (stopReason !== undefined || closed) return;
+    stopReason = reason;
     budgetController.abort(new SourceAccessBudgetExceededError(stopReason));
   };
+
+  const stopForElapsedTime = () => stop("elapsed-time-limit");
 
   const elapsedMs = () => Math.max(0, clock.monotonicNow() - startedAt);
 
@@ -125,7 +127,7 @@ export function createSourceAccessBudget(input: {
 
       const admittedAttempts = input.client.snapshot().admittedAttempts;
       if (admittedAttempts + reservedRequests >= input.maxRequests) {
-        stopReason ??= "request-limit";
+        stop("request-limit");
         throw new SourceAccessBudgetExceededError("request-limit");
       }
 
@@ -150,8 +152,14 @@ export function createSourceAccessBudget(input: {
           { signal, deadlineEpochMs },
         );
       } catch (error) {
-        if (error instanceof SourceAccessDeadlineExceededError) {
-          stopReason ??= "wait-exceeds-budget";
+        if (
+          error instanceof SourceAccessDeadlineExceededError ||
+          (typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "source_access_deadline_exceeded")
+        ) {
+          stop("wait-exceeds-budget");
           throw new SourceAccessBudgetExceededError("wait-exceeds-budget", {
             cause: error,
           });
@@ -165,6 +173,10 @@ export function createSourceAccessBudget(input: {
       if (closed) return;
       closed = true;
       clock.clearTimer(timer);
+      if (!signal.aborted)
+        budgetController.abort(
+          new DOMException("单轮来源访问作用域已关闭。", "AbortError"),
+        );
     },
   };
 }

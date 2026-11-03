@@ -95,6 +95,8 @@ const sourceAdapterManifestStoredFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
+  stateSchema: jsonSchemaDocumentSchema.optional(),
+  stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({
@@ -110,6 +112,8 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
+  stateSchema: jsonSchemaDocumentSchema.optional(),
+  stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({

@@ -25,6 +25,9 @@ export class ChallengeRecovery {
     timeoutMs: number,
     source: SourceAccessKind,
   ) => Promise<unknown>;
+  private readonly sourceBudgetRemainingMs:
+    | (() => number | undefined)
+    | undefined;
 
   constructor(
     page: Page,
@@ -35,10 +38,12 @@ export class ChallengeRecovery {
       source: SourceAccessKind,
     ) => Promise<unknown> = (href, timeoutMs) =>
       page.goto(href, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
+    sourceBudgetRemainingMs?: () => number | undefined,
   ) {
     this.page = page;
     this.signal = signal;
     this.navigate = navigate;
+    this.sourceBudgetRemainingMs = sourceBudgetRemainingMs;
   }
 
   async recover<T>(
@@ -59,7 +64,15 @@ export class ChallengeRecovery {
     const deadline =
       started + Math.min(30_000, 90_000 - this.summary.elapsedMs);
     const remaining = () =>
-      Math.max(0, Math.ceil(deadline - performance.now()));
+      Math.max(
+        0,
+        Math.ceil(
+          Math.min(
+            deadline - performance.now(),
+            this.sourceBudgetRemainingMs?.() ?? Number.POSITIVE_INFINITY,
+          ),
+        ),
+      );
     const timeout = () => {
       this.signal.throwIfAborted();
       const milliseconds = remaining();

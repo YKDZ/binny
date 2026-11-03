@@ -65,7 +65,7 @@ export type LinuxdoManualRun = {
   };
 };
 
-export type LinuxdoAction = "check" | "collect" | "list-categories";
+export type LinuxdoAction = "check" | "collect" | "list-categories" | "sync";
 
 type LinuxdoCheckOutput = {
   readonly availability: "available" | "unavailable" | "unknown";
@@ -348,6 +348,84 @@ export async function navigateThroughLinuxdoViewer(
   await page.keyboard.press("Enter");
 }
 
+type LinuxdoLoginInput = {
+  readonly binId: string;
+  readonly cli: LinuxdoCli;
+  readonly browser: Browser;
+  readonly publishedHost: string;
+  readonly serverPort: number;
+  readonly sourceOrigin: string;
+  readonly sourceControlUrl: string;
+  readonly username: string;
+  readonly password: string;
+};
+
+export async function loginLinuxdoUser(
+  input: LinuxdoLoginInput,
+): Promise<void> {
+  const beforeLogin = await readSourceState(input.sourceControlUrl);
+  const eventCounts = {
+    loginPage: beforeLogin.events.filter(
+      ({ action }) => action === "login-page",
+    ).length,
+    loginComplete: beforeLogin.events.filter(
+      ({ action }) => action === "login-complete",
+    ).length,
+  };
+  const session = await openLinuxdoHumanSession(input.cli, input.binId);
+  const viewer = await openLinuxdoViewer(
+    input.browser,
+    session,
+    input.publishedHost,
+    input.serverPort,
+  );
+  try {
+    await navigateThroughLinuxdoViewer(viewer, `${input.sourceOrigin}/login`);
+    await waitForSourceEvent(
+      input.sourceControlUrl,
+      "login-page",
+      eventCounts.loginPage + 1,
+    );
+    await viewer.keyboard.press("Tab");
+    await viewer.keyboard.type(input.username, { delay: 5 });
+    await viewer.keyboard.press("Tab");
+    await viewer.keyboard.type(input.password, { delay: 5 });
+    await viewer.keyboard.press("Tab");
+    await viewer.keyboard.press("Enter");
+    await waitForSourceEvent(
+      input.sourceControlUrl,
+      "login-complete",
+      eventCounts.loginComplete + 1,
+    );
+  } finally {
+    await closeLinuxdoHumanSession(input.cli, input.binId, session.sessionId);
+    const oldViewerUrl = viewer.url();
+    await viewer.waitForFunction(
+      () =>
+        document.querySelector("#status")?.textContent ===
+        "连接已结束，请回到终端查看会话状态。",
+      undefined,
+      { timeout: 15_000 },
+    );
+    assert.equal(await viewer.locator("#screen canvas").count(), 0);
+    const rejectedViewer = await input.browser.newPage();
+    try {
+      await rejectedViewer.goto(oldViewerUrl);
+      await rejectedViewer.waitForFunction(
+        () =>
+          document.querySelector("#status")?.textContent ===
+          "连接已结束，请回到终端查看会话状态。",
+        undefined,
+        { timeout: 15_000 },
+      );
+      assert.equal(await rejectedViewer.locator("#screen canvas").count(), 0);
+    } finally {
+      await rejectedViewer.close();
+      await viewer.close();
+    }
+  }
+}
+
 export async function linuxdoUserJourney(input: {
   readonly binId: string;
   readonly topicId: number;
@@ -360,7 +438,7 @@ export async function linuxdoUserJourney(input: {
   readonly username: string;
   readonly password: string;
 }): Promise<LinuxdoUserJourney> {
-  const { binId, topicId, cli, browser, publishedHost, serverPort } = input;
+  const { binId, topicId, cli } = input;
   const topicScope = `topic:${String(topicId)}`;
   const collectParams = {
     topicId,
@@ -400,90 +478,7 @@ export async function linuxdoUserJourney(input: {
     beforeLogin.events.some(({ action }) => action === "topic"),
     false,
   );
-
-  const eventCounts = {
-    loginPage: beforeLogin.events.filter(
-      ({ action }) => action === "login-page",
-    ).length,
-    loginComplete: beforeLogin.events.filter(
-      ({ action }) => action === "login-complete",
-    ).length,
-    sessionRead: beforeLogin.events.filter(
-      ({ action }) => action === "session-current",
-    ).length,
-  };
-  const session = await openLinuxdoHumanSession(cli, binId);
-
-  const viewer = await openLinuxdoViewer(
-    browser,
-    session,
-    publishedHost,
-    serverPort,
-  );
-  try {
-    await navigateThroughLinuxdoViewer(viewer, `${input.sourceOrigin}/login`);
-    await waitForSourceEvent(
-      input.sourceControlUrl,
-      "login-page",
-      eventCounts.loginPage + 1,
-    );
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type(input.username, { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type(input.password, { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.press("Enter");
-    await waitForSourceEvent(
-      input.sourceControlUrl,
-      "login-complete",
-      eventCounts.loginComplete + 1,
-    );
-    await navigateThroughLinuxdoViewer(
-      viewer,
-      `${input.sourceOrigin}/session/current.json`,
-    );
-    await waitForSourceEvent(
-      input.sourceControlUrl,
-      "session-current",
-      eventCounts.sessionRead + 1,
-    );
-    const browserSessionRead = (
-      await readSourceState(input.sourceControlUrl)
-    ).events
-      .filter(({ action }) => action === "session-current")
-      .at(-1);
-    assert.equal(
-      browserSessionRead?.authenticated,
-      true,
-      "noVNC 浏览器没有在登录响应后保留受控站点会话。",
-    );
-  } finally {
-    await closeLinuxdoHumanSession(cli, binId, session.sessionId);
-    const oldViewerUrl = viewer.url();
-    await viewer.waitForFunction(
-      () =>
-        document.querySelector("#status")?.textContent ===
-        "连接已结束，请回到终端查看会话状态。",
-      undefined,
-      { timeout: 15_000 },
-    );
-    assert.equal(await viewer.locator("#screen canvas").count(), 0);
-    const rejectedViewer = await browser.newPage();
-    try {
-      await rejectedViewer.goto(oldViewerUrl);
-      await rejectedViewer.waitForFunction(
-        () =>
-          document.querySelector("#status")?.textContent ===
-          "连接已结束，请回到终端查看会话状态。",
-        undefined,
-        { timeout: 15_000 },
-      );
-      assert.equal(await rejectedViewer.locator("#screen canvas").count(), 0);
-    } finally {
-      await rejectedViewer.close();
-      await viewer.close();
-    }
-  }
+  await loginLinuxdoUser(input);
 
   const authenticatedCheck = await triggerLinuxdoRun(cli, binId, "check", {
     topicId,

@@ -6,10 +6,15 @@ import {
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  createSourceAccessBudget,
+  SourceAccessBudgetExceededError,
   isSourceAdapterActionError,
   sourceAccessConfigSchema,
   type ArchiveResourceMetadata,
+  type JsonObject,
+  type SourceAccessBudgetClient,
   type SourceAccessKind,
+  type SourceAccessRequest,
   type SourceAccessResponseObservation,
   type SourceAccessSnapshot,
   type SourceAdapterContext,
@@ -328,6 +333,112 @@ const collectParamsSchema = z
       },
     ],
   });
+const syncTargetIntentSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("all-visible") }).strict(),
+  z
+    .object({ kind: z.literal("targets"), targets: actionTargetsSchema })
+    .strict(),
+]);
+const syncParamsSchema = z
+  .object({
+    targets: actionTargetsSchema.optional(),
+    maxPages: z
+      .number()
+      .int()
+      .positive()
+      .max(100)
+      .safe()
+      .default(20)
+      .describe("每个已接续范围扫描帖子流的页数上限，默认 20 页。"),
+    maxRequests: z
+      .number()
+      .int()
+      .positive()
+      .max(500)
+      .safe()
+      .default(200)
+      .describe("本轮主动来源请求总数上限，含等待获准的请求。"),
+    maxElapsedMs: z
+      .number()
+      .int()
+      .positive()
+      .max(900_000)
+      .safe()
+      .default(300_000)
+      .describe("本轮动作执行总时长上限，默认 5 分钟，最高 15 分钟。"),
+  })
+  .strict()
+  .superRefine((params, context) => {
+    if (params.targets?.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["targets"],
+        message: "目标列表不能为空；省略 targets 可处理当前可见范围。",
+      });
+    }
+  });
+const syncScopeReferenceSchema = z
+  .object({ kind: z.enum(["category", "topic"]), id: topicIdSchema })
+  .strict();
+const syncScopeIdentitySchema = z
+  .object({
+    binId: z.string().min(1),
+    identityId: z.string().min(1),
+    origin: siteOriginSchema,
+    scope: syncScopeReferenceSchema,
+  })
+  .strict();
+const syncProgressEntrySchema = syncScopeIdentitySchema
+  .extend({
+    position: z.iso
+      .datetime()
+      .describe("本轮已分配的接续位置；不代表此前内容完整覆盖。"),
+    lastRunId: z.string().min(1).describe("最近一次分配该位置的运行 ID。"),
+  })
+  .strict();
+const syncPersistentStateSchema = z
+  .object({
+    version: z.literal(1),
+    scopes: z.array(syncProgressEntrySchema),
+    lastIntent: z
+      .object({
+        runId: z.string().min(1),
+        upperBound: z.iso.datetime(),
+        target: syncTargetIntentSchema,
+        phase: z
+          .enum([
+            "preparing",
+            "discovering-targets",
+            "processing",
+            "completed",
+            "partial",
+            "failed",
+            "cancelled",
+            "budget-exhausted",
+          ])
+          .describe("崩溃前最后持久化的阶段；非终结阶段表示该运行事实未知。"),
+      })
+      .strict()
+      .describe("最近一次已持久记录的运行意图。")
+      .optional(),
+  })
+  .strict()
+  .describe(
+    "Linux.do 当前接续状态；每项由 bin、访问身份、规范站点 origin 和真实板块或主题定位。position 是接续位置，不代表资料完整性。",
+  );
+const syncUnavailableStateSchema = z
+  .object({
+    status: z.literal("unavailable"),
+    reason: z
+      .literal("persistent_state_unavailable")
+      .describe("运行器无法读取或保存接续状态，已停止相关 sync 来源访问。"),
+  })
+  .strict();
+const syncPublicStateSchema = z
+  .union([syncPersistentStateSchema, syncUnavailableStateSchema])
+  .describe(
+    "bin get 中的 Linux.do 接续状态；可用时包含范围进度和最近意图，持久状态故障时只公开稳定原因。首次运行前该字段缺失。",
+  );
 const listCategoriesParamsSchema = z.object({}).strict();
 type CategoryReference = z.infer<typeof categoryReferenceSchema>;
 type DiscoveredCategory = {
@@ -477,6 +588,20 @@ type PostRangeCollectionParams = CollectParams & {
   readonly postCreatedRange: z.output<typeof postCreatedRangeSchema>;
 };
 type CheckParams = z.output<typeof checkParamsSchema>;
+type SyncParams = z.output<typeof syncParamsSchema>;
+type SyncPersistentState = z.output<typeof syncPersistentStateSchema>;
+type SyncTargetIntent = z.output<typeof syncTargetIntentSchema>;
+type SyncScopeReference = SyncPersistentState["scopes"][number]["scope"];
+type SyncScopeTarget = Exclude<ConfiguredTarget, { readonly kind: "latest" }>;
+type SyncScopePlan = {
+  readonly target: SyncScopeTarget;
+  readonly identity: z.output<typeof syncScopeIdentitySchema>;
+  readonly mode: "initialized" | "continued" | "truncated" | "no-forward-range";
+  readonly position: string;
+  readonly previousPosition?: string;
+  readonly range?: { readonly from: string; readonly to: string };
+  readonly skippedBefore?: string;
+};
 type DiscourseProblem = {
   readonly code: string;
   readonly message: string;
@@ -527,7 +652,10 @@ const sourceAccessReportSchema = z
       .array(
         z
           .object({
+            source: z.enum(["site", "media"]),
+            origin: siteOriginSchema,
             status: z.union([z.literal(429), z.literal(503)]),
+            retryAfter: z.string().max(256).optional(),
             outcome: z.enum(["cooled", "missing", "invalid", "past"]),
             observedAt: z.iso.datetime(),
             cooldownUntil: z.iso.datetime().optional(),
@@ -707,10 +835,111 @@ const collectReportSchema = z
       .readonly(),
   })
   .strict();
+const syncRangeSchema = z
+  .object({
+    from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
+    to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
+  })
+  .strict();
+const syncScopeReportSchema = z
+  .object({
+    scope: syncScopeReferenceSchema,
+    mode: z.enum(["initialized", "continued", "truncated", "no-forward-range"]),
+    position: z.iso.datetime().describe("已持久化的接续位置，不代表完整覆盖。"),
+    range: syncRangeSchema.optional(),
+    skippedBefore: z.iso
+      .datetime()
+      .describe("被一小时上限截去的旧范围起点；本轮从 range.from 接续。")
+      .optional(),
+    status: z.enum([
+      "initializing",
+      "initialized",
+      "unstarted",
+      "in-progress",
+      "completed",
+      "partial",
+      "unknown",
+      "no-forward-range",
+    ]),
+  })
+  .strict();
+const syncBudgetReportSchema = z
+  .object({
+    maxRequests: z.number().int().positive(),
+    maxElapsedMs: z.number().int().positive(),
+    elapsedMs: z.number().int().nonnegative(),
+    remainingMs: z.number().int().nonnegative(),
+    stopReason: z
+      .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
+      .optional(),
+  })
+  .strict();
+const syncReportSchema = z
+  .object({
+    phase: z.enum([
+      "preparing",
+      "discovering-targets",
+      "processing",
+      "completed",
+      "partial",
+      "failed",
+      "cancelled",
+      "budget-exhausted",
+    ]),
+    upperBound: z.iso.datetime().describe("动作执行开始时冻结的本轮上界 U。"),
+    intent: syncTargetIntentSchema.describe("来源访问前记录的逻辑目标意图。"),
+    discovery: z.enum([
+      "not-started",
+      "in-progress",
+      "complete",
+      "partial",
+      "failed",
+    ]),
+    challengeRecovery: challengeRecoverySchema,
+    budget: syncBudgetReportSchema,
+    sourceAccess: sourceAccessReportSchema,
+    scopes: z.array(syncScopeReportSchema).readonly(),
+    observedPosts: z.number().int().nonnegative(),
+    topicsExamined: z.number().int().nonnegative(),
+    incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+  })
+  .strict()
+  .describe("本轮新增内容发现、接续位置、来源访问预算和未确认范围事实。");
+const syncOutputSchema = z
+  .object({
+    challengeRecovery: challengeRecoverySchema,
+    outcome: z.enum(["initialized", "advanced", "no-forward-range", "partial"]),
+    upperBound: z.iso.datetime(),
+    scopes: z
+      .array(
+        z
+          .object({
+            scope: syncScopeReferenceSchema,
+            position: z.iso.datetime(),
+            status: z.enum([
+              "initialized",
+              "advanced",
+              "partial",
+              "unknown",
+              "unstarted",
+              "no-forward-range",
+            ]),
+            range: syncRangeSchema.optional(),
+            skippedBefore: z.iso.datetime().optional(),
+          })
+          .strict(),
+      )
+      .readonly(),
+    observedPosts: z.number().int().nonnegative(),
+    topicsExamined: z.number().int().nonnegative(),
+    incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+  })
+  .strict();
 type CollectionReport = z.output<typeof collectReportSchema>;
 type CollectionReportUpdate = Omit<CollectionReport, "sourceAccess"> & {
   readonly sourceAccess?: CollectionReport["sourceAccess"];
 };
+type SyncReport = z.output<typeof syncReportSchema>;
 type CollectionIncompleteScope = z.infer<
   typeof collectionIncompleteScopeSchema
 >;
@@ -809,9 +1038,33 @@ type PageSourceAccess = {
   readonly signal: AbortSignal;
   readonly siteOrigin: string;
   readonly events: PageRequestEvents;
-  readonly rateLimitResponses: SourceAccessResponseObservation[];
+  readonly rateLimitResponses: SourceAccessReport["rateLimitResponses"];
   readonly publish: ((report: SourceAccessReport) => Promise<void>) | undefined;
 };
+
+function sourceBudgetRemainingMs(
+  client: NonNullable<SourceAdapterContext["sourceAccess"]>,
+): number | undefined {
+  const budget = client as Partial<SourceAccessBudgetClient>;
+  return typeof budget.remainingMs === "function"
+    ? budget.remainingMs()
+    : undefined;
+}
+
+function activeRequestTimeoutMs(
+  client: NonNullable<SourceAdapterContext["sourceAccess"]>,
+  signal: AbortSignal,
+  maximumMs: number,
+): number {
+  signal.throwIfAborted();
+  const remaining = sourceBudgetRemainingMs(client);
+  if (remaining === undefined) return maximumMs;
+  if (remaining <= 0) {
+    signal.throwIfAborted();
+    throw new DOMException("来源访问预算已耗尽。", "TimeoutError");
+  }
+  return Math.min(maximumMs, remaining);
+}
 
 function emptySourceAccessReport(): SourceAccessReport {
   return {
@@ -834,23 +1087,52 @@ function sourceAccessReport(state: PageSourceAccess): SourceAccessReport {
   const active: SourceAccessSnapshot = state.client.snapshot();
   return {
     ...active,
-    rateLimitResponses: state.rateLimitResponses.map((observation) => ({
-      status: observation.status,
-      outcome: observation.outcome,
-      observedAt: new Date(observation.observedAtEpochMs).toISOString(),
-      ...(observation.cooldownUntilEpochMs === undefined
-        ? {}
-        : {
-            cooldownUntil: new Date(
-              observation.cooldownUntilEpochMs,
-            ).toISOString(),
-          }),
-    })),
+    rateLimitResponses: [...state.rateLimitResponses],
     pageRequestEventsObserved: {
       ...state.events,
       byResourceType: { ...state.events.byResourceType },
     },
   };
+}
+
+async function sourceResponseDetails(
+  value: unknown,
+): Promise<
+  { readonly status: 429 | 503; readonly retryAfter?: string } | undefined
+> {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const rawStatus = record.status;
+  let status: number | undefined;
+  if (typeof rawStatus === "number") status = rawStatus;
+  else if (typeof rawStatus === "function") {
+    const resolved = (rawStatus as () => unknown).call(value);
+    if (typeof resolved === "number") status = resolved;
+  }
+  if (status !== 429 && status !== 503) return undefined;
+
+  if (typeof record.retryAfter === "string")
+    return { status, retryAfter: record.retryAfter };
+  if (typeof record.headerValue === "function") {
+    const header = await (
+      record.headerValue as (name: string) => Promise<unknown>
+    ).call(value, "retry-after");
+    return {
+      status,
+      ...(typeof header === "string" ? { retryAfter: header } : {}),
+    };
+  }
+  if (typeof record.headers === "function") {
+    const headers = await (record.headers as () => unknown).call(value);
+    if (typeof headers === "object" && headers !== null) {
+      const retryAfter = (headers as Record<string, unknown>)["retry-after"];
+      return {
+        status,
+        ...(typeof retryAfter === "string" ? { retryAfter } : {}),
+      };
+    }
+  }
+  return { status };
 }
 
 async function reportPageSourceAccess(state: PageSourceAccess): Promise<void> {
@@ -868,60 +1150,44 @@ async function withSourceAdmission<T>(
   await reportPageSourceAccess(state);
   let result: T;
   try {
-    result = await state.client.withAdmission(
-      { groupId: "linuxdo", source, origin: url.origin },
-      async () => {
-        state.signal.throwIfAborted();
-        const value = await operation();
-        const response = sourceResponseMetadata(value);
-        if (response?.status === 429 || response?.status === 503) {
-          state.rateLimitResponses.push(
-            await state.client.observeResponse(
-              { groupId: "linuxdo", source, origin: url.origin },
-              response,
-            ),
-          );
-        }
-        return value;
-      },
-    );
+    const request: SourceAccessRequest = {
+      groupId: "linuxdo",
+      source,
+      origin: url.origin,
+    };
+    result = await state.client.withAdmission(request, async () => {
+      state.signal.throwIfAborted();
+      const response = await operation();
+      const details = await sourceResponseDetails(response);
+      if (details !== undefined) {
+        const observation: SourceAccessResponseObservation =
+          await state.client.observeResponse(request, details);
+        state.rateLimitResponses.push({
+          source,
+          origin: url.origin,
+          status: details.status,
+          ...(details.retryAfter === undefined
+            ? {}
+            : { retryAfter: details.retryAfter }),
+          outcome: observation.outcome,
+          observedAt: new Date(observation.observedAtEpochMs).toISOString(),
+          ...(observation.cooldownUntilEpochMs === undefined
+            ? {}
+            : {
+                cooldownUntil: new Date(
+                  observation.cooldownUntilEpochMs,
+                ).toISOString(),
+              }),
+        });
+      }
+      return response;
+    });
   } catch (error) {
     await reportPageSourceAccess(state).catch(() => undefined);
     throw error;
   }
   await reportPageSourceAccess(state);
   return result;
-}
-
-function sourceResponseMetadata(
-  value: unknown,
-): { readonly status: number; readonly retryAfter?: string } | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  if ("status" in value && typeof value.status === "number") {
-    const retryAfter = "retryAfter" in value ? value.retryAfter : undefined;
-    return {
-      status: value.status,
-      ...(typeof retryAfter === "string" ? { retryAfter } : {}),
-    };
-  }
-  if (
-    "status" in value &&
-    typeof value.status === "function" &&
-    "headers" in value &&
-    typeof value.headers === "function"
-  ) {
-    const headers = value.headers();
-    return {
-      status: value.status(),
-      ...(typeof headers === "object" &&
-      headers !== null &&
-      "retry-after" in headers &&
-      typeof headers["retry-after"] === "string"
-        ? { retryAfter: headers["retry-after"] }
-        : {}),
-    };
-  }
-  return undefined;
 }
 
 function siteFromConfig(config: SourceAdapterConfig): {
@@ -959,6 +1225,7 @@ async function withSharedBrowser<T>(
   }
   if (context.sourceAccess === undefined)
     throw new Error("Linux.do 运行上下文缺少声明的来源访问准入能力。");
+  const sourceAccess = context.sourceAccess;
 
   const connectedBrowser = await chromium.connect(connection.endpoint);
   try {
@@ -1014,9 +1281,14 @@ async function withSharedBrowser<T>(
         withSourceAdmission(page, source, new URL(href), async () => {
           return await page.goto(href, {
             waitUntil: "domcontentloaded",
-            timeout: timeoutMs,
+            timeout: activeRequestTimeoutMs(
+              sourceAccess,
+              context.signal,
+              timeoutMs,
+            ),
           });
         }),
+      () => sourceBudgetRemainingMs(sourceAccess),
     );
     pageRecovery.set(page, recovery);
     const cancel = () => {
@@ -1114,9 +1386,11 @@ async function ensurePageOrigin(
   signal.throwIfAborted();
   const home = new URL("/", url);
   await withSourceAdmission(page, source, home, async () => {
+    const state = pageSourceAccess.get(page);
+    if (state === undefined) throw new Error("页面没有绑定来源准入状态。");
     return await page.goto(home.href, {
       waitUntil: "domcontentloaded",
-      timeout: 30_000,
+      timeout: activeRequestTimeoutMs(state.client, signal, 30_000),
     });
   });
   if (new URL(page.url()).origin !== url.origin) {
@@ -1133,10 +1407,30 @@ async function fetchInPage(
   validMedia?: (response: PageFetchResponse) => boolean,
   source: SourceAccessKind = "site",
 ): Promise<PageFetchResponse> {
-  const initialDeadline = performance.now() + 30_000;
+  const accessState = pageSourceAccess.get(page);
+  if (accessState === undefined) throw new Error("页面没有绑定来源准入状态。");
+  const initialDeadline =
+    performance.now() +
+    activeRequestTimeoutMs(accessState.client, accessState.signal, 30_000);
   let response: PageFetchResponse;
   while (true) {
-    const remaining = () => Math.ceil(initialDeadline - performance.now());
+    const remaining = () => {
+      accessState.signal.throwIfAborted();
+      const budgetRemaining = sourceBudgetRemainingMs(accessState.client);
+      if (budgetRemaining !== undefined && budgetRemaining <= 0) {
+        accessState.signal.throwIfAborted();
+        return 0;
+      }
+      return Math.max(
+        0,
+        Math.ceil(
+          Math.min(
+            initialDeadline - performance.now(),
+            budgetRemaining ?? Number.POSITIVE_INFINITY,
+          ),
+        ),
+      );
+    };
     if (remaining() <= 0) throw new Error("页面读取时间已耗尽。");
     try {
       response = await fetchInPageOnce(
@@ -1220,6 +1514,14 @@ async function fetchInPageOnce(
   source: SourceAccessKind = "site",
 ): Promise<PageFetchResponse> {
   return await withSourceAdmission(page, source, url, async () => {
+    const accessState = pageSourceAccess.get(page);
+    if (accessState === undefined)
+      throw new Error("页面没有绑定来源准入状态。");
+    const boundedTimeoutMs = activeRequestTimeoutMs(
+      accessState.client,
+      accessState.signal,
+      timeoutMs,
+    );
     return await page.evaluate(
       async ({ href, acceptHeader, bodyType, expiresAt }) => {
         const controller = new AbortController();
@@ -1270,7 +1572,8 @@ async function fetchInPageOnce(
         acceptHeader: accept,
         bodyType: body,
         // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
-        expiresAt: performance.timeOrigin + performance.now() + timeoutMs,
+        expiresAt:
+          performance.timeOrigin + performance.now() + boundedTimeoutMs,
       },
     );
   });
@@ -2113,6 +2416,318 @@ function collectTargets(
   });
 }
 
+function syncScopeTargets(
+  selectedTargets: readonly ConfiguredTarget[] | undefined,
+  categories: readonly DiscoveredCategory[],
+): Exclude<ConfiguredTarget, { readonly kind: "latest" }>[] {
+  const selected = collectTargets(selectedTargets, categories);
+  const expanded = selected.flatMap((target) =>
+    target.kind === "latest"
+      ? categories.flatMap((category) => categorySubtree(category))
+      : [target],
+  );
+  const byScope = new Map<
+    string,
+    Exclude<ConfiguredTarget, { readonly kind: "latest" }>
+  >();
+  for (const target of expanded) {
+    const key =
+      target.kind === "category"
+        ? `category:${String(target.categoryId)}`
+        : `topic:${String(target.topicId)}`;
+    byScope.set(key, target);
+  }
+  return [...byScope.values()].toSorted((first, second) => {
+    const kindOrder = first.kind.localeCompare(second.kind);
+    if (kindOrder !== 0) return kindOrder;
+    const firstId =
+      first.kind === "category" ? first.categoryId : first.topicId;
+    const secondId =
+      second.kind === "category" ? second.categoryId : second.topicId;
+    return firstId - secondId;
+  });
+}
+
+function syncScopeReference(
+  target: Exclude<ConfiguredTarget, { readonly kind: "latest" }>,
+): SyncScopeReference {
+  return target.kind === "category"
+    ? { kind: "category", id: target.categoryId }
+    : { kind: "topic", id: target.topicId };
+}
+
+function syncScopeIdentity(
+  context: SourceAdapterContext,
+  origin: URL,
+  scope: SyncScopeReference,
+) {
+  return {
+    binId: context.binId,
+    identityId: context.identityId,
+    origin: origin.origin,
+    scope,
+  };
+}
+
+function syncScopeKey(
+  identity: z.output<typeof syncScopeIdentitySchema>,
+): string {
+  return JSON.stringify([
+    identity.binId,
+    identity.identityId,
+    identity.origin,
+    identity.scope.kind,
+    identity.scope.id,
+  ]);
+}
+
+function existingSyncProgress(
+  state: SyncPersistentState,
+  identity: z.output<typeof syncScopeIdentitySchema>,
+) {
+  const key = syncScopeKey(identity);
+  return state.scopes.find((entry) => syncScopeKey(entry) === key);
+}
+
+function syncRange(
+  position: string,
+  upperBound: string,
+): { readonly from: string; readonly to: string } | undefined {
+  const previousPosition = Date.parse(position);
+  const upperBoundMs = Date.parse(upperBound);
+  if (upperBoundMs <= previousPosition) return undefined;
+  return {
+    from: new Date(
+      Math.max(previousPosition, upperBoundMs - 60 * 60 * 1_000),
+    ).toISOString(),
+    to: upperBound,
+  };
+}
+
+function syncScopePlans(
+  context: SourceAdapterContext,
+  origin: URL,
+  targets: readonly SyncScopeTarget[],
+  state: SyncPersistentState,
+  upperBound: string,
+): SyncScopePlan[] {
+  const upperBoundMs = Date.parse(upperBound);
+  return targets.map((target) => {
+    const scope = syncScopeReference(target);
+    const identity = syncScopeIdentity(context, origin, scope);
+    const previous = existingSyncProgress(state, identity);
+    if (previous === undefined) {
+      return { target, identity, mode: "initialized", position: upperBound };
+    }
+    const previousPosition = Date.parse(previous.position);
+    if (upperBoundMs <= previousPosition) {
+      return {
+        target,
+        identity,
+        mode: "no-forward-range",
+        position: previous.position,
+        previousPosition: previous.position,
+      };
+    }
+    const cutoff = upperBoundMs - 60 * 60 * 1_000;
+    const range = syncRange(previous.position, upperBound);
+    if (range === undefined) {
+      return {
+        target,
+        identity,
+        mode: "no-forward-range",
+        position: previous.position,
+      };
+    }
+    return {
+      target,
+      identity,
+      mode: previousPosition < cutoff ? "truncated" : "continued",
+      position: upperBound,
+      previousPosition: previous.position,
+      range,
+      ...(previousPosition < cutoff
+        ? { skippedBefore: previous.position }
+        : {}),
+    };
+  });
+}
+
+function assignSyncPosition(
+  state: SyncPersistentState,
+  plan: SyncScopePlan,
+  runId: string,
+): SyncPersistentState {
+  const nextEntry = syncProgressEntrySchema.parse({
+    ...plan.identity,
+    position: plan.position,
+    lastRunId: runId,
+  });
+  const key = syncScopeKey(plan.identity);
+  const index = state.scopes.findIndex((entry) => syncScopeKey(entry) === key);
+  const scopes = [...state.scopes];
+  if (index < 0) scopes.push(nextEntry);
+  else scopes[index] = nextEntry;
+  return syncPersistentStateSchema.parse({ ...state, scopes });
+}
+
+function syncStateJson(state: SyncPersistentState): JsonObject {
+  const checked = syncPersistentStateSchema.parse(state);
+  return JSON.parse(JSON.stringify(checked)) as JsonObject;
+}
+
+async function loadSyncPersistentState(
+  context: SourceAdapterContext,
+): Promise<SyncPersistentState> {
+  if (context.persistentState === undefined) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_state_unavailable",
+      message: "当前运行器没有提供 Linux.do 持久接续状态。",
+      impact: "本次同步没有访问来源，也没有改变接续位置。",
+      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
+      requiresHuman: false,
+    });
+  }
+  let saved: JsonObject | undefined;
+  try {
+    saved = await context.persistentState.load();
+  } catch {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_state_unavailable",
+      message: "无法读取 Linux.do 持久接续状态。",
+      impact: "本次同步没有访问来源，也没有重置或推进接续位置。",
+      suggestion: "检查运行器状态存储后重新触发；不要手动清空接续状态。",
+      requiresHuman: true,
+    });
+  }
+  if (saved === undefined) return { version: 1, scopes: [] };
+  const checked = syncPersistentStateSchema.safeParse(saved);
+  if (!checked.success) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_state_invalid",
+      message: "Linux.do 持久接续状态不符合当前适配器声明。",
+      impact: "本次同步已停止，没有重置或推进任何范围。",
+      suggestion: "检查运行器状态存储并恢复有效备份后重新触发。",
+      requiresHuman: true,
+    });
+  }
+  return checked.data;
+}
+
+async function saveSyncPersistentState(
+  context: SourceAdapterContext,
+  state: SyncPersistentState,
+): Promise<void> {
+  if (context.persistentState === undefined) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_state_unavailable",
+      message: "当前运行器没有提供 Linux.do 持久接续状态。",
+      impact: "本次同步已停止，不能保证接续位置已保存。",
+      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
+      requiresHuman: false,
+    });
+  }
+  try {
+    await context.persistentState.save(syncStateJson(state));
+  } catch {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_state_unavailable",
+      message: "无法持久保存 Linux.do 接续状态。",
+      impact: "本轮已停止，未继续访问来源；运行报告保留最后成功持久化的范围。",
+      suggestion: "检查运行器状态存储后重新触发；不要手动清空接续状态。",
+      requiresHuman: true,
+    });
+  }
+}
+
+function syncBudgetReport(
+  budget: SourceAccessBudgetClient,
+): SyncReport["budget"] {
+  const snapshot = budget.budgetSnapshot();
+  return {
+    maxRequests: snapshot.maxRequests,
+    maxElapsedMs: snapshot.maxElapsedMs,
+    elapsedMs: snapshot.elapsedMs,
+    remainingMs: snapshot.remainingMs,
+    ...(snapshot.stopReason === undefined
+      ? {}
+      : { stopReason: snapshot.stopReason }),
+  };
+}
+
+function syncScopeName(scope: SyncScopeReference): string {
+  return `${scope.kind}:${String(scope.id)}`;
+}
+
+function syncIntent(params: SyncParams): SyncTargetIntent {
+  return params.targets === undefined
+    ? { kind: "all-visible" }
+    : { kind: "targets", targets: params.targets };
+}
+
+function syncStateWithIntent(
+  state: SyncPersistentState,
+  context: SourceAdapterContext,
+  upperBound: string,
+  intent: SyncTargetIntent,
+  phase: NonNullable<SyncPersistentState["lastIntent"]>["phase"],
+): SyncPersistentState {
+  return syncPersistentStateSchema.parse({
+    ...state,
+    lastIntent: {
+      runId: context.runId,
+      upperBound,
+      target: intent,
+      phase,
+    },
+  });
+}
+
+function syncPlanReport(
+  plan: SyncScopePlan,
+  status: SyncReport["scopes"][number]["status"],
+  assigned = false,
+): SyncReport["scopes"][number] {
+  return {
+    scope: syncScopeReference(plan.target),
+    mode: plan.mode,
+    position: assigned
+      ? plan.position
+      : (plan.previousPosition ?? plan.position),
+    ...(plan.range === undefined ? {} : { range: plan.range }),
+    ...(plan.skippedBefore === undefined
+      ? {}
+      : { skippedBefore: plan.skippedBefore }),
+    status,
+  };
+}
+
+function syncOutputStatus(
+  status: SyncReport["scopes"][number]["status"],
+): z.output<typeof syncOutputSchema>["scopes"][number]["status"] {
+  switch (status) {
+    case "initializing":
+    case "initialized":
+      return "initialized";
+    case "in-progress":
+      return "unknown";
+    case "completed":
+      return "advanced";
+    case "partial":
+      return "partial";
+    case "unknown":
+      return "unknown";
+    case "unstarted":
+      return "unstarted";
+    case "no-forward-range":
+      return "no-forward-range";
+  }
+}
+
+function emptyChallengeRecovery(): ChallengeRecoverySummary {
+  return { rounds: 0, elapsedMs: 0, successes: 0 };
+}
+
 type PostRangeTargetSelection = {
   readonly allVisible: boolean;
   readonly topicIds: ReadonlySet<number>;
@@ -2848,7 +3463,18 @@ async function downloadMedia(
         page,
         "media",
         mediaUrl,
-        async () => await request.get(mediaUrl.href, { timeout: 30_000 }),
+        async () => {
+          const accessState = pageSourceAccess.get(page);
+          if (accessState === undefined)
+            throw new Error("页面没有绑定来源准入状态。");
+          return await request.get(mediaUrl.href, {
+            timeout: activeRequestTimeoutMs(
+              accessState.client,
+              accessState.signal,
+              30_000,
+            ),
+          });
+        },
       );
       status = response.status();
       mediaType = response.headers()["content-type"];
@@ -3684,10 +4310,7 @@ function failureWithProgress(
 }
 
 async function collectPostCreatedRange(
-  context: SourceAdapterContext<
-    SourceAdapterConfig,
-    typeof collectReportSchema
-  >,
+  context: SourceAdapterContext<SourceAdapterConfig>,
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
@@ -3696,7 +4319,13 @@ async function collectPostCreatedRange(
   completedScopes: string[],
   incompleteScopes: CollectionIncompleteScope[],
   publishReport: (report: CollectionReportUpdate) => Promise<void>,
-): Promise<Omit<z.output<typeof collectOutputSchema>, "challengeRecovery">> {
+  selectionOverride?: PostRangeTargetSelection,
+): Promise<
+  Omit<z.output<typeof collectOutputSchema>, "challengeRecovery"> & {
+    readonly observedPosts: number;
+    readonly topicsExamined: number;
+  }
+> {
   const range = {
     from: new Date(dateWindow.startInclusive).toISOString(),
     to: new Date(dateWindow.endExclusive).toISOString(),
@@ -3725,12 +4354,9 @@ async function collectPostCreatedRange(
     discovery: "in-progress",
     scopes: [{ scope: rangeScope, ...range, status: "in-progress" }],
   });
-  const selection = await resolvePostRangeTargets(
-    page,
-    site,
-    params,
-    context.signal,
-  );
+  const selection =
+    selectionOverride ??
+    (await resolvePostRangeTargets(page, site, params, context.signal));
   const scan = await scanPostCreatedRange(
     page,
     site.origin,
@@ -3768,6 +4394,8 @@ async function collectPostCreatedRange(
   }
 
   let collectedTopics = 0;
+  let topicsExamined = 0;
+  let observedPosts = 0;
   const topics = [...postsByTopic.entries()].toSorted(
     ([firstId], [secondId]) => firstId - secondId,
   );
@@ -3795,7 +4423,11 @@ async function collectPostCreatedRange(
       incompleteScopes,
     );
     if (topicResult === "limited") break;
-    if (topicResult === "processed") collectedTopics += 1;
+    if (topicResult === "processed") {
+      observedPosts += posts.length;
+      collectedTopics += 1;
+      topicsExamined += 1;
+    }
   }
 
   if (incompleteScopes.length === 0) completedScopes.push(rangeScope);
@@ -3834,6 +4466,8 @@ async function collectPostCreatedRange(
     collectionCompleteness:
       incompleteScopes.length === 0 ? "complete" : "partial",
     incompleteScopes,
+    observedPosts,
+    topicsExamined,
   };
 }
 
@@ -3915,7 +4549,7 @@ async function collectTopic(
           throw failureFromProblem(session.problem);
         }
         if (rangeParams !== undefined) {
-          return await collectPostCreatedRange(
+          const rangeOutput = await collectPostCreatedRange(
             context,
             page,
             request,
@@ -3926,6 +4560,11 @@ async function collectTopic(
             incompleteScopes,
             publishReport,
           );
+          return {
+            completedScopes: rangeOutput.completedScopes,
+            collectionCompleteness: rangeOutput.collectionCompleteness,
+            incompleteScopes: rangeOutput.incompleteScopes,
+          };
         }
         if (params.topicId !== undefined) {
           await publishReport({
@@ -4186,6 +4825,363 @@ async function collectTopic(
   }
 }
 
+async function sync(
+  context: SourceAdapterContext<SourceAdapterConfig, typeof syncReportSchema>,
+  params: SyncParams,
+): Promise<z.output<typeof syncOutputSchema>> {
+  // 这是同步唯一的日历上界；来源访问耗时由独立的 monotonic budget 计算。
+  const upperBound = new Date(Date.now()).toISOString();
+  const intent = syncIntent(params);
+  if (context.sourceAccess === undefined) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_sync_source_access_unavailable",
+      message: "当前运行器没有提供 Linux.do 来源访问预算。",
+      impact: "本轮没有访问来源或推进接续位置。",
+      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
+      requiresHuman: false,
+    });
+  }
+
+  const budget = createSourceAccessBudget({
+    client: context.sourceAccess,
+    signal: context.signal,
+    maxRequests: params.maxRequests,
+    maxElapsedMs: params.maxElapsedMs,
+  });
+  const runContext = {
+    ...context,
+    signal: budget.signal,
+    sourceAccess: budget,
+  };
+  const site = siteFromConfig(context.config);
+  const plans: SyncScopePlan[] = [];
+  const reportScopes = new Map<string, SyncReport["scopes"][number]>();
+  const incompleteScopes: CollectionIncompleteScope[] = [];
+  const completedScopes: string[] = [];
+  let observedPosts = 0;
+  let topicsExamined = 0;
+  let state: SyncPersistentState | undefined;
+  let activePlan: SyncScopePlan | undefined;
+  let report = syncReportSchema.parse({
+    phase: "preparing",
+    upperBound,
+    intent,
+    discovery: "not-started",
+    challengeRecovery: emptyChallengeRecovery(),
+    budget: syncBudgetReport(budget),
+    sourceAccess: emptySourceAccessReport(),
+    scopes: [],
+    observedPosts,
+    topicsExamined,
+    incompleteScopes,
+  });
+
+  const publishReport = async (next: SyncReport) => {
+    report = syncReportSchema.parse({
+      ...next,
+      budget: syncBudgetReport(budget),
+      scopes: [...reportScopes.values()],
+      observedPosts,
+      topicsExamined,
+      incompleteScopes,
+    });
+    await context.report(report);
+  };
+  const persistIntent = async (
+    phase: NonNullable<SyncPersistentState["lastIntent"]>["phase"],
+  ) => {
+    if (state === undefined) return;
+    const next = syncStateWithIntent(state, context, upperBound, intent, phase);
+    await saveSyncPersistentState(context, next);
+    state = next;
+  };
+  const saveAssignedScopes = async (
+    assignedPlans: readonly SyncScopePlan[],
+    phase: NonNullable<SyncPersistentState["lastIntent"]>["phase"],
+  ) => {
+    if (state === undefined) throw new Error("同步状态尚未加载。");
+    let next = state;
+    for (const plan of assignedPlans)
+      next = assignSyncPosition(next, plan, context.runId);
+    next = syncStateWithIntent(next, context, upperBound, intent, phase);
+    await saveSyncPersistentState(context, next);
+    state = next;
+  };
+  const addIncomplete = (
+    scope: string,
+    reasonCode: string,
+    message: string,
+  ) => {
+    if (
+      incompleteScopes.some(
+        (current) =>
+          current.scope === scope &&
+          current.reasonCode === reasonCode &&
+          current.message === message,
+      )
+    )
+      return;
+    incompleteScopes.push({ scope, reasonCode, message });
+  };
+  const output = (
+    challengeRecovery = emptyChallengeRecovery(),
+  ): z.output<typeof syncOutputSchema> => {
+    const scopeOutput = [...reportScopes.values()].map((scope) => ({
+      scope: scope.scope,
+      position: scope.position,
+      status: syncOutputStatus(scope.status),
+      ...(scope.range === undefined ? {} : { range: scope.range }),
+      ...(scope.skippedBefore === undefined
+        ? {}
+        : { skippedBefore: scope.skippedBefore }),
+    }));
+    const incomplete =
+      report.phase === "budget-exhausted" ||
+      incompleteScopes.length > 0 ||
+      scopeOutput.some(
+        ({ status }) =>
+          status === "partial" ||
+          status === "unknown" ||
+          status === "unstarted",
+      );
+    const processed = plans.some(
+      (plan) => plan.mode === "continued" || plan.mode === "truncated",
+    );
+    const initialized = plans.some((plan) => plan.mode === "initialized");
+    return {
+      challengeRecovery,
+      outcome: incomplete
+        ? "partial"
+        : processed
+          ? "advanced"
+          : initialized
+            ? "initialized"
+            : "no-forward-range",
+      upperBound,
+      scopes: scopeOutput,
+      observedPosts,
+      topicsExamined,
+      incompleteScopes: [...incompleteScopes],
+    };
+  };
+
+  try {
+    state = await loadSyncPersistentState(context);
+    state = syncStateWithIntent(
+      state,
+      context,
+      upperBound,
+      intent,
+      "preparing",
+    );
+    await saveSyncPersistentState(context, state);
+    await publishReport(report);
+
+    await persistIntent("discovering-targets");
+    await publishReport({ ...report, phase: "discovering-targets" });
+    const browserOutput = await withSharedBrowser(
+      runContext,
+      async ({ page, request }) => {
+        const session = await readSessionAccess(page, site, budget.signal);
+        if (session.kind === "unavailable")
+          throw failureFromProblem(session.problem);
+
+        const needsCategories =
+          params.targets === undefined ||
+          params.targets.some(
+            (target) => target.kind === "category" || target.kind === "latest",
+          );
+        const categories = needsCategories
+          ? await readVisibleCategories(page, site, budget.signal)
+          : [];
+        const selectedTargets = syncScopeTargets(params.targets, categories);
+        plans.push(
+          ...syncScopePlans(
+            context,
+            site.origin,
+            selectedTargets,
+            state!,
+            upperBound,
+          ),
+        );
+
+        for (const plan of plans) {
+          const status =
+            plan.mode === "initialized"
+              ? "initializing"
+              : plan.mode === "no-forward-range"
+                ? "no-forward-range"
+                : "unstarted";
+          reportScopes.set(
+            syncScopeName(syncScopeReference(plan.target)),
+            syncPlanReport(plan, status),
+          );
+        }
+        const newScopes = plans.filter((plan) => plan.mode === "initialized");
+        if (newScopes.length > 0) {
+          await saveAssignedScopes(newScopes, "discovering-targets");
+          for (const plan of newScopes)
+            reportScopes.set(
+              syncScopeName(syncScopeReference(plan.target)),
+              syncPlanReport(plan, "initialized", true),
+            );
+        }
+        await persistIntent("processing");
+        await publishReport({
+          ...report,
+          phase: "processing",
+          discovery: "complete",
+        });
+
+        for (const plan of plans) {
+          if (plan.mode === "initialized" || plan.mode === "no-forward-range")
+            continue;
+          budget.signal.throwIfAborted();
+          budget.remainingMs();
+          budget.signal.throwIfAborted();
+          await saveAssignedScopes([plan], "processing");
+          activePlan = plan;
+          const name = syncScopeName(syncScopeReference(plan.target));
+          reportScopes.set(name, syncPlanReport(plan, "in-progress", true));
+          await publishReport({ ...report, phase: "processing" });
+
+          const beforeIncompleteCount = incompleteScopes.length;
+          let scopeDiscovery: CollectionReport["discovery"] | undefined;
+          const selected: PostRangeTargetSelection =
+            plan.target.kind === "topic"
+              ? {
+                  allVisible: false,
+                  topicIds: new Set([plan.target.topicId]),
+                  categoryIds: new Set(),
+                }
+              : {
+                  allVisible: false,
+                  topicIds: new Set(),
+                  categoryIds: new Set([plan.target.categoryId]),
+                };
+          const rangeParams: PostRangeCollectionParams = {
+            targets: [plan.target],
+            postCreatedRange: postCreatedRangeSchema.parse({
+              ...plan.range,
+              maxPages: params.maxPages,
+            }),
+            maxTopics: undefined,
+          };
+          const result = await collectPostCreatedRange(
+            runContext,
+            page,
+            request,
+            site,
+            rangeParams,
+            {
+              startInclusive: Date.parse(plan.range!.from),
+              endExclusive: Date.parse(plan.range!.to),
+            },
+            completedScopes,
+            incompleteScopes,
+            async (rangeReport) => {
+              scopeDiscovery = rangeReport.discovery;
+            },
+            selected,
+          );
+          observedPosts += result.observedPosts;
+          topicsExamined += result.topicsExamined;
+          const addedIncomplete = incompleteScopes.splice(
+            beforeIncompleteCount,
+          );
+          for (const incomplete of addedIncomplete) {
+            addIncomplete(
+              incomplete.scope === "post-created-range"
+                ? name
+                : incomplete.scope,
+              incomplete.reasonCode,
+              incomplete.message,
+            );
+          }
+          const scopeIncomplete = addedIncomplete.length > 0;
+          const scopeStatus = !scopeIncomplete
+            ? "completed"
+            : scopeDiscovery === "failed"
+              ? "unknown"
+              : "partial";
+          reportScopes.set(name, syncPlanReport(plan, scopeStatus, true));
+          activePlan = undefined;
+          await publishReport({
+            ...report,
+            phase: scopeIncomplete ? "partial" : "processing",
+            discovery: scopeIncomplete ? "partial" : "complete",
+          });
+        }
+
+        return { challengeRecovery: { rounds: 0, elapsedMs: 0, successes: 0 } };
+      },
+      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+    );
+
+    const challengeRecovery = browserOutput.challengeRecovery;
+    const hasPartial = [...reportScopes.values()].some(
+      ({ status }) =>
+        status === "partial" || status === "unknown" || status === "unstarted",
+    );
+    const phase = hasPartial ? "partial" : "completed";
+    await persistIntent(hasPartial ? "partial" : "completed");
+    await publishReport({
+      ...report,
+      phase,
+      discovery: hasPartial ? "partial" : "complete",
+      challengeRecovery,
+      sourceAccess: browserOutput.sourceAccess,
+    });
+    return output(challengeRecovery);
+  } catch (error) {
+    const budgetStop = error instanceof SourceAccessBudgetExceededError;
+    const cancelled = context.signal.aborted;
+    if (activePlan !== undefined) {
+      const name = syncScopeName(syncScopeReference(activePlan.target));
+      reportScopes.set(name, syncPlanReport(activePlan, "unknown", true));
+      addIncomplete(
+        name,
+        budgetStop
+          ? `budget_${error.reason.replaceAll("-", "_")}`
+          : cancelled
+            ? "sync_cancelled"
+            : "sync_scope_unknown",
+        budgetStop
+          ? `本轮达到 ${error.reason} 上限；该已分配范围没有确认完成。`
+          : cancelled
+            ? "本轮在处理该范围时取消；接续位置已分配，覆盖结果未知。"
+            : error instanceof Error
+              ? `本轮在处理该范围时失败：${error.message}`
+              : "本轮在处理该范围时失败，覆盖结果未知。",
+      );
+      activePlan = undefined;
+    }
+    if (budgetStop) {
+      await persistIntent("budget-exhausted").catch(() => undefined);
+      await publishReport({
+        ...report,
+        phase: "budget-exhausted",
+        discovery: plans.length === 0 ? "failed" : "partial",
+      }).catch(() => undefined);
+      return output();
+    }
+
+    const failurePhase = cancelled ? "cancelled" : "failed";
+    await persistIntent(failurePhase).catch(() => undefined);
+    await publishReport({
+      ...report,
+      phase: failurePhase,
+      discovery:
+        report.discovery === "not-started" || report.discovery === "in-progress"
+          ? "failed"
+          : "partial",
+    }).catch(() => undefined);
+    throw failureWithProgress(error, context, completedScopes);
+  } finally {
+    budget.close();
+  }
+}
+
 export const sourceAdapter = defineSourceAdapter({
   id: "binny.source-adapter-linuxdo",
   version: "1.0.0",
@@ -4194,6 +5190,8 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: true, profileReuseAfterRestart: true },
   },
   configSchema: sourceAdapterConfigSchema,
+  stateSchema: syncPersistentStateSchema,
+  stateSnapshotSchema: syncPublicStateSchema,
   actions: {
     "list-categories": defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "发现当前 Linux.do 登录账号可见的板块及其采集引用。",
@@ -4215,6 +5213,14 @@ export const sourceAdapter = defineSourceAdapter({
       output: collectOutputSchema,
       report: collectReportSchema,
       execute: collectTopic,
+    }),
+    sync: defineSourceAdapterAction(sourceAdapterConfigSchema, {
+      description:
+        "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复。",
+      params: syncParamsSchema,
+      output: syncOutputSchema,
+      report: syncReportSchema,
+      execute: sync,
     }),
   },
 });

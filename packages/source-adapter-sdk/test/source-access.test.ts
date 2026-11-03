@@ -878,18 +878,126 @@ void test("单轮预算在同一来源准入前预留并限制主动请求数", 
     );
     assert.equal(pendingSettled, false);
     assert.equal(operations, 0);
+    assert.equal(budget.signal.aborted, true);
 
     await coordinator.release(ownerId, held.leaseId);
     heldReleased = true;
     const settled = await pending;
-    assert.equal(settled.kind, "completed");
-    assert.equal(operations, 1);
-    assert.equal(access.snapshot().admittedAttempts, 1);
+    assert.equal(settled.kind, "failed");
+    if (settled.kind === "failed") {
+      assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
+      assert.equal(
+        (settled.error as SourceAccessBudgetExceededError).reason,
+        "request-limit",
+      );
+    }
+    assert.equal(operations, 0);
+    assert.equal(access.snapshot().admittedAttempts, 0);
     assert.equal(budget.budgetSnapshot().stopReason, "request-limit");
   } finally {
     if (!heldReleased)
       await coordinator.release(ownerId, held.leaseId).catch(() => undefined);
     budget.close();
+    coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("关闭单轮预算时撤销排队请求但不伪造预算耗尽", async () => {
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const coordinator = await createSourceAccessCoordinator({
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const ownerId = "owner-budget-close";
+  const request = {
+    runId: "run-budget-close",
+    groupId: "linuxdo",
+    source: "site" as const,
+    origin: "https://linux.do",
+    minimumIntervalMs: 0,
+    maxConcurrency: 1,
+  };
+  const held = await coordinator.acquire(
+    ownerId,
+    { ...request, runId: "run-holding-close-permit" },
+    config,
+    new AbortController().signal,
+  );
+  const actionAbort = new AbortController();
+  const transport: SourceAccessTransport = {
+    async acquire(input, signal) {
+      return await coordinator.acquire(ownerId, input, config, signal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(input, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        input,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: request.runId,
+    signal: actionAbort.signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal: actionAbort.signal,
+    maxRequests: 1,
+    maxElapsedMs: 30_000,
+  });
+  let operationStarted = false;
+  const pending = budget
+    .withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operationStarted = true;
+      },
+    )
+    .then(
+      () => ({ kind: "completed" as const }),
+      (error: unknown) => ({ kind: "failed" as const, error }),
+    );
+
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(operationStarted, false);
+    assert.equal(access.snapshot().admittedAttempts, 0);
+    budget.close();
+    assert.equal(budget.signal.aborted, true);
+    const settled = await pending;
+    assert.equal(settled.kind, "failed");
+    if (settled.kind === "failed") {
+      assert.ok(settled.error instanceof DOMException);
+      assert.equal((settled.error as DOMException).name, "AbortError");
+    }
+
+    await coordinator.release(ownerId, held.leaseId);
+    assert.equal(operationStarted, false);
+    assert.equal(access.snapshot().admittedAttempts, 0);
+    assert.equal(budget.budgetSnapshot().stopReason, undefined);
+  } finally {
+    actionAbort.abort(new DOMException("test cleanup", "AbortError"));
+    budget.close();
+    await coordinator.release(ownerId, held.leaseId).catch(() => undefined);
     coordinator.closeOwner(ownerId);
   }
 });
