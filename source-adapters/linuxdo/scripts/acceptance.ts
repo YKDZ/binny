@@ -79,6 +79,7 @@ type FixtureState = {
   readonly unavailableMediaStatus: number;
   readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
   readonly topicListDelayMs?: number;
+  readonly mediaResponseDelayMs?: number;
 };
 
 const targetDefinitions = {
@@ -319,7 +320,9 @@ async function createOverlay(): Promise<void> {
       "    ports: !override",
       '      - "8081"',
       "    networks: !override",
-      "      - browser",
+      "      browser:",
+      "        aliases:",
+      "          - linuxdo-e2e-media",
       "networks:",
       "  default:",
       "    ipam:",
@@ -374,11 +377,13 @@ function sourceUrl(pathname: string): string {
 async function sourceState(): Promise<{
   readonly state: Record<string, unknown>;
   readonly events: readonly {
+    readonly at: number;
     readonly action: string;
     readonly path: string;
     readonly authenticated?: boolean;
     readonly topicIds?: readonly number[];
     readonly moreTopicsUrl?: string | null;
+    readonly activeMediaRequests?: number;
   }[];
 }> {
   const response = await fetch(sourceUrl("/__control/state"), {
@@ -388,11 +393,13 @@ async function sourceState(): Promise<{
   return (await response.json()) as {
     readonly state: Record<string, unknown>;
     readonly events: readonly {
+      readonly at: number;
       readonly action: string;
       readonly path: string;
       readonly authenticated?: boolean;
       readonly topicIds?: readonly number[];
       readonly moreTopicsUrl?: string | null;
+      readonly activeMediaRequests?: number;
     }[];
   };
 }
@@ -1012,7 +1019,7 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   const timeZone = collectParamsSchema.properties?.timeZone as
     | { readonly description?: string; readonly examples?: readonly unknown[] }
     | undefined;
-  assert.match(timeZone?.description ?? "", /有效名称/u);
+  assert.match(timeZone?.description ?? "", /有效 IANA 时区名称/u);
   assert.deepEqual(timeZone?.examples, ["UTC", "Asia/Tokyo"]);
 
   const singleAction = cliData<{
@@ -1039,6 +1046,131 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
     typeof (reportSchema.properties.phase as { readonly description?: unknown })
       .description === "string",
   );
+  for (const name of ["check", "list-categories"]) {
+    const report = actions.actions[name]?.report as
+      | { readonly properties?: Readonly<Record<string, unknown>> }
+      | undefined;
+    assert.ok(report?.properties?.sourceAccess !== undefined);
+  }
+}
+
+type SourceAccessSummary = {
+  readonly admittedAttempts: number;
+  readonly waitedMs: number;
+  readonly bySource: { readonly site: number; readonly media: number };
+  readonly pageRequestEventsObserved: { readonly total: number };
+};
+
+function sourceAccessSummary(run: ManualRun): SourceAccessSummary {
+  assert.ok(run.report !== undefined, `运行没有保存报告：${run.runId}`);
+  const summary = run.report.sourceAccess as SourceAccessSummary | undefined;
+  assert.ok(
+    summary !== undefined,
+    `报告没有来源访问统计：${JSON.stringify(run.report)}`,
+  );
+  return summary;
+}
+
+async function setSourceAccessPolicy(
+  minimumIntervalMs: number,
+  maxConcurrency: number,
+): Promise<void> {
+  const config = {
+    origin: "http://linuxdo-e2e-source:8081",
+    sourceAccess: {
+      groups: {
+        linuxdo: {
+          sources: ["site", "media"],
+          minimumIntervalMs,
+          maxConcurrency,
+        },
+      },
+    },
+  };
+  cliData(
+    await cli([
+      "bin",
+      "update",
+      "binny-discovery-topic",
+      "--identity",
+      "binny-discovery-profile",
+      "--config",
+      JSON.stringify(config),
+    ]),
+    "updated",
+  );
+  await waitForRuntime();
+}
+
+async function verifySharedSourceAccess(): Promise<void> {
+  const minimumIntervalMs = 1_500;
+  await setSourceAccessPolicy(minimumIntervalMs, 1);
+  await clearSourceEvents();
+  try {
+    const check = await trigger("check", { topicId: 2401 });
+    assert.equal(check.status, "completed", JSON.stringify(check));
+    const checkAccess = sourceAccessSummary(check);
+    assert.ok(checkAccess.admittedAttempts >= 3, JSON.stringify(checkAccess));
+    assert.ok(
+      checkAccess.waitedMs >= minimumIntervalMs,
+      JSON.stringify(checkAccess),
+    );
+    assert.ok(checkAccess.bySource.site >= 3, JSON.stringify(checkAccess));
+
+    const categories = await trigger("list-categories", {});
+    assert.equal(categories.status, "completed", JSON.stringify(categories));
+    const categoryAccess = sourceAccessSummary(categories);
+    assert.ok(categoryAccess.waitedMs > 0, JSON.stringify(categoryAccess));
+    assert.ok(
+      categoryAccess.bySource.site >= 3,
+      JSON.stringify(categoryAccess),
+    );
+
+    const intervalEvents = (await sourceState()).events;
+    const intervalActiveEvents = intervalEvents.filter(({ action }) =>
+      ["site-home", "session-current", "topic", "posts", "categories"].includes(
+        action,
+      ),
+    );
+    for (let index = 1; index < intervalActiveEvents.length; index++) {
+      const previous = intervalActiveEvents[index - 1]!;
+      const current = intervalActiveEvents[index]!;
+      assert.ok(
+        current.at - previous.at >= minimumIntervalMs - 100,
+        `相邻来源请求间隔不足：${previous.action} ${previous.at} -> ${current.action} ${current.at}`,
+      );
+    }
+
+    await setSourceAccessPolicy(0, 1);
+    await updateFixtureState({ mediaResponseDelayMs: 250 });
+    const collection = await trigger("collect", { topicId: 2401 });
+    assert.equal(collection.status, "completed", JSON.stringify(collection));
+    const collectionAccess = sourceAccessSummary(collection);
+    assert.ok(
+      collectionAccess.bySource.site >= 4,
+      JSON.stringify(collectionAccess),
+    );
+    assert.ok(
+      collectionAccess.bySource.media >= 1,
+      JSON.stringify(collectionAccess),
+    );
+    assert.ok(
+      collectionAccess.pageRequestEventsObserved.total > 0,
+      JSON.stringify(collectionAccess),
+    );
+
+    const mediaEvents = (await sourceState()).events.filter(
+      ({ action }) => action === "media",
+    );
+    assert.ok(mediaEvents.length >= 3, JSON.stringify(mediaEvents));
+    assert.ok(
+      mediaEvents.every(({ activeMediaRequests }) => activeMediaRequests === 1),
+      `主动媒体并发超过配置上限：${JSON.stringify(mediaEvents)}`,
+    );
+  } finally {
+    await updateFixtureState({ mediaResponseDelayMs: 0 });
+    await setSourceAccessPolicy(0, 1);
+  }
 }
 
 async function verifyCategoryDiscovery(): Promise<void> {
@@ -1255,7 +1387,18 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
           "found",
         ),
       ({ status, report }) =>
-        status === "executing" && report?.phase === "collecting",
+        status === "executing" &&
+        report?.phase === "collecting" &&
+        Array.isArray(report.scopes) &&
+        report.scopes.some(
+          (scope) =>
+            typeof scope === "object" &&
+            scope !== null &&
+            "scope" in scope &&
+            scope.scope === "target:latest" &&
+            "status" in scope &&
+            scope.status === "in-progress",
+        ),
       "collect 运行的执行中报告",
     );
     assert.equal(collecting.report?.referenceTime, collecting.referenceTime);
@@ -3776,7 +3919,18 @@ async function main(): Promise<void> {
         "--identity",
         "binny-discovery-profile",
         "--config",
-        JSON.stringify({ origin: "http://linuxdo-e2e-source:8081" }),
+        JSON.stringify({
+          origin: "http://linuxdo-e2e-source:8081",
+          sourceAccess: {
+            groups: {
+              linuxdo: {
+                sources: ["site", "media"],
+                minimumIntervalMs: 0,
+                maxConcurrency: 1,
+              },
+            },
+          },
+        }),
       ]),
       "updated",
     );
@@ -3789,6 +3943,8 @@ async function main(): Promise<void> {
     process.stdout.write("本次动作参数校验定位错误且不改长期配置通过。\n");
     const journey = await verifyLoginRequired();
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
+    await verifySharedSourceAccess();
+    process.stdout.write("Linux.do 跨动作／worker 来源准入及报告解释通过。\n");
     await assertSignedInCheckFailures();
     process.stdout.write("挑战页面与指定主题不可用分支通过。\n");
     await verifyNavigationRace();

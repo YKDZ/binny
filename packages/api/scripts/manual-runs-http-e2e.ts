@@ -739,6 +739,22 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
       "invalid_time_zone",
     );
 
+  const invalidOverlapPolicy = await fetch(
+    baseUrl + "/bins/" + encodeURIComponent(binId) + "/schedules",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        expression,
+        timeZone: "UTC",
+        action: "collect",
+        params,
+        overlapPolicy: "parallel",
+      }),
+    },
+  );
+  assert.equal(invalidOverlapPolicy.status, 400);
+
   const invalidActionParameters = await client.bins[":binId"].schedules.$post({
     param: { binId },
     json: { expression, timeZone: "UTC", action: "collect", params: {} },
@@ -781,6 +797,7 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   assert.equal(schedule.timeZone, "UTC");
   assert.equal(schedule.action, "collect");
   assert.deepEqual(schedule.params, params);
+  assert.equal(schedule.overlapPolicy, "queue");
   assert.ok(Date.parse(schedule.nextDueAt) > Date.now());
 
   const listed = await client.bins[":binId"].schedules.$get({
@@ -829,6 +846,41 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
     assert.deepEqual(error.path, ["params", "gateKey"]);
   }
 
+  const overlapPolicyUpdate = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$patch({
+    param: { binId, scheduleId: schedule.scheduleId },
+    json: { overlapPolicy: "skip" },
+  });
+  assert.equal(overlapPolicyUpdate.status, 200);
+  if (overlapPolicyUpdate.status === 200)
+    assert.equal((await overlapPolicyUpdate.json()).overlapPolicy, "skip");
+
+  const invalidPolicyUpdate = await fetch(
+    baseUrl +
+      "/bins/" +
+      encodeURIComponent(binId) +
+      "/schedules/" +
+      encodeURIComponent(schedule.scheduleId),
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ overlapPolicy: "parallel" }),
+    },
+  );
+  assert.equal(invalidPolicyUpdate.status, 400);
+  const scheduleAfterInvalidPolicy = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$get({
+    param: { binId, scheduleId: schedule.scheduleId },
+  });
+  assert.equal(scheduleAfterInvalidPolicy.status, 200);
+  if (scheduleAfterInvalidPolicy.status === 200)
+    assert.equal(
+      (await scheduleAfterInvalidPolicy.json()).overlapPolicy,
+      "skip",
+    );
+
   const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
     param: { binId, scheduleId: schedule.scheduleId },
     json: {
@@ -845,7 +897,18 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
     assert.equal(value.timeZone, "Europe/London");
     assert.equal(value.action, "check");
     assert.equal(value.params.gateKey, "schedule-schedule-updated");
+    assert.equal(value.overlapPolicy, "skip");
   }
+
+  const restoredQueuePolicy = await client.bins[":binId"].schedules[
+    ":scheduleId"
+  ].$patch({
+    param: { binId, scheduleId: schedule.scheduleId },
+    json: { overlapPolicy: "queue" },
+  });
+  assert.equal(restoredQueuePolicy.status, 200);
+  if (restoredQueuePolicy.status === 200)
+    assert.equal((await restoredQueuePolicy.json()).overlapPolicy, "queue");
 
   const disabled = await client.bins[":binId"].schedules[
     ":scheduleId"

@@ -14,6 +14,32 @@ import {
 } from "@binny/contracts";
 import { z } from "zod";
 
+import type { SourceAccessClient } from "./source-access.ts";
+
+export {
+  createSourceAccessCoordinator,
+  createSourceAccessClient,
+  sourceAccessConfigFromAdapterConfig,
+  sourceAccessConfigSchema,
+  sourceAccessGroupSchema,
+  sourceAccessPersistentStateSchema,
+} from "./source-access.ts";
+export type {
+  SourceAccessAcquireInput,
+  SourceAccessClient,
+  SourceAccessClock,
+  SourceAccessCoordinator,
+  SourceAccessConfig,
+  SourceAccessGroup,
+  SourceAccessKind,
+  SourceAccessLease,
+  SourceAccessPersistentState,
+  SourceAccessPersistentStore,
+  SourceAccessRequest,
+  SourceAccessSnapshot,
+  SourceAccessTransport,
+} from "./source-access.ts";
+
 export type { SourceAdapterManifest, JsonSchema } from "@binny/contracts";
 export type { ArchiveCommit, ArchiveResourceMetadata } from "@binny/contracts";
 
@@ -121,6 +147,7 @@ type SourceAdapterContextBase<TConfig> = {
   readonly config: TConfig;
   readonly signal: AbortSignal;
   readonly browser?: SourceAdapterBrowserConnection;
+  readonly sourceAccess?: SourceAccessClient;
   readonly archive: {
     submit(input: SourceAdapterArchiveSubmission): Promise<ArchiveCommit>;
   };

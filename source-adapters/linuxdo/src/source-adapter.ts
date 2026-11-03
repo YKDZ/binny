@@ -7,7 +7,10 @@ import {
   defineSourceAdapter,
   defineSourceAdapterAction,
   isSourceAdapterActionError,
+  sourceAccessConfigSchema,
   type ArchiveResourceMetadata,
+  type SourceAccessKind,
+  type SourceAccessSnapshot,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { chromium, type APIRequestContext, type Page } from "patchright-core";
@@ -42,13 +45,50 @@ const siteOriginSchema = z.url().refine((value) => {
   );
 }, "站点地址必须是没有路径、查询或凭据的 HTTP(S) origin。");
 
+const linuxDoSourceAccessSchema = sourceAccessConfigSchema.superRefine(
+  (declaration, context) => {
+    const group = declaration.groups.linuxdo;
+    if (
+      group === undefined ||
+      !group.sources.includes("site") ||
+      !group.sources.includes("media")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["groups"],
+        message: "Linux.do 必须用 linuxdo 组共同准入站点和媒体来源。",
+      });
+    }
+    if (Object.keys(declaration.groups).some((id) => id !== "linuxdo")) {
+      context.addIssue({
+        code: "custom",
+        path: ["groups"],
+        message: "Linux.do 的站点和媒体主动访问必须共享 linuxdo 来源组。",
+      });
+    }
+  },
+);
+
 const sourceAdapterConfigSchema = z
   .object({
     origin: siteOriginSchema
       .describe(
-        "Linux.do 站点 origin，只填 HTTP(S) 协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
+        "Linux.do 站点的 HTTP(S) origin，只填协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
       )
       .meta({ examples: ["https://linux.do"] }),
+    sourceAccess: linuxDoSourceAccessSchema
+      .default({
+        groups: {
+          linuxdo: {
+            sources: ["site", "media"],
+            minimumIntervalMs: 1_000,
+            maxConcurrency: 1,
+          },
+        },
+      })
+      .describe(
+        "Linux.do 主动访问策略：同一组覆盖站点 JSON、显式导航、挑战恢复重读和站内／外部媒体；当前默认间隔 1000 毫秒，最终值待真实站点校准。",
+      ),
   })
   .strict();
 const categorySlugPathSchema = z
@@ -125,15 +165,6 @@ const checkParamsSchema = z
       .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
   })
-  .describe(
-    "检查登录状态以及指定主题或目标的当前可见范围；topicId 与 targets 互斥。",
-  )
-  .meta({
-    examples: [
-      { topicId: 2401 },
-      { targets: [{ id: "latest", kind: "latest" }] },
-    ],
-  })
   .strict()
   .superRefine((params, context) => {
     if (params.topicId !== undefined && params.targets !== undefined) {
@@ -143,6 +174,15 @@ const checkParamsSchema = z
         message: "topicId 与 targets 不能同时使用。",
       });
     }
+  })
+  .describe(
+    "检查登录状态以及指定主题或目标的当前可见范围；topicId 与 targets 互斥。",
+  )
+  .meta({
+    examples: [
+      { topicId: 2401 },
+      { targets: [{ id: "latest", kind: "latest" }] },
+    ],
   });
 const collectionDateSchema = z
   .string()
@@ -183,16 +223,6 @@ const postCreatedRangeSchema = z
         "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
       ),
   })
-  .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 模式互斥。")
-  .meta({
-    examples: [
-      {
-        from: "2026-10-28T02:00:00.000Z",
-        to: "2026-10-28T04:00:00.000Z",
-        maxPages: 20,
-      },
-    ],
-  })
   .strict()
   .superRefine((range, context) => {
     if (Date.parse(range.from) >= Date.parse(range.to)) {
@@ -202,6 +232,16 @@ const postCreatedRangeSchema = z
         message: "区间起点必须早于不包含的终点。",
       });
     }
+  })
+  .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 模式互斥。")
+  .meta({
+    examples: [
+      {
+        from: "2026-10-28T02:00:00.000Z",
+        to: "2026-10-28T04:00:00.000Z",
+        maxPages: 20,
+      },
+    ],
   });
 const collectParamsSchema = z
   .object({
@@ -212,13 +252,17 @@ const collectParamsSchema = z
     targets: actionTargetsSchema.optional(),
     date: collectionDateSchema
       .optional()
-      .describe("按 timeZone 解释的逻辑日期；与 postCreatedRange 互斥。"),
+      .describe(
+        "按 timeZone 解释的逻辑日期；必须为 today、yesterday 或有效 YYYY-MM-DD 日期，与 postCreatedRange 互斥。",
+      ),
     timeZone: collectionTimeZoneSchema
       .optional()
-      .describe("解释 date 的 IANA 时区；与 postCreatedRange 互斥。"),
+      .describe(
+        "解释 date 的有效 IANA 时区名称；date 与 timeZone 成对提供，且与 postCreatedRange 互斥。",
+      ),
     postCreatedRange: postCreatedRangeSchema
       .optional()
-      .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 互斥。"),
+      .meta(postCreatedRangeSchema.meta() ?? {}),
     maxTopics: z
       .number()
       .int()
@@ -227,20 +271,6 @@ const collectParamsSchema = z
       .optional()
       .describe("本轮主题处理数量上限；省略时不额外限制主题数。")
       .meta({ examples: [25] }),
-  })
-  .describe(
-    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
-  )
-  .meta({
-    examples: [
-      { date: "today", timeZone: "Asia/Tokyo" },
-      {
-        postCreatedRange: {
-          from: "2026-10-28T02:00:00.000Z",
-          to: "2026-10-28T04:00:00.000Z",
-        },
-      },
-    ],
   })
   .strict()
   .superRefine((params, context) => {
@@ -282,6 +312,20 @@ const collectParamsSchema = z
         });
       }
     }
+  })
+  .describe(
+    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
+  )
+  .meta({
+    examples: [
+      { date: "today", timeZone: "Asia/Tokyo" },
+      {
+        postCreatedRange: {
+          from: "2026-10-28T02:00:00.000Z",
+          to: "2026-10-28T04:00:00.000Z",
+        },
+      },
+    ],
   });
 const listCategoriesParamsSchema = z.object({}).strict();
 type CategoryReference = z.infer<typeof categoryReferenceSchema>;
@@ -422,6 +466,7 @@ type DiscoursePost = z.infer<typeof discoursePostSchema>;
 type DiscourseTopic = z.infer<typeof discourseTopicSchema>;
 type ConfiguredTarget = z.infer<typeof configuredTargetSchema>;
 type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
+type SourceAccessReport = z.output<typeof sourceAccessReportSchema>;
 type CollectParams = z.output<typeof collectParamsSchema>;
 type DateCollectionParams = CollectParams & {
   readonly date: string;
@@ -456,6 +501,76 @@ const checkOutputSchema = z
         })
         .strict(),
     ),
+  })
+  .strict();
+const sourceAccessReportSchema = z
+  .object({
+    admittedAttempts: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("通过共享准入且即将调用主动传输的操作次数；失败尝试也计入。"),
+    waitedMs: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("本动作等待共享来源准入的累计毫秒数。"),
+    bySource: z
+      .object({
+        site: z.number().int().nonnegative(),
+        media: z.number().int().nonnegative(),
+      })
+      .strict()
+      .describe("按适配器声明的站点或媒体来源类别统计的主动准入操作数。"),
+    pageRequestEventsObserved: z
+      .object({
+        total: z.number().int().nonnegative(),
+        get: z.number().int().nonnegative(),
+        nonGet: z.number().int().nonnegative(),
+        sameOriginGet: z.number().int().nonnegative(),
+        otherOriginGet: z.number().int().nonnegative(),
+        byResourceType: z
+          .object({
+            document: z.number().int().nonnegative(),
+            fetch: z.number().int().nonnegative(),
+            xhr: z.number().int().nonnegative(),
+            other: z.number().int().nonnegative(),
+          })
+          .strict(),
+      })
+      .strict()
+      .describe(
+        "浏览器 Page request 事件观测，含自动子请求；与主动准入操作分开记录，不能当作全部 HTTP 数量。",
+      ),
+  })
+  .strict()
+  .describe("解释本次主动访问和浏览器自动请求观测的统计。");
+const checkReportSchema = z
+  .object({
+    phase: z.enum([
+      "preparing",
+      "checking",
+      "completed",
+      "failed",
+      "cancelled",
+    ]),
+    intent: checkParamsSchema.describe("来源访问前记录的检查主题或目标。"),
+    sourceAccess: sourceAccessReportSchema,
+  })
+  .strict();
+const listCategoriesReportSchema = z
+  .object({
+    phase: z.enum([
+      "preparing",
+      "discovering",
+      "completed",
+      "failed",
+      "cancelled",
+    ]),
+    intent: z
+      .literal("list-categories")
+      .describe("来源访问前记录的板块发现意图。"),
+    sourceAccess: sourceAccessReportSchema,
   })
   .strict();
 const collectionIncompleteScopeSchema = z
@@ -552,6 +667,7 @@ const collectReportSchema = z
     discovery: z
       .enum(["not-started", "in-progress", "complete", "partial", "failed"])
       .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
+    sourceAccess: sourceAccessReportSchema,
     scopes: z
       .array(
         z
@@ -579,6 +695,9 @@ const collectReportSchema = z
   })
   .strict();
 type CollectionReport = z.output<typeof collectReportSchema>;
+type CollectionReportUpdate = Omit<CollectionReport, "sourceAccess"> & {
+  readonly sourceAccess?: CollectionReport["sourceAccess"];
+};
 type CollectionIncompleteScope = z.infer<
   typeof collectionIncompleteScopeSchema
 >;
@@ -655,6 +774,86 @@ const checkBasis =
   "通过正式持久浏览器的共享身份读取 Discourse 当前会话和指定主题 JSON；检查不下载媒体、不写入归档。";
 const postBatchSize = 100;
 const pageRecovery = new WeakMap<Page, ChallengeRecovery>();
+const pageSourceAccess = new WeakMap<Page, PageSourceAccess>();
+
+type PageRequestEvents = {
+  total: number;
+  get: number;
+  nonGet: number;
+  sameOriginGet: number;
+  otherOriginGet: number;
+  byResourceType: {
+    document: number;
+    fetch: number;
+    xhr: number;
+    other: number;
+  };
+};
+
+type PageSourceAccess = {
+  readonly client: NonNullable<SourceAdapterContext["sourceAccess"]>;
+  readonly signal: AbortSignal;
+  readonly siteOrigin: string;
+  readonly events: PageRequestEvents;
+  readonly publish: ((report: SourceAccessReport) => Promise<void>) | undefined;
+};
+
+function emptySourceAccessReport(): SourceAccessReport {
+  return {
+    admittedAttempts: 0,
+    waitedMs: 0,
+    bySource: { site: 0, media: 0 },
+    pageRequestEventsObserved: {
+      total: 0,
+      get: 0,
+      nonGet: 0,
+      sameOriginGet: 0,
+      otherOriginGet: 0,
+      byResourceType: { document: 0, fetch: 0, xhr: 0, other: 0 },
+    },
+  };
+}
+
+function sourceAccessReport(state: PageSourceAccess): SourceAccessReport {
+  const active: SourceAccessSnapshot = state.client.snapshot();
+  return {
+    ...active,
+    pageRequestEventsObserved: {
+      ...state.events,
+      byResourceType: { ...state.events.byResourceType },
+    },
+  };
+}
+
+async function reportPageSourceAccess(state: PageSourceAccess): Promise<void> {
+  await state.publish?.(sourceAccessReport(state));
+}
+
+async function withSourceAdmission<T>(
+  page: Page,
+  source: SourceAccessKind,
+  url: URL,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const state = pageSourceAccess.get(page);
+  if (state === undefined) throw new Error("页面没有绑定来源准入状态。");
+  await reportPageSourceAccess(state);
+  let result: T;
+  try {
+    result = await state.client.withAdmission(
+      { groupId: "linuxdo", source, origin: url.origin },
+      async () => {
+        state.signal.throwIfAborted();
+        return await operation();
+      },
+    );
+  } catch (error) {
+    await reportPageSourceAccess(state).catch(() => undefined);
+    throw error;
+  }
+  await reportPageSourceAccess(state);
+  return result;
+}
 
 function siteFromConfig(config: SourceAdapterConfig): {
   readonly origin: URL;
@@ -668,9 +867,18 @@ function siteFromConfig(config: SourceAdapterConfig): {
 }
 
 async function withSharedBrowser<T>(
-  context: Pick<SourceAdapterContext, "browser" | "signal">,
+  context: Pick<
+    SourceAdapterContext<SourceAdapterConfig>,
+    "browser" | "signal" | "config" | "sourceAccess"
+  >,
   callback: (browser: SharedBrowser) => Promise<T>,
-): Promise<T & { readonly challengeRecovery: ChallengeRecoverySummary }> {
+  publishSourceAccess?: (report: SourceAccessReport) => Promise<void>,
+): Promise<
+  T & {
+    readonly challengeRecovery: ChallengeRecoverySummary;
+    readonly sourceAccess: SourceAccessReport;
+  }
+> {
   const connection = context.browser;
   if (connection === undefined || connection.protocol !== "playwright") {
     throw new Error("Linux.do 采集需要正式浏览器运行器提供 Playwright 连接。");
@@ -680,6 +888,8 @@ async function withSharedBrowser<T>(
       "Linux.do 信源适配器与浏览器运行器的 Playwright 版本不一致。",
     );
   }
+  if (context.sourceAccess === undefined)
+    throw new Error("Linux.do 运行上下文缺少声明的来源访问准入能力。");
 
   const connectedBrowser = await chromium.connect(connection.endpoint);
   try {
@@ -688,27 +898,80 @@ async function withSharedBrowser<T>(
       throw new Error("正式浏览器没有暴露持久 context。");
     }
     const page = await persistentContext.newPage();
-    const recovery = new ChallengeRecovery(page, context.signal);
+    const accessState: PageSourceAccess = {
+      client: context.sourceAccess,
+      signal: context.signal,
+      siteOrigin: new URL(context.config.origin).origin,
+      events: {
+        total: 0,
+        get: 0,
+        nonGet: 0,
+        sameOriginGet: 0,
+        otherOriginGet: 0,
+        byResourceType: { document: 0, fetch: 0, xhr: 0, other: 0 },
+      },
+      publish: publishSourceAccess,
+    };
+    pageSourceAccess.set(page, accessState);
+    page.on("request", (request) => {
+      accessState.events.total++;
+      const method = request.method().toUpperCase();
+      if (method !== "GET") {
+        accessState.events.nonGet++;
+        return;
+      }
+      accessState.events.get++;
+      try {
+        if (new URL(request.url()).origin === accessState.siteOrigin)
+          accessState.events.sameOriginGet++;
+        else accessState.events.otherOriginGet++;
+      } catch {
+        accessState.events.otherOriginGet++;
+      }
+      const resourceType = request.resourceType();
+      if (
+        resourceType === "document" ||
+        resourceType === "fetch" ||
+        resourceType === "xhr"
+      )
+        accessState.events.byResourceType[resourceType]++;
+      else accessState.events.byResourceType.other++;
+    });
+    const recovery = new ChallengeRecovery(
+      page,
+      context.signal,
+      (href, timeoutMs, source) =>
+        withSourceAdmission(page, source, new URL(href), async () => {
+          return await page.goto(href, {
+            waitUntil: "domcontentloaded",
+            timeout: timeoutMs,
+          });
+        }),
+    );
     pageRecovery.set(page, recovery);
     const cancel = () => {
       void page.close({ runBeforeUnload: false }).catch(() => undefined);
     };
     context.signal.addEventListener("abort", cancel, { once: true });
+    let output: T;
     try {
       context.signal.throwIfAborted();
-      const output = await callback({
+      output = await callback({
         page,
         request: persistentContext.request,
       });
-      return {
-        ...output,
-        challengeRecovery: { ...recovery.summary },
-      };
     } finally {
       context.signal.removeEventListener("abort", cancel);
       pageRecovery.delete(page);
       await page.close({ runBeforeUnload: false });
+      await reportPageSourceAccess(accessState).catch(() => undefined);
+      pageSourceAccess.delete(page);
     }
+    return {
+      ...output,
+      challengeRecovery: { ...recovery.summary },
+      sourceAccess: sourceAccessReport(accessState),
+    };
   } finally {
     await connectedBrowser.close();
   }
@@ -769,6 +1032,7 @@ async function ensurePageOrigin(
   page: Page,
   url: URL,
   signal: AbortSignal,
+  source: SourceAccessKind = "site",
 ): Promise<void> {
   let currentOrigin = "";
   try {
@@ -778,9 +1042,12 @@ async function ensurePageOrigin(
   }
   if (currentOrigin === url.origin) return;
   signal.throwIfAborted();
-  await page.goto(new URL("/", url).href, {
-    waitUntil: "domcontentloaded",
-    timeout: 30_000,
+  const home = new URL("/", url);
+  await withSourceAdmission(page, source, home, async () => {
+    return await page.goto(home.href, {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
   });
   if (new URL(page.url()).origin !== url.origin) {
     throw new Error("站点首页跳转到了不同的 origin，无法安全复用浏览器会话。");
@@ -794,6 +1061,7 @@ async function fetchInPage(
   body: "text" | "base64",
   validJson?: (value: unknown) => boolean,
   validMedia?: (response: PageFetchResponse) => boolean,
+  source: SourceAccessKind = "site",
 ): Promise<PageFetchResponse> {
   const initialDeadline = performance.now() + 30_000;
   let response: PageFetchResponse;
@@ -801,7 +1069,14 @@ async function fetchInPage(
     const remaining = () => Math.ceil(initialDeadline - performance.now());
     if (remaining() <= 0) throw new Error("页面读取时间已耗尽。");
     try {
-      response = await fetchInPageOnce(page, url, accept, body, remaining());
+      response = await fetchInPageOnce(
+        page,
+        url,
+        accept,
+        body,
+        remaining(),
+        source,
+      );
       break;
     } catch (error) {
       if (
@@ -821,7 +1096,7 @@ async function fetchInPage(
   if (recovery === undefined) return response;
   const restored = await recovery.recover(
     url,
-    (timeoutMs) => fetchInPageOnce(page, url, accept, body, timeoutMs),
+    (timeoutMs) => fetchInPageOnce(page, url, accept, body, timeoutMs, source),
     (value) => {
       if (value.status < 200 || value.status >= 300) return false;
       if (value.mitigated === "challenge") return false;
@@ -839,6 +1114,7 @@ async function fetchInPage(
       }
     },
     (value) => value.mitigated === "challenge",
+    source,
   );
   const result = restored ?? response;
   return result.mitigated === "challenge" &&
@@ -871,54 +1147,61 @@ async function fetchInPageOnce(
   accept: string,
   body: "text" | "base64",
   timeoutMs = 30_000,
+  source: SourceAccessKind = "site",
 ): Promise<PageFetchResponse> {
-  return await page.evaluate(
-    async ({ href, acceptHeader, bodyType, expiresAt }) => {
-      const controller = new AbortController();
-      const remaining =
-        expiresAt - (performance.timeOrigin + performance.now());
-      if (remaining <= 0)
-        throw new DOMException("请求期限已到。", "TimeoutError");
-      const timeout = window.setTimeout(() => controller.abort(), remaining);
-      try {
-        const response = await fetch(href, {
-          cache: "no-store",
-          credentials: "include",
-          headers: { accept: acceptHeader },
-          signal: controller.signal,
-        });
-        let responseBody: string;
-        if (bodyType === "text") {
-          responseBody = await response.text();
-        } else {
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          let binary = "";
-          const chunkSize = 0x8000;
-          for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
-            binary += String.fromCharCode(
-              ...bytes.subarray(offset, offset + chunkSize),
-            );
+  return await withSourceAdmission(page, source, url, async () => {
+    return await page.evaluate(
+      async ({ href, acceptHeader, bodyType, expiresAt }) => {
+        const controller = new AbortController();
+        const remaining =
+          expiresAt - (performance.timeOrigin + performance.now());
+        if (remaining <= 0)
+          throw new DOMException("请求期限已到。", "TimeoutError");
+        const timeout = window.setTimeout(() => controller.abort(), remaining);
+        try {
+          const response = await fetch(href, {
+            cache: "no-store",
+            credentials: "include",
+            headers: { accept: acceptHeader },
+            signal: controller.signal,
+          });
+          let responseBody: string;
+          if (bodyType === "text") {
+            responseBody = await response.text();
+          } else {
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            let binary = "";
+            const chunkSize = 0x8000;
+            for (
+              let offset = 0;
+              offset < bytes.byteLength;
+              offset += chunkSize
+            ) {
+              binary += String.fromCharCode(
+                ...bytes.subarray(offset, offset + chunkSize),
+              );
+            }
+            responseBody = btoa(binary);
           }
-          responseBody = btoa(binary);
+          return {
+            mitigated: response.headers.get("cf-mitigated") ?? "",
+            status: response.status,
+            contentType: response.headers.get("content-type") ?? "",
+            body: responseBody,
+          };
+        } finally {
+          window.clearTimeout(timeout);
         }
-        return {
-          mitigated: response.headers.get("cf-mitigated") ?? "",
-          status: response.status,
-          contentType: response.headers.get("content-type") ?? "",
-          body: responseBody,
-        };
-      } finally {
-        window.clearTimeout(timeout);
-      }
-    },
-    {
-      href: url.href,
-      acceptHeader: accept,
-      bodyType: body,
-      // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
-      expiresAt: performance.timeOrigin + performance.now() + timeoutMs,
-    },
-  );
+      },
+      {
+        href: url.href,
+        acceptHeader: accept,
+        bodyType: body,
+        // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
+        expiresAt: performance.timeOrigin + performance.now() + timeoutMs,
+      },
+    );
+  });
 }
 
 function topicScope(topicId: number): string {
@@ -1382,73 +1665,111 @@ function listCheckDiagnostic(
 }
 
 async function checkTopic(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: SourceAdapterContext<SourceAdapterConfig, typeof checkReportSchema>,
   params: CheckParams,
 ) {
   const site = siteFromConfig(context.config);
-  if (params.topicId !== undefined) {
-    return await checkOneTopic(context, site, params.topicId);
-  }
-  const targets = params.targets ?? [];
-  const scopes = targets.map(targetScope);
-  return await withSharedBrowser(context, async ({ page }) => {
-    const session = await readSessionAccess(page, site, context.signal);
-    if (session.kind === "unavailable") {
-      return targetCheckResult(scopes, session.availability, [session.problem]);
-    }
-    const problems: DiscourseProblem[] = [];
-    let availability: "available" | "unavailable" | "unknown" = "available";
-    for (const target of targets) {
-      if (target.kind === "topic") {
-        const access = await readTopic(
-          page,
-          site,
-          target.topicId,
-          context.signal,
-        );
-        if (access.kind === "unavailable") {
-          problems.push(access.problem);
-          availability = access.availability;
-          continue;
-        }
-        const posts = await readTopicPosts(
-          page,
-          access.siteOrigin,
-          access.topic,
-          context.signal,
-        );
-        if (posts.challenge !== undefined) {
-          problems.push(posts.challenge);
-          availability = "unknown";
-          continue;
-        }
-        problems.push(...topicProblems(access, posts));
-      } else {
-        // 单条主题足以诊断目标可读性，也能检查 Discourse 的下一页链接。
-        const listUrl = targetListUrl(site, target, 1, undefined);
-        try {
-          const response = await readTopicListPage(
-            page,
-            listUrl,
-            context.signal,
-          );
-          if (
-            response.more_topics_url !== null &&
-            response.more_topics_url !== undefined
-          ) {
-            paginationUrl(response.more_topics_url, listUrl, target);
-          }
-        } catch (error) {
-          const diagnostic = listCheckDiagnostic(error);
-          if (diagnostic === undefined) throw error;
-          problems.push(diagnostic.problem);
-          availability = diagnostic.availability;
-          continue;
-        }
-      }
-    }
-    return targetCheckResult(scopes, availability, problems);
+  let report = checkReportSchema.parse({
+    phase: "preparing",
+    intent: params,
+    sourceAccess: emptySourceAccessReport(),
   });
+  const publishReport = async (next: z.input<typeof checkReportSchema>) => {
+    report = checkReportSchema.parse(next);
+    await context.report(report);
+  };
+  await context.report(report);
+  try {
+    await publishReport({ ...report, phase: "checking" });
+    const onAccess = (sourceAccess: SourceAccessReport) =>
+      publishReport({ ...report, sourceAccess });
+    let browserOutput: Awaited<ReturnType<typeof checkOneTopic>>;
+    if (params.topicId !== undefined) {
+      browserOutput = await checkOneTopic(
+        context,
+        site,
+        params.topicId,
+        onAccess,
+      );
+    } else {
+      const targets = params.targets ?? [];
+      const scopes = targets.map(targetScope);
+      browserOutput = await withSharedBrowser(
+        context,
+        async ({ page }) => {
+          const session = await readSessionAccess(page, site, context.signal);
+          if (session.kind === "unavailable") {
+            return targetCheckResult(scopes, session.availability, [
+              session.problem,
+            ]);
+          }
+          const problems: DiscourseProblem[] = [];
+          let availability: "available" | "unavailable" | "unknown" =
+            "available";
+          for (const target of targets) {
+            if (target.kind === "topic") {
+              const access = await readTopic(
+                page,
+                site,
+                target.topicId,
+                context.signal,
+              );
+              if (access.kind === "unavailable") {
+                problems.push(access.problem);
+                availability = access.availability;
+                continue;
+              }
+              const posts = await readTopicPosts(
+                page,
+                access.siteOrigin,
+                access.topic,
+                context.signal,
+              );
+              if (posts.challenge !== undefined) {
+                problems.push(posts.challenge);
+                availability = "unknown";
+                continue;
+              }
+              problems.push(...topicProblems(access, posts));
+            } else {
+              // 单条主题足以诊断目标可读性，也能检查 Discourse 的下一页链接。
+              const listUrl = targetListUrl(site, target, 1, undefined);
+              try {
+                const response = await readTopicListPage(
+                  page,
+                  listUrl,
+                  context.signal,
+                );
+                if (
+                  response.more_topics_url !== null &&
+                  response.more_topics_url !== undefined
+                ) {
+                  paginationUrl(response.more_topics_url, listUrl, target);
+                }
+              } catch (error) {
+                const diagnostic = listCheckDiagnostic(error);
+                if (diagnostic === undefined) throw error;
+                problems.push(diagnostic.problem);
+                availability = diagnostic.availability;
+                continue;
+              }
+            }
+          }
+          return targetCheckResult(scopes, availability, problems);
+        },
+        onAccess,
+      );
+    }
+    const { sourceAccess, ...output } = browserOutput;
+    await publishReport({ ...report, phase: "completed", sourceAccess });
+    return output;
+  } catch (error) {
+    await publishReport({
+      ...report,
+      phase: context.signal.aborted ? "cancelled" : "failed",
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function categoryListFailure(
@@ -1552,27 +1873,58 @@ function buildDiscoveredCategories(
 }
 
 async function listCategories(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: SourceAdapterContext<
+    SourceAdapterConfig,
+    typeof listCategoriesReportSchema
+  >,
 ) {
   const site = siteFromConfig(context.config);
-  return await withSharedBrowser(context, async ({ page }) => {
-    const session = await readSessionAccess(page, site, context.signal);
-    if (session.kind === "unavailable") {
-      throw sourceAdapterActionError({
-        code: session.problem.code,
-        message: session.problem.message,
-        impact:
-          "本次没有确认当前登录账号可见的 Linux.do 板块，也没有提交归档。",
-        suggestion: session.problem.requiresHuman
-          ? "使用 human open 在持久浏览器中登录或完成人工挑战，再重新运行 list-categories。"
-          : "检查站点地址与当前会话后，重新运行 list-categories。",
-        requiresHuman: session.problem.requiresHuman,
-      });
-    }
-    return {
-      categories: await readVisibleCategories(page, site, context.signal),
-    };
+  let report = listCategoriesReportSchema.parse({
+    phase: "preparing",
+    intent: "list-categories",
+    sourceAccess: emptySourceAccessReport(),
   });
+  const publishReport = async (
+    next: z.input<typeof listCategoriesReportSchema>,
+  ) => {
+    report = listCategoriesReportSchema.parse(next);
+    await context.report(report);
+  };
+  await context.report(report);
+  try {
+    await publishReport({ ...report, phase: "discovering" });
+    const browserOutput = await withSharedBrowser(
+      context,
+      async ({ page }) => {
+        const session = await readSessionAccess(page, site, context.signal);
+        if (session.kind === "unavailable") {
+          throw sourceAdapterActionError({
+            code: session.problem.code,
+            message: session.problem.message,
+            impact:
+              "本次没有确认当前登录账号可见的 Linux.do 板块，也没有提交归档。",
+            suggestion: session.problem.requiresHuman
+              ? "使用 human open 在持久浏览器中登录或完成人工挑战，再重新运行 list-categories。"
+              : "检查站点地址与当前会话后，重新运行 list-categories。",
+            requiresHuman: session.problem.requiresHuman,
+          });
+        }
+        return {
+          categories: await readVisibleCategories(page, site, context.signal),
+        };
+      },
+      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+    );
+    const { sourceAccess, ...output } = browserOutput;
+    await publishReport({ ...report, phase: "completed", sourceAccess });
+    return output;
+  } catch (error) {
+    await publishReport({
+      ...report,
+      phase: context.signal.aborted ? "cancelled" : "failed",
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function readVisibleCategories(
@@ -1742,29 +2094,34 @@ async function resolvePostRangeTargets(
 }
 
 async function checkOneTopic(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: SourceAdapterContext<SourceAdapterConfig, typeof checkReportSchema>,
   site: ReturnType<typeof siteFromConfig>,
   topicId: number,
+  publishSourceAccess: (report: SourceAccessReport) => Promise<void>,
 ) {
-  return await withSharedBrowser(context, async ({ page }) => {
-    const access = await readTopicAccess(page, site, topicId, context.signal);
-    if (access.kind === "unavailable") {
-      return checkResult(topicScope(topicId), access.availability, [
-        access.problem,
-      ]);
-    }
-    const posts = await readTopicPosts(
-      page,
-      access.siteOrigin,
-      access.topic,
-      context.signal,
-    );
-    if (posts.challenge !== undefined) {
-      return checkResult(topicScope(topicId), "unknown", [posts.challenge]);
-    }
-    const problems = topicProblems(access, posts);
-    return checkResult(topicScope(topicId), "available", problems);
-  });
+  return await withSharedBrowser(
+    context,
+    async ({ page }) => {
+      const access = await readTopicAccess(page, site, topicId, context.signal);
+      if (access.kind === "unavailable") {
+        return checkResult(topicScope(topicId), access.availability, [
+          access.problem,
+        ]);
+      }
+      const posts = await readTopicPosts(
+        page,
+        access.siteOrigin,
+        access.topic,
+        context.signal,
+      );
+      if (posts.challenge !== undefined) {
+        return checkResult(topicScope(topicId), "unknown", [posts.challenge]);
+      }
+      const problems = topicProblems(access, posts);
+      return checkResult(topicScope(topicId), "available", problems);
+    },
+    publishSourceAccess,
+  );
 }
 
 function topicProblems(
@@ -2393,7 +2750,7 @@ async function downloadMedia(
   let body: Uint8Array;
   try {
     if (mediaUrl.origin === siteOrigin.origin) {
-      await ensurePageOrigin(page, mediaUrl, context.signal);
+      await ensurePageOrigin(page, mediaUrl, context.signal, "media");
       const response = await fetchInPage(
         page,
         mediaUrl,
@@ -2406,6 +2763,7 @@ async function downloadMedia(
             value.contentType,
             Buffer.from(value.body, "base64").byteLength,
           ) === undefined,
+        "media",
       );
       status = response.status;
       if (response.recoveryFailure !== undefined) {
@@ -2414,7 +2772,12 @@ async function downloadMedia(
       mediaType = response.contentType;
       body = Buffer.from(response.body, "base64");
     } else {
-      const response = await request.get(mediaUrl.href, { timeout: 30_000 });
+      const response = await withSourceAdmission(
+        page,
+        "media",
+        mediaUrl,
+        async () => await request.get(mediaUrl.href, { timeout: 30_000 }),
+      );
       status = response.status();
       mediaType = response.headers()["content-type"];
       body = await response.body();
@@ -2512,7 +2875,7 @@ async function archivePost(
   topic: DiscourseTopic,
   post: DiscoursePost,
   diagnostics: ReturnType<typeof postDiagnostics>,
-  mediaCache: Map<string, MediaDownload>,
+  mediaCache: Map<string, Promise<MediaDownload>>,
 ) {
   const prepared = await prepareCookedBody(page, post.cooked ?? "");
   const references = new Map<number, string>();
@@ -2525,25 +2888,30 @@ async function archivePost(
     readonly suggestion?: string;
   }[] = post.post_number === 1 ? [...diagnostics] : [];
 
-  for (const candidate of prepared.media) {
-    let mediaUrl = candidate.url;
-    try {
-      mediaUrl = new URL(candidate.url, siteOrigin).href;
-    } catch {
-      // downloadMedia 将无效地址转换为可见的部分采集结果。
-    }
-    let downloaded = mediaCache.get(mediaUrl);
-    if (downloaded === undefined) {
-      downloaded = await downloadMedia(
-        page,
-        request,
-        candidate.kind,
-        mediaUrl,
-        siteOrigin,
-        context,
-      );
-      mediaCache.set(mediaUrl, downloaded);
-    }
+  const downloads = await Promise.all(
+    prepared.media.map(async (candidate) => {
+      let mediaUrl = candidate.url;
+      try {
+        mediaUrl = new URL(candidate.url, siteOrigin).href;
+      } catch {
+        // downloadMedia 将无效地址转换为可见的部分采集结果。
+      }
+      let pending = mediaCache.get(mediaUrl);
+      if (pending === undefined) {
+        pending = downloadMedia(
+          page,
+          request,
+          candidate.kind,
+          mediaUrl,
+          siteOrigin,
+          context,
+        );
+        mediaCache.set(mediaUrl, pending);
+      }
+      return { candidate, downloaded: await pending };
+    }),
+  );
+  for (const { candidate, downloaded } of downloads) {
     if (downloaded.ok) {
       const mediaPart = archivedMedia(downloaded.resource);
       references.set(candidate.index, mediaPart.reference);
@@ -2730,7 +3098,7 @@ async function collectPostRangeTopic(
     selectedRead.missingPostIds,
     false,
   );
-  const mediaCache = new Map<string, MediaDownload>();
+  const mediaCache = new Map<string, Promise<MediaDownload>>();
   let complete = selectedRead.missingPostIds.length === 0;
   const incompleteMessages: string[] = [];
   if (selectedRead.missingPostIds.length > 0) {
@@ -2833,7 +3201,7 @@ async function collectTopicContent(
     read.missingPostIds,
     read.scopeIncomplete,
   );
-  const mediaCache = new Map<string, MediaDownload>();
+  const mediaCache = new Map<string, Promise<MediaDownload>>();
   const incompleteMessages = diagnostics.map(({ message }) => message);
   let allPostsComplete = true;
   for (let offset = 0; offset < read.posts.length; offset += postBatchSize) {
@@ -3255,7 +3623,7 @@ async function collectPostCreatedRange(
   dateWindow: CollectionDateWindow,
   completedScopes: string[],
   incompleteScopes: CollectionIncompleteScope[],
-  publishReport: (report: CollectionReport) => Promise<void>,
+  publishReport: (report: CollectionReportUpdate) => Promise<void>,
 ): Promise<Omit<z.output<typeof collectOutputSchema>, "challengeRecovery">> {
   const range = {
     from: new Date(dateWindow.startInclusive).toISOString(),
@@ -3427,10 +3795,14 @@ async function collectTopic(
         : { maxTopics: params.maxTopics }),
     },
     discovery: "not-started",
+    sourceAccess: emptySourceAccessReport(),
     scopes: [],
   });
-  const publishReport = async (next: CollectionReport) => {
-    report = collectReportSchema.parse(next);
+  const publishReport = async (next: CollectionReportUpdate) => {
+    report = collectReportSchema.parse({
+      ...next,
+      sourceAccess: next.sourceAccess ?? report.sourceAccess,
+    });
     await context.report(report);
   };
   const output = () => ({
@@ -3463,170 +3835,228 @@ async function collectTopic(
       phase: "checking-access",
       window: range,
     });
-    return await withSharedBrowser(context, async ({ page, request }) => {
-      const session = await readSessionAccess(page, site, context.signal);
-      if (session.kind === "unavailable") {
-        throw failureFromProblem(session.problem);
-      }
-      if (rangeParams !== undefined) {
-        return await collectPostCreatedRange(
-          context,
-          page,
-          request,
-          site,
-          rangeParams,
-          dateWindow,
-          completedScopes,
-          incompleteScopes,
-          publishReport,
-        );
-      }
-      if (params.topicId !== undefined) {
-        await publishReport({
-          ...report,
-          phase: "collecting",
-          discovery: "complete",
-          scopes: [
-            {
-              scope: `topic:${String(params.topicId)}`,
-              ...range,
-              status: "in-progress",
-            },
-          ],
-        });
-        const access = await readTopic(
-          page,
-          site,
-          params.topicId,
-          context.signal,
-        );
-        if (access.kind === "unavailable") throw failureFromAccess(access);
-        if (
-          !topicMatchesDateWindow(
-            params.topicId,
-            access.topic.created_at,
+    const browserOutput = await withSharedBrowser(
+      context,
+      async ({ page, request }) => {
+        const session = await readSessionAccess(page, site, context.signal);
+        if (session.kind === "unavailable") {
+          throw failureFromProblem(session.problem);
+        }
+        if (rangeParams !== undefined) {
+          return await collectPostCreatedRange(
+            context,
+            page,
+            request,
+            site,
+            rangeParams,
             dateWindow,
-          )
-        ) {
-          completedScopes.push(`${topicScope(params.topicId)}:filtered:date`);
+            completedScopes,
+            incompleteScopes,
+            publishReport,
+          );
+        }
+        if (params.topicId !== undefined) {
           await publishReport({
             ...report,
-            phase: "completed",
-            scopes: report.scopes.map((scope) => ({
-              ...scope,
-              status: "completed",
-            })),
+            phase: "collecting",
+            discovery: "complete",
+            scopes: [
+              {
+                scope: `topic:${String(params.topicId)}`,
+                ...range,
+                status: "in-progress",
+              },
+            ],
           });
-          return output();
-        }
-        const incomplete = await collectTopicContent(
-          context,
-          page,
-          request,
-          site,
-          params.topicId,
-          completedScopes,
-          access,
-        );
-        if (incomplete !== undefined) incompleteScopes.push(incomplete);
-        await publishReport({
-          ...report,
-          phase: "completed",
-          scopes: report.scopes.map((scope) => ({
-            ...scope,
-            status: incomplete === undefined ? "completed" : "incomplete",
-          })),
-        });
-        return output();
-      }
-
-      let categories: DiscoveredCategory[] = [];
-      if (
-        params.targets === undefined ||
-        params.targets.some((target) => target.kind === "category")
-      ) {
-        await publishReport({
-          ...report,
-          phase: "discovering-targets",
-          discovery: "in-progress",
-        });
-        categories = await readVisibleCategories(page, site, context.signal);
-      }
-      const targets = collectTargets(params.targets, categories);
-      const scopes = targets.map((target) => ({
-        scope: targetScope(target),
-        ...range,
-        status: "unstarted" as const,
-      }));
-      await publishReport({
-        ...report,
-        phase: "collecting",
-        discovery: "complete",
-        scopes,
-      });
-      const progress: DiscoveryProgress = {
-        seenTopicIds: new Set(),
-        collectedTopics: 0,
-      };
-      for (const [index, target] of targets.entries()) {
-        context.signal.throwIfAborted();
-        const scope = targetScope(target);
-        await publishReport({
-          ...report,
-          scopes: report.scopes.map((current) =>
-            current.scope === scope
-              ? { ...current, status: "in-progress" }
-              : current,
-          ),
-        });
-        if (target.kind === "topic") {
-          if (progress.seenTopicIds.has(target.topicId)) {
-            completedScopes.push(targetScope(target));
-            await publishReport({
-              ...report,
-              scopes: report.scopes.map((current) =>
-                current.scope === scope
-                  ? { ...current, status: "completed" }
-                  : current,
-              ),
-            });
-            continue;
-          }
-          progress.seenTopicIds.add(target.topicId);
           const access = await readTopic(
             page,
             site,
-            target.topicId,
+            params.topicId,
             context.signal,
           );
           if (access.kind === "unavailable") throw failureFromAccess(access);
           if (
             !topicMatchesDateWindow(
-              target.topicId,
+              params.topicId,
               access.topic.created_at,
               dateWindow,
             )
           ) {
-            completedScopes.push(`${targetScope(target)}:filtered:date`);
+            completedScopes.push(`${topicScope(params.topicId)}:filtered:date`);
+            await publishReport({
+              ...report,
+              phase: "completed",
+              scopes: report.scopes.map((scope) => ({
+                ...scope,
+                status: "completed",
+              })),
+            });
+            return output();
+          }
+          const incomplete = await collectTopicContent(
+            context,
+            page,
+            request,
+            site,
+            params.topicId,
+            completedScopes,
+            access,
+          );
+          if (incomplete !== undefined) incompleteScopes.push(incomplete);
+          await publishReport({
+            ...report,
+            phase: "completed",
+            scopes: report.scopes.map((scope) => ({
+              ...scope,
+              status: incomplete === undefined ? "completed" : "incomplete",
+            })),
+          });
+          return output();
+        }
+
+        let categories: DiscoveredCategory[] = [];
+        if (
+          params.targets === undefined ||
+          params.targets.some((target) => target.kind === "category")
+        ) {
+          await publishReport({
+            ...report,
+            phase: "discovering-targets",
+            discovery: "in-progress",
+          });
+          categories = await readVisibleCategories(page, site, context.signal);
+        }
+        const targets = collectTargets(params.targets, categories);
+        const scopes = targets.map((target) => ({
+          scope: targetScope(target),
+          ...range,
+          status: "unstarted" as const,
+        }));
+        await publishReport({
+          ...report,
+          phase: "collecting",
+          discovery: "complete",
+          scopes,
+        });
+        const progress: DiscoveryProgress = {
+          seenTopicIds: new Set(),
+          collectedTopics: 0,
+        };
+        for (const [index, target] of targets.entries()) {
+          context.signal.throwIfAborted();
+          const scope = targetScope(target);
+          await publishReport({
+            ...report,
+            scopes: report.scopes.map((current) =>
+              current.scope === scope
+                ? { ...current, status: "in-progress" }
+                : current,
+            ),
+          });
+          if (target.kind === "topic") {
+            if (progress.seenTopicIds.has(target.topicId)) {
+              completedScopes.push(targetScope(target));
+              await publishReport({
+                ...report,
+                scopes: report.scopes.map((current) =>
+                  current.scope === scope
+                    ? { ...current, status: "completed" }
+                    : current,
+                ),
+              });
+              continue;
+            }
+            progress.seenTopicIds.add(target.topicId);
+            const access = await readTopic(
+              page,
+              site,
+              target.topicId,
+              context.signal,
+            );
+            if (access.kind === "unavailable") throw failureFromAccess(access);
+            if (
+              !topicMatchesDateWindow(
+                target.topicId,
+                access.topic.created_at,
+                dateWindow,
+              )
+            ) {
+              completedScopes.push(`${targetScope(target)}:filtered:date`);
+              await publishReport({
+                ...report,
+                scopes: report.scopes.map((current) =>
+                  current.scope === scope
+                    ? { ...current, status: "completed" }
+                    : current,
+                ),
+              });
+              continue;
+            }
+            if (
+              params.maxTopics !== undefined &&
+              progress.collectedTopics >= params.maxTopics
+            ) {
+              incompleteScopes.push({
+                scope: targetScope(target),
+                reasonCode: "topic_limit_reached",
+                message: `已达到显式 maxTopics=${String(params.maxTopics)}，所选主题仍在日期范围内。`,
+              });
+              for (const remainingTarget of targets.slice(index + 1)) {
+                incompleteScopes.push({
+                  scope: targetScope(remainingTarget),
+                  reasonCode: "not_scanned_due_to_topic_limit",
+                  message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
+                });
+              }
+              await publishReport({
+                ...report,
+                scopes: report.scopes.map((current) =>
+                  current.scope === scope
+                    ? { ...current, status: "incomplete" }
+                    : current,
+                ),
+              });
+              break;
+            }
+            const incomplete = await collectTopicContent(
+              context,
+              page,
+              request,
+              site,
+              target.topicId,
+              completedScopes,
+              access,
+            );
+            if (incomplete !== undefined) incompleteScopes.push(incomplete);
+            progress.collectedTopics += 1;
+            completedScopes.push(targetScope(target));
             await publishReport({
               ...report,
               scopes: report.scopes.map((current) =>
                 current.scope === scope
-                  ? { ...current, status: "completed" }
+                  ? {
+                      ...current,
+                      status:
+                        incomplete === undefined ? "completed" : "incomplete",
+                    }
                   : current,
               ),
             });
             continue;
           }
-          if (
-            params.maxTopics !== undefined &&
-            progress.collectedTopics >= params.maxTopics
-          ) {
-            incompleteScopes.push({
-              scope: targetScope(target),
-              reasonCode: "topic_limit_reached",
-              message: `已达到显式 maxTopics=${String(params.maxTopics)}，所选主题仍在日期范围内。`,
-            });
+          const result = await collectListTarget(
+            context,
+            page,
+            request,
+            site,
+            target,
+            params.maxTopics,
+            dateWindow,
+            progress,
+            completedScopes,
+            incompleteScopes,
+          );
+          if (result === "limited") {
             for (const remainingTarget of targets.slice(index + 1)) {
               incompleteScopes.push({
                 scope: targetScope(remainingTarget),
@@ -3644,81 +4074,30 @@ async function collectTopic(
             });
             break;
           }
-          const incomplete = await collectTopicContent(
-            context,
-            page,
-            request,
-            site,
-            target.topicId,
-            completedScopes,
-            access,
-          );
-          if (incomplete !== undefined) incompleteScopes.push(incomplete);
-          progress.collectedTopics += 1;
-          completedScopes.push(targetScope(target));
           await publishReport({
             ...report,
             scopes: report.scopes.map((current) =>
               current.scope === scope
                 ? {
                     ...current,
-                    status:
-                      incomplete === undefined ? "completed" : "incomplete",
+                    status: incompleteScopes.some(
+                      (incomplete) => incomplete.scope === scope,
+                    )
+                      ? "incomplete"
+                      : "completed",
                   }
                 : current,
             ),
           });
-          continue;
         }
-        const result = await collectListTarget(
-          context,
-          page,
-          request,
-          site,
-          target,
-          params.maxTopics,
-          dateWindow,
-          progress,
-          completedScopes,
-          incompleteScopes,
-        );
-        if (result === "limited") {
-          for (const remainingTarget of targets.slice(index + 1)) {
-            incompleteScopes.push({
-              scope: targetScope(remainingTarget),
-              reasonCode: "not_scanned_due_to_topic_limit",
-              message: `前一范围达到显式 maxTopics=${String(params.maxTopics)} 后未扫描此范围。`,
-            });
-          }
-          await publishReport({
-            ...report,
-            scopes: report.scopes.map((current) =>
-              current.scope === scope
-                ? { ...current, status: "incomplete" }
-                : current,
-            ),
-          });
-          break;
-        }
-        await publishReport({
-          ...report,
-          scopes: report.scopes.map((current) =>
-            current.scope === scope
-              ? {
-                  ...current,
-                  status: incompleteScopes.some(
-                    (incomplete) => incomplete.scope === scope,
-                  )
-                    ? "incomplete"
-                    : "completed",
-                }
-              : current,
-          ),
-        });
-      }
-      await publishReport({ ...report, phase: "completed" });
-      return output();
-    });
+        await publishReport({ ...report, phase: "completed" });
+        return output();
+      },
+      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+    );
+    const { sourceAccess, ...result } = browserOutput;
+    await publishReport({ ...report, phase: "completed", sourceAccess });
+    return result;
   } catch (error) {
     await publishReport({
       ...report,
@@ -3748,12 +4127,14 @@ export const sourceAdapter = defineSourceAdapter({
       description: "发现当前 Linux.do 登录账号可见的板块及其采集引用。",
       params: listCategoriesParamsSchema,
       output: listCategoriesOutputSchema,
+      report: listCategoriesReportSchema,
       execute: listCategories,
     }),
     check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description: "检查登录状态以及所选 Linux.do 目标的可见范围。",
       params: checkParamsSchema,
       output: checkOutputSchema,
+      report: checkReportSchema,
       execute: checkTopic,
     }),
     collect: defineSourceAdapterAction(sourceAdapterConfigSchema, {

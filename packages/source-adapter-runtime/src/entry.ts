@@ -29,9 +29,13 @@ import {
   type RuntimeEnvironment,
 } from "@binny/contracts";
 import {
+  parseSourceAdapterInput,
+  sourceAccessConfigFromAdapterConfig,
   sourceAdapterManifest,
   type SourceAdapterBrowserConnection,
   type SourceAdapterDefinition,
+  type SourceAccessAcquireInput,
+  type SourceAccessConfig,
 } from "@binny/source-adapter-sdk";
 
 import {
@@ -40,6 +44,7 @@ import {
   type BrowserPowerEvent,
 } from "./browser-lifecycle.ts";
 import { createRuntimeServer } from "./runtime-server.ts";
+import { openPersistentSourceAccessCoordinator } from "./source-access.ts";
 
 const sourceAdapterPath =
   process.env.BINNY_SOURCE_ADAPTER_ENTRY ?? "/app/dist/index.js";
@@ -193,6 +198,9 @@ async function advanceOwnerGeneration(
 const ownerLock = await findOwnerLockDescriptor();
 const ownerLockDescriptor = ownerLock.descriptor;
 const ownerGeneration = await advanceOwnerGeneration(ownerLock.path);
+const sourceAccessCoordinator = await openPersistentSourceAccessCoordinator(
+  join(dirname(ownerLock.path), "source-access.json"),
+);
 const importedSourceAdapter = (await import(
   pathToFileURL(sourceAdapterPath).href
 )) as {
@@ -449,6 +457,8 @@ type WorkerOutcome =
 type ActionWorker = {
   readonly child: ChildProcess;
   readonly pid: number;
+  readonly ownerId: string;
+  readonly accessRequests: Map<string, AbortController>;
   readonly ready: Promise<void>;
   readonly outcome: Promise<WorkerOutcome>;
   readonly closed: Promise<void>;
@@ -473,7 +483,44 @@ function parseWorkerMessage(value: unknown): unknown {
   }
 }
 
-function startActionWorker(): ActionWorker {
+function sourceAccessInput(
+  value: unknown,
+  run: ManualRunExecution,
+): SourceAccessAcquireInput | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const request = value as Record<string, unknown>;
+  if (
+    request.runId !== run.runId ||
+    typeof request.groupId !== "string" ||
+    (request.source !== "site" && request.source !== "media") ||
+    typeof request.origin !== "string" ||
+    typeof request.minimumIntervalMs !== "number" ||
+    typeof request.maxConcurrency !== "number" ||
+    !Number.isSafeInteger(request.minimumIntervalMs) ||
+    !Number.isSafeInteger(request.maxConcurrency) ||
+    (request.notBeforeEpochMs !== undefined &&
+      (typeof request.notBeforeEpochMs !== "number" ||
+        !Number.isSafeInteger(request.notBeforeEpochMs) ||
+        request.notBeforeEpochMs < 0))
+  )
+    return undefined;
+  return {
+    runId: request.runId,
+    groupId: request.groupId,
+    source: request.source,
+    origin: request.origin,
+    minimumIntervalMs: request.minimumIntervalMs,
+    maxConcurrency: request.maxConcurrency,
+    ...(request.notBeforeEpochMs === undefined
+      ? {}
+      : { notBeforeEpochMs: request.notBeforeEpochMs }),
+  };
+}
+
+function startActionWorker(
+  run: ManualRunExecution,
+  declarations: SourceAccessConfig | undefined,
+): ActionWorker {
   const child = spawn(process.execPath, [workerEntry], {
     detached: true,
     env: process.env,
@@ -481,6 +528,9 @@ function startActionWorker(): ActionWorker {
   });
   const pid = child.pid;
   if (pid === undefined) throw new Error("无法启动隔离的信源适配器执行进程。");
+  const ownerId = randomUUID();
+  const accessRequests = new Map<string, AbortController>();
+  let worker!: ActionWorker;
 
   let resolveReady!: () => void;
   let rejectReady!: (error: Error) => void;
@@ -502,6 +552,99 @@ function startActionWorker(): ActionWorker {
     const message = parseWorkerMessage(value);
     if (typeof message !== "object" || message === null || !("type" in message))
       return;
+    if (message.type === "source-access-acquire") {
+      const record = message as Record<string, unknown>;
+      if (
+        declarations === undefined ||
+        typeof record.requestId !== "string" ||
+        accessRequests.has(record.requestId)
+      ) {
+        void sendWorkerMessage(worker, {
+          type: "source-access-rejected",
+          requestId: record.requestId,
+          message: "本次运行没有可用的来源准入声明。",
+        });
+        return;
+      }
+      const request = sourceAccessInput(record.input, run);
+      if (request === undefined) {
+        void sendWorkerMessage(worker, {
+          type: "source-access-rejected",
+          requestId: record.requestId,
+          message: "来源准入请求格式无效。",
+        });
+        return;
+      }
+      const pending = new AbortController();
+      accessRequests.set(record.requestId, pending);
+      void sourceAccessCoordinator
+        .acquire(ownerId, request, declarations, pending.signal)
+        .then(async (lease) => {
+          if (
+            pending.signal.aborted ||
+            accessRequests.get(record.requestId as string) !== pending
+          ) {
+            await sourceAccessCoordinator.release(ownerId, lease.leaseId);
+            return;
+          }
+          accessRequests.delete(record.requestId as string);
+          try {
+            await sendWorkerMessage(worker, {
+              type: "source-access-granted",
+              requestId: record.requestId,
+              ...lease,
+            });
+          } catch (error) {
+            await sourceAccessCoordinator.release(ownerId, lease.leaseId);
+            throw error;
+          }
+        })
+        .catch(async (error: unknown) => {
+          accessRequests.delete(record.requestId as string);
+          if (!worker.child.connected) return;
+          await sendWorkerMessage(worker, {
+            type: "source-access-rejected",
+            requestId: record.requestId,
+            message:
+              error instanceof Error ? error.message : "来源准入请求失败。",
+          }).catch(() => undefined);
+        });
+      return;
+    }
+    if (message.type === "source-access-cancel") {
+      const record = message as Record<string, unknown>;
+      if (typeof record.requestId !== "string") return;
+      const pending = accessRequests.get(record.requestId);
+      if (pending !== undefined) {
+        accessRequests.delete(record.requestId);
+        pending.abort();
+      }
+      return;
+    }
+    if (message.type === "source-access-release") {
+      const record = message as Record<string, unknown>;
+      if (
+        typeof record.requestId !== "string" ||
+        typeof record.leaseId !== "string"
+      )
+        return;
+      void sourceAccessCoordinator
+        .release(ownerId, record.leaseId)
+        .then(() =>
+          sendWorkerMessage(worker, {
+            type: "source-access-released",
+            requestId: record.requestId,
+          }),
+        )
+        .catch((error: unknown) =>
+          sendWorkerMessage(worker, {
+            type: "source-access-rejected",
+            requestId: record.requestId,
+            message: error instanceof Error ? error.message : "许可释放失败。",
+          }).catch(() => undefined),
+        );
+      return;
+    }
     if (message.type === "ready") {
       readyResolved = true;
       resolveReady();
@@ -531,7 +674,8 @@ function startActionWorker(): ActionWorker {
       resolveOutcome({ type: "exit", code, signal });
     }
   });
-  return { child, pid, ready, outcome, closed };
+  worker = { child, pid, ownerId, accessRequests, ready, outcome, closed };
+  return worker;
 }
 
 function sendWorkerMessage(
@@ -724,6 +868,11 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       await browserLifecycle.cleanAutomaticPages();
       browserBound = false;
     }
+    if (worker !== undefined) {
+      for (const pending of worker.accessRequests.values()) pending.abort();
+      worker.accessRequests.clear();
+      sourceAccessCoordinator.closeOwner(worker.ownerId);
+    }
   }
   try {
     if (activeSourceAdapter.environment.browser.required) {
@@ -740,7 +889,14 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       );
       browserBound = true;
     }
-    worker = startActionWorker();
+    const configured = await parseSourceAdapterInput(
+      activeSourceAdapter.configSchema,
+      run.config,
+    );
+    const accessDeclarations = configured.success
+      ? sourceAccessConfigFromAdapterConfig(configured.data)
+      : undefined;
+    worker = startActionWorker(run, accessDeclarations);
     activeWorker = worker;
     const readyDeadline = Date.now() + 10_000;
     await Promise.race([
