@@ -3,9 +3,7 @@
   "version": "9",
   "dialect": "postgres",
   "id": "f2912e4b-e40e-451c-a8da-3e54571a7716",
-  "prevIds": [
-    "03f25771-1150-4aad-b687-ebc95298ed16"
-  ],
+  "prevIds": ["03f25771-1150-4aad-b687-ebc95298ed16"],
   "footprints": [
     {
       "statementType": "create_index",

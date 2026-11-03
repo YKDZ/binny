@@ -39,6 +39,8 @@ import {
   humanSessionSchema,
   jsonObjectSchema,
   manualRunErrorSchema,
+  manualRunListPageSchema,
+  manualRunListQuerySchema,
   manualRunSchema,
   postgresTextSchema,
   scheduleCreateInputSchema,
@@ -312,6 +314,9 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
         params !== undefined,
       { message: "至少提供一个需要修改的字段。" },
     ),
+);
+const cliRunListInputSchema = withPostgresJsonSchemaProjection(
+  manualRunListQuerySchema.safeExtend({ binId: binIdSchema }),
 );
 const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
@@ -964,6 +969,73 @@ function createCliContract(identity: CliCommandIdentity) {
           )
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的运行触发状态。");
+        },
+      }),
+      ...command("runList")({
+        kind: "command",
+        parent: "run",
+        name: "list",
+        description:
+          "按动作、状态和运行创建时间分页查找运行；运行创建时间不代表帖子创建时间。",
+        fields: {
+          binId: { kind: "positional", description: "bin 标识" },
+          action: {
+            kind: "valueOption",
+            longOption: "--action",
+            description: "按动作名称筛选",
+          },
+          status: {
+            kind: "valueOption",
+            longOption: "--status",
+            description: "按运行状态筛选",
+          },
+          createdFrom: {
+            kind: "valueOption",
+            longOption: "--created-from",
+            description: "按运行创建时间筛选，包含此时间",
+          },
+          createdBefore: {
+            kind: "valueOption",
+            longOption: "--created-before",
+            description: "按运行创建时间筛选，不包含此时间",
+          },
+          limit: {
+            kind: "valueOption",
+            longOption: "--limit",
+            description: "每页数量，默认 20，最大 100",
+          },
+          cursor: {
+            kind: "valueOption",
+            longOption: "--cursor",
+            description: "上一页返回的游标",
+          },
+        },
+        input: cliRunListInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            listed: {
+              description: "运行摘要和下一页游标",
+              exitCode: 0,
+              schema: manualRunListPageSchema,
+              text: (page) => outputText("运行记录", page),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const { binId, ...query } = input;
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"].runs.$get({
+              param: { binId },
+              query,
+            });
+          if (response.status === 200)
+            return outcome.data.listed(await response.json());
+          if (response.status === 400)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("服务返回了未声明的运行列表状态。");
         },
       }),
       ...command("runGet")({

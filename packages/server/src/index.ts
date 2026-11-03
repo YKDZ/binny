@@ -13,6 +13,7 @@ import {
   createBinConfigurationStore,
   createBrowserCapacityCoordinator,
   createHumanSessionStore,
+  createManualRunListStore,
   createManualRunStore,
   createRuntimeConnectionStore,
   createScheduleStore,
@@ -88,6 +89,7 @@ export async function createServerRuntime(options: {
   });
   const runtime = createRuntimeConnectionStore(database, browserCapacity);
   const runs = createManualRunStore(database, browserCapacity);
+  const runListings = createManualRunListStore(database);
   const schedules = createScheduleStore(database);
   const humanSessions = createHumanSessionStore(database, browserCapacity);
   const viewerWaitMs = environmentMilliseconds(
@@ -205,6 +207,7 @@ export async function createServerRuntime(options: {
       bins: createBinConfigurationStore(database, browserCapacity),
       runtime: runtimeOperations,
       runs,
+      runListings,
       schedules,
       archives,
       humanSessions: humanOperations,

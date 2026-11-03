@@ -3266,6 +3266,20 @@ async function countSourceArrivals(
   ).length;
 }
 
+async function countAllSourceArrivals(sourceUrl: string): Promise<number> {
+  const response = await fetch(sourceUrl + "/control/arrivals", {
+    signal: AbortSignal.timeout(3_000),
+  });
+  assert.equal(response.status, 200);
+  const status: unknown = await response.json();
+  return typeof status === "object" &&
+    status !== null &&
+    "arrivals" in status &&
+    Array.isArray(status.arrivals)
+    ? status.arrivals.length
+    : 0;
+}
+
 async function releaseSource(
   sourceUrl: string,
   gateKey: string,
@@ -3849,6 +3863,36 @@ async function manualRunsCliStep(
     triggered.runId,
     "binny-runs-one",
   );
+  const sourceArrivalsBeforeRunList =
+    await countAllSourceArrivals(sourceControlUrl);
+  const executingRuns = cliData<{
+    readonly runs: readonly {
+      readonly runId: string;
+      readonly status: string;
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--action",
+      "collect",
+      "--status",
+      "executing",
+    ]),
+    "listed",
+  );
+  assert.ok(
+    executingRuns.runs.some(
+      ({ runId, status }) =>
+        runId === triggered.runId && status === "executing",
+    ),
+  );
+  assert.equal(
+    await countAllSourceArrivals(sourceControlUrl),
+    sourceArrivalsBeforeRunList,
+    "只读运行列表不能增加来源请求。",
+  );
   await releaseSource(sourceControlUrl, gateKey);
 
   const deadline = Date.now() + 30_000;
@@ -3911,6 +3955,7 @@ async function manualRunsCliStep(
     readonly runId: string;
     readonly status: string;
     readonly binId: string;
+    readonly createdAt: string;
   }>(
     await cli(baseUrl, [
       "run",
@@ -3966,6 +4011,7 @@ async function manualRunsCliStep(
   const followUp = cliData<{
     readonly runId: string;
     readonly status: string;
+    readonly createdAt: string;
   }>(
     await cli(baseUrl, [
       "run",
@@ -4010,6 +4056,175 @@ async function manualRunsCliStep(
     "source/cli-after-check",
   ]);
 
+  const filteredHistory = cliData<{
+    readonly runs: readonly { readonly runId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--action",
+      "check",
+      "--status",
+      "completed",
+      "--created-from",
+      checkTriggered.createdAt,
+      "--created-before",
+      "2099-01-01T00:00:00Z",
+    ]),
+    "listed",
+  );
+  assert.deepEqual(
+    filteredHistory.runs.map(({ runId }) => runId),
+    [checkTriggered.runId],
+  );
+  const emptyHistory = cliData<{
+    readonly runs: readonly unknown[];
+    readonly nextCursor?: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--action",
+      "check",
+      "--status",
+      "failed",
+    ]),
+    "listed",
+  );
+  assert.deepEqual(emptyHistory, { runs: [] });
+
+  const firstHistoryPage = cliData<{
+    readonly runs: readonly {
+      readonly runId: string;
+      readonly action: string;
+      readonly status: string;
+      readonly createdAt: string;
+    }[];
+    readonly nextCursor?: string;
+  }>(
+    await cli(baseUrl, ["run", "list", "binny-runs-one", "--limit", "2"]),
+    "listed",
+  );
+  assert.equal(firstHistoryPage.runs.length, 2);
+  assert.ok(firstHistoryPage.nextCursor);
+  const firstHistoryRun = firstHistoryPage.runs[0];
+  assert.ok(firstHistoryRun);
+  const detailFromHistory = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", "binny-runs-one", firstHistoryRun.runId]),
+    "found",
+  );
+  assert.equal(detailFromHistory.runId, firstHistoryRun.runId);
+
+  const malformedCursor = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--cursor",
+      "invalid-cursor",
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(malformedCursor.path, ["cursor"]);
+  const mismatchedCursor = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--action",
+      "check",
+      "--limit",
+      "2",
+      "--cursor",
+      firstHistoryPage.nextCursor,
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(mismatchedCursor.path, ["cursor"]);
+
+  const pageInsertGateKey = "runs-cli-page-insert";
+  const pageInsertRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      "binny-runs-one",
+      "check",
+      "--params",
+      JSON.stringify({
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: pageInsertGateKey,
+        sourceKey: "cli-page-insert",
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    pageInsertGateKey,
+    pageInsertRun.runId,
+    "binny-runs-one",
+  );
+  await releaseSource(sourceControlUrl, pageInsertGateKey, "unknown");
+  await waitForCliManualRunState(
+    baseUrl,
+    "binny-runs-one",
+    pageInsertRun.runId,
+    ["completed"],
+  );
+
+  const secondHistoryPage = cliData<{
+    readonly runs: readonly { readonly runId: string }[];
+    readonly nextCursor?: string;
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--limit",
+      "2",
+      "--cursor",
+      firstHistoryPage.nextCursor,
+    ]),
+    "listed",
+  );
+  assert.ok(
+    secondHistoryPage.runs.every(
+      ({ runId }) =>
+        !firstHistoryPage.runs.some((first) => first.runId === runId),
+    ),
+  );
+  assert.ok(
+    secondHistoryPage.runs.some(({ runId }) => runId === triggered.runId),
+  );
+  assert.equal(
+    secondHistoryPage.runs.some(({ runId }) => runId === pageInsertRun.runId),
+    false,
+    "翻页期间新增的较新运行不能滑入旧游标之后。",
+  );
+  assert.equal(secondHistoryPage.nextCursor, undefined);
+
+  const invalidDateRange = await fetch(
+    baseUrl +
+      "/bins/binny-runs-one/runs?createdFrom=2026-11-04T00%3A00%3A00Z&createdBefore=2026-11-03T00%3A00%3A00Z",
+  );
+  assert.equal(invalidDateRange.status, 400);
+  const invalidDateRangeBody = (await invalidDateRange.json()) as {
+    readonly error: {
+      readonly code: string;
+      readonly path?: readonly string[];
+    };
+  };
+  assert.equal(invalidDateRangeBody.error.code, "invalid_input");
+  assert.deepEqual(invalidDateRangeBody.error.path, ["createdBefore"]);
+
   await ownerGenerationOverlapStep(baseUrl, heartbeatProxy, followUp.runId);
   await replacementPreservesAcceptedCancellationStep(baseUrl);
 
@@ -4035,6 +4250,21 @@ async function manualRunsCliStep(
     slowGateKey,
     slowRun.runId,
     "binny-runs-one",
+  );
+  const slowExecutingHistory = cliData<{
+    readonly runs: readonly { readonly runId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--status",
+      "executing",
+    ]),
+    "listed",
+  );
+  assert.ok(
+    slowExecutingHistory.runs.some(({ runId }) => runId === slowRun.runId),
   );
   await releaseSource(sourceControlUrl, slowGateKey, "slow");
   await waitForSourceMarker(
@@ -4070,6 +4300,20 @@ async function manualRunsCliStep(
   );
   assert.equal(queuedBehindSlowRun.status, "queued");
   assert.equal(queuedBehindSlowRun.queueReason, "earlier_run_active");
+  const queuedHistory = cliData<{
+    readonly runs: readonly {
+      readonly runId: string;
+      readonly status: string;
+    }[];
+  }>(
+    await cli(baseUrl, ["run", "list", "binny-runs-one", "--status", "queued"]),
+    "listed",
+  );
+  assert.ok(
+    queuedHistory.runs.some(
+      ({ runId, status }) => runId === nextRun.runId && status === "queued",
+    ),
+  );
 
   const acceptedCancel = cliData<ManualRunCliState>(
     await cli(baseUrl, ["run", "cancel", "binny-runs-one", slowRun.runId]),
@@ -4101,6 +4345,26 @@ async function manualRunsCliStep(
   );
   assert.ok(cancelled.stopConfirmedAt);
   assert.equal(cancelled.result?.stopReason.code, "cancelled");
+  const cancelledHistory = cliData<{
+    readonly runs: readonly {
+      readonly runId: string;
+      readonly status: string;
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "binny-runs-one",
+      "--status",
+      "cancelled",
+    ]),
+    "listed",
+  );
+  assert.ok(
+    cancelledHistory.runs.some(
+      ({ runId, status }) => runId === slowRun.runId && status === "cancelled",
+    ),
+  );
   assert.equal(cancelled.result?.commits.length, 1);
   const savedPartial = cancelled.result?.commits[0];
   assert.ok(savedPartial);
@@ -5035,6 +5299,32 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
     assert.equal(retained.trigger.kind, "schedule");
     if (retained.trigger.kind === "schedule")
       assert.equal(retained.trigger.scheduleId, scheduleId);
+    const historyAfterPlanRemoval = cliData<{
+      readonly runs: readonly { readonly runId: string }[];
+    }>(
+      await cli(baseUrl, [
+        "run",
+        "list",
+        binId,
+        "--action",
+        retained.action,
+        "--status",
+        "completed",
+        "--created-from",
+        retained.createdAt,
+        "--created-before",
+        "2099-01-01T00:00:00Z",
+        "--limit",
+        "100",
+      ]),
+      "listed",
+    );
+    assert.ok(
+      historyAfterPlanRemoval.runs.some(
+        ({ runId: listedRunId }) => listedRunId === runId,
+      ),
+      "删除运行计划后，已完成运行仍可通过运行列表发现。",
+    );
   }
 
   const inspectServer = async (containerId: string) => {
@@ -5456,6 +5746,22 @@ async function manualRunControllerPartitionStep(): Promise<void> {
     );
     assert.equal(stale.result?.error?.code, "runtime_interrupted");
     assert.equal(stale.stopConfirmedAt, undefined);
+    const offlineFailedHistory = cliData<{
+      readonly runs: readonly {
+        readonly runId: string;
+        readonly status: string;
+      }[];
+    }>(
+      await cli(baseUrl, ["run", "list", binId, "--status", "failed"]),
+      "listed",
+    );
+    assert.ok(
+      offlineFailedHistory.runs.some(
+        ({ runId, status }) =>
+          runId === interrupted.runId && status === "failed",
+      ),
+      "运行器无法连接时仍可查询已保存的失败历史。",
+    );
     const stillQueued = cliData<ManualRunCliState>(
       await cli(baseUrl, ["run", "get", binId, next.runId]),
       "found",

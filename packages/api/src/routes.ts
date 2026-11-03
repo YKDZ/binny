@@ -10,6 +10,7 @@ import {
   scheduleApiSchemas as contractScheduleApiSchemas,
   scheduleCreateInputSchema,
   scheduleUpdateInputSchema,
+  manualRunListQuerySchema,
   archiveQueryContractPath,
   archiveQueryContractVersion,
   publicApiProtocolVersion,
@@ -22,6 +23,7 @@ import {
   type BinConfiguration,
   type BinConfigurationOperations,
   type ManualRunOperations,
+  type ManualRunListOperations,
   type RuntimeConnectionOperations,
   type ScheduleOperations,
   toInputJsonSchema,
@@ -44,6 +46,7 @@ export type {
   BinConfigurationOperations,
   HumanSessionOperations,
   ManualRunOperations,
+  ManualRunListOperations,
   RuntimeConnectionOperations,
   ScheduleOperations,
 } from "@binny/contracts";
@@ -52,6 +55,7 @@ export type ApiOperations = {
   readonly bins: BinConfigurationOperations;
   readonly runtime: RuntimeConnectionOperations;
   readonly runs: ManualRunOperations;
+  readonly runListings: ManualRunListOperations;
   readonly schedules: ScheduleOperations;
   readonly archives: ArchiveOperations;
   readonly humanSessions: HumanSessionOperations;
@@ -215,6 +219,27 @@ function makeApp(operations: ApiOperations, productVersion: string) {
         );
         if (!result.ok) return c.json({ error: result.error }, result.status);
         return c.json(result.value, 202);
+      },
+    )
+    .get(
+      "/bins/:binId/runs",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("query", manualRunListQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runListings.listRuns(
+          c.req.valid("param").binId,
+          c.req.valid("query"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
       },
     )
     .get(

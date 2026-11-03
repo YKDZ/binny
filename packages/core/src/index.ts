@@ -11,6 +11,7 @@ export {
 } from "./browser-capacity.ts";
 export { createRuntimeConnectionStore } from "./runtime-connection.ts";
 export { createManualRunStore } from "./manual-run.ts";
+export { createManualRunListStore } from "./manual-run-list.ts";
 export {
   createScheduleStore,
   startScheduleDispatcher,

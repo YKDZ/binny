@@ -6,6 +6,7 @@ export * from "./archive-relations.ts";
 export * from "./bin-configuration.ts";
 export * from "./human-session.ts";
 export * from "./manual-run.ts";
+export * from "./manual-run-list.ts";
 export * from "./postgres-text.ts";
 export * from "./runtime-human-session.ts";
 export * from "./schedule.ts";
