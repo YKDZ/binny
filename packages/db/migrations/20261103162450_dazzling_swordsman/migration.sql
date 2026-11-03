@@ -1,0 +1,1 @@
+CREATE INDEX "manual_runs_bin_history_idx" ON "manual_runs" ("bin_id","created_at","run_id");

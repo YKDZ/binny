@@ -675,6 +675,11 @@ export const manualRuns = pgTable(
     index("manual_runs_bin_queue_idx")
       .on(table.binId, table.createdAt, table.runId)
       .where(eq(table.status, "queued")),
+    index("manual_runs_bin_history_idx").on(
+      table.binId,
+      table.createdAt,
+      table.runId,
+    ),
     uniqueIndex("manual_runs_one_executing_bin_idx")
       .on(table.binId)
       .where(inArray(table.status, ["executing", "cancelling"])),
