@@ -186,6 +186,10 @@ type CommandWithApiUrl<Definition> = Definition extends {
     }
   : Definition;
 
+type CommandWithApiUrlByName<Name, Definition> = Name extends "cliSchema"
+  ? Definition
+  : CommandWithApiUrl<Definition>;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -229,7 +233,12 @@ function stripApiUrlFromHandlerInput(
 
 function addApiUrlOption<Commands extends Record<string, unknown>>(
   commands: Commands,
-): { [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]> } {
+): {
+  [Command in keyof Commands]: CommandWithApiUrlByName<
+    Command,
+    Commands[Command]
+  >;
+} {
   // 查询命令先校验专用契约；服务信息命令用于查看不兼容服务。
   const commandsWithoutAutomaticProtocolCheck = new Set([
     "serviceInfo",
@@ -241,6 +250,7 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
       if (!isRecord(definition) || definition.kind !== "command") {
         return [name, definition];
       }
+      if (name === "cliSchema") return [name, definition];
       if (!(definition.input instanceof z.ZodObject)) {
         throw new Error(`CLI 命令 ${name} 的输入必须是对象 schema。`);
       }
@@ -268,7 +278,94 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
   );
   // 每条命令的解析字段与输入 schema 同步扩展，避免另写 argv 解析器。
   return extendedCommands as {
-    [Command in keyof Commands]: CommandWithApiUrl<Commands[Command]>;
+    [Command in keyof Commands]: CommandWithApiUrlByName<
+      Command,
+      Commands[Command]
+    >;
+  };
+}
+
+type CliSchemaSource = {
+  readonly grammar: {
+    readonly root: { readonly id: string };
+    readonly nodes: readonly {
+      readonly kind: string;
+      readonly id: string;
+      readonly parent: string;
+      readonly name: string;
+      readonly aliases: readonly string[];
+    }[];
+    readonly controls: unknown;
+  };
+  readonly manifest: {
+    readonly schemaVersion: string;
+    readonly root: string;
+    readonly commands: Readonly<Record<string, unknown>>;
+    readonly controls: unknown;
+    readonly usageFailure: unknown;
+    readonly wire: Readonly<Record<string, unknown>>;
+  };
+};
+
+type CliSchemaDocument = {
+  readonly grammar: CliSchemaSource["grammar"];
+  readonly manifest: CliSchemaSource["manifest"];
+};
+
+function cliSchemaDocument(
+  contract: CliSchemaSource,
+  commandPath: readonly string[],
+): CliSchemaDocument | undefined {
+  if (commandPath.length === 0) {
+    return { grammar: contract.grammar, manifest: contract.manifest };
+  }
+
+  let parent = contract.grammar.root.id;
+  const ancestors: string[] = [];
+  let selectedNode: CliSchemaSource["grammar"]["nodes"][number] | undefined;
+  for (const segment of commandPath) {
+    selectedNode = contract.grammar.nodes.find(
+      (node) =>
+        node.parent === parent &&
+        (node.name === segment || node.aliases.includes(segment)),
+    );
+    if (selectedNode === undefined) return undefined;
+    ancestors.push(selectedNode.id);
+    parent = selectedNode.id;
+  }
+
+  const includedIds = new Set(ancestors);
+  if (selectedNode?.kind !== "command") {
+    let addedDescendant = true;
+    while (addedDescendant) {
+      addedDescendant = false;
+      for (const node of contract.grammar.nodes) {
+        if (includedIds.has(node.parent) && !includedIds.has(node.id)) {
+          includedIds.add(node.id);
+          addedDescendant = true;
+        }
+      }
+    }
+  }
+
+  return {
+    grammar: {
+      ...contract.grammar,
+      nodes: contract.grammar.nodes.filter((node) => includedIds.has(node.id)),
+    },
+    manifest: {
+      ...contract.manifest,
+      commands: Object.fromEntries(
+        Object.entries(contract.manifest.commands).filter(([id]) =>
+          includedIds.has(id),
+        ),
+      ),
+      wire: Object.fromEntries(
+        Object.entries(contract.manifest.wire).filter(([id]) =>
+          includedIds.has(id),
+        ),
+      ),
+    },
   };
 }
 
@@ -331,6 +428,15 @@ const errorOutputSchema = z.union([
     })
     .strict(),
 ]);
+const cliSchemaDocumentOutputSchema = z
+  .object({ grammar: z.unknown(), manifest: z.unknown() })
+  .strict();
+const cliSchemaPathFailureSchema = z
+  .object({
+    message: z.string(),
+    path: z.array(z.string()),
+  })
+  .strict();
 type CliApiError = z.infer<typeof errorOutputSchema>;
 
 type ServiceCompatibilityFailure = {
@@ -413,6 +519,9 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  let getCliSchemaDocument: (
+    commandPath: readonly string[],
+  ) => CliSchemaDocument | undefined = () => undefined;
   const failures = {
     apiError: {
       description: "请求未能完成",
@@ -421,7 +530,7 @@ function createCliContract(identity: CliCommandIdentity) {
       text: ({ message }: CliApiError) => text.line("操作未完成：" + message),
     },
   };
-  return define({
+  const contract = define({
     root: "cli",
     help: helpCapability({
       shortAlias: "-h",
@@ -450,6 +559,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "配置和管理 Binny 垃圾桶。",
         helpSupplement: text.lines([
           "联网命令可在具体命令后添加 --url <服务地址>；未指定时读取 BINNY_API_URL，否则使用 http://localhost:3000。",
+          "使用 binny schema 查看离线命令目录，或在其后添加命令路径查看语法、输入输出与错误契约。",
         ]),
       },
       bin: {
@@ -488,6 +598,51 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "schedule",
         description: "管理定时采集计划。",
       },
+      ...command("cliSchema")({
+        kind: "command",
+        parent: "cli",
+        name: "schema",
+        description: "离线查看本地 CLI 命令契约。",
+        helpSupplement: text.lines([
+          "省略命令路径可列出完整目录；指定路径可查看对应语法、输入输出和错误契约。此命令不连接目标服务。",
+        ]),
+        fields: {
+          commandPath: {
+            kind: "variadicPositional",
+            description: "可选命令路径，例如 bin get",
+          },
+        },
+        input: z.object({ commandPath: z.array(z.string()).default([]) }),
+        success: {
+          kind: "data",
+          variants: {
+            document: {
+              description: "CLI 原生命令语法和数据契约",
+              exitCode: 0,
+              schema: cliSchemaDocumentOutputSchema,
+              text: (document) => outputText("CLI 命令契约", document),
+            },
+          },
+        },
+        failures: {
+          unknownPath: {
+            description: "命令路径不存在",
+            exitCode: 2,
+            schema: cliSchemaPathFailureSchema,
+            text: ({ message }) => text.line("命令路径无效：" + message),
+          },
+        },
+        async handler({ input, outcome }) {
+          const document = getCliSchemaDocument(input.commandPath);
+          if (document === undefined) {
+            return outcome.failure.unknownPath({
+              message: "不存在对应的本地 CLI 命令。",
+              path: input.commandPath,
+            });
+          }
+          return outcome.data.document(document);
+        },
+      }),
       ...command("serviceInfo")({
         kind: "command",
         parent: "service",
@@ -534,7 +689,8 @@ function createCliContract(identity: CliCommandIdentity) {
           query: {
             kind: "valueOption",
             longOption: "--query",
-            description: "搜索请求 JSON（与 HTTP API 使用相同契约）",
+            description:
+              "搜索请求 JSON 字符串；完整契约见 service info 的 queryContract",
           },
         },
         input: cliArchiveSearchInputSchema,
@@ -594,7 +750,8 @@ function createCliContract(identity: CliCommandIdentity) {
           query: {
             kind: "valueOption",
             longOption: "--query",
-            description: "聚合请求 JSON（与 HTTP API 使用相同契约）",
+            description:
+              "聚合请求 JSON 字符串；完整契约见 service info 的 queryContract",
           },
         },
         input: cliArchiveAggregationInputSchema,
@@ -675,6 +832,9 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "bin",
         name: "get",
         description: "读取一个 bin 的配置和状态。",
+        helpSupplement: text.lines([
+          "配置 JSON Schema 随本命令返回；构造或修改配置前先查看此声明。",
+        ]),
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: z.object({ id: binIdSchema }),
         success: {
@@ -751,7 +911,7 @@ function createCliContract(identity: CliCommandIdentity) {
           config: {
             kind: "valueOption",
             longOption: "--config",
-            description: "长期配置 JSON",
+            description: "长期配置 JSON 字符串；配置结构见 bin get 返回的声明",
           },
           browserIdleTimeoutSeconds: {
             kind: "valueOption",
@@ -922,11 +1082,15 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "触发一次独立采集运行。",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
-          action: { kind: "positional", description: "已声明的动作名称" },
+          action: {
+            kind: "positional",
+            description: "已声明的动作名称；可用动作见 bin actions <binId>",
+          },
           params: {
             kind: "valueOption",
             longOption: "--params",
-            description: "本次运行参数 JSON",
+            description:
+              "本次运行参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
           },
         },
         input: withPostgresJsonSchemaProjection(
@@ -1183,12 +1347,14 @@ function createCliContract(identity: CliCommandIdentity) {
           action: {
             kind: "valueOption",
             longOption: "--action",
-            description: "已声明的信源适配器动作",
+            description:
+              "已声明的信源适配器动作；可用动作见 bin actions <binId>",
           },
           params: {
             kind: "valueOption",
             longOption: "--params",
-            description: "动作参数 JSON",
+            description:
+              "动作参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
           },
           disabled: {
             kind: "flag",
@@ -1320,12 +1486,14 @@ function createCliContract(identity: CliCommandIdentity) {
           action: {
             kind: "valueOption",
             longOption: "--action",
-            description: "已声明的信源适配器动作",
+            description:
+              "已声明的信源适配器动作；可用动作见 bin actions <binId>",
           },
           params: {
             kind: "valueOption",
             longOption: "--params",
-            description: "动作参数 JSON",
+            description:
+              "动作参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
           },
         },
         input: cliScheduleUpdateInputSchema,
@@ -1923,6 +2091,9 @@ function createCliContract(identity: CliCommandIdentity) {
       }),
     } as const),
   });
+  getCliSchemaDocument = (commandPath) =>
+    cliSchemaDocument(contract, commandPath);
+  return contract;
 }
 
 export async function runCli(runtime: CliRuntime): Promise<number> {

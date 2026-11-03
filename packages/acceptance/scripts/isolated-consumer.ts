@@ -31,6 +31,7 @@ export type IsolatedCliConsumer = {
     args: readonly string[],
     options?: CliRunOptions,
   ) => Promise<ProcessResult>;
+  readonly verifyOfflineSchema: () => Promise<void>;
   readonly verifyRemoteUrlSelection: (apiUrl: string) => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -271,6 +272,97 @@ export async function createIsolatedCliConsumer({
     );
     assert.match(help.stdout, /--url/u);
 
+    async function verifyOfflineSchema(): Promise<void> {
+      const offlineEnvironment = consumerEnvironment("http://127.0.0.1:1");
+      const rootHelp = await runChecked(
+        binary,
+        ["--help"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      assert.match(rootHelp.stdout, /binny schema/u);
+
+      const directory = await runChecked(
+        binary,
+        ["schema"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const listed = JSON.parse(directory.stdout) as {
+        readonly kind: string;
+        readonly variant: string;
+        readonly data: {
+          readonly grammar: {
+            readonly nodes: readonly { readonly id: string }[];
+          };
+          readonly manifest: {
+            readonly commands: Readonly<Record<string, unknown>>;
+            readonly wire: Readonly<Record<string, unknown>>;
+          };
+        };
+      };
+      assert.equal(listed.kind, "data");
+      assert.equal(listed.variant, "document");
+      assert.ok(listed.data.grammar.nodes.some(({ id }) => id === "cliSchema"));
+      assert.ok("archiveSearch" in listed.data.manifest.commands);
+
+      const selected = await runChecked(
+        binary,
+        ["schema", "archive", "search"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const detail = JSON.parse(selected.stdout) as {
+        readonly data: {
+          readonly grammar: {
+            readonly nodes: readonly { readonly id: string }[];
+          };
+          readonly manifest: {
+            readonly commands: Readonly<{
+              readonly archiveSearch?: {
+                readonly input: {
+                  readonly inputSchema: {
+                    readonly properties: Readonly<
+                      Record<string, { readonly type?: string }>
+                    >;
+                  };
+                };
+              };
+            }>;
+          };
+        };
+      };
+      assert.deepEqual(
+        detail.data.grammar.nodes.map(({ id }) => id),
+        ["archive", "archiveSearch"],
+      );
+      assert.equal(
+        detail.data.manifest.commands.archiveSearch?.input.inputSchema
+          .properties.query?.type,
+        "string",
+      );
+
+      const unknown = await run(
+        binary,
+        ["schema", "archive", "unknown"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      assert.equal(unknown.code, 2, unknown.stdout + unknown.stderr);
+      const failure = JSON.parse(unknown.stderr) as {
+        readonly kind: string;
+        readonly variant: string;
+        readonly data: {
+          readonly path: readonly string[];
+          readonly message: string;
+        };
+      };
+      assert.equal(failure.kind, "failure");
+      assert.equal(failure.variant, "unknownPath");
+      assert.deepEqual(failure.data.path, ["archive", "unknown"]);
+      assert.match(failure.data.message, /不存在/u);
+    }
+
     const invoke = async (
       args: readonly string[],
       options: CliRunOptions = {},
@@ -293,6 +385,7 @@ export async function createIsolatedCliConsumer({
     };
     return {
       run: invoke,
+      verifyOfflineSchema,
       async verifyRemoteUrlSelection(apiUrl) {
         const explicit = await invoke(["service", "info"], {
           apiUrl,
