@@ -1,0 +1,73 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "f2912e4b-e40e-451c-a8da-3e54571a7716",
+  "prevIds": [
+    "03f25771-1150-4aad-b687-ebc95298ed16"
+  ],
+  "footprints": [
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "manual_runs",
+        "manual_runs_bin_history_idx"
+      ],
+      "writes": [
+        "s|idx|public.manual_runs_bin_history_idx",
+        "n|idx|public.manual_runs_bin_history_idx",
+        "e|idx|public.manual_runs_bin_history_idx",
+        "n|rel|public.manual_runs_bin_history_idx"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.bin_id",
+        "n|col|public.manual_runs.created_at",
+        "n|col|public.manual_runs.run_id"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "manual_runs_bin_history_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "created_at",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "run_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    }
+  ]
+}
