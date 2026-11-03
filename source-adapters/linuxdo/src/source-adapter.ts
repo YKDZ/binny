@@ -159,12 +159,46 @@ const collectionTimeZoneSchema = z
   .string()
   .min(1, "必须提供 IANA 时区。")
   .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。");
+const postCreatedRangeSchema = z
+  .object({
+    from: z.iso
+      .datetime({ offset: true })
+      .describe("帖子创建时间的包含起点，必须带明确时区偏移。"),
+    to: z.iso
+      .datetime({ offset: true })
+      .describe("帖子创建时间的不包含终点，必须带明确时区偏移。"),
+    maxPages: z
+      .number()
+      .int()
+      .positive()
+      .max(1_000)
+      .safe()
+      .default(20)
+      .describe(
+        "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
+      ),
+  })
+  .strict()
+  .superRefine((range, context) => {
+    if (Date.parse(range.from) >= Date.parse(range.to)) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message: "区间起点必须早于不包含的终点。",
+      });
+    }
+  });
 const collectParamsSchema = z
   .object({
     topicId: topicIdSchema.optional(),
     targets: actionTargetsSchema.optional(),
-    date: collectionDateSchema,
-    timeZone: collectionTimeZoneSchema,
+    date: collectionDateSchema
+      .optional()
+      .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
+    timeZone: collectionTimeZoneSchema
+      .optional()
+      .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
+    postCreatedRange: postCreatedRangeSchema.optional(),
     maxTopics: z.number().int().positive().safe().optional(),
   })
   .strict()
@@ -182,6 +216,30 @@ const collectParamsSchema = z
         message:
           "目标列表不能为空；省略 targets 可采集当前账号的全部可见板块。",
       });
+    }
+    if (params.postCreatedRange !== undefined) {
+      if (params.date !== undefined || params.timeZone !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["postCreatedRange"],
+          message: "帖子创建时间区间不能与 date/timeZone 模式混用。",
+        });
+      }
+    } else {
+      if (params.date === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["date"],
+          message: "必须提供 date/timeZone 或 postCreatedRange。",
+        });
+      }
+      if (params.timeZone === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["timeZone"],
+          message: "日期模式必须提供 IANA 时区。",
+        });
+      }
     }
   });
 const listCategoriesParamsSchema = z.object({}).strict();
@@ -243,6 +301,9 @@ const topicListResponseSchema = z
       })
       .passthrough(),
   })
+  .passthrough();
+const discoursePostFeedSchema = z
+  .object({ latest_posts: z.array(z.unknown()) })
   .passthrough();
 const postIdSchema = z.number().int().safe().positive();
 const discourseReplyPostNumberSchema = z
@@ -322,6 +383,13 @@ type ConfiguredTarget = z.infer<typeof configuredTargetSchema>;
 type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
 type SourceAccessReport = z.output<typeof sourceAccessReportSchema>;
 type CollectParams = z.output<typeof collectParamsSchema>;
+type DateCollectionParams = CollectParams & {
+  readonly date: string;
+  readonly timeZone: string;
+};
+type PostRangeCollectionParams = CollectParams & {
+  readonly postCreatedRange: z.output<typeof postCreatedRangeSchema>;
+};
 type CheckParams = z.output<typeof checkParamsSchema>;
 type DiscourseProblem = {
   readonly code: string;
@@ -453,10 +521,15 @@ const collectReportSchema = z
       .describe("此运行固定使用的时间依据，不随排队或后续运行变化。"),
     intent: z
       .object({
-        date: collectionDateSchema.describe("按时区解释的逻辑采集日期。"),
-        timeZone: collectionTimeZoneSchema.describe(
-          "解释逻辑日期的 IANA 时区。",
-        ),
+        date: collectionDateSchema
+          .optional()
+          .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
+        timeZone: collectionTimeZoneSchema
+          .optional()
+          .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
+        postCreatedRange: postCreatedRangeSchema
+          .optional()
+          .describe("按帖子创建时间筛选的左闭右开区间及有限页数上限。"),
         target: z
           .discriminatedUnion("kind", [
             z
@@ -480,6 +553,23 @@ const collectReportSchema = z
           .describe("本轮请求的主题数量上限。"),
       })
       .strict()
+      .superRefine((intent, context) => {
+        if (intent.postCreatedRange !== undefined) {
+          if (intent.date !== undefined || intent.timeZone !== undefined) {
+            context.addIssue({
+              code: "custom",
+              path: ["postCreatedRange"],
+              message: "帖子创建时间区间不能与日期模式混用。",
+            });
+          }
+        } else if (intent.date === undefined || intent.timeZone === undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [intent.date === undefined ? "date" : "timeZone"],
+            message: "运行意图必须声明完整的日期模式或帖子创建时间区间。",
+          });
+        }
+      })
       .describe("来源访问前记录的运行意图。"),
     window: z
       .object({
@@ -488,10 +578,10 @@ const collectReportSchema = z
       })
       .strict()
       .optional()
-      .describe("本轮筛选使用的左闭右开创建日期区间。"),
+      .describe("本轮筛选的左闭右开创建时间范围，可按主题日期或帖子日期解释。"),
     discovery: z
-      .enum(["not-started", "in-progress", "complete", "failed"])
-      .describe("动态目标发现的状态；失败时未确认范围不会被补全。"),
+      .enum(["not-started", "in-progress", "complete", "partial", "failed"])
+      .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
     sourceAccess: sourceAccessReportSchema,
     scopes: z
       .array(
@@ -520,6 +610,9 @@ const collectReportSchema = z
   })
   .strict();
 type CollectionReport = z.output<typeof collectReportSchema>;
+type CollectionReportUpdate = Omit<CollectionReport, "sourceAccess"> & {
+  readonly sourceAccess?: CollectionReport["sourceAccess"];
+};
 type CollectionIncompleteScope = z.infer<
   typeof collectionIncompleteScopeSchema
 >;
@@ -1863,6 +1956,58 @@ function collectTargets(
   });
 }
 
+type PostRangeTargetSelection = {
+  readonly allVisible: boolean;
+  readonly topicIds: ReadonlySet<number>;
+  readonly categoryIds: ReadonlySet<number>;
+};
+
+async function resolvePostRangeTargets(
+  page: Page,
+  site: ReturnType<typeof siteFromConfig>,
+  params: CollectParams,
+  signal: AbortSignal,
+): Promise<PostRangeTargetSelection> {
+  if (params.topicId !== undefined) {
+    return {
+      allVisible: false,
+      topicIds: new Set([params.topicId]),
+      categoryIds: new Set(),
+    };
+  }
+  if (params.targets === undefined) {
+    return {
+      allVisible: true,
+      topicIds: new Set(),
+      categoryIds: new Set(),
+    };
+  }
+  const categories = params.targets.some(({ kind }) => kind === "category")
+    ? await readVisibleCategories(page, site, signal)
+    : [];
+  const targets = collectTargets(params.targets, categories);
+  if (targets.some(({ kind }) => kind === "latest")) {
+    return {
+      allVisible: true,
+      topicIds: new Set(),
+      categoryIds: new Set(),
+    };
+  }
+  return {
+    allVisible: false,
+    topicIds: new Set(
+      targets.flatMap((target) =>
+        target.kind === "topic" ? [target.topicId] : [],
+      ),
+    ),
+    categoryIds: new Set(
+      targets.flatMap((target) =>
+        target.kind === "category" ? [target.categoryId] : [],
+      ),
+    ),
+  };
+}
+
 async function checkOneTopic(
   context: SourceAdapterContext<SourceAdapterConfig, typeof checkReportSchema>,
   site: ReturnType<typeof siteFromConfig>,
@@ -2070,6 +2215,318 @@ async function readTopicPosts(
     scopeIncomplete:
       topic.post_stream.stream === undefined ||
       topic.post_stream.isMegaTopic === true,
+  };
+}
+
+async function readSelectedTopicPosts(
+  page: Page,
+  siteOrigin: URL,
+  topicId: number,
+  requestedPostIds: readonly number[],
+  signal: AbortSignal,
+): Promise<{
+  readonly posts: ReadonlyMap<number, DiscoursePost>;
+  readonly missingPostIds: readonly number[];
+}> {
+  const postsById = new Map<number, DiscoursePost>();
+  for (
+    let offset = 0;
+    offset < requestedPostIds.length;
+    offset += postBatchSize
+  ) {
+    const batch = [
+      ...new Set(requestedPostIds.slice(offset, offset + postBatchSize)),
+    ];
+    const postsUrl = new URL(`/t/${String(topicId)}/posts.json`, siteOrigin);
+    for (const postId of batch) {
+      postsUrl.searchParams.append("post_ids[]", String(postId));
+    }
+    const response = await readJson(page, postsUrl, signal, (value) => {
+      const parsed = topicPostsResponseSchema.safeParse(value);
+      if (!parsed.success) return false;
+      const ids = new Set<number>();
+      for (const value of parsed.data.post_stream.posts) {
+        const post = discoursePostSchema.safeParse(value);
+        if (
+          post.success &&
+          (post.data.topic_id === undefined || post.data.topic_id === topicId)
+        ) {
+          ids.add(post.data.id);
+        }
+      }
+      return batch.every((id) => ids.has(id));
+    });
+    if (response.kind !== "json" || response.status !== 200) continue;
+    const envelope = topicPostsResponseSchema.safeParse(response.value);
+    if (!envelope.success) continue;
+    for (const value of envelope.data.post_stream.posts) {
+      const post = discoursePostSchema.safeParse(value);
+      if (
+        post.success &&
+        batch.includes(post.data.id) &&
+        (post.data.topic_id === undefined || post.data.topic_id === topicId)
+      ) {
+        postsById.set(post.data.id, post.data);
+      }
+    }
+  }
+  return {
+    posts: postsById,
+    missingPostIds: requestedPostIds.filter((id) => !postsById.has(id)),
+  };
+}
+
+type PostRangeScanIssue = {
+  readonly reasonCode: string;
+  readonly message: string;
+  readonly discovery: "partial" | "failed";
+};
+
+type PostRangeScan = {
+  readonly posts: readonly DiscoursePost[];
+  readonly pagesRead: number;
+  readonly complete: boolean;
+  readonly issue?: PostRangeScanIssue;
+};
+
+async function readPostFeedPage(
+  page: Page,
+  siteOrigin: URL,
+  before: number | undefined,
+  signal: AbortSignal,
+): Promise<
+  | { readonly kind: "page"; readonly posts: readonly DiscoursePost[] }
+  | { readonly kind: "error"; readonly issue: PostRangeScanIssue }
+> {
+  const feedUrl = new URL("/posts.json", siteOrigin);
+  if (before !== undefined) feedUrl.searchParams.set("before", String(before));
+  const response = await readJson(page, feedUrl, signal, (value) => {
+    const feed = discoursePostFeedSchema.safeParse(value);
+    return (
+      feed.success &&
+      feed.data.latest_posts.every(
+        (post) => discoursePostSchema.safeParse(post).success,
+      )
+    );
+  });
+  if (response.kind === "networkError") {
+    return {
+      kind: "error",
+      issue: {
+        reasonCode: "post_range_source_unreachable",
+        message: `读取 Linux.do 帖子流失败：${response.message}`,
+        discovery: "failed",
+      },
+    };
+  }
+  if (response.kind !== "json") {
+    const challenged = requiresPageReview(response);
+    return {
+      kind: "error",
+      issue: {
+        reasonCode: challenged
+          ? "post_range_challenge_response"
+          : "post_range_response_invalid",
+        message: responseProblemMessage(
+          response,
+          "Linux.do 帖子流没有返回可识别的 JSON。",
+        ),
+        discovery: "failed",
+      },
+    };
+  }
+  if (response.status !== 200) {
+    return {
+      kind: "error",
+      issue: {
+        reasonCode: "post_range_source_request_failed",
+        message: `Linux.do 帖子流返回 HTTP ${String(response.status)}。`,
+        discovery: "failed",
+      },
+    };
+  }
+  const feed = discoursePostFeedSchema.safeParse(response.value);
+  if (!feed.success) {
+    return {
+      kind: "error",
+      issue: {
+        reasonCode: "post_range_response_invalid",
+        message: "Linux.do 帖子流缺少有效的 latest_posts 数组。",
+        discovery: "failed",
+      },
+    };
+  }
+  const posts: DiscoursePost[] = [];
+  for (const value of feed.data.latest_posts) {
+    const post = discoursePostSchema.safeParse(value);
+    if (!post.success) {
+      return {
+        kind: "error",
+        issue: {
+          reasonCode: "post_range_response_invalid",
+          message: "Linux.do 帖子流包含无法识别的帖子字段。",
+          discovery: "failed",
+        },
+      };
+    }
+    posts.push(post.data);
+  }
+  return { kind: "page", posts };
+}
+
+function isPostFeedProgress(
+  posts: readonly DiscoursePost[],
+  before: number | undefined,
+): boolean {
+  let previous = before ?? Number.POSITIVE_INFINITY;
+  for (const post of posts) {
+    if (post.id >= previous) return false;
+    previous = post.id;
+  }
+  return true;
+}
+
+async function scanPostCreatedRange(
+  page: Page,
+  siteOrigin: URL,
+  signal: AbortSignal,
+  maxPages: number,
+): Promise<PostRangeScan> {
+  const postsById = new Map<number, DiscoursePost>();
+  let pagesRead = 0;
+  let validPageCount = 0;
+  let issue: PostRangeScanIssue | undefined;
+  let historyExhausted = false;
+  let stopScanning = false;
+  let cursor: number | undefined;
+  let initialMaxId: number | undefined;
+
+  const readPage = async (before: number | undefined) => {
+    signal.throwIfAborted();
+    pagesRead += 1;
+    const result = await readPostFeedPage(page, siteOrigin, before, signal);
+    if (result.kind === "error") {
+      issue ??= {
+        ...result.issue,
+        discovery: validPageCount === 0 ? "failed" : "partial",
+      };
+      stopScanning = true;
+      return undefined;
+    }
+    validPageCount += 1;
+    return result.posts;
+  };
+  const keepPosts = (posts: readonly DiscoursePost[]) => {
+    for (const post of posts) {
+      if (post.topic_id === undefined) {
+        issue ??= {
+          reasonCode: "post_range_topic_id_missing",
+          message: `帖子 ${String(post.id)} 缺少主题 ID，无法确认其归档上下文。`,
+          discovery: "partial",
+        };
+      }
+      const createdAt =
+        post.created_at === undefined
+          ? Number.NaN
+          : Date.parse(post.created_at);
+      if (!Number.isFinite(createdAt)) {
+        issue ??= {
+          reasonCode: "post_range_created_at_invalid",
+          message: `帖子 ${String(post.id)} 缺少有效创建时间，无法确认其是否位于所选区间。`,
+          discovery: "partial",
+        };
+      }
+      postsById.set(post.id, post);
+    }
+  };
+
+  const firstPage = await readPage(undefined);
+  if (firstPage === undefined) {
+    return {
+      posts: [],
+      pagesRead,
+      complete: false,
+      ...(issue === undefined ? {} : { issue }),
+    };
+  }
+  if (firstPage.length === 0) {
+    historyExhausted = true;
+  } else {
+    initialMaxId = firstPage[0]?.id;
+    keepPosts(firstPage);
+    if (!isPostFeedProgress(firstPage, undefined)) {
+      issue ??= {
+        reasonCode: "post_range_cursor_not_advancing",
+        message: "Linux.do 帖子流首页的 ID 没有严格递减。",
+        discovery: "partial",
+      };
+      stopScanning = true;
+    } else {
+      cursor = firstPage.at(-1)?.id;
+    }
+  }
+
+  while (!historyExhausted && !stopScanning && pagesRead < maxPages - 1) {
+    const nextPage = await readPage(cursor);
+    if (nextPage === undefined) break;
+    if (nextPage.length === 0) {
+      historyExhausted = true;
+      break;
+    }
+    keepPosts(nextPage);
+    if (!isPostFeedProgress(nextPage, cursor)) {
+      issue ??= {
+        reasonCode: "post_range_cursor_not_advancing",
+        message: `Linux.do 帖子流在 before=${String(cursor)} 后重复帖子或没有严格推进。`,
+        discovery: "partial",
+      };
+      stopScanning = true;
+      break;
+    }
+    cursor = nextPage.at(-1)?.id;
+  }
+
+  let headVerified = false;
+  if (!stopScanning && pagesRead < maxPages) {
+    const baseline = initialMaxId ?? 0;
+    let headCursor: number | undefined;
+    while (pagesRead < maxPages) {
+      const headPage = await readPage(headCursor);
+      if (headPage === undefined) break;
+      if (headPage.length === 0) {
+        headVerified = true;
+        break;
+      }
+      keepPosts(headPage);
+      if (!isPostFeedProgress(headPage, headCursor)) {
+        issue ??= {
+          reasonCode: "post_range_cursor_not_advancing",
+          message: "Linux.do 帖子流复查首页时 ID 没有严格递减。",
+          discovery: "partial",
+        };
+        stopScanning = true;
+        break;
+      }
+      if (headPage.some(({ id }) => id <= baseline)) {
+        headVerified = true;
+        break;
+      }
+      headCursor = headPage.at(-1)?.id;
+    }
+  }
+
+  if (issue === undefined && (!historyExhausted || !headVerified)) {
+    issue = {
+      reasonCode: "post_range_page_limit_reached",
+      message: `帖子流最多扫描 ${String(maxPages)} 页，尚未同时确认历史分页耗尽和首页复查。`,
+      discovery: "partial",
+    };
+  }
+  return {
+    posts: [...postsById.values()],
+    pagesRead,
+    complete: historyExhausted && headVerified && issue === undefined,
+    ...(issue === undefined ? {} : { issue }),
   };
 }
 
@@ -2456,6 +2913,171 @@ async function archivePost(
   return { state, complete: missing.length === 0 };
 }
 
+async function collectPostRangeTopic(
+  context: SourceAdapterContext,
+  page: Page,
+  request: APIRequestContext,
+  site: ReturnType<typeof siteFromConfig>,
+  topicId: number,
+  inRangePosts: readonly DiscoursePost[],
+  selection: PostRangeTargetSelection,
+  maxTopics: number | undefined,
+  collectedTopics: number,
+  completedScopes: string[],
+  incompleteScopes: CollectionIncompleteScope[],
+): Promise<"processed" | "skipped" | "limited"> {
+  const access = await readTopic(page, site, topicId, context.signal);
+  if (access.kind === "unavailable") {
+    incompleteScopes.push({
+      scope: topicScope(topicId),
+      reasonCode: access.problem.code,
+      message: access.problem.message,
+    });
+    return "processed";
+  }
+  if (
+    !selection.allVisible &&
+    !selection.topicIds.has(topicId) &&
+    !selection.categoryIds.has(access.topic.category_id ?? -1)
+  ) {
+    return "skipped";
+  }
+  if (maxTopics !== undefined && collectedTopics >= maxTopics) {
+    incompleteScopes.push({
+      scope: "post-created-range",
+      reasonCode: "post_range_topic_limit_reached",
+      message: `已达到显式 maxTopics=${String(maxTopics)}；当前符合目标的主题 ${String(topicId)} 未处理。`,
+    });
+    return "limited";
+  }
+
+  const topicRoot = access.topic.post_stream.posts.find(
+    ({ post_number }) => post_number === 1,
+  );
+  const rootCandidateId = topicRoot?.id ?? access.topic.post_stream.stream?.[0];
+  const requestedBodyIds = inRangePosts
+    .filter((post) => post.cooked === undefined)
+    .map(({ id }) => id);
+  if (topicRoot?.cooked === undefined && rootCandidateId !== undefined) {
+    requestedBodyIds.push(rootCandidateId);
+  }
+  const selectedRead = await readSelectedTopicPosts(
+    page,
+    access.siteOrigin,
+    topicId,
+    [...new Set(requestedBodyIds)],
+    context.signal,
+  );
+  const selectedPosts = new Map<number, DiscoursePost>();
+  for (const post of inRangePosts) selectedPosts.set(post.id, post);
+  for (const [postId, post] of selectedRead.posts) {
+    const current = selectedPosts.get(postId);
+    selectedPosts.set(
+      postId,
+      current === undefined ? post : { ...current, ...post },
+    );
+  }
+
+  const rootFromRange = [...selectedPosts.values()].find(
+    ({ post_number }) => post_number === 1,
+  );
+  const fetchedRoot =
+    rootCandidateId === undefined
+      ? undefined
+      : selectedRead.posts.get(rootCandidateId);
+  const resolvedTopicRoot =
+    topicRoot === undefined
+      ? fetchedRoot
+      : fetchedRoot === undefined
+        ? topicRoot
+        : { ...topicRoot, ...fetchedRoot };
+  const root = rootFromRange ?? resolvedTopicRoot;
+  if (root === undefined || root.post_number !== 1) {
+    incompleteScopes.push({
+      scope: topicScope(topicId),
+      reasonCode: "post_range_topic_root_unavailable",
+      message: `主题 ${String(topicId)} 的必要主帖上下文不可读；本次没有归档其区间回复。`,
+    });
+    return "processed";
+  }
+
+  const postsToArchive = [
+    root,
+    ...[...selectedPosts.values()].filter(({ id }) => id !== root.id),
+  ].toSorted(
+    (first, second) =>
+      first.post_number - second.post_number || first.id - second.id,
+  );
+  const diagnostics = postDiagnostics(
+    topicId,
+    selectedRead.missingPostIds,
+    false,
+  );
+  const mediaCache = new Map<string, Promise<MediaDownload>>();
+  let complete = selectedRead.missingPostIds.length === 0;
+  const incompleteMessages: string[] = [];
+  if (selectedRead.missingPostIds.length > 0) {
+    incompleteMessages.push(
+      `帖子 ${selectedRead.missingPostIds.map(String).join("、")} 的正文没有补取成功。`,
+    );
+  }
+  for (
+    let offset = 0;
+    offset < postsToArchive.length;
+    offset += postBatchSize
+  ) {
+    context.signal.throwIfAborted();
+    const batch = postsToArchive.slice(offset, offset + postBatchSize);
+    const items: Awaited<ReturnType<typeof archivePost>>["state"][] = [];
+    for (const post of batch) {
+      const archived = await archivePost(
+        page,
+        request,
+        context,
+        access.siteOrigin,
+        access.siteNamespace,
+        access.topic,
+        post,
+        diagnostics,
+        mediaCache,
+      );
+      items.push(archived.state);
+      complete &&= archived.complete;
+      if (!archived.complete) {
+        incompleteMessages.push(
+          ...archived.state.capture.missing.map(
+            ({ path, reason }) => `${path}：${reason}`,
+          ),
+        );
+      }
+    }
+    const relations = batch
+      .filter(({ id }) => id !== root.id)
+      .map((post) =>
+        postRelation(access.siteNamespace, topicId, root.id, post),
+      );
+    await context.archive.submit({ items, relations });
+    for (const post of batch) {
+      completedScopes.push(
+        selectedPosts.has(post.id)
+          ? `post:${String(post.id)}`
+          : `context:post:${String(post.id)}`,
+      );
+    }
+  }
+  if (!complete) {
+    incompleteScopes.push({
+      scope: topicScope(topicId),
+      reasonCode: "post_range_archive_partial",
+      message:
+        incompleteMessages.length === 0
+          ? `主题 ${String(topicId)} 的部分区间内容没有完整归档。`
+          : incompleteMessages.join("；"),
+    });
+  }
+  return "processed";
+}
+
 async function collectTopicContent(
   context: SourceAdapterContext,
   page: Page,
@@ -2619,7 +3241,7 @@ function localDateStart(
 }
 
 function collectionDateWindow(
-  params: Pick<CollectParams, "date" | "timeZone">,
+  params: DateCollectionParams,
   referenceTime: string,
 ): CollectionDateWindow {
   const formatter = new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
@@ -2674,6 +3296,22 @@ function collectionDateWindow(
   return {
     startInclusive: start.getTime(),
     endExclusive: end.getTime(),
+  };
+}
+
+function dateCollectionParams(params: CollectParams): DateCollectionParams {
+  if (params.date === undefined || params.timeZone === undefined) {
+    throw new Error("动作参数 schema 未能确认日期采集模式。");
+  }
+  return { ...params, date: params.date, timeZone: params.timeZone };
+}
+
+function postCreatedWindow(
+  range: PostRangeCollectionParams["postCreatedRange"],
+): CollectionDateWindow {
+  return {
+    startInclusive: Date.parse(range.from),
+    endExclusive: Date.parse(range.to),
   };
 }
 
@@ -2888,6 +3526,160 @@ function failureWithProgress(
   );
 }
 
+async function collectPostCreatedRange(
+  context: SourceAdapterContext<
+    SourceAdapterConfig,
+    typeof collectReportSchema
+  >,
+  page: Page,
+  request: APIRequestContext,
+  site: ReturnType<typeof siteFromConfig>,
+  params: PostRangeCollectionParams,
+  dateWindow: CollectionDateWindow,
+  completedScopes: string[],
+  incompleteScopes: CollectionIncompleteScope[],
+  publishReport: (report: CollectionReportUpdate) => Promise<void>,
+): Promise<Omit<z.output<typeof collectOutputSchema>, "challengeRecovery">> {
+  const range = {
+    from: new Date(dateWindow.startInclusive).toISOString(),
+    to: new Date(dateWindow.endExclusive).toISOString(),
+  };
+  const rangeScope = "post-created-range";
+  await publishReport({
+    phase: "collecting",
+    referenceTime: context.referenceTime,
+    intent: {
+      ...(params.date === undefined ? {} : { date: params.date }),
+      ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
+      ...(params.postCreatedRange === undefined
+        ? {}
+        : { postCreatedRange: params.postCreatedRange }),
+      target:
+        params.topicId !== undefined
+          ? { kind: "topic", topicId: params.topicId }
+          : params.targets === undefined
+            ? { kind: "all-visible" }
+            : { kind: "targets", targets: params.targets },
+      ...(params.maxTopics === undefined
+        ? {}
+        : { maxTopics: params.maxTopics }),
+    },
+    window: range,
+    discovery: "in-progress",
+    scopes: [{ scope: rangeScope, ...range, status: "in-progress" }],
+  });
+  const selection = await resolvePostRangeTargets(
+    page,
+    site,
+    params,
+    context.signal,
+  );
+  const scan = await scanPostCreatedRange(
+    page,
+    site.origin,
+    context.signal,
+    params.postCreatedRange.maxPages,
+  );
+  if (scan.issue !== undefined) {
+    incompleteScopes.push({
+      scope: rangeScope,
+      reasonCode: scan.issue.reasonCode,
+      message: `${scan.issue.message} 已读取 ${String(scan.pagesRead)} 页；本轮覆盖保留为部分或未知。`,
+    });
+  }
+
+  const postsByTopic = new Map<number, DiscoursePost[]>();
+  for (const post of scan.posts) {
+    if (
+      post.topic_id === undefined ||
+      (selection.topicIds.size > 0 && !selection.topicIds.has(post.topic_id))
+    ) {
+      continue;
+    }
+    const createdAt =
+      post.created_at === undefined ? Number.NaN : Date.parse(post.created_at);
+    if (
+      !Number.isFinite(createdAt) ||
+      createdAt < dateWindow.startInclusive ||
+      createdAt >= dateWindow.endExclusive
+    ) {
+      continue;
+    }
+    const topicPosts = postsByTopic.get(post.topic_id) ?? [];
+    topicPosts.push(post);
+    postsByTopic.set(post.topic_id, topicPosts);
+  }
+
+  let collectedTopics = 0;
+  const topics = [...postsByTopic.entries()].toSorted(
+    ([firstId], [secondId]) => firstId - secondId,
+  );
+  for (const [topicId, posts] of topics) {
+    context.signal.throwIfAborted();
+    if (
+      !selection.allVisible &&
+      selection.topicIds.size > 0 &&
+      selection.categoryIds.size === 0 &&
+      !selection.topicIds.has(topicId)
+    ) {
+      continue;
+    }
+    const topicResult = await collectPostRangeTopic(
+      context,
+      page,
+      request,
+      site,
+      topicId,
+      posts,
+      selection,
+      params.maxTopics,
+      collectedTopics,
+      completedScopes,
+      incompleteScopes,
+    );
+    if (topicResult === "limited") break;
+    if (topicResult === "processed") collectedTopics += 1;
+  }
+
+  if (incompleteScopes.length === 0) completedScopes.push(rangeScope);
+  const unknown = scan.issue?.discovery === "failed" && scan.posts.length === 0;
+  const scopeStatus =
+    incompleteScopes.length === 0
+      ? ("completed" as const)
+      : unknown
+        ? ("unknown" as const)
+        : ("incomplete" as const);
+  await publishReport({
+    phase: "completed",
+    referenceTime: context.referenceTime,
+    intent: {
+      ...(params.date === undefined ? {} : { date: params.date }),
+      ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
+      ...(params.postCreatedRange === undefined
+        ? {}
+        : { postCreatedRange: params.postCreatedRange }),
+      target:
+        params.topicId !== undefined
+          ? { kind: "topic", topicId: params.topicId }
+          : params.targets === undefined
+            ? { kind: "all-visible" }
+            : { kind: "targets", targets: params.targets },
+      ...(params.maxTopics === undefined
+        ? {}
+        : { maxTopics: params.maxTopics }),
+    },
+    window: range,
+    discovery: scan.issue === undefined ? "complete" : scan.issue.discovery,
+    scopes: [{ scope: rangeScope, ...range, status: scopeStatus }],
+  });
+  return {
+    completedScopes,
+    collectionCompleteness:
+      incompleteScopes.length === 0 ? "complete" : "partial",
+    incompleteScopes,
+  };
+}
+
 async function collectTopic(
   context: SourceAdapterContext<
     SourceAdapterConfig,
@@ -2902,8 +3694,11 @@ async function collectTopic(
     phase: "preparing",
     referenceTime: context.referenceTime,
     intent: {
-      date: params.date,
-      timeZone: params.timeZone,
+      ...(params.date === undefined ? {} : { date: params.date }),
+      ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
+      ...(params.postCreatedRange === undefined
+        ? {}
+        : { postCreatedRange: params.postCreatedRange }),
       target:
         params.topicId !== undefined
           ? { kind: "topic", topicId: params.topicId }
@@ -2918,8 +3713,11 @@ async function collectTopic(
     sourceAccess: emptySourceAccessReport(),
     scopes: [],
   });
-  const publishReport = async (next: CollectionReport) => {
-    report = collectReportSchema.parse(next);
+  const publishReport = async (next: CollectionReportUpdate) => {
+    report = collectReportSchema.parse({
+      ...next,
+      sourceAccess: next.sourceAccess ?? report.sourceAccess,
+    });
     await context.report(report);
   };
   const output = () => ({
@@ -2930,9 +3728,19 @@ async function collectTopic(
         : ("partial" as const),
     incompleteScopes,
   });
+  const rangeParams: PostRangeCollectionParams | undefined =
+    params.postCreatedRange === undefined
+      ? undefined
+      : { ...params, postCreatedRange: params.postCreatedRange };
   try {
     await context.report(report);
-    const dateWindow = collectionDateWindow(params, context.referenceTime);
+    const dateWindow =
+      rangeParams === undefined
+        ? collectionDateWindow(
+            dateCollectionParams(params),
+            context.referenceTime,
+          )
+        : postCreatedWindow(rangeParams.postCreatedRange);
     const range = {
       from: new Date(dateWindow.startInclusive).toISOString(),
       to: new Date(dateWindow.endExclusive).toISOString(),
@@ -2948,6 +3756,19 @@ async function collectTopic(
         const session = await readSessionAccess(page, site, context.signal);
         if (session.kind === "unavailable") {
           throw failureFromProblem(session.problem);
+        }
+        if (rangeParams !== undefined) {
+          return await collectPostCreatedRange(
+            context,
+            page,
+            request,
+            site,
+            rangeParams,
+            dateWindow,
+            completedScopes,
+            incompleteScopes,
+            publishReport,
+          );
         }
         if (params.topicId !== undefined) {
           await publishReport({

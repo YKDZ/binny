@@ -27,6 +27,11 @@ type SourceState = {
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
   readonly dailyTopicOverlapCount: number;
+  readonly postRangeEnabled: boolean;
+  readonly postRangeAddAfterFirstPage: boolean;
+  readonly postRangeRepeatPage: boolean;
+  readonly postRangeInvalidPage: number | null;
+  readonly postRangePageSize: number;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
@@ -101,6 +106,11 @@ let activeState: SourceState = {
   categoriesInvalidResponse: false,
   dailyCollectionEnabled: false,
   dailyTopicOverlapCount: 1,
+  postRangeEnabled: false,
+  postRangeAddAfterFirstPage: false,
+  postRangeRepeatPage: false,
+  postRangeInvalidPage: null,
+  postRangePageSize: 2,
   paginationOrderMutationEnabled: false,
   invalidCreatedAtTopicIds: [],
   topicVersion: 1,
@@ -118,6 +128,7 @@ let activeState: SourceState = {
 const events: SourceEvent[] = [];
 let navigationRequested = false;
 let activeMediaRequests = 0;
+let postRangeReadCount = 0;
 
 function sendJson(
   response: import("node:http").ServerResponse,
@@ -301,6 +312,103 @@ function posts(): readonly Record<string, unknown>[] {
       : []),
   ].map((value, index) =>
     index === 0 ? { ...value, title: rootTitle } : value,
+  );
+}
+
+function postRangeFixtures(
+  includeInserted: boolean,
+): Record<string, unknown>[] {
+  const existing = posts();
+  const firstReply = existing[1];
+  const secondReply = existing[2];
+  const root = existing[0];
+  if (
+    firstReply === undefined ||
+    secondReply === undefined ||
+    root === undefined
+  )
+    throw new Error("帖子区间夹具缺少受控主题正文。");
+  const newTopic = discoveredTopic(2499) as {
+    readonly post_stream: {
+      readonly posts: readonly Record<string, unknown>[];
+    };
+  };
+  const newTopicRoot = newTopic.post_stream.posts[0];
+  if (newTopicRoot === undefined)
+    throw new Error("帖子区间夹具缺少新主题主帖。");
+  const insertion = {
+    ...newTopicRoot,
+    id: 249_901,
+    post_number: 2,
+    reply_to_post_number: 1,
+    created_at: "2026-10-28T03:30:00.000Z",
+    updated_at: "2026-10-28T03:30:00.000Z",
+    cooked: "<p>扫描期间插入的区间回复。</p>",
+  };
+  const values: Record<string, unknown>[] = [
+    {
+      ...newTopicRoot,
+      created_at: "2026-10-28T02:30:00.000Z",
+      updated_at: "2026-10-28T02:30:00.000Z",
+    },
+    {
+      ...secondReply,
+      id: 240_009,
+      post_number: 6,
+      created_at: "2026-10-28T04:00:00.000Z",
+      updated_at: "2026-10-28T04:00:00.000Z",
+      cooked: "<p>终点边界之外的帖子。</p>",
+    },
+    {
+      ...firstReply,
+      id: 240_008,
+      post_number: 5,
+      created_at: "2026-10-28T01:30:00.000Z",
+      updated_at: "2026-10-28T01:30:00.000Z",
+      cooked: "<p>早于起点的旧时间戳帖子甲。</p>",
+    },
+    {
+      ...firstReply,
+      id: 240_007,
+      post_number: 4,
+      created_at: "2026-10-28T01:00:00.000Z",
+      updated_at: "2026-10-28T01:00:00.000Z",
+      cooked: "<p>早于起点的旧时间戳帖子乙。</p>",
+    },
+    {
+      ...firstReply,
+      id: 240_006,
+      post_number: 4,
+      created_at: "2026-10-28T03:30:00.000Z",
+      updated_at: "2026-10-28T03:30:00.000Z",
+      cooked: `<p>区间新增回复内容。</p><img src="${replyPhotoPath}" alt="区间回复插图">`,
+    },
+    {
+      ...firstReply,
+      id: 240_005,
+      post_number: 3,
+      created_at: "2026-10-28T01:00:00.000Z",
+      updated_at: "2026-10-28T01:00:00.000Z",
+      cooked: "<p>早于起点的旧时间戳帖子丙。</p>",
+    },
+    {
+      ...secondReply,
+      created_at: "2026-10-28T03:00:00.000Z",
+      updated_at: "2026-10-28T03:00:00.000Z",
+    },
+    {
+      ...firstReply,
+      created_at: "2026-10-28T02:00:00.000Z",
+      updated_at: "2026-10-28T02:00:00.000Z",
+    },
+    {
+      ...root,
+      created_at: "2026-10-28T01:00:00.000Z",
+      updated_at: "2026-10-28T01:00:00.000Z",
+    },
+  ];
+  return [...(includeInserted ? [insertion] : []), ...values].toSorted(
+    (first, second) => Number(second.id) - Number(first.id),
   );
 }
 
@@ -681,9 +789,28 @@ function updateState(value: unknown): boolean {
     "categoriesUnavailable",
     "categoriesInvalidResponse",
     "dailyCollectionEnabled",
+    "postRangeEnabled",
+    "postRangeAddAfterFirstPage",
+    "postRangeRepeatPage",
     "paginationOrderMutationEnabled",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;
+  }
+  if (
+    "postRangePageSize" in updates &&
+    (!Number.isSafeInteger(updates.postRangePageSize) ||
+      Number(updates.postRangePageSize) < 1 ||
+      Number(updates.postRangePageSize) > 50)
+  ) {
+    return false;
+  }
+  if (
+    "postRangeInvalidPage" in updates &&
+    updates.postRangeInvalidPage !== null &&
+    (!Number.isSafeInteger(updates.postRangeInvalidPage) ||
+      Number(updates.postRangeInvalidPage) < 1)
+  ) {
+    return false;
   }
   if (
     "dailyTopicOverlapCount" in updates &&
@@ -765,6 +892,7 @@ function updateState(value: unknown): boolean {
     return false;
   }
   if (updates.navigationRace === true) navigationRequested = false;
+  postRangeReadCount = 0;
   activeState = {
     ...activeState,
     ...updates,
@@ -1026,6 +1154,42 @@ const server = createServer((request, response) => {
               : []),
           ],
         },
+      });
+      return;
+    }
+    if (request.method === "GET" && pathname === "/posts.json") {
+      record(
+        "post-list",
+        `${pathname}?${url.searchParams.toString()}`,
+        authenticated,
+      );
+      if (!authenticated || !activeState.postRangeEnabled) {
+        response.writeHead(404);
+        response.end();
+        return;
+      }
+      postRangeReadCount += 1;
+      if (activeState.postRangeInvalidPage === postRangeReadCount) {
+        sendJson(response, 200, {});
+        return;
+      }
+      const beforeValue = url.searchParams.get("before");
+      const before = beforeValue === null ? undefined : Number(beforeValue);
+      if (before !== undefined && !Number.isSafeInteger(before)) {
+        sendJson(response, 400, { errors: ["before 游标无效。"] });
+        return;
+      }
+      const feed = postRangeFixtures(
+        activeState.postRangeAddAfterFirstPage && postRangeReadCount > 1,
+      );
+      const eligible =
+        activeState.postRangeRepeatPage && before !== undefined
+          ? feed
+          : feed.filter(
+              ({ id }) => before === undefined || Number(id) < before,
+            );
+      sendJson(response, 200, {
+        latest_posts: eligible.slice(0, activeState.postRangePageSize),
       });
       return;
     }
