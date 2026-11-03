@@ -26,6 +26,7 @@ import {
   type BrowserPower,
   type RuntimeHumanSessionControl,
   type RuntimeHumanSessionEvent,
+  type RuntimeSourceStateSnapshot,
   type RuntimeEnvironment,
 } from "@binny/contracts";
 import {
@@ -556,6 +557,54 @@ function sourceAccessResponseInput(
   };
 }
 
+function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
+  const updatedAt = new Date().toISOString();
+  if (sourceAccessUnavailable || sourceAccessCoordinator === undefined) {
+    return {
+      updatedAt,
+      sourceAccess: {
+        status: "unavailable",
+        reason: "persistent_state_unavailable",
+      },
+    };
+  }
+  const saved = sourceAccessCoordinator.snapshot();
+  const groupIds = [
+    ...new Set([
+      ...Object.keys(saved.lastAdmittedAt),
+      ...Object.keys(saved.cooldownByGroup),
+    ]),
+  ];
+  return {
+    updatedAt,
+    sourceAccess: {
+      status: "available",
+      groups: Object.fromEntries(
+        groupIds.map((groupId) => {
+          const cooldown = saved.cooldownByGroup[groupId];
+          const lastAdmittedAt = saved.lastAdmittedAt[groupId];
+          return [
+            groupId,
+            {
+              ...(lastAdmittedAt === undefined
+                ? {}
+                : { lastAdmittedAt: new Date(lastAdmittedAt).toISOString() }),
+              ...(cooldown === undefined
+                ? {}
+                : {
+                    cooldownUntil: new Date(
+                      cooldown.notBeforeEpochMs,
+                    ).toISOString(),
+                    latestLimitStatus: cooldown.status,
+                  }),
+            },
+          ];
+        }),
+      ),
+    },
+  };
+}
+
 function startActionWorker(
   run: ManualRunExecution,
   declarations: SourceAccessConfig | undefined,
@@ -603,6 +652,9 @@ function startActionWorker(
         void sendWorkerMessage(worker, {
           type: "source-access-rejected",
           requestId: record.requestId,
+          ...(sourceAccessUnavailable || sourceAccessCoordinator === undefined
+            ? { code: "source_access_state_unavailable" }
+            : {}),
           message:
             sourceAccessUnavailable || sourceAccessCoordinator === undefined
               ? "来源访问状态不可用，相关来源访问已停止。"
@@ -651,6 +703,9 @@ function startActionWorker(
           await sendWorkerMessage(worker, {
             type: "source-access-rejected",
             requestId: record.requestId,
+            ...(error instanceof SourceAccessPersistentStoreError
+              ? { code: "source_access_state_unavailable" }
+              : {}),
             message:
               error instanceof Error ? error.message : "来源准入请求失败。",
           }).catch(() => undefined);
@@ -668,6 +723,7 @@ function startActionWorker(
         void sendWorkerMessage(worker, {
           type: "source-access-rejected",
           requestId: record.requestId,
+          code: "source_access_state_unavailable",
           message: "来源访问状态不可用，冷却依据未能保存。",
         });
         return;
@@ -697,6 +753,9 @@ function startActionWorker(
           return sendWorkerMessage(worker, {
             type: "source-access-rejected",
             requestId: record.requestId,
+            ...(error instanceof SourceAccessPersistentStoreError
+              ? { code: "source_access_state_unavailable" }
+              : {}),
             message:
               error instanceof Error
                 ? error.message
@@ -1317,6 +1376,7 @@ async function heartbeat(
         ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
         ...(humanSessionEvent === undefined ? {} : { humanSessionEvent }),
         sourceAdapter: manifest,
+        sourceStateSnapshot: runtimeSourceStateSnapshot(),
         environment: runtimeEnvironment(),
       },
     });

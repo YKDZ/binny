@@ -1,0 +1,1 @@
+ALTER TABLE "runtime_connections" ADD COLUMN "source_state_snapshot" jsonb;

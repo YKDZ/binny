@@ -17,6 +17,7 @@ import {
   createSourceAccessClient,
   sourceAccessConfigFromAdapterConfig,
   sourceAdapterActionError,
+  SourceAccessStateUnavailableError,
   type SourceAccessAcquireInput,
   type SourceAccessLease,
   type SourceAccessResponse,
@@ -229,11 +230,13 @@ process.on("message", (value: unknown) => {
     if (pending === undefined) return;
     pendingSourceAccess.delete(record.requestId);
     pending.reject(
-      new Error(
-        typeof record.message === "string"
-          ? record.message
-          : "来源准入请求失败。",
-      ),
+      record.code === "source_access_state_unavailable"
+        ? new SourceAccessStateUnavailableError()
+        : new Error(
+            typeof record.message === "string"
+              ? record.message
+              : "来源准入请求失败。",
+          ),
     );
   }
 });
@@ -245,6 +248,14 @@ process.once("SIGTERM", () => {
 
 function failureFrom(error: unknown) {
   if (isSourceAdapterActionError(error)) return error.failure;
+  if (error instanceof SourceAccessStateUnavailableError) {
+    return {
+      code: error.code,
+      message: error.message,
+      impact: "本次运行没有发出来源请求。",
+      requiresHuman: false,
+    } as const;
+  }
   return {
     code: "source_adapter_execution_failed",
     message: "信源适配器动作执行失败。",

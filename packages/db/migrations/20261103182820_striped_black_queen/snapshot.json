@@ -1,0 +1,42 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "ea541111-c981-4f6e-8477-42fb81cd1c79",
+  "prevIds": ["58946d68-9f52-424a-baff-fc96965f6798"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "runtime_connections",
+        "source_state_snapshot"
+      ],
+      "writes": [
+        "s|col|public.runtime_connections.source_state_snapshot",
+        "n|col|public.runtime_connections.source_state_snapshot",
+        "e|col|public.runtime_connections.source_state_snapshot"
+      ],
+      "reads": ["n|tbl|public.runtime_connections", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_connections",
+        "name": "source_state_snapshot",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}

@@ -194,6 +194,15 @@ export class SourceAccessPersistentStoreError extends Error {
   }
 }
 
+export class SourceAccessStateUnavailableError extends Error {
+  readonly code = "source_access_state_unavailable";
+
+  constructor() {
+    super("来源访问状态不可用，已停止本次主动访问。");
+    this.name = "SourceAccessStateUnavailableError";
+  }
+}
+
 type CoordinatorWaiter = {
   readonly ownerId: string;
   readonly request: SourceAccessAcquireInput;
@@ -353,8 +362,7 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       response.status < 100 ||
       response.status > 599 ||
       (response.retryAfter !== undefined &&
-        (typeof response.retryAfter !== "string" ||
-          response.retryAfter.length > 256))
+        typeof response.retryAfter !== "string")
     )
       throw new Error("来源响应冷却依据格式无效。");
 
@@ -364,6 +372,8 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     const observedAtEpochMs = Math.floor(this.clock.epochNow());
     if (!Number.isSafeInteger(observedAtEpochMs) || observedAtEpochMs < 0)
       throw new Error("来源准入时钟返回了无效的 epoch 时间。");
+    if (response.retryAfter !== undefined && response.retryAfter.length > 256)
+      return { status: response.status, observedAtEpochMs, outcome: "invalid" };
     if (response.retryAfter === undefined || response.retryAfter.trim() === "")
       return { status: response.status, observedAtEpochMs, outcome: "missing" };
 

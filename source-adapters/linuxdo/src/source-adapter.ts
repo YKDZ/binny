@@ -10,6 +10,7 @@ import {
   sourceAccessConfigSchema,
   type ArchiveResourceMetadata,
   type SourceAccessKind,
+  type SourceAccessResponseObservation,
   type SourceAccessSnapshot,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -522,6 +523,18 @@ const sourceAccessReportSchema = z
       })
       .strict()
       .describe("按适配器声明的站点或媒体来源类别统计的主动准入操作数。"),
+    rateLimitResponses: z
+      .array(
+        z
+          .object({
+            status: z.union([z.literal(429), z.literal(503)]),
+            outcome: z.enum(["cooled", "missing", "invalid", "past"]),
+            observedAt: z.iso.datetime(),
+            cooldownUntil: z.iso.datetime().optional(),
+          })
+          .strict(),
+      )
+      .describe("主动传输收到的429/503及其冷却处理结果；不会自动重试。"),
     pageRequestEventsObserved: z
       .object({
         total: z.number().int().nonnegative(),
@@ -747,6 +760,7 @@ type PageFetchResponse = {
   readonly mitigated: string;
   readonly status: number;
   readonly contentType: string;
+  readonly retryAfter?: string;
   readonly body: string;
 };
 type TopicPostRead = {
@@ -795,6 +809,7 @@ type PageSourceAccess = {
   readonly signal: AbortSignal;
   readonly siteOrigin: string;
   readonly events: PageRequestEvents;
+  readonly rateLimitResponses: SourceAccessResponseObservation[];
   readonly publish: ((report: SourceAccessReport) => Promise<void>) | undefined;
 };
 
@@ -803,6 +818,7 @@ function emptySourceAccessReport(): SourceAccessReport {
     admittedAttempts: 0,
     waitedMs: 0,
     bySource: { site: 0, media: 0 },
+    rateLimitResponses: [],
     pageRequestEventsObserved: {
       total: 0,
       get: 0,
@@ -818,6 +834,18 @@ function sourceAccessReport(state: PageSourceAccess): SourceAccessReport {
   const active: SourceAccessSnapshot = state.client.snapshot();
   return {
     ...active,
+    rateLimitResponses: state.rateLimitResponses.map((observation) => ({
+      status: observation.status,
+      outcome: observation.outcome,
+      observedAt: new Date(observation.observedAtEpochMs).toISOString(),
+      ...(observation.cooldownUntilEpochMs === undefined
+        ? {}
+        : {
+            cooldownUntil: new Date(
+              observation.cooldownUntilEpochMs,
+            ).toISOString(),
+          }),
+    })),
     pageRequestEventsObserved: {
       ...state.events,
       byResourceType: { ...state.events.byResourceType },
@@ -844,7 +872,17 @@ async function withSourceAdmission<T>(
       { groupId: "linuxdo", source, origin: url.origin },
       async () => {
         state.signal.throwIfAborted();
-        return await operation();
+        const value = await operation();
+        const response = sourceResponseMetadata(value);
+        if (response?.status === 429 || response?.status === 503) {
+          state.rateLimitResponses.push(
+            await state.client.observeResponse(
+              { groupId: "linuxdo", source, origin: url.origin },
+              response,
+            ),
+          );
+        }
+        return value;
       },
     );
   } catch (error) {
@@ -853,6 +891,37 @@ async function withSourceAdmission<T>(
   }
   await reportPageSourceAccess(state);
   return result;
+}
+
+function sourceResponseMetadata(
+  value: unknown,
+): { readonly status: number; readonly retryAfter?: string } | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  if ("status" in value && typeof value.status === "number") {
+    const retryAfter = "retryAfter" in value ? value.retryAfter : undefined;
+    return {
+      status: value.status,
+      ...(typeof retryAfter === "string" ? { retryAfter } : {}),
+    };
+  }
+  if (
+    "status" in value &&
+    typeof value.status === "function" &&
+    "headers" in value &&
+    typeof value.headers === "function"
+  ) {
+    const headers = value.headers();
+    return {
+      status: value.status(),
+      ...(typeof headers === "object" &&
+      headers !== null &&
+      "retry-after" in headers &&
+      typeof headers["retry-after"] === "string"
+        ? { retryAfter: headers["retry-after"] }
+        : {}),
+    };
+  }
+  return undefined;
 }
 
 function siteFromConfig(config: SourceAdapterConfig): {
@@ -910,6 +979,7 @@ async function withSharedBrowser<T>(
         otherOriginGet: 0,
         byResourceType: { document: 0, fetch: 0, xhr: 0, other: 0 },
       },
+      rateLimitResponses: [],
       publish: publishSourceAccess,
     };
     pageSourceAccess.set(page, accessState);
@@ -1183,10 +1253,12 @@ async function fetchInPageOnce(
             }
             responseBody = btoa(binary);
           }
+          const retryAfter = response.headers.get("retry-after");
           return {
             mitigated: response.headers.get("cf-mitigated") ?? "",
             status: response.status,
             contentType: response.headers.get("content-type") ?? "",
+            ...(retryAfter === null ? {} : { retryAfter }),
             body: responseBody,
           };
         } finally {

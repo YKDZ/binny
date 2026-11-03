@@ -8,7 +8,9 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
+  runtimeSourceStateSnapshotSchema,
   runtimeProtocolVersion,
+  type SourceStateSnapshot,
   type BinError,
   type BinOperation,
   type SourceAdapterManifest,
@@ -52,6 +54,7 @@ const runtimeSelection = {
   ownerGeneration: runtimeConnections.ownerGeneration,
   protocolVersion: runtimeConnections.protocolVersion,
   runtimeControlUrl: runtimeConnections.runtimeControlUrl,
+  sourceStateSnapshot: runtimeConnections.sourceStateSnapshot,
 };
 
 type RuntimeCompatibilityError = {
@@ -209,12 +212,76 @@ function offline(
   return {
     status: "offline",
     reason,
+    sourceStateSnapshot: projectSourceStateSnapshot(row),
     ...(row?.runtimeId === null || row?.runtimeId === undefined
       ? {}
       : { runtimeId: row.runtimeId }),
     ...(row?.lastHeartbeatAt === null || row?.lastHeartbeatAt === undefined
       ? {}
       : { lastHeartbeatAt: row.lastHeartbeatAt.toISOString() }),
+  };
+}
+
+function sourceSnapshotIsCurrent(
+  row: RuntimeConnectionRow | undefined,
+  snapshotUpdatedAt: string,
+): boolean {
+  if (
+    row === undefined ||
+    row.disconnected === true ||
+    row.protocolVersion !== runtimeProtocolVersion ||
+    row.lastHeartbeatAt === null
+  )
+    return false;
+  const now = Date.now();
+  const heartbeatAgeMs = now - row.lastHeartbeatAt.getTime();
+  const snapshotAgeMs = now - Date.parse(snapshotUpdatedAt);
+  return (
+    heartbeatAgeMs <= runtimeHeartbeatTimeoutMs &&
+    snapshotAgeMs >= 0 &&
+    snapshotAgeMs <= runtimeHeartbeatTimeoutMs
+  );
+}
+
+function projectSourceStateSnapshot(
+  row: RuntimeConnectionRow | undefined,
+): SourceStateSnapshot {
+  if (
+    row?.sourceStateSnapshot === null ||
+    row?.sourceStateSnapshot === undefined
+  )
+    return {
+      freshness: "unknown",
+      sourceAccess: { status: "unknown" },
+    };
+
+  const checked = runtimeSourceStateSnapshotSchema.safeParse(
+    row.sourceStateSnapshot,
+  );
+  if (!checked.success) {
+    const savedUpdatedAt =
+      typeof row.sourceStateSnapshot === "object" &&
+      row.sourceStateSnapshot !== null &&
+      "updatedAt" in row.sourceStateSnapshot &&
+      typeof row.sourceStateSnapshot.updatedAt === "string"
+        ? row.sourceStateSnapshot.updatedAt
+        : (row.lastHeartbeatAt?.toISOString() ?? new Date(0).toISOString());
+    return {
+      freshness: sourceSnapshotIsCurrent(row, savedUpdatedAt)
+        ? "current"
+        : "stale",
+      updatedAt: savedUpdatedAt,
+      sourceAccess: {
+        status: "unavailable",
+        reason: "persistent_state_unavailable",
+      },
+    };
+  }
+
+  const isCurrent = sourceSnapshotIsCurrent(row, checked.data.updatedAt);
+  return {
+    freshness: isCurrent ? "current" : "stale",
+    ...checked.data,
   };
 }
 
@@ -262,6 +329,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
       status: "incompatible",
       runtimeId: row.runtimeId,
       lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+      sourceStateSnapshot: projectSourceStateSnapshot(row),
       error,
     };
   }
@@ -274,6 +342,7 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     runtimeId: row.runtimeId,
     environment,
     lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+    sourceStateSnapshot: projectSourceStateSnapshot(row),
   };
 }
 
@@ -656,6 +725,7 @@ export function createRuntimeConnectionStore(
             runtimeId: checked.data.runtimeId,
             sourceAdapter: checked.data.sourceAdapter,
             environment: checked.data.environment,
+            sourceStateSnapshot: checked.data.sourceStateSnapshot ?? null,
             protocolVersion: checked.data.protocolVersion,
             runtimeControlUrl: checked.data.runtimeControlUrl,
             disconnected: false,
@@ -668,6 +738,9 @@ export function createRuntimeConnectionStore(
               runtimeId: checked.data.runtimeId,
               sourceAdapter: checked.data.sourceAdapter,
               environment: checked.data.environment,
+              ...(checked.data.sourceStateSnapshot === undefined
+                ? {}
+                : { sourceStateSnapshot: checked.data.sourceStateSnapshot }),
               protocolVersion: checked.data.protocolVersion,
               runtimeControlUrl: checked.data.runtimeControlUrl,
               // 保持 PostgreSQL 服务端时钟语义。

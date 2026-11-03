@@ -103,6 +103,7 @@ export const runtimeConnections = pgTable(
     runtimeId: text("runtime_id").notNull(),
     sourceAdapter: jsonb("source_adapter").notNull(),
     environment: jsonb("environment").notNull(),
+    sourceStateSnapshot: jsonb("source_state_snapshot"),
     lastHeartbeatAt: timestamp("last_heartbeat_at", {
       withTimezone: true,
       mode: "date",
