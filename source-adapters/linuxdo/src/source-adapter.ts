@@ -131,9 +131,9 @@ const postCreatedRangeSchema = z
       .positive()
       .max(1_000)
       .safe()
-      .optional()
+      .default(20)
       .describe(
-        "帖子流扫描页数上限，省略时默认 20 页；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
+        "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
       ),
   })
   .strict()
@@ -571,7 +571,6 @@ type MediaDownload =
 const checkBasis =
   "通过正式持久浏览器的共享身份读取 Discourse 当前会话和指定主题 JSON；检查不下载媒体、不写入归档。";
 const postBatchSize = 100;
-const defaultPostRangeMaxPages = 20;
 const pageRecovery = new WeakMap<Page, ChallengeRecovery>();
 
 function siteFromConfig(config: SourceAdapterConfig): {
@@ -3169,7 +3168,7 @@ async function collectPostCreatedRange(
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
-  params: CollectParams,
+  params: PostRangeCollectionParams,
   dateWindow: CollectionDateWindow,
   completedScopes: string[],
   incompleteScopes: CollectionIncompleteScope[],
@@ -3188,13 +3187,7 @@ async function collectPostCreatedRange(
       ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
       ...(params.postCreatedRange === undefined
         ? {}
-        : {
-            postCreatedRange: {
-              ...params.postCreatedRange,
-              maxPages:
-                params.postCreatedRange.maxPages ?? defaultPostRangeMaxPages,
-            },
-          }),
+        : { postCreatedRange: params.postCreatedRange }),
       target:
         params.topicId !== undefined
           ? { kind: "topic", topicId: params.topicId }
@@ -3219,7 +3212,7 @@ async function collectPostCreatedRange(
     page,
     site.origin,
     context.signal,
-    params.postCreatedRange?.maxPages ?? defaultPostRangeMaxPages,
+    params.postCreatedRange.maxPages,
   );
   if (scan.issue !== undefined) {
     incompleteScopes.push({
@@ -3298,13 +3291,7 @@ async function collectPostCreatedRange(
       ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
       ...(params.postCreatedRange === undefined
         ? {}
-        : {
-            postCreatedRange: {
-              ...params.postCreatedRange,
-              maxPages:
-                params.postCreatedRange.maxPages ?? defaultPostRangeMaxPages,
-            },
-          }),
+        : { postCreatedRange: params.postCreatedRange }),
       target:
         params.topicId !== undefined
           ? { kind: "topic", topicId: params.topicId }
@@ -3345,13 +3332,7 @@ async function collectTopic(
       ...(params.timeZone === undefined ? {} : { timeZone: params.timeZone }),
       ...(params.postCreatedRange === undefined
         ? {}
-        : {
-            postCreatedRange: {
-              ...params.postCreatedRange,
-              maxPages:
-                params.postCreatedRange.maxPages ?? defaultPostRangeMaxPages,
-            },
-          }),
+        : { postCreatedRange: params.postCreatedRange }),
       target:
         params.topicId !== undefined
           ? { kind: "topic", topicId: params.topicId }
@@ -3377,15 +3358,19 @@ async function collectTopic(
         : ("partial" as const),
     incompleteScopes,
   });
+  const rangeParams: PostRangeCollectionParams | undefined =
+    params.postCreatedRange === undefined
+      ? undefined
+      : { ...params, postCreatedRange: params.postCreatedRange };
   try {
     await context.report(report);
     const dateWindow =
-      params.postCreatedRange === undefined
+      rangeParams === undefined
         ? collectionDateWindow(
             dateCollectionParams(params),
             context.referenceTime,
           )
-        : postCreatedWindow(params.postCreatedRange);
+        : postCreatedWindow(rangeParams.postCreatedRange);
     const range = {
       from: new Date(dateWindow.startInclusive).toISOString(),
       to: new Date(dateWindow.endExclusive).toISOString(),
@@ -3400,13 +3385,13 @@ async function collectTopic(
       if (session.kind === "unavailable") {
         throw failureFromProblem(session.problem);
       }
-      if (params.postCreatedRange !== undefined) {
+      if (rangeParams !== undefined) {
         return await collectPostCreatedRange(
           context,
           page,
           request,
           site,
-          params,
+          rangeParams,
           dateWindow,
           completedScopes,
           incompleteScopes,

@@ -955,6 +955,14 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.deepEqual(postCreatedRange.required, ["from", "to"]);
   assert.ok(postCreatedRange.properties?.from !== undefined);
   assert.ok(postCreatedRange.properties?.to !== undefined);
+  assert.equal(
+    (
+      postCreatedRange.properties?.maxPages as
+        | { readonly default?: unknown }
+        | undefined
+    )?.default,
+    20,
+  );
 
   assert.ok(collect.report !== undefined, "collect 应声明可发现的运行报告。");
   const reportSchema = collect.report as {
