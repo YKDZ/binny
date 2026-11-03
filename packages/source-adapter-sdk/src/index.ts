@@ -26,18 +26,27 @@ export {
 } from "./source-access.ts";
 export type {
   SourceAccessAcquireInput,
+  SourceAccessAdmissionOptions,
   SourceAccessClient,
   SourceAccessClock,
   SourceAccessCoordinator,
+  SourceAccessCoordinatorSnapshot,
   SourceAccessConfig,
+  SourceAccessCooldown,
   SourceAccessGroup,
   SourceAccessKind,
   SourceAccessLease,
   SourceAccessPersistentState,
   SourceAccessPersistentStore,
   SourceAccessRequest,
+  SourceAccessResponse,
+  SourceAccessResponseObservation,
   SourceAccessSnapshot,
   SourceAccessTransport,
+} from "./source-access.ts";
+export {
+  SourceAccessDeadlineExceededError,
+  SourceAccessPersistentStoreError,
 } from "./source-access.ts";
 
 export type { SourceAdapterManifest, JsonSchema } from "@binny/contracts";
