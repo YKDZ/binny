@@ -5,6 +5,7 @@ import {
   jsonObjectSchema,
   scheduleCreateInputSchema,
   scheduleLastErrorSchema,
+  scheduleLastSkipSchema,
   scheduleSchema,
   scheduleUpdateInputSchema,
   type Schedule,
@@ -169,9 +170,13 @@ function toSchedule(
     timeZone: row.timeZone,
     action: row.action,
     params: row.params,
+    overlapPolicy: row.overlapPolicy,
     enabled: row.enabled,
     nextDueAt: row.nextDueAt.toISOString(),
     ...(lastRunId === undefined ? {} : { lastRunId }),
+    ...(row.lastSkip === null
+      ? {}
+      : { lastSkip: scheduleLastSkipSchema.parse(row.lastSkip) }),
     ...(row.lastError === null
       ? {}
       : { lastError: scheduleLastErrorSchema.parse(row.lastError) }),
@@ -474,6 +479,7 @@ export function createScheduleStore(database: Database): ScheduleStore {
             timeZone: checked.data.timeZone,
             action: checked.data.action,
             params: checked.data.params,
+            overlapPolicy: checked.data.overlapPolicy,
             enabled: checked.data.enabled ?? true,
             nextDueAt: nextDue.value,
           })
@@ -583,6 +589,7 @@ export function createScheduleStore(database: Database): ScheduleStore {
           timeZone: checked.data.timeZone ?? current.timeZone,
           action: checked.data.action ?? current.action,
           params: checked.data.params ?? current.params,
+          overlapPolicy: checked.data.overlapPolicy ?? current.overlapPolicy,
         };
         const nextDue = computeNextDue(
           updated.expression,

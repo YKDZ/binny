@@ -109,6 +109,70 @@ void describe("离线 CLI 命令契约", () => {
     assert.match(archiveHelp.output, /JSON 字符串/u);
   });
 
+  void it("计划创建和修改契约公开重叠策略选项", async () => {
+    const create = await run(["schema", "schedule", "create"]);
+    const update = await run(["schema", "schedule", "update"]);
+
+    assert.equal(create.exitCode, 0);
+    assert.equal(update.exitCode, 0);
+    const creation = JSON.parse(create.output) as {
+      readonly data: {
+        readonly grammar: {
+          readonly nodes: readonly {
+            readonly id: string;
+            readonly fields?: readonly {
+              readonly key: string;
+              readonly longOption?: string;
+            }[];
+          }[];
+        };
+        readonly manifest: {
+          readonly commands: Readonly<
+            Record<
+              string,
+              {
+                readonly input: {
+                  readonly inputSchema: {
+                    readonly properties: Readonly<
+                      Record<
+                        string,
+                        {
+                          readonly enum?: readonly string[];
+                        }
+                      >
+                    >;
+                  };
+                };
+              }
+            >
+          >;
+        };
+      };
+    };
+    const creationCommand = creation.data.manifest.commands.scheduleCreate;
+    assert.ok(creationCommand);
+    assert.deepEqual(
+      creationCommand.input.inputSchema.properties.overlapPolicy?.enum,
+      ["queue", "skip"],
+    );
+    assert.ok(
+      creation.data.grammar.nodes
+        .find(({ id }) => id === "scheduleCreate")
+        ?.fields?.some(
+          ({ key, longOption }) =>
+            key === "overlapPolicy" && longOption === "--overlap-policy",
+        ),
+    );
+    const modification = JSON.parse(update.output) as typeof creation;
+    const modificationCommand =
+      modification.data.manifest.commands.scheduleUpdate;
+    assert.ok(modificationCommand);
+    assert.deepEqual(
+      modificationCommand.input.inputSchema.properties.overlapPolicy?.enum,
+      ["queue", "skip"],
+    );
+  });
+
   void it("schema 使用 argv 字符串契约，提供同一数据的文本展示并拒绝未知路径", async () => {
     const commandHelp = await run(["schema", "--help"]);
     assert.equal(commandHelp.exitCode, 0);

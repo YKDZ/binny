@@ -13,6 +13,20 @@ import {
 
 const scheduleIdSchema = z.string().uuid();
 
+export const scheduleOverlapPolicySchema = z
+  .enum(["queue", "skip"])
+  .describe("同一计划仍有未完成运行时，到期触发采用排队或跳过策略。");
+
+export const scheduleLastSkipSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      reason: z.literal("overlap").describe("同一计划仍有未完成运行。"),
+      scheduledFor: z.iso.datetime().describe("被跳过的计划触发时刻。"),
+      skippedAt: z.iso.datetime().describe("处理并跳过该触发的时刻。"),
+    })
+    .strict(),
+);
+
 /** 按 cron-parser 的 strict 规则解析（包括原生宏），并要求调用方声明 IANA 时区。 */
 export const scheduleCreateInputSchema = withPostgresJsonSchemaProjection(
   z
@@ -21,6 +35,7 @@ export const scheduleCreateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128),
       action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
+      overlapPolicy: scheduleOverlapPolicySchema.default("queue"),
       enabled: z.boolean().optional(),
     })
     .strict(),
@@ -33,6 +48,7 @@ export const scheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128).optional(),
       action: sourceAdapterActionNameSchema.optional(),
       params: jsonObjectSchema.optional(),
+      overlapPolicy: scheduleOverlapPolicySchema.optional(),
     })
     .strict()
     .refine((value) => Object.keys(value).length > 0, {
@@ -59,11 +75,17 @@ export const scheduleSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128),
       action: sourceAdapterActionNameSchema,
       params: jsonObjectSchema,
+      overlapPolicy: scheduleOverlapPolicySchema,
       enabled: z.boolean(),
       nextDueAt: z.iso.datetime(),
       lastRunId: scheduleIdSchema
         .optional()
         .describe("该计划最近创建的运行 ID；运行可以仍在排队。"),
+      lastSkip: scheduleLastSkipSchema
+        .optional()
+        .describe(
+          "该计划最近一次跳过触发的原因与时间；不会替代运行引用或运行历史。",
+        ),
       lastError: scheduleLastErrorSchema.optional(),
       createdAt: z.iso.datetime(),
       updatedAt: z.iso.datetime(),
@@ -109,6 +131,8 @@ export type Schedule = z.infer<typeof scheduleSchema>;
 export type ScheduleCreateInput = z.infer<typeof scheduleCreateInputSchema>;
 export type ScheduleUpdateInput = z.infer<typeof scheduleUpdateInputSchema>;
 export type ScheduleLastError = z.infer<typeof scheduleLastErrorSchema>;
+export type ScheduleOverlapPolicy = z.infer<typeof scheduleOverlapPolicySchema>;
+export type ScheduleLastSkip = z.infer<typeof scheduleLastSkipSchema>;
 export type ScheduleApiError = z.infer<typeof scheduleErrorSchema>["error"];
 export type ScheduleOperation<T> =
   | { readonly ok: true; readonly value: T }

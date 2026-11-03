@@ -388,6 +388,7 @@ const cliScheduleCreateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128),
       action: sourceAdapterActionNameSchema,
       params: jsonObjectTextSchema.optional(),
+      overlapPolicy: z.enum(["queue", "skip"]).default("queue"),
       disabled: z.boolean().optional(),
     })
     .strict(),
@@ -401,14 +402,16 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128).optional(),
       action: sourceAdapterActionNameSchema.optional(),
       params: jsonObjectTextSchema.optional(),
+      overlapPolicy: z.enum(["queue", "skip"]).optional(),
     })
     .strict()
     .refine(
-      ({ expression, timeZone, action, params }) =>
+      ({ expression, timeZone, action, params, overlapPolicy }) =>
         expression !== undefined ||
         timeZone !== undefined ||
         action !== undefined ||
-        params !== undefined,
+        params !== undefined ||
+        overlapPolicy !== undefined,
       { message: "至少提供一个需要修改的字段。" },
     ),
 );
@@ -1428,6 +1431,11 @@ function createCliContract(identity: CliCommandIdentity) {
             description:
               "动作参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
           },
+          overlapPolicy: {
+            kind: "valueOption",
+            longOption: "--overlap-policy",
+            description: "同计划仍有未完成运行时排队或跳过本次触发，默认 queue",
+          },
           disabled: {
             kind: "flag",
             longOption: "--disabled",
@@ -1453,6 +1461,7 @@ function createCliContract(identity: CliCommandIdentity) {
             timeZone: input.timeZone,
             action: input.action,
             params: input.params ?? {},
+            overlapPolicy: input.overlapPolicy,
             enabled: !(input.disabled ?? false),
           });
           const response = await dependencies
@@ -1541,7 +1550,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "schedule",
         name: "update",
-        description: "修改计划表达式、时区、动作或参数。",
+        description: "修改计划表达式、时区、动作、参数或重叠策略。",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
           scheduleId: { kind: "positional", description: "计划标识" },
@@ -1566,6 +1575,11 @@ function createCliContract(identity: CliCommandIdentity) {
             longOption: "--params",
             description:
               "动作参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
+          },
+          overlapPolicy: {
+            kind: "valueOption",
+            longOption: "--overlap-policy",
+            description: "同计划仍有未完成运行时排队或跳过本次触发",
           },
         },
         input: cliScheduleUpdateInputSchema,

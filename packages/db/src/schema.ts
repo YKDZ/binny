@@ -40,6 +40,7 @@ const manualRunStatuses = [
   "cancelled",
 ] as const;
 const manualRunTriggerTypes = ["manual", "schedule"] as const;
+const scheduleOverlapPolicies = ["queue", "skip"] as const;
 const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
 const browserCapacityReservationStates = [
   "reserved",
@@ -591,11 +592,17 @@ export const schedules = pgTable(
     timeZone: text("time_zone").notNull(),
     action: text("action").notNull(),
     params: jsonb("params").notNull(),
+    overlapPolicy: text("overlap_policy", {
+      enum: scheduleOverlapPolicies,
+    })
+      .notNull()
+      .default("queue"),
     enabled: boolean("enabled").notNull().default(true),
     nextDueAt: timestamp("next_due_at", {
       withTimezone: true,
       mode: "date",
     }).notNull(),
+    lastSkip: jsonb("last_skip"),
     lastError: jsonb("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -605,6 +612,10 @@ export const schedules = pgTable(
       .default(sql`clock_timestamp()`),
   },
   (table) => [
+    check(
+      "schedules_overlap_policy_check",
+      inArray(table.overlapPolicy, scheduleOverlapPolicies),
+    ),
     index("schedules_due_idx")
       .on(table.nextDueAt, table.binId, table.scheduleId)
       .where(eq(table.enabled, true)),
