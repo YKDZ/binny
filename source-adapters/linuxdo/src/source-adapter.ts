@@ -107,7 +107,7 @@ const categoryReferenceSchema = z
     kind: z.literal("category"),
     categoryId: topicIdSchema.describe("Linux.do 板块数字 ID。"),
     categorySlugPath: categorySlugPathSchema.describe(
-      "板块 URL 中的 slug 路径；多级板块以斜杠分隔。",
+      "板块路径中的 slug，不含 /c/ 前缀；多级板块以斜杠分隔。",
     ),
   })
   .strict();
@@ -139,7 +139,7 @@ const actionTargetsSchema = z
           id: "support",
           kind: "category",
           categoryId: 4,
-          categorySlugPath: "c/support",
+          categorySlugPath: "support",
         },
       ],
     ],
