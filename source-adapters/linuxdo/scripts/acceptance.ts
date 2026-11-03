@@ -10,6 +10,7 @@ import { type Browser, type Page } from "patchright-core";
 
 import {
   closeLinuxdoHumanSession,
+  loginLinuxdoUser,
   linuxdoUserJourney,
   navigateThroughLinuxdoViewer,
   openLinuxdoHumanSession,
@@ -67,6 +68,8 @@ type FixtureState = {
   readonly postRangeAddAfterFirstPage: boolean;
   readonly postRangeRepeatPage: boolean;
   readonly postRangeInvalidPage: number | null;
+  readonly postRangeResponseStatus: number | null;
+  readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
@@ -74,11 +77,13 @@ type FixtureState = {
   readonly replyVersion: number;
   readonly addedReply: boolean;
   readonly discoveryAddedReply: boolean;
+  readonly syncScenarioStage: number;
   readonly omittedPostIds: readonly number[];
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
   readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
+  readonly siteHomeDelayMs?: number;
   readonly topicListDelayMs?: number;
   readonly mediaResponseDelayMs?: number;
   readonly rateLimitPath: string | null;
@@ -172,6 +177,7 @@ const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny-discovery-${suffix}`;
 const serverImage = `${projectName}-server:local`;
 const browserImage = `${projectName}-linuxdo:local`;
+const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
 const publishedHost =
   process.env.BINNY_DISCOVERY_PUBLISHED_HOST ?? "172.17.0.1";
 const password = `binny-discovery-${randomUUID().replaceAll("-", "")}`;
@@ -318,6 +324,7 @@ async function createOverlay(): Promise<void> {
       "      - runtime",
       "      - connections",
       "  runtime-linuxdo:",
+      "    stop_grace_period: 30s",
       "    environment:",
       "      NODE_OPTIONS: --import=/var/lib/binny/test-clock/clock.ts",
       "      BINNY_TEST_CLOCK_FILE: /var/lib/binny/test-clock/offset-ms",
@@ -1073,6 +1080,32 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
       | undefined;
     assert.ok(report?.properties?.sourceAccess !== undefined);
   }
+
+  const sync = actions.actions.sync;
+  assert.ok(sync?.params !== undefined, "动作发现应公开 sync 参数。 ");
+  assert.ok(sync.output !== undefined, "动作发现应公开 sync 结果。 ");
+  assert.ok(sync.report !== undefined, "sync 应声明可发现的运行报告。 ");
+  const syncParams = sync.params as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+  for (const name of ["maxPages", "maxRequests", "maxElapsedMs"])
+    assert.ok(syncParams.properties?.[name] !== undefined);
+  const syncReport = sync.report as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+  };
+  assert.ok(syncReport.properties?.upperBound !== undefined);
+  assert.ok(syncReport.properties?.budget !== undefined);
+  assert.ok(syncReport.properties?.scopes !== undefined);
+
+  const manifest = await runtimeManifest();
+  assert.ok(
+    manifest.sourceAdapter.stateSchema !== undefined,
+    "运行器清单应通过原生 schema 公开 Linux.do 接续状态。",
+  );
+  assert.ok(
+    manifest.sourceAdapter.stateSnapshotSchema !== undefined,
+    "运行器清单应通过原生 schema 公开接续状态的可用与故障形状。",
+  );
 }
 
 type SourceAccessSummary = {
@@ -1536,6 +1569,7 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
 type PublicSourceStateSnapshot = {
   readonly freshness: "unknown" | "current" | "stale";
   readonly updatedAt?: string;
+  readonly sync?: unknown;
   readonly sourceAccess:
     | { readonly status: "unknown" }
     | {
@@ -3930,6 +3964,664 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   });
 }
 
+type SyncRunOutput = {
+  readonly outcome: "initialized" | "advanced" | "no-forward-range" | "partial";
+  readonly upperBound: string;
+  readonly scopes: readonly {
+    readonly scope: {
+      readonly kind: "category" | "topic";
+      readonly id: number;
+    };
+    readonly position: string;
+    readonly status:
+      | "initialized"
+      | "advanced"
+      | "partial"
+      | "unknown"
+      | "unstarted"
+      | "no-forward-range";
+    readonly range?: { readonly from: string; readonly to: string };
+    readonly skippedBefore?: string;
+  }[];
+  readonly observedPosts: number;
+  readonly topicsExamined: number;
+  readonly incompleteScopes: readonly {
+    readonly scope: string;
+    readonly reasonCode: string;
+    readonly message: string;
+  }[];
+};
+
+type SyncRunReport = {
+  readonly phase: string;
+  readonly upperBound: string;
+  readonly intent:
+    | { readonly kind: "all-visible" }
+    | {
+        readonly kind: "targets";
+        readonly targets: readonly Record<string, unknown>[];
+      };
+  readonly discovery: string;
+  readonly budget: {
+    readonly maxRequests: number;
+    readonly maxElapsedMs: number;
+    readonly elapsedMs: number;
+    readonly remainingMs: number;
+    readonly stopReason?: string;
+  };
+  readonly sourceAccess: {
+    readonly admittedAttempts: number;
+    readonly rateLimitResponses: readonly {
+      readonly source: "site" | "media";
+      readonly origin: string;
+      readonly status: 429 | 503;
+      readonly retryAfter?: string;
+      readonly outcome: "cooled" | "missing" | "invalid" | "past";
+      readonly observedAt: string;
+      readonly cooldownUntil?: string;
+    }[];
+  };
+  readonly scopes: readonly {
+    readonly scope: {
+      readonly kind: "category" | "topic";
+      readonly id: number;
+    };
+    readonly mode: string;
+    readonly position: string;
+    readonly range?: { readonly from: string; readonly to: string };
+    readonly skippedBefore?: string;
+    readonly status: string;
+  }[];
+  readonly observedPosts: number;
+  readonly topicsExamined: number;
+  readonly incompleteScopes: readonly {
+    readonly scope: string;
+    readonly reasonCode: string;
+    readonly message: string;
+  }[];
+};
+
+function syncOutput(run: ManualRun): SyncRunOutput {
+  assert.ok(run.result?.output !== undefined, JSON.stringify(run));
+  return run.result.output as SyncRunOutput;
+}
+
+function syncReport(run: ManualRun): SyncRunReport {
+  assert.ok(run.report !== undefined, `sync 运行没有报告：${run.runId}`);
+  return run.report as SyncRunReport;
+}
+
+async function verifyBoundedSync(): Promise<void> {
+  const categoryTarget = linuxdoTargets("category");
+  const params = {
+    targets: categoryTarget,
+    maxPages: 20,
+    maxRequests: 100,
+    maxElapsedMs: 120_000,
+  };
+  await setSourceAccessPolicy(0, 1);
+  await updateFixtureState({
+    postRangeEnabled: true,
+    postRangeAddAfterFirstPage: false,
+    postRangeRepeatPage: false,
+    postRangeInvalidPage: null,
+    postRangeResponseStatus: null,
+    postRangeRetryAfter: null,
+    postRangePageSize: 2,
+    syncScenarioStage: 0,
+    siteHomeDelayMs: 5_000,
+  });
+  await setTestClockAt("2026-10-28T02:00:00.000Z");
+
+  try {
+    await clearSourceEvents();
+    const initializedRun = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "sync",
+        "--params",
+        JSON.stringify(params),
+      ]),
+      "triggered",
+    );
+    await waitForSourceEvent("site-home", 1);
+    const reportBeforeSourceResponse = cliData<ManualRun>(
+      await cli(["run", "get", "binny-discovery-topic", initializedRun.runId]),
+      "found",
+    );
+    assert.equal(reportBeforeSourceResponse.status, "executing");
+    assert.equal(
+      syncReport(reportBeforeSourceResponse).phase,
+      "discovering-targets",
+    );
+    const initialUpperBound = syncReport(reportBeforeSourceResponse).upperBound;
+    assert.ok(
+      Date.parse(initialUpperBound) >= Date.parse("2026-10-28T02:00:00.000Z") &&
+        Date.parse(initialUpperBound) < Date.parse("2026-10-28T02:00:30.000Z"),
+      initialUpperBound,
+    );
+    assert.deepEqual(syncReport(reportBeforeSourceResponse).intent, {
+      kind: "targets",
+      targets: categoryTarget,
+    });
+    const sourceEventsBeforeSnapshotRead = await sourceState();
+    const stateBeforeDiscoveryResponse = await readBinRuntime(
+      "binny-discovery-topic",
+    );
+    const sourceEventsAfterSnapshotRead = await sourceState();
+    assert.deepEqual(
+      sourceEventsAfterSnapshotRead.events,
+      sourceEventsBeforeSnapshotRead.events,
+      "bin get 读取接续状态不应触发来源访问。",
+    );
+    assert.deepEqual(stateBeforeDiscoveryResponse.sourceStateSnapshot.sync, {
+      version: 1,
+      scopes: [],
+      lastIntent: {
+        runId: initializedRun.runId,
+        upperBound: initialUpperBound,
+        target: { kind: "targets", targets: categoryTarget },
+        phase: "discovering-targets",
+      },
+    });
+    const initialized = await waitForManualRun(initializedRun.runId);
+    assert.equal(initialized.status, "completed", JSON.stringify(initialized));
+    await updateFixtureState({ siteHomeDelayMs: 0 });
+    assert.equal(syncReport(initialized).phase, "completed");
+    assert.equal(syncReport(initialized).upperBound, initialUpperBound);
+    assert.equal(syncReport(initialized).discovery, "complete");
+    assert.equal(syncOutput(initialized).outcome, "initialized");
+    assert.equal(syncOutput(initialized).observedPosts, 0);
+    assert.deepEqual(
+      syncOutput(initialized).scopes.map(({ scope, status, position }) => ({
+        scope,
+        status,
+        position,
+      })),
+      [
+        {
+          scope: { kind: "category", id: 42 },
+          status: "initialized",
+          position: initialUpperBound,
+        },
+        {
+          scope: { kind: "category", id: 43 },
+          status: "initialized",
+          position: initialUpperBound,
+        },
+      ],
+    );
+    const initializedState = await readBinRuntime("binny-discovery-topic");
+    assert.deepEqual(initializedState.sourceStateSnapshot.sync, {
+      version: 1,
+      scopes: [
+        {
+          binId: "binny-discovery-topic",
+          identityId: "binny-discovery-profile",
+          origin: "http://linuxdo-e2e-source:8081",
+          scope: { kind: "category", id: 42 },
+          position: initialUpperBound,
+          lastRunId: initializedRun.runId,
+        },
+        {
+          binId: "binny-discovery-topic",
+          identityId: "binny-discovery-profile",
+          origin: "http://linuxdo-e2e-source:8081",
+          scope: { kind: "category", id: 43 },
+          position: initialUpperBound,
+          lastRunId: initializedRun.runId,
+        },
+      ],
+      lastIntent: {
+        runId: initializedRun.runId,
+        upperBound: initialUpperBound,
+        target: { kind: "targets", targets: categoryTarget },
+        phase: "completed",
+      },
+    });
+    assert.deepEqual(
+      (await sourceState()).events.map(({ action }) => action),
+      ["site-home", "session-current", "categories"],
+      "首次 sync 只发现当前真实范围，不扫描帖子流或主题历史。",
+    );
+    assert.deepEqual(
+      await searchArchiveSourceKeys("sync 第一轮发现的旧主题新回复"),
+      [],
+    );
+    assert.deepEqual(await searchArchiveSourceKeys("发现主题 2500"), []);
+
+    await updateFixtureState({ syncScenarioStage: 1 });
+    await setTestClockAt("2026-10-28T03:00:00.000Z");
+    await clearSourceEvents();
+    const firstIncrement = await trigger("sync", params);
+    assert.equal(
+      firstIncrement.status,
+      "completed",
+      JSON.stringify(firstIncrement),
+    );
+    assert.equal(syncReport(firstIncrement).phase, "completed");
+    const firstUpperBound = syncReport(firstIncrement).upperBound;
+    assert.ok(
+      Date.parse(firstUpperBound) >= Date.parse("2026-10-28T03:00:00.000Z") &&
+        Date.parse(firstUpperBound) < Date.parse("2026-10-28T03:00:30.000Z"),
+      firstUpperBound,
+    );
+    const expectedFirstRangeFrom = new Date(
+      Math.max(
+        Date.parse(initialUpperBound),
+        Date.parse(firstUpperBound) - 60 * 60 * 1_000,
+      ),
+    ).toISOString();
+    assert.deepEqual(syncReport(firstIncrement).scopes[0]?.range, {
+      from: expectedFirstRangeFrom,
+      to: firstUpperBound,
+    });
+    assert.ok(syncOutput(firstIncrement).observedPosts >= 2);
+    assert.ok(syncOutput(firstIncrement).topicsExamined >= 2);
+    assert.equal(
+      (await searchArchiveItem("sync 第一轮发现的旧主题新回复")).sourceKey.key,
+      "post:240010",
+    );
+    assert.equal(
+      (await searchArchiveItem("发现主题 2500")).sourceKey.key,
+      "post:250000",
+    );
+
+    await compose([
+      "up",
+      "--detach",
+      "--wait",
+      "--wait-timeout",
+      "90",
+      "--force-recreate",
+      "runtime-linuxdo",
+    ]);
+    await Promise.all([waitForRuntimeHealth(), waitForRuntime()]);
+
+    const stateAfterRecreate = await readBinRuntime("binny-discovery-topic");
+    const persistedSyncState = stateAfterRecreate.sourceStateSnapshot.sync as {
+      readonly scopes?: readonly {
+        readonly scope?: { readonly kind: string; readonly id: number };
+        readonly position?: string;
+        readonly lastRunId?: string;
+      }[];
+    };
+    assert.deepEqual(
+      persistedSyncState.scopes?.map(({ scope, position, lastRunId }) => ({
+        scope,
+        position,
+        lastRunId,
+      })),
+      [
+        {
+          scope: { kind: "category", id: 42 },
+          position: firstUpperBound,
+          lastRunId: firstIncrement.runId,
+        },
+        {
+          scope: { kind: "category", id: 43 },
+          position: firstUpperBound,
+          lastRunId: firstIncrement.runId,
+        },
+      ],
+    );
+    const browserStateAfterRecreate = await trigger("check", { topicId: 2401 });
+    assert.equal(browserStateAfterRecreate.status, "completed");
+    if (checkOutput(browserStateAfterRecreate).availability === "unavailable") {
+      await loginLinuxdoUser({
+        binId: "binny-discovery-topic",
+        cli,
+        browser: browser!,
+        publishedHost,
+        serverPort,
+        sourceOrigin: "http://linuxdo-e2e-source:8081",
+        sourceControlUrl: sourceUrl("/__control/state"),
+        username: "binny-discovery-user",
+        password: "linuxdo-fixture",
+      });
+      const authenticatedCheck = await trigger("check", { topicId: 2401 });
+      assert.equal(authenticatedCheck.status, "completed");
+      assert.equal(
+        checkOutput(authenticatedCheck).availability,
+        "available",
+        JSON.stringify(authenticatedCheck),
+      );
+    } else {
+      assert.equal(
+        checkOutput(browserStateAfterRecreate).availability,
+        "available",
+      );
+    }
+
+    await updateFixtureState({ syncScenarioStage: 2 });
+    await setTestClockAt("2026-10-28T04:00:00.000Z");
+    await clearSourceEvents();
+    const resumed = await trigger("sync", params);
+    assert.equal(resumed.status, "completed", JSON.stringify(resumed));
+    const resumedUpperBound = syncReport(resumed).upperBound;
+    assert.ok(
+      Date.parse(resumedUpperBound) >= Date.parse("2026-10-28T04:00:00.000Z") &&
+        Date.parse(resumedUpperBound) < Date.parse("2026-10-28T04:00:30.000Z"),
+      resumedUpperBound,
+    );
+    const expectedResumedRangeFrom = new Date(
+      Math.max(
+        Date.parse(firstUpperBound),
+        Date.parse(resumedUpperBound) - 60 * 60 * 1_000,
+      ),
+    ).toISOString();
+    assert.deepEqual(syncReport(resumed).scopes[0]?.range, {
+      from: expectedResumedRangeFrom,
+      to: resumedUpperBound,
+    });
+    assert.equal(
+      (await searchArchiveItem("sync 第二轮发现的旧主题新回复")).sourceKey.key,
+      "post:240011",
+    );
+
+    await clearSourceEvents();
+    const sourceEventsBeforeRestartSnapshot = await sourceState();
+    const resumedState = await readBinRuntime("binny-discovery-topic");
+    const sourceEventsAfterRestartSnapshot = await sourceState();
+    assert.deepEqual(
+      sourceEventsAfterRestartSnapshot.events,
+      sourceEventsBeforeRestartSnapshot.events,
+      "runtime 重启后的 bin get 读取也不应访问来源。",
+    );
+    const resumedSyncState = resumedState.sourceStateSnapshot.sync as {
+      readonly scopes?: readonly {
+        readonly scope?: { readonly kind: string; readonly id: number };
+        readonly position?: string;
+        readonly lastRunId?: string;
+      }[];
+    };
+    assert.deepEqual(
+      resumedSyncState.scopes?.map(({ scope, position, lastRunId }) => ({
+        scope,
+        position,
+        lastRunId,
+      })),
+      [
+        {
+          scope: { kind: "category", id: 42 },
+          position: resumedUpperBound,
+          lastRunId: resumed.runId,
+        },
+        {
+          scope: { kind: "category", id: 43 },
+          position: resumedUpperBound,
+          lastRunId: resumed.runId,
+        },
+      ],
+    );
+
+    await setTestClockAt(
+      new Date(Date.parse(resumedUpperBound) - 60_000).toISOString(),
+    );
+    await clearSourceEvents();
+    const noForwardRange = await trigger("sync", params);
+    assert.equal(
+      noForwardRange.status,
+      "completed",
+      JSON.stringify(noForwardRange),
+    );
+    assert.equal(syncOutput(noForwardRange).outcome, "no-forward-range");
+    assert.ok(
+      syncOutput(noForwardRange).scopes.every(
+        ({ status }) => status === "no-forward-range",
+      ),
+      JSON.stringify(noForwardRange),
+    );
+    assert.equal(
+      (await sourceState()).events.some(({ action }) => action === "post-list"),
+      false,
+      "U 不晚于 P 时应报告无正向范围且不扫描帖子流。",
+    );
+
+    await updateFixtureState({ syncScenarioStage: 3 });
+    await updateFixtureState({ topicListDelayMs: 1_500 });
+    const priorTopicLists = (await sourceState()).events.filter(
+      ({ action }) => action === "topic-list",
+    ).length;
+    const blocker = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "collect",
+        "--params",
+        JSON.stringify({
+          targets: categoryTarget,
+          date: "2026-10-28",
+          timeZone: "UTC",
+          maxTopics: 1,
+        }),
+      ]),
+      "triggered",
+    );
+    await waitForSourceEvent("topic-list", priorTopicLists + 1);
+    const queuedSync = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "sync",
+        "--params",
+        JSON.stringify(params),
+      ]),
+      "triggered",
+    );
+    assert.equal(queuedSync.status, "queued");
+    await setTestClockAt("2026-10-28T06:30:00.000Z");
+    await updateFixtureState({ topicListDelayMs: 0 });
+    const blockerResult = await waitForManualRun(blocker.runId);
+    assert.equal(
+      blockerResult.status,
+      "completed",
+      JSON.stringify(blockerResult),
+    );
+    const afterLongQueue = await waitForManualRun(queuedSync.runId);
+    assert.equal(
+      afterLongQueue.status,
+      "completed",
+      JSON.stringify(afterLongQueue),
+    );
+    const longUpperBound = syncReport(afterLongQueue).upperBound;
+    assert.ok(
+      Date.parse(longUpperBound) >= Date.parse("2026-10-28T06:30:00.000Z"),
+      longUpperBound,
+    );
+    assert.equal(syncReport(afterLongQueue).scopes[0]?.mode, "truncated");
+    const expectedLongRangeFrom = new Date(
+      Math.max(
+        Date.parse(resumedUpperBound),
+        Date.parse(longUpperBound) - 60 * 60 * 1_000,
+      ),
+    ).toISOString();
+    assert.deepEqual(syncReport(afterLongQueue).scopes[0]?.range, {
+      from: expectedLongRangeFrom,
+      to: longUpperBound,
+    });
+    assert.equal(
+      syncReport(afterLongQueue).scopes[0]?.skippedBefore,
+      resumedUpperBound,
+    );
+    assert.deepEqual(
+      await searchArchiveSourceKeys("超过一小时范围的旧回复"),
+      [],
+      "长时间排队时不应补采一小时窗口之外的旧回复。",
+    );
+
+    await setTestClockAt(
+      new Date(Date.parse(longUpperBound) + 60_000).toISOString(),
+    );
+    await clearSourceEvents();
+    const requestLimit = await trigger("sync", {
+      ...params,
+      maxRequests: 3,
+    });
+    assert.equal(
+      requestLimit.status,
+      "completed",
+      JSON.stringify(requestLimit),
+    );
+    assert.equal(syncReport(requestLimit).phase, "budget-exhausted");
+    assert.equal(syncReport(requestLimit).budget.stopReason, "request-limit");
+    assert.equal(syncOutput(requestLimit).outcome, "partial");
+    assert.ok(
+      syncOutput(requestLimit).scopes.some(
+        ({ scope, status }) =>
+          scope.kind === "category" && scope.id === 42 && status === "unknown",
+      ),
+      JSON.stringify(requestLimit),
+    );
+    assert.equal(
+      (await sourceState()).events.some(({ action }) => action === "post-list"),
+      false,
+      "请求额度耗尽后不得开始帖子流扫描。",
+    );
+
+    const topicParams = {
+      ...params,
+      targets: linuxdoTargets("pinned"),
+    };
+    const requestLimitUpperBound = syncReport(requestLimit).upperBound;
+    await setTestClockAt(
+      new Date(Date.parse(requestLimitUpperBound) + 60_000).toISOString(),
+    );
+    const topicInitialized = await trigger("sync", topicParams);
+    assert.equal(
+      topicInitialized.status,
+      "completed",
+      JSON.stringify(topicInitialized),
+    );
+    const topicInitializedUpperBound = syncReport(topicInitialized).upperBound;
+    await setTestClockAt(
+      new Date(Date.parse(topicInitializedUpperBound) + 60_000).toISOString(),
+    );
+    await updateFixtureState({
+      postRangeResponseStatus: 429,
+      postRangeRetryAfter: "60",
+    });
+    await clearSourceEvents();
+    const cooled = await trigger("sync", {
+      ...topicParams,
+      maxElapsedMs: 1_000,
+    });
+    assert.equal(cooled.status, "completed", JSON.stringify(cooled));
+    assert.equal(syncReport(cooled).phase, "partial");
+    assert.equal(syncReport(cooled).scopes[0]?.status, "unknown");
+    assert.equal(syncOutput(cooled).scopes[0]?.status, "unknown");
+    assert.equal(
+      syncReport(cooled).sourceAccess.rateLimitResponses[0]?.status,
+      429,
+    );
+    assert.equal(
+      syncReport(cooled).sourceAccess.rateLimitResponses[0]?.retryAfter,
+      "60",
+    );
+    assert.equal(
+      syncReport(cooled).sourceAccess.rateLimitResponses[0]?.outcome,
+      "cooled",
+    );
+
+    const cooledUpperBound = syncReport(cooled).upperBound;
+    await setTestClockAt(
+      new Date(Date.parse(cooledUpperBound) + 60_000).toISOString(),
+    );
+    await clearSourceEvents();
+    const waitLimit = await trigger("sync", {
+      ...topicParams,
+      maxElapsedMs: 5_000,
+    });
+    assert.equal(waitLimit.status, "completed", JSON.stringify(waitLimit));
+    assert.equal(syncReport(waitLimit).phase, "budget-exhausted");
+    assert.equal(
+      syncReport(waitLimit).budget.stopReason,
+      "wait-exceeds-budget",
+    );
+    assert.equal(syncOutput(waitLimit).outcome, "partial");
+    assert.equal(syncOutput(waitLimit).scopes.length, 0);
+    assert.deepEqual(
+      (await sourceState()).events,
+      [],
+      "冷却所需等待超过本轮预算时不应向受控来源发出请求。",
+    );
+    await setTestClockAt(
+      new Date(Date.parse(cooledUpperBound) + 5_000).toISOString(),
+    );
+    await updateFixtureState({
+      postRangeResponseStatus: null,
+      postRangeRetryAfter: null,
+    });
+    await setSourceAccessPolicy(0, 1);
+  } finally {
+    await updateFixtureState({
+      postRangeEnabled: false,
+      postRangeAddAfterFirstPage: false,
+      postRangeRepeatPage: false,
+      postRangeInvalidPage: null,
+      postRangeResponseStatus: null,
+      postRangeRetryAfter: null,
+      syncScenarioStage: 0,
+      siteHomeDelayMs: 0,
+    });
+    await setSourceAccessPolicy(0, 1);
+    await setTestClockOffset(0);
+  }
+}
+
+async function verifyCorruptSyncStateVisibility(): Promise<void> {
+  await clearSourceEvents();
+  const corruption = await compose([
+    "exec",
+    "--no-TTY",
+    "runtime-linuxdo",
+    "node",
+    "--input-type=module",
+    "-e",
+    'import { writeFileSync } from "node:fs"; writeFileSync("/var/lib/binny/runtime/binny.source-adapter-linuxdo.state.json", "{");',
+  ]);
+  assert.equal(corruption.code, 0, corruption.stderr);
+  await compose(["restart", "runtime-linuxdo"]);
+  await waitForRuntimeHealth();
+  await waitForRuntime();
+
+  const bin = cliData<{
+    readonly execution: PublicBinRuntime;
+  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
+  assert.equal(bin.execution.sourceStateSnapshot.freshness, "current");
+  assert.deepEqual(bin.execution.sourceStateSnapshot.sync, {
+    status: "unavailable",
+    reason: "persistent_state_unavailable",
+  });
+
+  const failedSync = await trigger("sync", {
+    targets: linuxdoTargets("category"),
+    maxPages: 20,
+    maxRequests: 100,
+    maxElapsedMs: 120_000,
+  });
+  assert.equal(failedSync.status, "failed", JSON.stringify(failedSync));
+  assert.equal(
+    failedSync.result?.error?.code,
+    "source_adapter_state_unavailable",
+  );
+  assert.equal(
+    (await sourceState()).events.some(
+      ({ action }) => action === "site-home" || action === "post-list",
+    ),
+    false,
+    "持久接续状态损坏时不应访问 Linux.do 来源。",
+  );
+  assert.equal(
+    JSON.stringify(failedSync).includes("source-adapter-state"),
+    false,
+  );
+}
+
 async function verifyDailyCollection(): Promise<void> {
   await updateFixtureState({ dailyCollectionEnabled: true });
 
@@ -4280,6 +4972,12 @@ async function verifyLogout(): Promise<void> {
 
 async function main(): Promise<void> {
   try {
+    if (
+      internalStep !== undefined &&
+      internalStep !== "bounded-sync" &&
+      internalStep !== "state-corruption"
+    )
+      throw new Error(`未知 Linux.do 验收内部步骤：${internalStep}`);
     await createOverlay();
     const config = await compose(["config", "--quiet"]);
     assert.equal(config.code, 0);
@@ -4350,6 +5048,22 @@ async function main(): Promise<void> {
     process.stdout.write("本次动作参数校验定位错误且不改长期配置通过。\n");
     const journey = await verifyLoginRequired();
     process.stdout.write("登录状态检查与 noVNC 人工登录通过。\n");
+    if (internalStep === "bounded-sync") {
+      await verifyBoundedSync();
+      await verifyCorruptSyncStateVisibility();
+      process.stdout.write(
+        "sync 首次初始化、连续新增、重启接续、一小时截断、预算停止与状态损坏保护通过。\n",
+      );
+      return;
+    }
+    if (internalStep === "state-corruption") {
+      await verifyCorruptSourceStateVisibility();
+      await verifyCorruptSyncStateVisibility();
+      process.stdout.write(
+        "来源准入与同步状态损坏按公开快照拒绝来源访问和相关动作。\n",
+      );
+      return;
+    }
     await verifySharedSourceAccess();
     process.stdout.write("Linux.do 跨动作／worker 来源准入及报告解释通过。\n");
     await assertSignedInCheckFailures();
@@ -4373,6 +5087,10 @@ async function main(): Promise<void> {
     await verifyPostCreatedRangeCollection();
     process.stdout.write(
       "帖子创建时间区间、before分页、扫描期间新增、上下文归档与未知覆盖报告通过。\n",
+    );
+    await verifyBoundedSync();
+    process.stdout.write(
+      "sync 首次初始化、连续新增、重启接续、一小时截断与预算停止通过。\n",
     );
     await verifyDiscovery();
     process.stdout.write(
@@ -4405,6 +5123,8 @@ async function main(): Promise<void> {
     process.stdout.write(
       "损坏的来源冷却状态公开为不可用并拒绝后续主动访问通过。\n",
     );
+    await verifyCorruptSyncStateVisibility();
+    process.stdout.write("接续状态损坏的公开诊断与来源访问阻止通过。\n");
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,

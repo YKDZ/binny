@@ -32,6 +32,8 @@ type SourceState = {
   readonly postRangeAddAfterFirstPage: boolean;
   readonly postRangeRepeatPage: boolean;
   readonly postRangeInvalidPage: number | null;
+  readonly postRangeResponseStatus: number | null;
+  readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
@@ -39,11 +41,13 @@ type SourceState = {
   readonly replyVersion: number;
   readonly addedReply: boolean;
   readonly discoveryAddedReply: boolean;
+  readonly syncScenarioStage: number;
   readonly omittedPostIds: readonly number[];
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
   readonly unavailableMediaStatus: number;
   readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
+  readonly siteHomeDelayMs?: number;
   readonly topicListDelayMs?: number;
   readonly mediaResponseDelayMs?: number;
   readonly rateLimitPath: string | null;
@@ -116,6 +120,8 @@ let activeState: SourceState = {
   postRangeAddAfterFirstPage: false,
   postRangeRepeatPage: false,
   postRangeInvalidPage: null,
+  postRangeResponseStatus: null,
+  postRangeRetryAfter: null,
   postRangePageSize: 2,
   paginationOrderMutationEnabled: false,
   invalidCreatedAtTopicIds: [],
@@ -123,11 +129,13 @@ let activeState: SourceState = {
   replyVersion: 1,
   addedReply: false,
   discoveryAddedReply: false,
+  syncScenarioStage: 0,
   omittedPostIds: [],
   unavailableTopicIds: [],
   unavailableMedia: [],
   unavailableMediaStatus: 503,
   topicCreatedAtOverrides: {},
+  siteHomeDelayMs: 0,
   topicListDelayMs: 0,
   mediaResponseDelayMs: 0,
   rateLimitPath: null,
@@ -320,6 +328,34 @@ function posts(): readonly Record<string, unknown>[] {
           ),
         ]
       : []),
+    ...(activeState.syncScenarioStage >= 1
+      ? [
+          {
+            ...post(
+              240_010,
+              6,
+              "<p>sync 第一轮发现的旧主题新回复。</p>",
+              "2026-10-28T02:45:00.000Z",
+              1,
+            ),
+            created_at: "2026-10-28T02:45:00.000Z",
+          },
+        ]
+      : []),
+    ...(activeState.syncScenarioStage >= 2
+      ? [
+          {
+            ...post(
+              240_011,
+              7,
+              "<p>sync 第二轮发现的旧主题新回复。</p>",
+              "2026-10-28T03:30:00.000Z",
+              1,
+            ),
+            created_at: "2026-10-28T03:30:00.000Z",
+          },
+        ]
+      : []),
   ].map((value, index) =>
     index === 0 ? { ...value, title: rootTitle } : value,
   );
@@ -417,9 +453,48 @@ function postRangeFixtures(
       updated_at: "2026-10-28T01:00:00.000Z",
     },
   ];
-  return [...(includeInserted ? [insertion] : []), ...values].toSorted(
-    (first, second) => Number(second.id) - Number(first.id),
+  const syncTopic: Record<string, unknown>[] = [];
+  if (activeState.syncScenarioStage >= 1) {
+    const syncTopicRoot = (
+      discoveredTopic(2500) as {
+        readonly post_stream: {
+          readonly posts: readonly Record<string, unknown>[];
+        };
+      }
+    ).post_stream.posts[0];
+    if (syncTopicRoot === undefined)
+      throw new Error("sync 夹具缺少新增主题主帖。");
+    syncTopic.push({
+      ...syncTopicRoot,
+      created_at: "2026-10-28T02:30:00.000Z",
+      updated_at: "2026-10-28T02:30:00.000Z",
+    });
+  }
+  const syncReplies = existing.filter(
+    ({ id }) => id === 240_010 || id === 240_011,
   );
+  const oldSyncReply: Record<string, unknown>[] =
+    activeState.syncScenarioStage >= 3
+      ? [
+          {
+            ...post(
+              240_012,
+              8,
+              "<p>超过一小时范围的旧回复。</p>",
+              "2026-10-28T04:30:00.000Z",
+              1,
+            ),
+            created_at: "2026-10-28T04:30:00.000Z",
+          },
+        ]
+      : [];
+  return [
+    ...(includeInserted ? [insertion] : []),
+    ...syncTopic,
+    ...syncReplies,
+    ...oldSyncReply,
+    ...values,
+  ].toSorted((first, second) => Number(second.id) - Number(first.id));
 }
 
 function legacyTopicCreatedAt(topicId: number): string {
@@ -770,6 +845,14 @@ function updateState(value: unknown): boolean {
       return false;
     }
   }
+  if (
+    "syncScenarioStage" in updates &&
+    (!Number.isSafeInteger(updates.syncScenarioStage) ||
+      Number(updates.syncScenarioStage) < 0 ||
+      Number(updates.syncScenarioStage) > 3)
+  ) {
+    return false;
+  }
   for (const key of [
     "targetUnavailablePage",
     "targetChallengePage",
@@ -781,6 +864,18 @@ function updateState(value: unknown): boolean {
     if (
       key in updates &&
       updates[key] !== null &&
+      (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 0)
+    ) {
+      return false;
+    }
+  }
+  for (const key of [
+    "siteHomeDelayMs",
+    "topicListDelayMs",
+    "mediaResponseDelayMs",
+  ] as const) {
+    if (
+      key in updates &&
       (!Number.isSafeInteger(updates[key]) || Number(updates[key]) < 0)
     ) {
       return false;
@@ -825,6 +920,22 @@ function updateState(value: unknown): boolean {
     updates.postRangeInvalidPage !== null &&
     (!Number.isSafeInteger(updates.postRangeInvalidPage) ||
       Number(updates.postRangeInvalidPage) < 1)
+  ) {
+    return false;
+  }
+  if (
+    "postRangeResponseStatus" in updates &&
+    updates.postRangeResponseStatus !== null &&
+    updates.postRangeResponseStatus !== 429 &&
+    updates.postRangeResponseStatus !== 503
+  ) {
+    return false;
+  }
+  if (
+    "postRangeRetryAfter" in updates &&
+    updates.postRangeRetryAfter !== null &&
+    (typeof updates.postRangeRetryAfter !== "string" ||
+      updates.postRangeRetryAfter.length > 256)
   ) {
     return false;
   }
@@ -970,6 +1081,7 @@ const server = createServer((request, response) => {
     }
     if (request.method === "GET" && pathname === "/") {
       record("site-home", pathname, authenticated);
+      await delay(activeState.siteHomeDelayMs ?? 0);
       if (!activeState.navigationRace) {
         response.writeHead(404);
         response.end("Linux.do 受控首页。");
@@ -1233,6 +1345,16 @@ const server = createServer((request, response) => {
         return;
       }
       postRangeReadCount += 1;
+      if (activeState.postRangeResponseStatus !== null) {
+        response.writeHead(activeState.postRangeResponseStatus, {
+          "content-type": "application/json; charset=utf-8",
+          ...(activeState.postRangeRetryAfter === null
+            ? {}
+            : { "retry-after": activeState.postRangeRetryAfter }),
+        });
+        response.end(JSON.stringify({ errors: ["受控来源暂时限流。"] }));
+        return;
+      }
       if (activeState.postRangeInvalidPage === postRangeReadCount) {
         sendJson(response, 200, {});
         return;

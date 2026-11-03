@@ -6,6 +6,7 @@ import {
   archiveJsonValueSchema,
   jsonObjectSchema,
   manualRunExecutionSchema,
+  type JsonObject,
   type ManualRunCompletion,
   type ManualRunExecution,
 } from "@binny/contracts";
@@ -17,6 +18,7 @@ import {
   createSourceAccessClient,
   sourceAccessConfigFromAdapterConfig,
   sourceAdapterActionError,
+  SourceAccessDeadlineExceededError,
   SourceAccessStateUnavailableError,
   type SourceAccessAcquireInput,
   type SourceAccessLease,
@@ -64,7 +66,12 @@ type PendingSourceAccess = {
   readonly resolve: (value?: unknown) => void;
   readonly reject: (error: unknown) => void;
 };
+type PendingAdapterState = {
+  readonly resolve: (value?: JsonObject) => void;
+  readonly reject: (error: unknown) => void;
+};
 const pendingSourceAccess = new Map<string, PendingSourceAccess>();
+const pendingAdapterState = new Map<string, PendingAdapterState>();
 
 function decodeMessage(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -181,6 +188,26 @@ const sourceAccessTransport: SourceAccessTransport = {
   },
 };
 
+function requestAdapterState(
+  runId: string,
+  type: "adapter-state-load" | "adapter-state-save",
+  state?: JsonObject,
+): Promise<JsonObject | undefined> {
+  const requestId = randomUUID();
+  return new Promise((resolve, reject) => {
+    pendingAdapterState.set(requestId, { resolve, reject });
+    void send({
+      type,
+      requestId,
+      runId,
+      ...(state === undefined ? {} : { state }),
+    }).catch((error: unknown) => {
+      pendingAdapterState.delete(requestId);
+      reject(error);
+    });
+  });
+}
+
 process.on("message", (value: unknown) => {
   const message = decodeMessage(value);
   if (typeof message !== "object" || message === null || !("type" in message))
@@ -232,11 +259,49 @@ process.on("message", (value: unknown) => {
     pending.reject(
       record.code === "source_access_state_unavailable"
         ? new SourceAccessStateUnavailableError()
-        : new Error(
-            typeof record.message === "string"
-              ? record.message
-              : "来源准入请求失败。",
-          ),
+        : record.code === "source_access_deadline_exceeded"
+          ? new SourceAccessDeadlineExceededError()
+          : new Error(
+              typeof record.message === "string"
+                ? record.message
+                : "来源准入请求失败。",
+            ),
+    );
+    return;
+  }
+  if (record.type === "adapter-state-loaded") {
+    const pending = pendingAdapterState.get(record.requestId);
+    if (pending === undefined) return;
+    pendingAdapterState.delete(record.requestId);
+    if (record.state === undefined) {
+      pending.resolve(undefined);
+      return;
+    }
+    const state = jsonObjectSchema.safeParse(record.state);
+    if (!state.success) {
+      pending.reject(new Error("运行器返回了无效的信源适配器状态。"));
+      return;
+    }
+    pending.resolve(state.data);
+    return;
+  }
+  if (record.type === "adapter-state-saved") {
+    const pending = pendingAdapterState.get(record.requestId);
+    if (pending === undefined) return;
+    pendingAdapterState.delete(record.requestId);
+    pending.resolve();
+    return;
+  }
+  if (record.type === "adapter-state-rejected") {
+    const pending = pendingAdapterState.get(record.requestId);
+    if (pending === undefined) return;
+    pendingAdapterState.delete(record.requestId);
+    pending.reject(
+      new Error(
+        typeof record.message === "string"
+          ? record.message
+          : "信源适配器状态不可用。",
+      ),
     );
   }
 });
@@ -361,6 +426,14 @@ async function executeRun(
       signal: actionAbort.signal,
       ...(browser === undefined ? {} : { browser }),
       ...(sourceAccess === undefined ? {} : { sourceAccess }),
+      persistentState: {
+        async load() {
+          return await requestAdapterState(run.runId, "adapter-state-load");
+        },
+        async save(state: JsonObject) {
+          await requestAdapterState(run.runId, "adapter-state-save", state);
+        },
+      },
       report: async (value: unknown) => {
         if (action.report === undefined) {
           throw sourceAdapterActionError({

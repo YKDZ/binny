@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createApiClient } from "@binny/api/client";
-import type { SourceAdapterManifest } from "@binny/contracts";
+import type { JsonObject, SourceAdapterManifest } from "@binny/contracts";
 import {
   manualRunFailureSchema,
   type ArchiveCommit,
@@ -16,6 +16,15 @@ import { z } from "zod";
 
 import type { SourceAccessClient } from "./source-access.ts";
 
+export {
+  createSourceAccessBudget,
+  SourceAccessBudgetExceededError,
+} from "./source-access-budget.ts";
+export type {
+  SourceAccessBudgetClient,
+  SourceAccessBudgetSnapshot,
+  SourceAccessBudgetStopReason,
+} from "./source-access-budget.ts";
 export {
   createSourceAccessCoordinator,
   createSourceAccessClient,
@@ -50,7 +59,11 @@ export {
   SourceAccessStateUnavailableError,
 } from "./source-access.ts";
 
-export type { SourceAdapterManifest, JsonSchema } from "@binny/contracts";
+export type {
+  JsonObject,
+  SourceAdapterManifest,
+  JsonSchema,
+} from "@binny/contracts";
 export type { ArchiveCommit, ArchiveResourceMetadata } from "@binny/contracts";
 
 type SourceAdapterApiClient = ReturnType<typeof createApiClient>;
@@ -58,6 +71,11 @@ type SourceAdapterApiClient = ReturnType<typeof createApiClient>;
 export type ArchiveResourceUpload =
   | { readonly ok: true; readonly resource: ArchiveResourceMetadata }
   | { readonly ok: false; readonly error: ArchiveError };
+
+export type SourceAdapterPersistentStateStore = {
+  load(): Promise<JsonObject | undefined>;
+  save(state: JsonObject): Promise<void>;
+};
 
 export type SourceAdapterArchiveSubmission = Omit<
   ArchiveSubmissionInput,
@@ -158,6 +176,7 @@ type SourceAdapterContextBase<TConfig> = {
   readonly signal: AbortSignal;
   readonly browser?: SourceAdapterBrowserConnection;
   readonly sourceAccess?: SourceAccessClient;
+  readonly persistentState?: SourceAdapterPersistentStateStore;
   readonly archive: {
     submit(input: SourceAdapterArchiveSubmission): Promise<ArchiveCommit>;
   };
@@ -394,6 +413,8 @@ export interface SourceAdapterDefinition<
   readonly description?: string;
   readonly environment: SourceAdapterEnvironment;
   readonly configSchema: TConfig;
+  readonly stateSchema?: z.ZodType;
+  readonly stateSnapshotSchema?: z.ZodType;
   readonly actions: TActions;
 }
 
@@ -433,6 +454,8 @@ export function defineSourceAdapter<
   readonly description?: string;
   readonly environment: SourceAdapterEnvironment;
   readonly configSchema: TConfig;
+  readonly stateSchema?: z.ZodType;
+  readonly stateSnapshotSchema?: z.ZodType;
   readonly actions: TActions & TypedSourceAdapterActions<TConfig, TActions>;
 }): SourceAdapterDefinition<
   TConfig,
@@ -471,6 +494,18 @@ export function sourceAdapterManifest(
       : { description: definition.description }),
     environment: definition.environment,
     configSchema: z.toJSONSchema(definition.configSchema, { io: "input" }),
+    ...(definition.stateSchema === undefined
+      ? {}
+      : {
+          stateSchema: z.toJSONSchema(definition.stateSchema, { io: "output" }),
+        }),
+    ...(definition.stateSnapshotSchema === undefined
+      ? {}
+      : {
+          stateSnapshotSchema: z.toJSONSchema(definition.stateSnapshotSchema, {
+            io: "output",
+          }),
+        }),
     actions: actionsWithRequiredActions,
   };
 }

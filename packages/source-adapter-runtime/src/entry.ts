@@ -15,6 +15,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  jsonObjectSchema,
   manualRunCompletionSchema,
   runtimeHeartbeatIntervalMs,
   runtimeEnvironmentKindSchema,
@@ -39,6 +40,7 @@ import {
   type SourceAccessCoordinator,
   type SourceAccessConfig,
   type SourceAccessResponse,
+  SourceAccessDeadlineExceededError,
   SourceAccessPersistentStoreError,
 } from "@binny/source-adapter-sdk";
 
@@ -49,6 +51,10 @@ import {
 } from "./browser-lifecycle.ts";
 import { createRuntimeServer } from "./runtime-server.ts";
 import { openPersistentSourceAccessCoordinator } from "./source-access.ts";
+import {
+  openPersistentSourceAdapterState,
+  type PersistentSourceAdapterState,
+} from "./sync-state.ts";
 
 const sourceAdapterPath =
   process.env.BINNY_SOURCE_ADAPTER_ENTRY ?? "/app/dist/index.js";
@@ -229,6 +235,19 @@ if (sourceAdapter === undefined)
 
 const activeSourceAdapter: SourceAdapterDefinition = sourceAdapter;
 const manifest = sourceAdapterManifest(activeSourceAdapter);
+let persistentSourceAdapterState: PersistentSourceAdapterState | undefined;
+let persistentSourceAdapterStateUnavailable = false;
+try {
+  persistentSourceAdapterState = await openPersistentSourceAdapterState(
+    join(dirname(ownerLock.path), `${manifest.id}.state.json`),
+    activeSourceAdapter.stateSchema,
+  );
+} catch (error) {
+  persistentSourceAdapterStateUnavailable = true;
+  process.stderr.write(
+    `信源适配器持久状态不可用，相关同步已停止：${error instanceof Error ? error.message : String(error)}\n`,
+  );
+}
 let browserPower: BrowserPower = {
   status: environmentKind === "browser" ? "stopped" : "unavailable",
 };
@@ -559,6 +578,30 @@ function sourceAccessResponseInput(
 
 function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
   const updatedAt = new Date().toISOString();
+  let sync = persistentSourceAdapterStateUnavailable
+    ? unavailableSourceAdapterStateSnapshot()
+    : persistentSourceAdapterState?.snapshot();
+  if (sync !== undefined && !persistentSourceAdapterStateUnavailable) {
+    const checked = activeSourceAdapter.stateSnapshotSchema?.safeParse(sync);
+    if (checked !== undefined && !checked.success) {
+      persistentSourceAdapterStateUnavailable = true;
+      process.stderr.write(
+        "信源适配器状态快照不符合原生 schema，相关同步已停止。\n",
+      );
+      sync = unavailableSourceAdapterStateSnapshot();
+    } else if (checked?.success) {
+      const json = jsonObjectSchema.safeParse(checked.data);
+      if (json.success) {
+        sync = json.data;
+      } else {
+        persistentSourceAdapterStateUnavailable = true;
+        process.stderr.write(
+          "信源适配器状态快照不是 JSON 对象，相关同步已停止。\n",
+        );
+        sync = unavailableSourceAdapterStateSnapshot();
+      }
+    }
+  }
   if (sourceAccessUnavailable || sourceAccessCoordinator === undefined) {
     return {
       updatedAt,
@@ -566,6 +609,7 @@ function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
         status: "unavailable",
         reason: "persistent_state_unavailable",
       },
+      ...(sync === undefined ? {} : { sync }),
     };
   }
   const saved = sourceAccessCoordinator.snapshot();
@@ -602,6 +646,14 @@ function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
         }),
       ),
     },
+    ...(sync === undefined ? {} : { sync }),
+  };
+}
+
+function unavailableSourceAdapterStateSnapshot() {
+  return {
+    status: "unavailable" as const,
+    reason: "persistent_state_unavailable" as const,
   };
 }
 
@@ -640,10 +692,82 @@ function startActionWorker(
     const message = parseWorkerMessage(value);
     if (typeof message !== "object" || message === null || !("type" in message))
       return;
+    if (
+      message.type === "adapter-state-load" ||
+      message.type === "adapter-state-save"
+    ) {
+      const record = message as Record<string, unknown>;
+      if (typeof record.requestId !== "string") return;
+      if (record.runId !== run.runId) {
+        void sendWorkerMessage(worker, {
+          type: "adapter-state-rejected",
+          requestId: record.requestId,
+          message: "信源适配器持久状态请求不属于当前运行。",
+        });
+        return;
+      }
+      if (
+        persistentSourceAdapterStateUnavailable ||
+        persistentSourceAdapterState === undefined
+      ) {
+        void sendWorkerMessage(worker, {
+          type: "adapter-state-rejected",
+          requestId: record.requestId,
+          code: "source_adapter_state_unavailable",
+          message: "信源适配器持久状态不可用，相关同步已停止。",
+        });
+        return;
+      }
+      if (message.type === "adapter-state-load") {
+        const state = persistentSourceAdapterState.snapshot();
+        void sendWorkerMessage(worker, {
+          type: "adapter-state-loaded",
+          requestId: record.requestId,
+          ...(state === undefined ? {} : { state }),
+        }).catch((error: unknown) => {
+          process.stderr.write(
+            `无法返回信源适配器持久状态：${error instanceof Error ? error.message : String(error)}\n`,
+          );
+        });
+        return;
+      }
+      if (!Object.hasOwn(record, "state")) {
+        void sendWorkerMessage(worker, {
+          type: "adapter-state-rejected",
+          requestId: record.requestId,
+          message: "信源适配器持久状态写入内容缺失。",
+        });
+        return;
+      }
+      void persistentSourceAdapterState
+        .replace(record.state)
+        .then(async () => {
+          await sendHeartbeatNow(false, false);
+          await sendWorkerMessage(worker, {
+            type: "adapter-state-saved",
+            requestId: record.requestId,
+          });
+        })
+        .catch(async (error: unknown) => {
+          persistentSourceAdapterStateUnavailable = true;
+          await sendHeartbeatNow(false, false);
+          await sendWorkerMessage(worker, {
+            type: "adapter-state-rejected",
+            requestId: record.requestId,
+            code: "source_adapter_state_unavailable",
+            message:
+              error instanceof Error
+                ? error.message
+                : "信源适配器持久状态无法保存。",
+          }).catch(() => undefined);
+        });
+      return;
+    }
     if (message.type === "source-access-acquire") {
       const record = message as Record<string, unknown>;
       if (
         declarations === undefined ||
+        persistentSourceAdapterStateUnavailable ||
         sourceAccessUnavailable ||
         sourceAccessCoordinator === undefined ||
         typeof record.requestId !== "string" ||
@@ -652,11 +776,14 @@ function startActionWorker(
         void sendWorkerMessage(worker, {
           type: "source-access-rejected",
           requestId: record.requestId,
-          ...(sourceAccessUnavailable || sourceAccessCoordinator === undefined
+          ...(persistentSourceAdapterStateUnavailable ||
+          sourceAccessUnavailable ||
+          sourceAccessCoordinator === undefined
             ? { code: "source_access_state_unavailable" }
             : {}),
-          message:
-            sourceAccessUnavailable || sourceAccessCoordinator === undefined
+          message: persistentSourceAdapterStateUnavailable
+            ? "信源适配器持久状态不可用，相关来源访问已停止。"
+            : sourceAccessUnavailable || sourceAccessCoordinator === undefined
               ? "来源访问状态不可用，相关来源访问已停止。"
               : "本次运行没有可用的来源准入声明。",
         });
@@ -700,12 +827,19 @@ function startActionWorker(
             sourceAccessUnavailable = true;
           accessRequests.delete(record.requestId as string);
           if (!worker.child.connected) return;
+          const errorCode =
+            typeof error === "object" && error !== null && "code" in error
+              ? error.code
+              : undefined;
           await sendWorkerMessage(worker, {
             type: "source-access-rejected",
             requestId: record.requestId,
             ...(error instanceof SourceAccessPersistentStoreError
               ? { code: "source_access_state_unavailable" }
-              : {}),
+              : error instanceof SourceAccessDeadlineExceededError ||
+                  errorCode === "source_access_deadline_exceeded"
+                ? { code: "source_access_deadline_exceeded" }
+                : {}),
             message:
               error instanceof Error ? error.message : "来源准入请求失败。",
           }).catch(() => undefined);
@@ -1009,6 +1143,26 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
       await finishRun(run, interruptFailure());
       await confirmNotStarted();
     }
+    return;
+  }
+
+  if (
+    activeSourceAdapter.stateSchema !== undefined &&
+    persistentSourceAdapterStateUnavailable
+  ) {
+    await confirmNotStarted();
+    await finishRun(run, {
+      status: "failed",
+      completedScopes: [],
+      error: {
+        code: "source_adapter_state_unavailable",
+        message: "信源适配器持久状态不可用，相关动作没有启动。",
+        impact: "本次运行没有发起来源请求；运行器没有重置或推进接续位置。",
+        suggestion: "检查信源适配器状态并恢复有效备份后重新触发。",
+        requiresHuman: true,
+      },
+    });
+    await acknowledgeStoppedRun(run.runId);
     return;
   }
 
