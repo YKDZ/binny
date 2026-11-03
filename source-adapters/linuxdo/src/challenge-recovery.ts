@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 
+import type { SourceAccessKind } from "@binny/source-adapter-sdk";
 import type { CDPSession, Page } from "patchright-core";
 
 export type ChallengeRecoverySummary = {
@@ -19,10 +20,25 @@ export class ChallengeRecovery {
 
   private readonly page: Page;
   private readonly signal: AbortSignal;
+  private readonly navigate: (
+    href: string,
+    timeoutMs: number,
+    source: SourceAccessKind,
+  ) => Promise<unknown>;
 
-  constructor(page: Page, signal: AbortSignal) {
+  constructor(
+    page: Page,
+    signal: AbortSignal,
+    navigate: (
+      href: string,
+      timeoutMs: number,
+      source: SourceAccessKind,
+    ) => Promise<unknown> = (href, timeoutMs) =>
+      page.goto(href, { waitUntil: "domcontentloaded", timeout: timeoutMs }),
+  ) {
     this.page = page;
     this.signal = signal;
+    this.navigate = navigate;
   }
 
   async recover<T>(
@@ -30,6 +46,7 @@ export class ChallengeRecovery {
     read: (remainingMs: number) => Promise<T>,
     valid: (value: T) => boolean,
     blocked: (value: T) => boolean,
+    source: SourceAccessKind = "site",
   ): Promise<T | undefined> {
     this.signal.throwIfAborted();
     this.failureMessage = undefined;
@@ -90,12 +107,7 @@ export class ChallengeRecovery {
         }),
       );
       navigating = true;
-      await within(() =>
-        this.page.goto(url.href, {
-          waitUntil: "domcontentloaded",
-          timeout: timeout(),
-        }),
-      );
+      await within(() => this.navigate(url.href, timeout(), source));
       navigating = false;
       while (remaining() > 0) {
         this.signal.throwIfAborted();

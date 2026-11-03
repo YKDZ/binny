@@ -39,14 +39,17 @@ type SourceState = {
   readonly unavailableMediaStatus: number;
   readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
   readonly topicListDelayMs?: number;
+  readonly mediaResponseDelayMs?: number;
 };
 
 type SourceEvent = {
+  readonly at: number;
   readonly action: string;
   readonly path: string;
   readonly authenticated?: boolean;
   readonly topicIds?: readonly number[];
   readonly moreTopicsUrl?: string | null;
+  readonly activeMediaRequests?: number;
 };
 
 const rootPostId = 240_001;
@@ -110,9 +113,11 @@ let activeState: SourceState = {
   unavailableMediaStatus: 503,
   topicCreatedAtOverrides: {},
   topicListDelayMs: 0,
+  mediaResponseDelayMs: 0,
 };
 const events: SourceEvent[] = [];
 let navigationRequested = false;
+let activeMediaRequests = 0;
 
 function sendJson(
   response: import("node:http").ServerResponse,
@@ -150,14 +155,79 @@ function record(
     readonly topicIds: readonly number[];
     readonly moreTopicsUrl: string | null;
   },
+  media?: { readonly activeMediaRequests: number },
 ): void {
   events.push({
+    at: Date.now(),
     action,
     path,
     ...(authenticated === undefined ? {} : { authenticated }),
     ...(pagination === undefined ? {} : pagination),
+    ...(media === undefined ? {} : media),
   });
   if (events.length > 10_000) events.shift();
+}
+
+async function responseHasFinished(
+  response: import("node:http").ServerResponse,
+): Promise<void> {
+  if (response.writableFinished || response.destroyed) return;
+  await new Promise<void>((resolve) => {
+    response.once("finish", resolve);
+    response.once("close", resolve);
+  });
+}
+
+async function serveMedia(
+  request: import("node:http").IncomingMessage,
+  response: import("node:http").ServerResponse,
+  pathname: string,
+  authenticated: boolean,
+): Promise<void> {
+  activeMediaRequests++;
+  record("media", pathname, authenticated, undefined, {
+    activeMediaRequests,
+  });
+  try {
+    await delay(activeState.mediaResponseDelayMs ?? 0);
+    if (!authenticated && request.headers.host !== "linuxdo-e2e-media:8081") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    if (pathname === challengeMediaPath && activeState.challengeMedia) {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end("<!doctype html><html><title>登录挑战</title></html>");
+      return;
+    }
+    if (activeState.unavailableMedia.includes(pathname)) {
+      response.writeHead(activeState.unavailableMediaStatus, {
+        "content-type": "text/plain; charset=utf-8",
+      });
+      response.end("受控媒体暂时不可用。");
+      return;
+    }
+    const bytes =
+      pathname === attachmentPath
+        ? attachmentBytes
+        : pathname === jsonAttachmentPath
+          ? jsonAttachmentBytes
+          : photoBytes;
+    response.writeHead(200, {
+      "content-type":
+        pathname === attachmentPath
+          ? "application/pdf"
+          : pathname === jsonAttachmentPath
+            ? "application/json; charset=utf-8"
+            : "image/png",
+    });
+    response.end(bytes);
+  } finally {
+    await responseHasFinished(response);
+    activeMediaRequests--;
+  }
 }
 
 function post(
@@ -190,7 +260,7 @@ function posts(): readonly Record<string, unknown>[] {
     post(
       rootPostId,
       1,
-      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}" data-download-href="${lightboxDownloadPath}"><picture><source type="image/webp" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x"><img src="${photoPath}" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x" alt="主题封面"></picture></a></div><p><a class="attachment" href="${attachmentPath}">主题资料.pdf</a></p><p><a class="attachment" href="${jsonAttachmentPath}">主题元数据.json</a></p>${activeState.challengeMedia ? `<p><a class="attachment" href="${challengeMediaPath}">登录挑战.html</a></p>` : ""}`,
+      `<p>主题正文版本 ${String(activeState.topicVersion)}</p><div class="lightbox-wrapper"><a class="lightbox" href="${photoPath}" data-download-href="${lightboxDownloadPath}"><picture><source type="image/webp" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x"><img src="${photoPath}" srcset="${smallPhotoCandidate} 1x, ${largePhotoCandidate} 2x" alt="主题封面"></picture></a></div><p><a class="attachment" href="http://linuxdo-e2e-media:8081${attachmentPath}">主题资料.pdf</a></p><p><a class="attachment" href="${jsonAttachmentPath}">主题元数据.json</a></p>${activeState.challengeMedia ? `<p><a class="attachment" href="${challengeMediaPath}">登录挑战.html</a></p>` : ""}`,
       `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
     ),
     post(
@@ -659,6 +729,14 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    "mediaResponseDelayMs" in updates &&
+    (!Number.isSafeInteger(updates.mediaResponseDelayMs) ||
+      Number(updates.mediaResponseDelayMs) < 0 ||
+      Number(updates.mediaResponseDelayMs) > 30_000)
+  ) {
+    return false;
+  }
   for (const key of [
     "nativeChallengePaths",
     "omittedPostIds",
@@ -715,11 +793,13 @@ const server = createServer((request, response) => {
       response.end("<!doctype html><html><body>页面导航完成。</body></html>");
       return;
     }
-    if (
-      request.method === "GET" &&
-      pathname === "/" &&
-      activeState.navigationRace
-    ) {
+    if (request.method === "GET" && pathname === "/") {
+      record("site-home", pathname, authenticated);
+      if (!activeState.navigationRace) {
+        response.writeHead(404);
+        response.end("Linux.do 受控首页。");
+        return;
+      }
       response.writeHead(200, { "content-type": "text/html" });
       response.end(`<!doctype html><html><body><script>
         const timer = setInterval(async () => {
@@ -1083,41 +1163,7 @@ const server = createServer((request, response) => {
       return;
     }
     if (pathname.startsWith("/uploads/") && request.method === "GET") {
-      record("media", pathname, authenticated);
-      if (!authenticated) {
-        response.writeHead(404);
-        response.end();
-        return;
-      }
-      if (pathname === challengeMediaPath && activeState.challengeMedia) {
-        response.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-        });
-        response.end("<!doctype html><html><title>登录挑战</title></html>");
-        return;
-      }
-      if (activeState.unavailableMedia.includes(pathname)) {
-        response.writeHead(activeState.unavailableMediaStatus, {
-          "content-type": "text/plain; charset=utf-8",
-        });
-        response.end("受控媒体暂时不可用。");
-        return;
-      }
-      const bytes =
-        pathname === attachmentPath
-          ? attachmentBytes
-          : pathname === jsonAttachmentPath
-            ? jsonAttachmentBytes
-            : photoBytes;
-      response.writeHead(200, {
-        "content-type":
-          pathname === attachmentPath
-            ? "application/pdf"
-            : pathname === jsonAttachmentPath
-              ? "application/json; charset=utf-8"
-              : "image/png",
-      });
-      response.end(bytes);
+      await serveMedia(request, response, pathname, authenticated);
       return;
     }
 

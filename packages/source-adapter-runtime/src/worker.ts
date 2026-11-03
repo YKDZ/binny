@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { createApiClient } from "@binny/api/client";
@@ -13,7 +14,12 @@ import {
   parseSourceAdapterInput,
   sourceAdapterManifest,
   isSourceAdapterActionError,
+  createSourceAccessClient,
+  sourceAccessConfigFromAdapterConfig,
   sourceAdapterActionError,
+  type SourceAccessAcquireInput,
+  type SourceAccessLease,
+  type SourceAccessTransport,
   type SourceAdapterDefinition,
 } from "@binny/source-adapter-sdk";
 import {
@@ -51,6 +57,125 @@ const client = createApiClient(apiUrl, {
 });
 let cancelled = false;
 let actionAbort: AbortController | undefined;
+type PendingSourceAccess = {
+  readonly resolve: (value?: SourceAccessLease) => void;
+  readonly reject: (error: unknown) => void;
+};
+const pendingSourceAccess = new Map<string, PendingSourceAccess>();
+
+function decodeMessage(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+const sourceAccessTransport: SourceAccessTransport = {
+  acquire(input: SourceAccessAcquireInput, signal: AbortSignal) {
+    const requestId = randomUUID();
+    return new Promise<SourceAccessLease>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new DOMException("已取消", "AbortError"));
+        return;
+      }
+      const abort = () => {
+        pendingSourceAccess.delete(requestId);
+        void send({ type: "source-access-cancel", requestId });
+        reject(signal.reason ?? new DOMException("已取消", "AbortError"));
+      };
+      pendingSourceAccess.set(requestId, {
+        resolve: (lease) => {
+          signal.removeEventListener("abort", abort);
+          if (lease === undefined) {
+            reject(new Error("运行器没有返回来源准入许可。"));
+          } else {
+            resolve(lease);
+          }
+        },
+        reject: (error) => {
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      });
+      signal.addEventListener("abort", abort, { once: true });
+      void send({ type: "source-access-acquire", requestId, input }).catch(
+        (error: unknown) => {
+          pendingSourceAccess.delete(requestId);
+          signal.removeEventListener("abort", abort);
+          reject(error);
+        },
+      );
+    });
+  },
+  release(leaseId) {
+    const requestId = randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      pendingSourceAccess.set(requestId, {
+        resolve: () => resolve(),
+        reject,
+      });
+      void send({ type: "source-access-release", requestId, leaseId }).catch(
+        (error: unknown) => {
+          pendingSourceAccess.delete(requestId);
+          reject(error);
+        },
+      );
+    });
+  },
+};
+
+process.on("message", (value: unknown) => {
+  const message = decodeMessage(value);
+  if (typeof message !== "object" || message === null || !("type" in message))
+    return;
+  const record = message as Record<string, unknown>;
+  if (typeof record.requestId !== "string") return;
+  if (record.type === "source-access-granted") {
+    const pending = pendingSourceAccess.get(record.requestId);
+    if (pending === undefined) {
+      if (typeof record.leaseId === "string")
+        void send({
+          type: "source-access-release",
+          requestId: randomUUID(),
+          leaseId: record.leaseId,
+        });
+      return;
+    }
+    pendingSourceAccess.delete(record.requestId);
+    if (
+      typeof record.leaseId !== "string" ||
+      typeof record.waitedMs !== "number" ||
+      !Number.isSafeInteger(record.waitedMs) ||
+      record.waitedMs < 0
+    ) {
+      pending.reject(new Error("运行器返回了无效的来源准入许可。"));
+      return;
+    }
+    pending.resolve({ leaseId: record.leaseId, waitedMs: record.waitedMs });
+    return;
+  }
+  if (record.type === "source-access-released") {
+    const pending = pendingSourceAccess.get(record.requestId);
+    if (pending === undefined) return;
+    pendingSourceAccess.delete(record.requestId);
+    pending.resolve();
+    return;
+  }
+  if (record.type === "source-access-rejected") {
+    const pending = pendingSourceAccess.get(record.requestId);
+    if (pending === undefined) return;
+    pendingSourceAccess.delete(record.requestId);
+    pending.reject(
+      new Error(
+        typeof record.message === "string"
+          ? record.message
+          : "来源准入请求失败。",
+      ),
+    );
+  }
+});
 
 process.once("SIGTERM", () => {
   cancelled = true;
@@ -142,6 +267,18 @@ async function executeRun(
   actionAbort = new AbortController();
   if (cancelled) actionAbort.abort();
   try {
+    const accessDeclarations = sourceAccessConfigFromAdapterConfig(
+      configured.data,
+    );
+    const sourceAccess =
+      accessDeclarations === undefined
+        ? undefined
+        : createSourceAccessClient({
+            runId: run.runId,
+            signal: actionAbort.signal,
+            declarations: accessDeclarations,
+            transport: sourceAccessTransport,
+          });
     const context = {
       binId: run.binId,
       identityId: run.identityId,
@@ -151,6 +288,7 @@ async function executeRun(
       config: configured.data,
       signal: actionAbort.signal,
       ...(browser === undefined ? {} : { browser }),
+      ...(sourceAccess === undefined ? {} : { sourceAccess }),
       report: async (value: unknown) => {
         if (action.report === undefined) {
           throw sourceAdapterActionError({
