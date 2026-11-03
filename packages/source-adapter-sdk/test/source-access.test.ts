@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  createSourceAccessBudget,
   createSourceAccessCoordinator,
   createSourceAccessClient,
+  SourceAccessBudgetExceededError,
   sourceAccessConfigSchema,
   type SourceAccessClock,
   type SourceAccessLease,
@@ -772,4 +774,424 @@ void test("原生来源声明用稳定组键并限制间隔和并发范围", () 
     }).success,
     false,
   );
+});
+
+void test("单轮预算在同一来源准入前预留并限制主动请求数", async () => {
+  const { clock } = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const coordinator = await createSourceAccessCoordinator({
+    clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const ownerId = "owner-budget";
+  const request = {
+    runId: "run-request-budget",
+    groupId: "linuxdo",
+    source: "site" as const,
+    origin: "https://linux.do",
+    minimumIntervalMs: 0,
+    maxConcurrency: 1,
+  };
+  const ownerSignal = new AbortController().signal;
+  const held = await coordinator.acquire(
+    ownerId,
+    { ...request, runId: "run-holding-budget-permit" },
+    config,
+    ownerSignal,
+  );
+  const signal = new AbortController().signal;
+  const transport: SourceAccessTransport = {
+    async acquire(request, acquireSignal) {
+      return await coordinator.acquire(ownerId, request, config, acquireSignal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-request-budget",
+    signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal,
+    maxRequests: 1,
+    maxElapsedMs: 5_000,
+  });
+  const clientRequest = {
+    groupId: "linuxdo",
+    source: "site" as const,
+    origin: "https://linux.do",
+  };
+  let operations = 0;
+  let pendingSettled = false;
+  const pending = budget
+    .withAdmission(clientRequest, async () => {
+      operations++;
+    })
+    .then(
+      () => {
+        pendingSettled = true;
+        return { kind: "completed" as const };
+      },
+      (error: unknown) => {
+        pendingSettled = true;
+        return { kind: "failed" as const, error };
+      },
+    );
+  let heldReleased = false;
+
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pendingSettled, false);
+    assert.equal(access.snapshot().admittedAttempts, 0);
+    await assert.rejects(
+      budget.withAdmission(clientRequest, async () => {
+        operations++;
+      }),
+      (error: unknown) =>
+        error instanceof SourceAccessBudgetExceededError &&
+        error.reason === "request-limit",
+    );
+    assert.equal(pendingSettled, false);
+    assert.equal(operations, 0);
+
+    await coordinator.release(ownerId, held.leaseId);
+    heldReleased = true;
+    const settled = await pending;
+    assert.equal(settled.kind, "completed");
+    assert.equal(operations, 1);
+    assert.equal(access.snapshot().admittedAttempts, 1);
+    assert.equal(budget.budgetSnapshot().stopReason, "request-limit");
+  } finally {
+    if (!heldReleased)
+      await coordinator.release(ownerId, held.leaseId).catch(() => undefined);
+    budget.close();
+    coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("单轮预算耗尽时取消在途操作并记录精确单调耗时", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const actionAbort = new AbortController();
+  const transport: SourceAccessTransport = {
+    async acquire(request, signal) {
+      return await coordinator.acquire(
+        "owner-time-budget",
+        request,
+        config,
+        signal,
+      );
+    },
+    async release(leaseId) {
+      await coordinator.release("owner-time-budget", leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        "owner-time-budget",
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-time-budget",
+    signal: actionAbort.signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal: actionAbort.signal,
+    clock: controlled.clock,
+    maxRequests: 4,
+    maxElapsedMs: 250,
+  });
+  let operationStarted = false;
+  const result = budget
+    .withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operationStarted = true;
+        await new Promise<void>((_resolve, reject) => {
+          if (budget.signal.aborted) {
+            reject(budget.signal.reason);
+            return;
+          }
+          budget.signal.addEventListener(
+            "abort",
+            () => reject(budget.signal.reason),
+            { once: true },
+          );
+        });
+      },
+    )
+    .then(
+      () => ({ kind: "completed" as const }),
+      (error: unknown) => ({ kind: "failed" as const, error }),
+    );
+
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(operationStarted, true);
+    await controlled.advanceBy(249);
+    assert.equal(budget.budgetSnapshot().elapsedMs, 249);
+    assert.equal(budget.signal.aborted, false);
+    await controlled.advanceBy(1);
+    assert.equal(budget.signal.aborted, true);
+    const settled = await result;
+    assert.equal(settled.kind, "failed");
+    if (settled.kind === "failed") {
+      assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
+      assert.equal(
+        (settled.error as SourceAccessBudgetExceededError).reason,
+        "elapsed-time-limit",
+      );
+    }
+    assert.equal(budget.budgetSnapshot().elapsedMs, 250);
+    assert.equal(budget.budgetSnapshot().stopReason, "elapsed-time-limit");
+  } finally {
+    actionAbort.abort(new DOMException("test cleanup", "AbortError"));
+    await result;
+    budget.close();
+    coordinator.closeOwner("owner-time-budget");
+  }
+});
+
+void test("单轮耗时预算到期会撤销同一协调器中排队的准入", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const ownerId = "owner-budget-wait";
+  const request = {
+    runId: "run-budget-wait",
+    groupId: "linuxdo",
+    source: "site" as const,
+    origin: "https://linux.do",
+    minimumIntervalMs: 0,
+    maxConcurrency: 1,
+  };
+  const held = await coordinator.acquire(
+    ownerId,
+    { ...request, runId: "run-holding-permit" },
+    config,
+    new AbortController().signal,
+  );
+  const actionAbort = new AbortController();
+  const transport: SourceAccessTransport = {
+    async acquire(input, signal) {
+      return await coordinator.acquire(ownerId, input, config, signal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(input, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        input,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: request.runId,
+    signal: actionAbort.signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal: actionAbort.signal,
+    clock: controlled.clock,
+    maxRequests: 2,
+    maxElapsedMs: 250,
+  });
+  let operationStarted = false;
+  let pendingSettled = false;
+  const pending = budget
+    .withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operationStarted = true;
+      },
+    )
+    .then(
+      () => {
+        pendingSettled = true;
+        return { kind: "completed" as const };
+      },
+      (error: unknown) => {
+        pendingSettled = true;
+        return { kind: "failed" as const, error };
+      },
+    );
+
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pendingSettled, false);
+    await controlled.advanceBy(250);
+    assert.equal(budget.signal.aborted, true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pendingSettled, true);
+    assert.equal(operationStarted, false);
+    assert.equal(access.snapshot().admittedAttempts, 0);
+    const settled = await pending;
+    assert.equal(settled.kind, "failed");
+    if (settled.kind === "failed") {
+      assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
+      assert.equal(
+        (settled.error as SourceAccessBudgetExceededError).reason,
+        "elapsed-time-limit",
+      );
+    }
+    assert.equal(budget.budgetSnapshot().elapsedMs, 250);
+  } finally {
+    actionAbort.abort(new DOMException("test cleanup", "AbortError"));
+    await pending;
+    budget.close();
+    await coordinator.release(ownerId, held.leaseId);
+    coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("最早来源准入时刻晚于预算期限时立即停止本轮等待", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const ownerId = "owner-budget-deadline";
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const signal = new AbortController().signal;
+  const transport: SourceAccessTransport = {
+    async acquire(request, acquireSignal) {
+      return await coordinator.acquire(ownerId, request, config, acquireSignal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-budget-deadline",
+    signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal,
+    clock: controlled.clock,
+    maxRequests: 2,
+    maxElapsedMs: 250,
+  });
+  let operationStarted = false;
+
+  try {
+    await assert.rejects(
+      budget.withAdmission(
+        {
+          groupId: "linuxdo",
+          source: "site",
+          origin: "https://linux.do",
+          notBeforeEpochMs: 1_001_000,
+        },
+        async () => {
+          operationStarted = true;
+        },
+      ),
+      (error: unknown) =>
+        error instanceof SourceAccessBudgetExceededError &&
+        (error.reason as string) === "wait-exceeds-budget",
+    );
+    assert.equal(operationStarted, false);
+    assert.equal(access.snapshot().admittedAttempts, 0);
+    assert.equal(
+      budget.budgetSnapshot().stopReason as string,
+      "wait-exceeds-budget",
+    );
+    assert.equal(budget.budgetSnapshot().elapsedMs, 0);
+  } finally {
+    budget.close();
+    coordinator.closeOwner(ownerId);
+  }
 });

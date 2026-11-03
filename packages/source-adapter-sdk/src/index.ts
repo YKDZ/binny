@@ -17,6 +17,15 @@ import { z } from "zod";
 import type { SourceAccessClient } from "./source-access.ts";
 
 export {
+  createSourceAccessBudget,
+  SourceAccessBudgetExceededError,
+} from "./source-access-budget.ts";
+export type {
+  SourceAccessBudgetClient,
+  SourceAccessBudgetSnapshot,
+  SourceAccessBudgetStopReason,
+} from "./source-access-budget.ts";
+export {
   createSourceAccessCoordinator,
   createSourceAccessClient,
   sourceAccessConfigFromAdapterConfig,
