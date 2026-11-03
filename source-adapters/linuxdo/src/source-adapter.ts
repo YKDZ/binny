@@ -10,6 +10,7 @@ import {
   sourceAccessConfigSchema,
   type ArchiveResourceMetadata,
   type SourceAccessKind,
+  type SourceAccessResponseObservation,
   type SourceAccessSnapshot,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -71,7 +72,11 @@ const linuxDoSourceAccessSchema = sourceAccessConfigSchema.superRefine(
 
 const sourceAdapterConfigSchema = z
   .object({
-    origin: siteOriginSchema,
+    origin: siteOriginSchema
+      .describe(
+        "Linux.do 站点的 HTTP(S) origin，只填协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
+      )
+      .meta({ examples: ["https://linux.do"] }),
     sourceAccess: linuxDoSourceAccessSchema
       .default({
         groups: {
@@ -101,24 +106,45 @@ const categoryReferenceSchema = z
   .object({
     id: targetIdSchema,
     kind: z.literal("category"),
-    categoryId: topicIdSchema,
-    categorySlugPath: categorySlugPathSchema,
+    categoryId: topicIdSchema.describe("Linux.do 板块数字 ID。"),
+    categorySlugPath: categorySlugPathSchema.describe(
+      "板块路径中的 slug，不含 /c/ 前缀；多级板块以斜杠分隔。",
+    ),
   })
   .strict();
 const configuredTargetSchema = z.discriminatedUnion("kind", [
-  z.object({ id: targetIdSchema, kind: z.literal("latest") }).strict(),
+  z
+    .object({
+      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+      kind: z.literal("latest").describe("按最新主题流发现主题。"),
+    })
+    .strict(),
   categoryReferenceSchema,
   z
     .object({
-      id: targetIdSchema,
-      kind: z.literal("topic"),
-      topicId: topicIdSchema,
+      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+      kind: z.literal("topic").describe("直接引用一个主题。"),
+      topicId: topicIdSchema.describe("Linux.do 主题数字 ID。"),
     })
     .strict(),
 ]);
 const actionTargetsSchema = z
   .array(configuredTargetSchema)
   .max(100)
+  .describe("显式指定的目标列表，最多 100 项；同一列表中的 id 必须唯一。")
+  .meta({
+    examples: [
+      [{ id: "latest", kind: "latest" }],
+      [
+        {
+          id: "support",
+          kind: "category",
+          categoryId: 4,
+          categorySlugPath: "support",
+        },
+      ],
+    ],
+  })
   .superRefine((targets, context) => {
     const ids = new Set<string>();
     for (const [index, target] of targets.entries()) {
@@ -134,7 +160,10 @@ const actionTargetsSchema = z
   });
 const checkParamsSchema = z
   .object({
-    topicId: topicIdSchema.optional(),
+    topicId: topicIdSchema
+      .optional()
+      .describe("只检查此主题；与 targets 互斥。")
+      .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
   })
   .strict()
@@ -146,6 +175,15 @@ const checkParamsSchema = z
         message: "topicId 与 targets 不能同时使用。",
       });
     }
+  })
+  .describe(
+    "检查登录状态以及指定主题或目标的当前可见范围；topicId 与 targets 互斥。",
+  )
+  .meta({
+    examples: [
+      { topicId: 2401 },
+      { targets: [{ id: "latest", kind: "latest" }] },
+    ],
   });
 const collectionDateSchema = z
   .string()
@@ -154,11 +192,19 @@ const collectionDateSchema = z
     (value) =>
       value === "today" || value === "yesterday" || isValidCalendarDate(value),
     "日期必须是 today、yesterday 或有效的 YYYY-MM-DD。",
-  );
+  )
+  .describe(
+    "按触发时固定的参考时间解释的逻辑日期；必须是 today、yesterday 或有效的 YYYY-MM-DD 日期。",
+  )
+  .meta({ examples: ["today", "2026-10-28"] });
 const collectionTimeZoneSchema = z
   .string()
   .min(1, "必须提供 IANA 时区。")
-  .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。");
+  .refine(isValidTimeZone, "时区必须是有效的 IANA 时区名称。")
+  .describe(
+    "解释 date 的 IANA 时区；必须是有效名称，且与 postCreatedRange 互斥。",
+  )
+  .meta({ examples: ["UTC", "Asia/Tokyo"] });
 const postCreatedRangeSchema = z
   .object({
     from: z.iso
@@ -187,19 +233,45 @@ const postCreatedRangeSchema = z
         message: "区间起点必须早于不包含的终点。",
       });
     }
+  })
+  .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 模式互斥。")
+  .meta({
+    examples: [
+      {
+        from: "2026-10-28T02:00:00.000Z",
+        to: "2026-10-28T04:00:00.000Z",
+        maxPages: 20,
+      },
+    ],
   });
 const collectParamsSchema = z
   .object({
-    topicId: topicIdSchema.optional(),
+    topicId: topicIdSchema
+      .optional()
+      .describe("只处理此主题；与 targets 互斥。")
+      .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
     date: collectionDateSchema
       .optional()
-      .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
+      .describe(
+        "按 timeZone 解释的逻辑日期；必须为 today、yesterday 或有效 YYYY-MM-DD 日期，与 postCreatedRange 互斥。",
+      ),
     timeZone: collectionTimeZoneSchema
       .optional()
-      .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
-    postCreatedRange: postCreatedRangeSchema.optional(),
-    maxTopics: z.number().int().positive().safe().optional(),
+      .describe(
+        "解释 date 的有效 IANA 时区名称；date 与 timeZone 成对提供，且与 postCreatedRange 互斥。",
+      ),
+    postCreatedRange: postCreatedRangeSchema
+      .optional()
+      .meta(postCreatedRangeSchema.meta() ?? {}),
+    maxTopics: z
+      .number()
+      .int()
+      .positive()
+      .safe()
+      .optional()
+      .describe("本轮主题处理数量上限；省略时不额外限制主题数。")
+      .meta({ examples: [25] }),
   })
   .strict()
   .superRefine((params, context) => {
@@ -241,6 +313,20 @@ const collectParamsSchema = z
         });
       }
     }
+  })
+  .describe(
+    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
+  )
+  .meta({
+    examples: [
+      { date: "today", timeZone: "Asia/Tokyo" },
+      {
+        postCreatedRange: {
+          from: "2026-10-28T02:00:00.000Z",
+          to: "2026-10-28T04:00:00.000Z",
+        },
+      },
+    ],
   });
 const listCategoriesParamsSchema = z.object({}).strict();
 type CategoryReference = z.infer<typeof categoryReferenceSchema>;
@@ -437,6 +523,18 @@ const sourceAccessReportSchema = z
       })
       .strict()
       .describe("按适配器声明的站点或媒体来源类别统计的主动准入操作数。"),
+    rateLimitResponses: z
+      .array(
+        z
+          .object({
+            status: z.union([z.literal(429), z.literal(503)]),
+            outcome: z.enum(["cooled", "missing", "invalid", "past"]),
+            observedAt: z.iso.datetime(),
+            cooldownUntil: z.iso.datetime().optional(),
+          })
+          .strict(),
+      )
+      .describe("主动传输收到的429/503及其冷却处理结果；不会自动重试。"),
     pageRequestEventsObserved: z
       .object({
         total: z.number().int().nonnegative(),
@@ -662,6 +760,7 @@ type PageFetchResponse = {
   readonly mitigated: string;
   readonly status: number;
   readonly contentType: string;
+  readonly retryAfter?: string;
   readonly body: string;
 };
 type TopicPostRead = {
@@ -710,6 +809,7 @@ type PageSourceAccess = {
   readonly signal: AbortSignal;
   readonly siteOrigin: string;
   readonly events: PageRequestEvents;
+  readonly rateLimitResponses: SourceAccessResponseObservation[];
   readonly publish: ((report: SourceAccessReport) => Promise<void>) | undefined;
 };
 
@@ -718,6 +818,7 @@ function emptySourceAccessReport(): SourceAccessReport {
     admittedAttempts: 0,
     waitedMs: 0,
     bySource: { site: 0, media: 0 },
+    rateLimitResponses: [],
     pageRequestEventsObserved: {
       total: 0,
       get: 0,
@@ -733,6 +834,18 @@ function sourceAccessReport(state: PageSourceAccess): SourceAccessReport {
   const active: SourceAccessSnapshot = state.client.snapshot();
   return {
     ...active,
+    rateLimitResponses: state.rateLimitResponses.map((observation) => ({
+      status: observation.status,
+      outcome: observation.outcome,
+      observedAt: new Date(observation.observedAtEpochMs).toISOString(),
+      ...(observation.cooldownUntilEpochMs === undefined
+        ? {}
+        : {
+            cooldownUntil: new Date(
+              observation.cooldownUntilEpochMs,
+            ).toISOString(),
+          }),
+    })),
     pageRequestEventsObserved: {
       ...state.events,
       byResourceType: { ...state.events.byResourceType },
@@ -759,7 +872,17 @@ async function withSourceAdmission<T>(
       { groupId: "linuxdo", source, origin: url.origin },
       async () => {
         state.signal.throwIfAborted();
-        return await operation();
+        const value = await operation();
+        const response = sourceResponseMetadata(value);
+        if (response?.status === 429 || response?.status === 503) {
+          state.rateLimitResponses.push(
+            await state.client.observeResponse(
+              { groupId: "linuxdo", source, origin: url.origin },
+              response,
+            ),
+          );
+        }
+        return value;
       },
     );
   } catch (error) {
@@ -768,6 +891,37 @@ async function withSourceAdmission<T>(
   }
   await reportPageSourceAccess(state);
   return result;
+}
+
+function sourceResponseMetadata(
+  value: unknown,
+): { readonly status: number; readonly retryAfter?: string } | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  if ("status" in value && typeof value.status === "number") {
+    const retryAfter = "retryAfter" in value ? value.retryAfter : undefined;
+    return {
+      status: value.status,
+      ...(typeof retryAfter === "string" ? { retryAfter } : {}),
+    };
+  }
+  if (
+    "status" in value &&
+    typeof value.status === "function" &&
+    "headers" in value &&
+    typeof value.headers === "function"
+  ) {
+    const headers = value.headers();
+    return {
+      status: value.status(),
+      ...(typeof headers === "object" &&
+      headers !== null &&
+      "retry-after" in headers &&
+      typeof headers["retry-after"] === "string"
+        ? { retryAfter: headers["retry-after"] }
+        : {}),
+    };
+  }
+  return undefined;
 }
 
 function siteFromConfig(config: SourceAdapterConfig): {
@@ -825,6 +979,7 @@ async function withSharedBrowser<T>(
         otherOriginGet: 0,
         byResourceType: { document: 0, fetch: 0, xhr: 0, other: 0 },
       },
+      rateLimitResponses: [],
       publish: publishSourceAccess,
     };
     pageSourceAccess.set(page, accessState);
@@ -1098,10 +1253,12 @@ async function fetchInPageOnce(
             }
             responseBody = btoa(binary);
           }
+          const retryAfter = response.headers.get("retry-after");
           return {
             mitigated: response.headers.get("cf-mitigated") ?? "",
             status: response.status,
             contentType: response.headers.get("content-type") ?? "",
+            ...(retryAfter === null ? {} : { retryAfter }),
             body: responseBody,
           };
         } finally {

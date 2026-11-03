@@ -56,6 +56,7 @@ export type {
 export {
   SourceAccessDeadlineExceededError,
   SourceAccessPersistentStoreError,
+  SourceAccessStateUnavailableError,
 } from "./source-access.ts";
 
 export type { SourceAdapterManifest, JsonSchema } from "@binny/contracts";

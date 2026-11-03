@@ -28,11 +28,11 @@ import {
   serviceMetadataSchema,
   archiveTimelinePageSchema,
   binConfigurationSchema,
+  sourceAdapterActionDiscoverySchema,
   binErrorSchema,
   binIdSchema,
   browserIdleTimeoutSecondsSchema,
   sourceAdapterActionNameSchema,
-  sourceAdapterManifestSchema,
   identityIdSchema,
   humanSessionCreatedSchema,
   humanSessionErrorSchema,
@@ -575,7 +575,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "bin",
-        description: "管理采集配置和已声明动作。",
+        description: "管理信源适配器配置与已声明动作。",
       },
       archive: {
         kind: "commandGroup",
@@ -593,7 +593,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "run",
-        description: "触发采集动作并查询运行结果。",
+        description: "触发已声明的动作并查询运行结果。",
       },
       human: {
         kind: "commandGroup",
@@ -605,7 +605,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "schedule",
-        description: "管理定时采集计划。",
+        description: "管理运行计划。",
       },
       ...command("cliSchema")({
         kind: "command",
@@ -873,22 +873,25 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "actions",
-        description: "发现信源适配器声明的动作和环境能力。",
-        fields: { id: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ id: binIdSchema }),
+        description: "查看信源适配器声明的动作；可选指定单个动作。",
+        fields: {
+          id: { kind: "positional", description: "bin 标识" },
+          action: {
+            kind: "positional",
+            description: "可选的已声明动作名称",
+          },
+        },
+        input: z.object({
+          id: binIdSchema,
+          action: sourceAdapterActionNameSchema.optional(),
+        }),
         success: {
           kind: "data",
           variants: {
             discovered: {
               description: "已声明动作",
               exitCode: 0,
-              schema: withPostgresJsonSchemaProjection(
-                z.object({
-                  actions: sourceAdapterManifestSchema.shape.actions,
-                  environment: sourceAdapterManifestSchema.shape.environment,
-                  execution: binConfigurationSchema.shape.execution,
-                }),
-              ),
+              schema: sourceAdapterActionDiscoverySchema,
               text: (actions) => outputText("已声明动作", actions),
             },
           },
@@ -897,7 +900,10 @@ function createCliContract(identity: CliCommandIdentity) {
         async handler({ input, dependencies, outcome }) {
           const response = await dependencies
             .createClient()
-            .bins[":binId"].actions.$get({ param: { binId: input.id } });
+            .bins[":binId"].actions.$get({
+              param: { binId: input.id },
+              query: input.action === undefined ? {} : { action: input.action },
+            });
           if (response.status === 200)
             return outcome.data.discovered(await response.json());
           if (response.status === 400 || response.status === 404)
@@ -994,7 +1000,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "disable",
-        description: "停用采集配置，但保留已归档内容。",
+        description: "停用信源适配器配置，但保留已归档内容。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: z.object({ id: binIdSchema }),
         success: {
@@ -1024,7 +1030,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "enable",
-        description: "重新启用采集配置。",
+        description: "重新启用信源适配器配置。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: z.object({ id: binIdSchema }),
         success: {
@@ -1088,7 +1094,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "run",
         name: "trigger",
-        description: "触发一次独立采集运行。",
+        description: "触发一次独立的动作运行。",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
           action: {
@@ -1407,7 +1413,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "schedule",
         name: "create",
-        description: "声明一个使用 IANA 时区的采集计划。",
+        description: "创建一个使用 IANA 时区的运行计划。",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
           expression: {
@@ -1448,10 +1454,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             created: {
-              description: "已声明的采集计划",
+              description: "已声明的运行计划",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("已创建采集计划", schedule),
+              text: (schedule) => outputText("已创建运行计划", schedule),
             },
           },
         },
@@ -1479,24 +1485,24 @@ function createCliContract(identity: CliCommandIdentity) {
             response.status === 409
           )
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划创建状态。");
+          throw new Error("服务返回了未声明的运行计划创建状态。");
         },
       }),
       ...command("scheduleList")({
         kind: "command",
         parent: "schedule",
         name: "list",
-        description: "列出一个 bin 的采集计划。",
+        description: "列出一个 bin 的运行计划。",
         fields: { binId: { kind: "positional", description: "bin 标识" } },
         input: z.object({ binId: binIdSchema }),
         success: {
           kind: "data",
           variants: {
             listed: {
-              description: "采集计划列表",
+              description: "运行计划列表",
               exitCode: 0,
               schema: cliScheduleListSchema,
-              text: (result) => outputText("采集计划", result),
+              text: (result) => outputText("运行计划", result),
             },
           },
         },
@@ -1509,14 +1515,14 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.listed(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划列表状态。");
+          throw new Error("服务返回了未声明的运行计划列表状态。");
         },
       }),
       ...command("scheduleGet")({
         kind: "command",
         parent: "schedule",
         name: "get",
-        description: "读取一个采集计划。",
+        description: "读取一个运行计划。",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
           scheduleId: { kind: "positional", description: "计划标识" },
@@ -1526,10 +1532,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             found: {
-              description: "采集计划详情",
+              description: "运行计划详情",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("采集计划", schedule),
+              text: (schedule) => outputText("运行计划", schedule),
             },
           },
         },
@@ -1544,7 +1550,7 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.found(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划读取状态。");
+          throw new Error("服务返回了未声明的运行计划读取状态。");
         },
       }),
       ...command("scheduleUpdate")({
@@ -1588,10 +1594,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             updated: {
-              description: "已修改的采集计划",
+              description: "已修改的运行计划",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("已修改采集计划", schedule),
+              text: (schedule) => outputText("已修改运行计划", schedule),
             },
           },
         },
@@ -1613,7 +1619,7 @@ function createCliContract(identity: CliCommandIdentity) {
             response.status === 409
           )
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划修改状态。");
+          throw new Error("服务返回了未声明的运行计划修改状态。");
         },
       }),
       ...command("scheduleDisable")({
@@ -1630,10 +1636,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             disabled: {
-              description: "已停用的采集计划",
+              description: "已停用的运行计划",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("已停用采集计划", schedule),
+              text: (schedule) => outputText("已停用运行计划", schedule),
             },
           },
         },
@@ -1648,7 +1654,7 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.disabled(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划停用状态。");
+          throw new Error("服务返回了未声明的运行计划停用状态。");
         },
       }),
       ...command("scheduleEnable")({
@@ -1665,10 +1671,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             enabled: {
-              description: "已启用的采集计划",
+              description: "已启用的运行计划",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("已启用采集计划", schedule),
+              text: (schedule) => outputText("已启用运行计划", schedule),
             },
           },
         },
@@ -1683,7 +1689,7 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.enabled(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划启用状态。");
+          throw new Error("服务返回了未声明的运行计划启用状态。");
         },
       }),
       ...command("scheduleRemove")({
@@ -1700,11 +1706,11 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             removed: {
-              description: "已移除的采集计划",
+              description: "已移除的运行计划",
               exitCode: 0,
               schema: scheduleDeleteResultSchema,
               text: ({ scheduleId }) =>
-                text.line("已移除采集计划：" + scheduleId),
+                text.line("已移除运行计划：" + scheduleId),
             },
           },
         },
@@ -1719,7 +1725,7 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.removed(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的采集计划移除状态。");
+          throw new Error("服务返回了未声明的运行计划移除状态。");
         },
       }),
       ...command("archiveItem")({

@@ -96,6 +96,18 @@ void describe("离线 CLI 命令契约", () => {
     assert.equal(actionHelp.exitCode, 0);
     assert.match(actionHelp.output, /bin actions/u);
 
+    const actionsHelp = await run(["bin", "actions", "--help"]);
+    assert.equal(actionsHelp.exitCode, 0);
+    assert.match(actionsHelp.output, /bin actions <id> \[<action>\]/u);
+
+    const runGroupHelp = await run(["run", "--help"]);
+    assert.equal(runGroupHelp.exitCode, 0);
+    assert.match(runGroupHelp.output, /触发已声明的动作并查询运行结果/u);
+
+    const scheduleGroupHelp = await run(["schedule", "--help"]);
+    assert.equal(scheduleGroupHelp.exitCode, 0);
+    assert.match(scheduleGroupHelp.output, /管理运行计划/u);
+
     const scheduleHelp = await run(["schedule", "create", "--help"]);
     assert.equal(scheduleHelp.exitCode, 0);
     assert.match(

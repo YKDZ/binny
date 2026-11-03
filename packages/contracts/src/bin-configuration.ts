@@ -72,21 +72,30 @@ export const sourceAdapterActionSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
-const sourceAdapterActionsSchema = z
-  .record(sourceAdapterActionNameSchema, sourceAdapterActionSchema)
-  .and(
-    z.object({
-      check: sourceAdapterActionSchema,
-      collect: sourceAdapterActionSchema,
-    }),
+export const sourceAdapterActionsRecordSchema = z.record(
+  sourceAdapterActionNameSchema,
+  sourceAdapterActionSchema,
+);
+
+/** `bin actions` 可返回完整动作表或只含所选动作的子集。 */
+export const sourceAdapterActionDiscoverySchema =
+  withPostgresJsonSchemaProjection(
+    z.object({ actions: sourceAdapterActionsRecordSchema }).strict(),
   );
+
+const sourceAdapterManifestActionsSchema = sourceAdapterActionsRecordSchema.and(
+  z.object({
+    check: sourceAdapterActionSchema,
+    collect: sourceAdapterActionSchema,
+  }),
+);
 
 const sourceAdapterManifestStoredFieldsSchema = z.object({
   id: sourceAdapterIdSchema,
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: sourceAdapterActionsSchema,
+  actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),
@@ -101,7 +110,7 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
-  actions: sourceAdapterActionsSchema,
+  actions: sourceAdapterManifestActionsSchema,
   environment: z.object({
     browser: z.object({
       required: z.boolean(),
@@ -238,6 +247,81 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
 export const runtimeProtocolVersion = 6;
+
+const sourceAccessSnapshotGroupSchema = z
+  .object({
+    lastAdmittedAt: z.iso
+      .datetime()
+      .optional()
+      .describe("该来源组最近一次主动访问许可时间。"),
+    cooldownUntil: z.iso
+      .datetime()
+      .optional()
+      .describe("服务端 Retry-After 冷却结束的最早准入时间。"),
+    latestLimitStatus: z
+      .union([z.literal(429), z.literal(503)])
+      .optional()
+      .describe("形成当前冷却的最近 HTTP 状态。"),
+  })
+  .describe("来源组最近确认的主动访问与服务端冷却事实。");
+
+export const sourceAccessRuntimeSnapshotSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({
+      status: z.literal("available"),
+      groups: z
+        .record(
+          z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+          sourceAccessSnapshotGroupSchema,
+        )
+        .describe("以适配器稳定来源组标识为键的已知访问事实。"),
+    }),
+    z.object({
+      status: z.literal("unavailable"),
+      reason: z
+        .literal("persistent_state_unavailable")
+        .describe("运行器无法读取或持久保存来源访问状态，已拒绝后续主动访问。"),
+    }),
+  ],
+);
+
+/** 运行器通过心跳发布的来源状态事实；核心只保存并投影它。 */
+export const runtimeSourceStateSnapshotSchema = z
+  .object({
+    updatedAt: z.iso.datetime().describe("运行器生成此状态快照的 UTC 时间。"),
+    sourceAccess: sourceAccessRuntimeSnapshotSchema.describe(
+      "SDK共享来源访问协调器报告的当前状态。",
+    ),
+    sync: jsonObjectSchema
+      .optional()
+      .describe("适配器声明的增量同步公开状态；由运行器同一快照投影。"),
+  })
+  .strict();
+
+/** bin get 将最后快照的新鲜度与其中报告的来源状态分开表达。 */
+export const sourceStateSnapshotSchema = z
+  .discriminatedUnion("freshness", [
+    z.object({
+      freshness: z
+        .literal("unknown")
+        .describe("该 bin 从未报告过来源状态快照。"),
+      sourceAccess: z.object({ status: z.literal("unknown") }).strict(),
+    }),
+    z.object({
+      freshness: z.literal("current").describe("运行器仍在线且快照新鲜。"),
+      updatedAt: z.iso.datetime().describe("运行器最近生成该快照的 UTC 时间。"),
+      sourceAccess: sourceAccessRuntimeSnapshotSchema,
+      sync: jsonObjectSchema.optional(),
+    }),
+    z.object({
+      freshness: z.literal("stale").describe("运行器离线或心跳已超时。"),
+      updatedAt: z.iso.datetime().describe("运行器最后生成该快照的 UTC 时间。"),
+      sourceAccess: sourceAccessRuntimeSnapshotSchema,
+      sync: jsonObjectSchema.optional(),
+    }),
+  ])
+  .describe("bin get 对运行器最后来源状态快照的新鲜度和内容的公开投影。");
 export const runtimeConfigurationValidationPath =
   "/internal/configuration/validate";
 export const runtimeActionParametersValidationPath =
@@ -367,6 +451,7 @@ const runtimeHeartbeatFieldsSchema = z.object({
   humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
   sourceAdapter: sourceAdapterManifestStoredSchema,
   environment: runtimeEnvironmentSchema,
+  sourceStateSnapshot: runtimeSourceStateSnapshotSchema.optional(),
 });
 
 const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema
@@ -406,6 +491,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
     runtimeId: postgresTextSchema,
     environment: runtimeEnvironmentSchema,
     lastHeartbeatAt: z.iso.datetime(),
+    sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
   z.object({
     status: z.literal("offline"),
@@ -416,6 +502,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
     ]),
     runtimeId: postgresTextSchema.optional(),
     lastHeartbeatAt: z.iso.datetime().optional(),
+    sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
   z.object({
     status: z.literal("incompatible"),
@@ -431,6 +518,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
       message: postgresTextSchema,
       path: z.array(z.union([z.string(), z.number()])),
     }),
+    sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
 ]);
 
@@ -496,6 +584,10 @@ export type RuntimeDisconnectInput = z.infer<
   typeof runtimeDisconnectInputSchema
 >;
 export type RuntimeExecution = z.infer<typeof runtimeExecutionSchema>;
+export type SourceStateSnapshot = z.infer<typeof sourceStateSnapshotSchema>;
+export type RuntimeSourceStateSnapshot = z.infer<
+  typeof runtimeSourceStateSnapshotSchema
+>;
 export type BinError = z.infer<typeof binErrorSchema>["error"];
 export type BinOperation<T> =
   | { readonly ok: true; readonly value: T }

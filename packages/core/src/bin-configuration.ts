@@ -356,6 +356,10 @@ function rowToConfiguration(row: BinRow): BinConfiguration {
     execution: {
       status: "offline",
       reason: "runtime_not_connected",
+      sourceStateSnapshot: {
+        freshness: "unknown",
+        sourceAccess: { status: "unknown" },
+      },
     },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

@@ -45,6 +45,10 @@ type SourceState = {
   readonly topicCreatedAtOverrides?: Readonly<Record<number, string>>;
   readonly topicListDelayMs?: number;
   readonly mediaResponseDelayMs?: number;
+  readonly rateLimitPath: string | null;
+  readonly rateLimitStatus: 429 | 503;
+  readonly retryAfterHeader: string;
+  readonly rateLimitRemaining: number;
 };
 
 type SourceEvent = {
@@ -124,6 +128,10 @@ let activeState: SourceState = {
   topicCreatedAtOverrides: {},
   topicListDelayMs: 0,
   mediaResponseDelayMs: 0,
+  rateLimitPath: null,
+  rateLimitStatus: 429,
+  retryAfterHeader: "1",
+  rateLimitRemaining: 0,
 };
 const events: SourceEvent[] = [];
 let navigationRequested = false;
@@ -891,6 +899,37 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    "rateLimitPath" in updates &&
+    updates.rateLimitPath !== null &&
+    (typeof updates.rateLimitPath !== "string" ||
+      !updates.rateLimitPath.startsWith("/") ||
+      updates.rateLimitPath.length > 512)
+  ) {
+    return false;
+  }
+  if (
+    "rateLimitStatus" in updates &&
+    updates.rateLimitStatus !== 429 &&
+    updates.rateLimitStatus !== 503
+  ) {
+    return false;
+  }
+  if (
+    "retryAfterHeader" in updates &&
+    (typeof updates.retryAfterHeader !== "string" ||
+      updates.retryAfterHeader.length > 256)
+  ) {
+    return false;
+  }
+  if (
+    "rateLimitRemaining" in updates &&
+    (!Number.isSafeInteger(updates.rateLimitRemaining) ||
+      Number(updates.rateLimitRemaining) < 0 ||
+      Number(updates.rateLimitRemaining) > 10)
+  ) {
+    return false;
+  }
   if (updates.navigationRace === true) navigationRequested = false;
   postRangeReadCount = 0;
   activeState = {
@@ -960,6 +999,23 @@ const server = createServer((request, response) => {
         return;
       }
       sendJson(response, 200, { state: activeState, events: [...events] });
+      return;
+    }
+    if (
+      activeState.rateLimitPath === pathname &&
+      activeState.rateLimitRemaining > 0
+    ) {
+      const { rateLimitStatus, retryAfterHeader } = activeState;
+      activeState = {
+        ...activeState,
+        rateLimitRemaining: activeState.rateLimitRemaining - 1,
+      };
+      record(`rate-limit-${String(rateLimitStatus)}`, pathname, authenticated);
+      response.writeHead(rateLimitStatus, {
+        "content-type": "application/json; charset=utf-8",
+        "retry-after": retryAfterHeader,
+      });
+      response.end(JSON.stringify({ errors: ["受控来源请求受限。"] }));
       return;
     }
     if (request.method === "POST" && pathname === "/__challenge/complete") {
