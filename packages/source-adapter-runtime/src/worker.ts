@@ -19,6 +19,8 @@ import {
   sourceAdapterActionError,
   type SourceAccessAcquireInput,
   type SourceAccessLease,
+  type SourceAccessResponse,
+  type SourceAccessResponseObservation,
   type SourceAccessTransport,
   type SourceAdapterDefinition,
 } from "@binny/source-adapter-sdk";
@@ -58,7 +60,7 @@ const client = createApiClient(apiUrl, {
 let cancelled = false;
 let actionAbort: AbortController | undefined;
 type PendingSourceAccess = {
-  readonly resolve: (value?: SourceAccessLease) => void;
+  readonly resolve: (value?: unknown) => void;
   readonly reject: (error: unknown) => void;
 };
 const pendingSourceAccess = new Map<string, PendingSourceAccess>();
@@ -88,10 +90,19 @@ const sourceAccessTransport: SourceAccessTransport = {
       pendingSourceAccess.set(requestId, {
         resolve: (lease) => {
           signal.removeEventListener("abort", abort);
-          if (lease === undefined) {
+          if (
+            typeof lease !== "object" ||
+            lease === null ||
+            !("leaseId" in lease) ||
+            typeof lease.leaseId !== "string" ||
+            !("waitedMs" in lease) ||
+            typeof lease.waitedMs !== "number" ||
+            !Number.isSafeInteger(lease.waitedMs) ||
+            lease.waitedMs < 0
+          ) {
             reject(new Error("运行器没有返回来源准入许可。"));
           } else {
-            resolve(lease);
+            resolve({ leaseId: lease.leaseId, waitedMs: lease.waitedMs });
           }
         },
         reject: (error) => {
@@ -122,6 +133,49 @@ const sourceAccessTransport: SourceAccessTransport = {
           reject(error);
         },
       );
+    });
+  },
+  observeResponse(
+    input: SourceAccessAcquireInput,
+    response: SourceAccessResponse,
+  ): Promise<SourceAccessResponseObservation> {
+    const requestId = randomUUID();
+    return new Promise((resolve, reject) => {
+      pendingSourceAccess.set(requestId, {
+        resolve(value) {
+          if (
+            typeof value !== "object" ||
+            value === null ||
+            !("status" in value) ||
+            (value.status !== 429 && value.status !== 503) ||
+            !("observedAtEpochMs" in value) ||
+            typeof value.observedAtEpochMs !== "number" ||
+            !Number.isSafeInteger(value.observedAtEpochMs) ||
+            !("outcome" in value) ||
+            (value.outcome !== "cooled" &&
+              value.outcome !== "missing" &&
+              value.outcome !== "invalid" &&
+              value.outcome !== "past") ||
+            ("cooldownUntilEpochMs" in value &&
+              (typeof value.cooldownUntilEpochMs !== "number" ||
+                !Number.isSafeInteger(value.cooldownUntilEpochMs)))
+          ) {
+            reject(new Error("运行器返回了无效的来源冷却观察。"));
+            return;
+          }
+          resolve(value as SourceAccessResponseObservation);
+        },
+        reject,
+      });
+      void send({
+        type: "source-access-response",
+        requestId,
+        input,
+        response,
+      }).catch((error: unknown) => {
+        pendingSourceAccess.delete(requestId);
+        reject(error);
+      });
     });
   },
 };
@@ -161,6 +215,13 @@ process.on("message", (value: unknown) => {
     if (pending === undefined) return;
     pendingSourceAccess.delete(record.requestId);
     pending.resolve();
+    return;
+  }
+  if (record.type === "source-access-response-recorded") {
+    const pending = pendingSourceAccess.get(record.requestId);
+    if (pending === undefined) return;
+    pendingSourceAccess.delete(record.requestId);
+    pending.resolve(record.observation);
     return;
   }
   if (record.type === "source-access-rejected") {

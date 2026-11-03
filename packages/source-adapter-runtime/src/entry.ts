@@ -35,7 +35,10 @@ import {
   type SourceAdapterBrowserConnection,
   type SourceAdapterDefinition,
   type SourceAccessAcquireInput,
+  type SourceAccessCoordinator,
   type SourceAccessConfig,
+  type SourceAccessResponse,
+  SourceAccessPersistentStoreError,
 } from "@binny/source-adapter-sdk";
 
 import {
@@ -198,9 +201,18 @@ async function advanceOwnerGeneration(
 const ownerLock = await findOwnerLockDescriptor();
 const ownerLockDescriptor = ownerLock.descriptor;
 const ownerGeneration = await advanceOwnerGeneration(ownerLock.path);
-const sourceAccessCoordinator = await openPersistentSourceAccessCoordinator(
-  join(dirname(ownerLock.path), "source-access.json"),
-);
+let sourceAccessCoordinator: SourceAccessCoordinator | undefined;
+let sourceAccessUnavailable = false;
+try {
+  sourceAccessCoordinator = await openPersistentSourceAccessCoordinator(
+    join(dirname(ownerLock.path), "source-access.json"),
+  );
+} catch (error) {
+  sourceAccessUnavailable = true;
+  process.stderr.write(
+    `来源准入持久状态不可用，相关来源访问已停止：${error instanceof Error ? error.message : String(error)}\n`,
+  );
+}
 const importedSourceAdapter = (await import(
   pathToFileURL(sourceAdapterPath).href
 )) as {
@@ -501,7 +513,11 @@ function sourceAccessInput(
     (request.notBeforeEpochMs !== undefined &&
       (typeof request.notBeforeEpochMs !== "number" ||
         !Number.isSafeInteger(request.notBeforeEpochMs) ||
-        request.notBeforeEpochMs < 0))
+        request.notBeforeEpochMs < 0)) ||
+    (request.deadlineEpochMs !== undefined &&
+      (typeof request.deadlineEpochMs !== "number" ||
+        !Number.isSafeInteger(request.deadlineEpochMs) ||
+        request.deadlineEpochMs < 0))
   )
     return undefined;
   return {
@@ -514,6 +530,29 @@ function sourceAccessInput(
     ...(request.notBeforeEpochMs === undefined
       ? {}
       : { notBeforeEpochMs: request.notBeforeEpochMs }),
+    ...(request.deadlineEpochMs === undefined
+      ? {}
+      : { deadlineEpochMs: request.deadlineEpochMs }),
+  };
+}
+
+function sourceAccessResponseInput(
+  value: unknown,
+): SourceAccessResponse | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const response = value as Record<string, unknown>;
+  if (
+    typeof response.status !== "number" ||
+    !Number.isSafeInteger(response.status) ||
+    (response.retryAfter !== undefined &&
+      typeof response.retryAfter !== "string")
+  )
+    return undefined;
+  return {
+    status: response.status,
+    ...(typeof response.retryAfter === "string"
+      ? { retryAfter: response.retryAfter }
+      : {}),
   };
 }
 
@@ -556,13 +595,18 @@ function startActionWorker(
       const record = message as Record<string, unknown>;
       if (
         declarations === undefined ||
+        sourceAccessUnavailable ||
+        sourceAccessCoordinator === undefined ||
         typeof record.requestId !== "string" ||
         accessRequests.has(record.requestId)
       ) {
         void sendWorkerMessage(worker, {
           type: "source-access-rejected",
           requestId: record.requestId,
-          message: "本次运行没有可用的来源准入声明。",
+          message:
+            sourceAccessUnavailable || sourceAccessCoordinator === undefined
+              ? "来源访问状态不可用，相关来源访问已停止。"
+              : "本次运行没有可用的来源准入声明。",
         });
         return;
       }
@@ -600,6 +644,8 @@ function startActionWorker(
           }
         })
         .catch(async (error: unknown) => {
+          if (error instanceof SourceAccessPersistentStoreError)
+            sourceAccessUnavailable = true;
           accessRequests.delete(record.requestId as string);
           if (!worker.child.connected) return;
           await sendWorkerMessage(worker, {
@@ -607,6 +653,54 @@ function startActionWorker(
             requestId: record.requestId,
             message:
               error instanceof Error ? error.message : "来源准入请求失败。",
+          }).catch(() => undefined);
+        });
+      return;
+    }
+    if (message.type === "source-access-response") {
+      const record = message as Record<string, unknown>;
+      if (
+        declarations === undefined ||
+        sourceAccessUnavailable ||
+        sourceAccessCoordinator === undefined ||
+        typeof record.requestId !== "string"
+      ) {
+        void sendWorkerMessage(worker, {
+          type: "source-access-rejected",
+          requestId: record.requestId,
+          message: "来源访问状态不可用，冷却依据未能保存。",
+        });
+        return;
+      }
+      const request = sourceAccessInput(record.input, run);
+      const response = sourceAccessResponseInput(record.response);
+      if (request === undefined || response === undefined) {
+        void sendWorkerMessage(worker, {
+          type: "source-access-rejected",
+          requestId: record.requestId,
+          message: "来源响应冷却依据格式无效。",
+        });
+        return;
+      }
+      void sourceAccessCoordinator
+        .observeResponse(ownerId, request, declarations, response)
+        .then((observation) =>
+          sendWorkerMessage(worker, {
+            type: "source-access-response-recorded",
+            requestId: record.requestId,
+            observation,
+          }),
+        )
+        .catch((error: unknown) => {
+          if (error instanceof SourceAccessPersistentStoreError)
+            sourceAccessUnavailable = true;
+          return sendWorkerMessage(worker, {
+            type: "source-access-rejected",
+            requestId: record.requestId,
+            message:
+              error instanceof Error
+                ? error.message
+                : "来源冷却状态无法持久保存。",
           }).catch(() => undefined);
         });
       return;
@@ -628,6 +722,14 @@ function startActionWorker(
         typeof record.leaseId !== "string"
       )
         return;
+      if (sourceAccessCoordinator === undefined) {
+        void sendWorkerMessage(worker, {
+          type: "source-access-rejected",
+          requestId: record.requestId,
+          message: "来源访问状态不可用，许可无法释放。",
+        });
+        return;
+      }
       void sourceAccessCoordinator
         .release(ownerId, record.leaseId)
         .then(() =>
@@ -871,7 +973,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
     if (worker !== undefined) {
       for (const pending of worker.accessRequests.values()) pending.abort();
       worker.accessRequests.clear();
-      sourceAccessCoordinator.closeOwner(worker.ownerId);
+      sourceAccessCoordinator?.closeOwner(worker.ownerId);
     }
   }
   try {
