@@ -106,7 +106,10 @@ assert.ok(
   "BINNY_E2E_CAPACITY_PHASE 必须为 all、seed、verify 或 delete。",
 );
 const isFullCapacityRun = capacityProfile === "full";
-const scheduleOnly = process.env.BINNY_E2E_INTERNAL_STEP === "scheduled-runs";
+const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
+const scheduleOnly =
+  internalStep === "scheduled-runs" || internalStep === "schedule-overlap";
+const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -5645,10 +5648,565 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   ]);
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();
+  await verifyScheduleOverlapPolicy(baseUrl);
   process.stdout.write(
     "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
   return baseUrl;
+}
+
+async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
+  const binId = "binny-runs-one";
+  const sourceUrl = manualRunSourceRuntimeUrl();
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const defaultGateKey = "schedule-overlap-api-default-" + randomUUID();
+  const scheduleGateKey = "schedule-overlap-skip-" + randomUUID();
+  const otherScheduleGateKey = "schedule-overlap-other-plan-" + randomUUID();
+  const manualGateKey = "schedule-overlap-manual-" + randomUUID();
+  let apiDefaultScheduleId: string | undefined;
+  let skipScheduleId: string | undefined;
+  let otherScheduleId: string | undefined;
+  let unconfirmedScheduleId: string | undefined;
+  let runtimeStopped = false;
+  let runtimePaused = false;
+
+  const readSchedule = async (scheduleId: string) =>
+    cliData<{
+      readonly scheduleId: string;
+      readonly overlapPolicy: "queue" | "skip";
+      readonly nextDueAt: string;
+      readonly lastRunId?: string;
+      readonly lastSkip?: {
+        readonly reason: "overlap";
+        readonly scheduledFor: string;
+        readonly skippedAt: string;
+      };
+    }>(await cli(baseUrl, ["schedule", "get", binId, scheduleId]), "found");
+
+  try {
+    await waitForApiAndDatabase(baseUrl);
+    await waitForRuntime(baseUrl, binId);
+    await waitForManualRunSource();
+
+    const defaultPayload = {
+      expression: "0 0 0 1 1 *",
+      timeZone: "UTC",
+      action: "collect",
+      params: {
+        sourceUrl,
+        gateKey: defaultGateKey,
+        sourceKey: defaultGateKey,
+      },
+      enabled: false,
+    };
+    const invalidCreate = await fetch(
+      baseUrl + "/bins/" + encodeURIComponent(binId) + "/schedules",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...defaultPayload, overlapPolicy: "parallel" }),
+      },
+    );
+    assert.equal(invalidCreate.status, 400);
+    const defaultCreate = await fetch(
+      baseUrl + "/bins/" + encodeURIComponent(binId) + "/schedules",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(defaultPayload),
+      },
+    );
+    assert.equal(defaultCreate.status, 201);
+    if (defaultCreate.status !== 201) return;
+    const defaultSchedule = (await defaultCreate.json()) as {
+      readonly scheduleId: string;
+      readonly overlapPolicy: string;
+    };
+    apiDefaultScheduleId = defaultSchedule.scheduleId;
+    assert.equal(defaultSchedule.overlapPolicy, "queue");
+
+    const created = cliData<{
+      readonly scheduleId: string;
+      readonly nextDueAt: string;
+      readonly overlapPolicy: "queue" | "skip";
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: scheduleGateKey,
+          sourceKey: scheduleGateKey,
+          waitAfterCommitMs: 60_000,
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    skipScheduleId = created.scheduleId;
+    assert.equal(created.overlapPolicy, "queue");
+    const firstDisabledDueAt = Date.parse(created.nextDueAt);
+    if (firstDisabledDueAt > Date.now())
+      await wait(firstDisabledDueAt - Date.now() + 100);
+
+    await compose(["stop", "runtime-fifteen-one"]);
+    runtimeStopped = true;
+
+    const enabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, ["schedule", "enable", binId, created.scheduleId]),
+      "enabled",
+    );
+    const firstDue = enabled.nextDueAt;
+    const firstRunSchedule = await waitFor(
+      () => readSchedule(created.scheduleId),
+      ({ lastRunId }) => lastRunId !== undefined,
+      "skip 策略的首个到期点创建一个正式计划运行",
+    );
+    const firstRunId = firstRunSchedule.lastRunId;
+    assert.ok(firstRunId !== undefined);
+    const firstRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, firstRunId]),
+      "found",
+    );
+    assert.equal(firstRun.status, "queued");
+    assert.equal(firstRun.trigger.kind, "schedule");
+    if (firstRun.trigger.kind === "schedule") {
+      assert.equal(firstRun.trigger.scheduleId, created.scheduleId);
+      assert.equal(firstRun.trigger.scheduledFor, firstDue);
+    }
+
+    const changedPolicy = cliData<{
+      readonly overlapPolicy: string;
+      readonly nextDueAt: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "update",
+        binId,
+        created.scheduleId,
+        "--overlap-policy",
+        "skip",
+      ]),
+      "updated",
+    );
+    assert.equal(changedPolicy.overlapPolicy, "skip");
+    const firstRunAfterPolicyUpdate = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, firstRunId]),
+      "found",
+    );
+    assert.equal(firstRunAfterPolicyUpdate.status, "queued");
+    assert.equal(firstRunAfterPolicyUpdate.trigger.kind, "schedule");
+    if (firstRunAfterPolicyUpdate.trigger.kind === "schedule") {
+      assert.equal(
+        firstRunAfterPolicyUpdate.trigger.scheduleId,
+        created.scheduleId,
+      );
+      assert.equal(firstRunAfterPolicyUpdate.trigger.scheduledFor, firstDue);
+      assert.equal(
+        firstRunAfterPolicyUpdate.referenceTime,
+        firstRunAfterPolicyUpdate.trigger.scheduledFor,
+      );
+    }
+
+    const queuedSkip = await waitFor(
+      () => readSchedule(created.scheduleId),
+      ({ lastRunId, lastSkip }) =>
+        lastRunId !== firstRunId ||
+        lastSkip?.scheduledFor === changedPolicy.nextDueAt,
+      "同计划有排队运行时跳过下一次到期触发",
+    );
+    assert.equal(queuedSkip.lastRunId, firstRunId);
+    assert.equal(queuedSkip.lastSkip?.reason, "overlap");
+    assert.equal(queuedSkip.lastSkip?.scheduledFor, changedPolicy.nextDueAt);
+    assert.ok(Date.parse(queuedSkip.lastSkip?.skippedAt ?? "") > 0);
+    assert.ok(
+      Date.parse(queuedSkip.nextDueAt) > Date.parse(changedPolicy.nextDueAt),
+    );
+    const listedSkip = cliData<{
+      readonly schedules: readonly {
+        readonly scheduleId: string;
+        readonly lastSkip?: { readonly reason: string };
+      }[];
+    }>(await cli(baseUrl, ["schedule", "list", binId]), "listed");
+    assert.equal(
+      listedSkip.schedules.find(
+        ({ scheduleId }) => scheduleId === created.scheduleId,
+      )?.lastSkip?.reason,
+      "overlap",
+    );
+
+    const nextOverlapAt = new Date(Date.parse(queuedSkip.nextDueAt));
+    assert.ok(Date.parse(queuedSkip.nextDueAt) - Date.now() > 10_000);
+    await compose(["start", "runtime-fifteen-one"]);
+    runtimeStopped = false;
+    await waitForRuntime(baseUrl, binId);
+    const otherExpression = [
+      nextOverlapAt.getUTCSeconds(),
+      nextOverlapAt.getUTCMinutes(),
+      nextOverlapAt.getUTCHours(),
+      nextOverlapAt.getUTCDate(),
+      nextOverlapAt.getUTCMonth() + 1,
+      "*",
+    ].join(" ");
+    const otherSchedule = cliData<{
+      readonly scheduleId: string;
+      readonly nextDueAt: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        otherExpression,
+        "--time-zone",
+        "UTC",
+        "--action",
+        "check",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: otherScheduleGateKey,
+          sourceKey: otherScheduleGateKey,
+        }),
+        "--overlap-policy",
+        "skip",
+      ]),
+      "created",
+    );
+    otherScheduleId = otherSchedule.scheduleId;
+    assert.equal(otherSchedule.nextDueAt, queuedSkip.nextDueAt);
+    await releaseSource(sourceControlUrl, otherScheduleGateKey, "available");
+    await waitForSourceArrival(
+      sourceControlUrl,
+      scheduleGateKey,
+      firstRunId,
+      binId,
+    );
+    const executingRun = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      firstRunId,
+      ["executing"],
+    );
+    await releaseSource(sourceControlUrl, scheduleGateKey, "slow");
+    await waitForSourceMarker(
+      sourceControlUrl,
+      firstRunId,
+      scheduleGateKey,
+      "committed",
+    );
+    assert.equal(executingRun.status, "executing");
+
+    const executingSkip = await waitFor(
+      () => readSchedule(created.scheduleId),
+      ({ lastRunId, lastSkip }) =>
+        lastRunId !== firstRunId ||
+        lastSkip?.scheduledFor === queuedSkip.nextDueAt,
+      "同计划运行执行中跳过下一次到期触发",
+    );
+    assert.equal(executingSkip.lastRunId, firstRunId);
+    assert.equal(executingSkip.lastSkip?.scheduledFor, queuedSkip.nextDueAt);
+    assert.equal(
+      (await readSchedule(otherSchedule.scheduleId)).lastRunId !== undefined,
+      true,
+      "另一计划首次到期时仍应创建运行。",
+    );
+    const otherRunId = (await readSchedule(otherSchedule.scheduleId)).lastRunId;
+    assert.ok(otherRunId !== undefined);
+    const otherRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, otherRunId]),
+      "found",
+    );
+    assert.equal(otherRun.status, "queued");
+    assert.equal(otherRun.trigger.kind, "schedule");
+    if (otherRun.trigger.kind === "schedule")
+      assert.equal(otherRun.trigger.scheduleId, otherSchedule.scheduleId);
+
+    while (Date.now() % 5_000 > 500) await wait(50);
+    const cancellationSchedule = cliData<{
+      readonly nextDueAt: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "update",
+        binId,
+        created.scheduleId,
+        "--expression",
+        "*/5 * * * * *",
+      ]),
+      "updated",
+    );
+    const cancellationDueAt = cancellationSchedule.nextDueAt;
+    assert.ok(Date.parse(cancellationDueAt) - Date.now() > 3_000);
+
+    await releaseSource(sourceControlUrl, manualGateKey, "material");
+    const manualRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        binId,
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: manualGateKey,
+          sourceKey: manualGateKey,
+        }),
+      ]),
+      "triggered",
+    );
+    assert.equal(manualRun.status, "queued");
+    assert.equal(manualRun.trigger.kind, "manual");
+
+    await compose(["pause", "runtime-fifteen-one"]);
+    runtimePaused = true;
+    const cancellingRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "cancel", binId, firstRunId]),
+      "cancellation",
+    );
+    assert.equal(cancellingRun.status, "cancelling");
+    const cancellingSkip = await waitFor(
+      () => readSchedule(created.scheduleId),
+      ({ lastRunId, lastSkip }) =>
+        lastRunId !== firstRunId ||
+        (lastSkip !== undefined &&
+          Date.parse(lastSkip.scheduledFor) >
+            Date.parse(executingSkip.lastSkip?.scheduledFor ?? "")),
+      "取消尚未确认时跳过同计划到期触发",
+    );
+    assert.equal(cancellingSkip.lastRunId, firstRunId);
+    assert.equal(cancellingSkip.lastSkip?.reason, "overlap");
+    assert.equal(cancellingSkip.lastSkip?.scheduledFor, cancellationDueAt);
+    const stillCancellingRun = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, firstRunId]),
+      "found",
+    );
+    assert.equal(stillCancellingRun.status, "cancelling");
+    assert.equal(stillCancellingRun.stopConfirmedAt, undefined);
+    assert.ok(stillCancellingRun.cancellationRequestedAt);
+    assert.ok(
+      Date.parse(cancellingSkip.lastSkip?.skippedAt ?? "") >=
+        Date.parse(stillCancellingRun.cancellationRequestedAt),
+    );
+    await compose(["unpause", "runtime-fifteen-one"]);
+    runtimePaused = false;
+    const cancelledRun = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      firstRunId,
+      ["cancelled"],
+    );
+    assert.ok(cancelledRun.stopConfirmedAt);
+    await releaseSource(sourceControlUrl, scheduleGateKey, "material");
+
+    const recoveredSchedule = await waitFor(
+      () => readSchedule(created.scheduleId),
+      ({ lastRunId }) => lastRunId !== undefined && lastRunId !== firstRunId,
+      "同计划运行终结后，后续到期点恢复创建运行",
+    );
+    const recoveredRunId = recoveredSchedule.lastRunId;
+    assert.ok(recoveredRunId !== undefined);
+    assert.ok(recoveredSchedule.lastSkip !== undefined);
+    assert.ok(Date.parse(recoveredSchedule.lastSkip.skippedAt) > 0);
+    assert.equal(recoveredSchedule.overlapPolicy, "skip");
+
+    cliData(
+      await cli(baseUrl, ["schedule", "disable", binId, created.scheduleId]),
+      "disabled",
+    );
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        otherSchedule.scheduleId,
+      ]),
+      "disabled",
+    );
+
+    const [finishedOther, finishedManual, finishedRecovered] =
+      await Promise.all([
+        waitForCliManualRunState(baseUrl, binId, otherRunId, ["completed"]),
+        waitForCliManualRunState(baseUrl, binId, manualRun.runId, [
+          "completed",
+        ]),
+        waitForCliManualRunState(baseUrl, binId, recoveredRunId, ["completed"]),
+      ]);
+    assert.equal(finishedOther.status, "completed");
+    assert.equal(finishedManual.trigger.kind, "manual");
+    assert.equal(finishedRecovered.trigger.kind, "schedule");
+    const retainedSkip = await readSchedule(created.scheduleId);
+    assert.equal(retainedSkip.lastRunId, recoveredRunId);
+    assert.equal(retainedSkip.lastSkip?.reason, "overlap");
+
+    const invalidUpdate = await fetch(
+      baseUrl +
+        "/bins/" +
+        encodeURIComponent(binId) +
+        "/schedules/" +
+        encodeURIComponent(created.scheduleId),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ overlapPolicy: "parallel" }),
+      },
+    );
+    assert.equal(invalidUpdate.status, 400);
+    const preserved = await readSchedule(created.scheduleId);
+    assert.equal(preserved.overlapPolicy, "skip");
+
+    const unconfirmedExpression = "*/20 * * * * *";
+    const unconfirmedGateKey = "schedule-overlap-unconfirmed-" + randomUUID();
+    const unconfirmedSchedule = cliData<{
+      readonly scheduleId: string;
+      readonly nextDueAt: string;
+      readonly overlapPolicy: "queue" | "skip";
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        unconfirmedExpression,
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: unconfirmedGateKey,
+          sourceKey: unconfirmedGateKey,
+          waitBeforeSourceMs: 60_000,
+        }),
+        "--overlap-policy",
+        "skip",
+      ]),
+      "created",
+    );
+    unconfirmedScheduleId = unconfirmedSchedule.scheduleId;
+    assert.equal(unconfirmedSchedule.overlapPolicy, "skip");
+    const expiredRunSchedule = await waitFor(
+      () => readSchedule(unconfirmedSchedule.scheduleId),
+      ({ lastRunId }) => lastRunId !== undefined,
+      "等待受控长动作的首次计划触发",
+    );
+    const expiredRunId = expiredRunSchedule.lastRunId;
+    assert.ok(expiredRunId !== undefined);
+    const expiredRun = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      expiredRunId,
+      ["executing"],
+    );
+    assert.equal(expiredRun.trigger.kind, "schedule");
+    if (expiredRun.trigger.kind === "schedule")
+      assert.equal(
+        expiredRun.trigger.scheduleId,
+        unconfirmedSchedule.scheduleId,
+      );
+
+    await compose(["pause", "runtime-fifteen-one"]);
+    runtimePaused = true;
+    const timedOutRun = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      expiredRunId,
+      ["failed"],
+    );
+    assert.equal(timedOutRun.stopConfirmedAt, undefined);
+    assert.equal(timedOutRun.result?.error?.code, "runtime_interrupted");
+    const dueWhileUnconfirmed = (
+      await readSchedule(unconfirmedSchedule.scheduleId)
+    ).nextDueAt;
+    const skippedUnconfirmed = await waitFor(
+      () => readSchedule(unconfirmedSchedule.scheduleId),
+      ({ lastRunId, lastSkip }) =>
+        lastRunId !== expiredRunId ||
+        lastSkip?.scheduledFor === dueWhileUnconfirmed,
+      "失败但未确认停止的同计划运行仍应阻止重叠触发",
+    );
+    assert.equal(skippedUnconfirmed.lastRunId, expiredRunId);
+    assert.equal(skippedUnconfirmed.lastSkip?.reason, "overlap");
+    assert.equal(
+      skippedUnconfirmed.lastSkip?.scheduledFor,
+      dueWhileUnconfirmed,
+    );
+    const failedStillUnconfirmed = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, expiredRunId]),
+      "found",
+    );
+    assert.equal(failedStillUnconfirmed.status, "failed");
+    assert.equal(failedStillUnconfirmed.stopConfirmedAt, undefined);
+
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        unconfirmedSchedule.scheduleId,
+      ]),
+      "disabled",
+    );
+    await compose(["unpause", "runtime-fifteen-one"]);
+    runtimePaused = false;
+    await compose(["kill", "--signal", "SIGKILL", "runtime-fifteen-one"]);
+    runtimeStopped = true;
+    await compose([
+      "up",
+      "--detach",
+      "--no-build",
+      "--force-recreate",
+      "runtime-fifteen-one",
+    ]);
+    runtimeStopped = false;
+    await waitForRuntime(baseUrl, binId);
+  } finally {
+    if (runtimePaused) {
+      try {
+        await compose(["unpause", "runtime-fifteen-one"]);
+      } catch (error) {
+        process.stderr.write(String(error) + "\n");
+      }
+    }
+    if (apiDefaultScheduleId !== undefined) {
+      try {
+        await fetch(
+          baseUrl +
+            "/bins/" +
+            encodeURIComponent(binId) +
+            "/schedules/" +
+            encodeURIComponent(apiDefaultScheduleId),
+          { method: "DELETE" },
+        );
+      } catch (error) {
+        process.stderr.write(String(error) + "\n");
+      }
+    }
+    for (const scheduleId of [
+      skipScheduleId,
+      otherScheduleId,
+      unconfirmedScheduleId,
+    ]) {
+      if (scheduleId === undefined) continue;
+      const removed = await cli(baseUrl, [
+        "schedule",
+        "remove",
+        binId,
+        scheduleId,
+      ]);
+      if (removed.code !== 0) process.stderr.write(removed.stderr);
+    }
+    if (runtimeStopped) await compose(["start", "runtime-fifteen-one"]);
+  }
 }
 
 async function manualRunControllerPartitionStep(): Promise<void> {
@@ -8780,7 +9338,11 @@ async function main(): Promise<void> {
         "updated",
       );
       await waitForRuntime(baseUrl, "binny-runs-one");
-      baseUrl = await scheduledRunsStep(baseUrl);
+      if (scheduleOverlapOnly) {
+        await verifyScheduleOverlapPolicy(baseUrl);
+      } else {
+        baseUrl = await scheduledRunsStep(baseUrl);
+      }
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(installedCliConsumer !== undefined);

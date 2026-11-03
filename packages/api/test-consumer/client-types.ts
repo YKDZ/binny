@@ -191,8 +191,10 @@ async function checkPublicScheduleContract(): Promise<void> {
   if (created.status === 201) {
     const schedule = await created.json();
     const timezone: string = schedule.timeZone;
+    const overlapPolicy: "queue" | "skip" = schedule.overlapPolicy;
     const nextDueAt: string = schedule.nextDueAt;
     void timezone;
+    void overlapPolicy;
     void nextDueAt;
     // @ts-expect-error schedule output has no undeclared action alias.
     void schedule.operation;
@@ -213,6 +215,12 @@ async function checkPublicScheduleContract(): Promise<void> {
     json: { ...createInput, params: ["invalid"] },
   });
 
+  void client.bins[":binId"].schedules.$post({
+    param: { binId },
+    // @ts-expect-error 重叠策略只接受 queue 或 skip。
+    json: { ...createInput, overlapPolicy: "parallel" },
+  });
+
   const listed = await client.bins[":binId"].schedules.$get({
     param: { binId },
   });
@@ -224,7 +232,11 @@ async function checkPublicScheduleContract(): Promise<void> {
 
   const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({
     param: { binId, scheduleId },
-    json: { expression: "0 30 2 * * *", timeZone: "Europe/London" },
+    json: {
+      expression: "0 30 2 * * *",
+      timeZone: "Europe/London",
+      overlapPolicy: "skip",
+    },
   });
   if (updated.status === 200) {
     void (await updated.json()).nextDueAt;

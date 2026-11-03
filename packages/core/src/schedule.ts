@@ -22,7 +22,7 @@ import {
   type Transaction,
 } from "@binny/db";
 import { CronExpressionParser } from "cron-parser";
-import { and, asc, desc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 
 import { createQueuedRunInTransaction } from "./manual-run.ts";
 import {
@@ -157,6 +157,33 @@ async function latestScheduleRunIds(
     }
   }
   return latest;
+}
+
+async function hasActiveOrUnconfirmedScheduleRun(
+  transaction: Transaction,
+  binId: string,
+  scheduleId: string,
+): Promise<boolean> {
+  const rows = await transaction
+    .select({ runId: manualRuns.runId })
+    .from(manualRuns)
+    .where(
+      and(
+        eq(manualRuns.binId, binId),
+        eq(manualRuns.scheduleId, scheduleId),
+        or(
+          inArray(manualRuns.status, ["queued", "executing", "cancelling"]),
+          and(
+            eq(manualRuns.status, "failed"),
+            isNull(manualRuns.stopConfirmedAt),
+            sql`${manualRuns.failure}->>'code' = ${"runtime_interrupted"}`,
+          ),
+        ),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  return rows.length > 0;
 }
 
 function toSchedule(
@@ -803,6 +830,29 @@ export function createScheduleStore(database: Database): ScheduleStore {
               .set({
                 enabled: false,
                 lastError: nextDue.error,
+                updatedAt: sql`clock_timestamp()`,
+              })
+              .where(eq(schedules.scheduleId, current.scheduleId));
+            return;
+          }
+
+          if (
+            current.overlapPolicy === "skip" &&
+            (await hasActiveOrUnconfirmedScheduleRun(
+              transaction,
+              current.binId,
+              current.scheduleId,
+            ))
+          ) {
+            await transaction
+              .update(schedules)
+              .set({
+                nextDueAt: nextDue.value,
+                lastSkip: {
+                  reason: "overlap",
+                  scheduledFor: current.nextDueAt.toISOString(),
+                  skippedAt: new Date().toISOString(),
+                },
                 updatedAt: sql`clock_timestamp()`,
               })
               .where(eq(schedules.scheduleId, current.scheduleId));

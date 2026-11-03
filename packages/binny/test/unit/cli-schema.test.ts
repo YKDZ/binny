@@ -171,6 +171,22 @@ void describe("离线 CLI 命令契约", () => {
       modificationCommand.input.inputSchema.properties.overlapPolicy?.enum,
       ["queue", "skip"],
     );
+
+    const invalidPolicy = await run([
+      "schedule",
+      "create",
+      "binny-runs-one",
+      "--expression",
+      "0 0 0 1 1 *",
+      "--time-zone",
+      "UTC",
+      "--action",
+      "collect",
+      "--overlap-policy",
+      "parallel",
+    ]);
+    assert.equal(invalidPolicy.exitCode, 2);
+    assert.equal(invalidPolicy.requestCount, 0);
   });
 
   void it("schema 使用 argv 字符串契约，提供同一数据的文本展示并拒绝未知路径", async () => {

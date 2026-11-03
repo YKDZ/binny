@@ -46,6 +46,7 @@ import {
   scheduleCreateInputSchema,
   scheduleDeleteResultSchema,
   scheduleErrorSchema,
+  scheduleOverlapPolicySchema,
   scheduleSchema,
   scheduleUpdateInputSchema,
   withArchiveJsonSchemaProjection,
@@ -388,7 +389,7 @@ const cliScheduleCreateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128),
       action: sourceAdapterActionNameSchema,
       params: jsonObjectTextSchema.optional(),
-      overlapPolicy: z.enum(["queue", "skip"]).default("queue"),
+      overlapPolicy: scheduleOverlapPolicySchema.default("queue"),
       disabled: z.boolean().optional(),
     })
     .strict(),
@@ -402,7 +403,7 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
       timeZone: postgresTextSchema.min(1).max(128).optional(),
       action: sourceAdapterActionNameSchema.optional(),
       params: jsonObjectTextSchema.optional(),
-      overlapPolicy: z.enum(["queue", "skip"]).optional(),
+      overlapPolicy: scheduleOverlapPolicySchema.optional(),
     })
     .strict()
     .refine(
