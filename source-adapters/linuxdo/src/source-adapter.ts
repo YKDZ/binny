@@ -659,15 +659,22 @@ async function withSourceAdmission<T>(
 ): Promise<T> {
   const state = pageSourceAccess.get(page);
   if (state === undefined) throw new Error("页面没有绑定来源准入状态。");
-  return await state.client.withAdmission(
-    { groupId: "linuxdo", source, origin: url.origin },
-    async () => {
-      state.signal.throwIfAborted();
-      await reportPageSourceAccess(state);
-      state.signal.throwIfAborted();
-      return await operation();
-    },
-  );
+  await reportPageSourceAccess(state);
+  let result: T;
+  try {
+    result = await state.client.withAdmission(
+      { groupId: "linuxdo", source, origin: url.origin },
+      async () => {
+        state.signal.throwIfAborted();
+        return await operation();
+      },
+    );
+  } catch (error) {
+    await reportPageSourceAccess(state).catch(() => undefined);
+    throw error;
+  }
+  await reportPageSourceAccess(state);
+  return result;
 }
 
 function siteFromConfig(config: SourceAdapterConfig): {

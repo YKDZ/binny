@@ -44,7 +44,7 @@ import {
   type BrowserPowerEvent,
 } from "./browser-lifecycle.ts";
 import { createRuntimeServer } from "./runtime-server.ts";
-import { PersistentSourceAccessCoordinator } from "./source-access.ts";
+import { openPersistentSourceAccessCoordinator } from "./source-access.ts";
 
 const sourceAdapterPath =
   process.env.BINNY_SOURCE_ADAPTER_ENTRY ?? "/app/dist/index.js";
@@ -198,7 +198,7 @@ async function advanceOwnerGeneration(
 const ownerLock = await findOwnerLockDescriptor();
 const ownerLockDescriptor = ownerLock.descriptor;
 const ownerGeneration = await advanceOwnerGeneration(ownerLock.path);
-const sourceAccessCoordinator = await PersistentSourceAccessCoordinator.open(
+const sourceAccessCoordinator = await openPersistentSourceAccessCoordinator(
   join(dirname(ownerLock.path), "source-access.json"),
 );
 const importedSourceAdapter = (await import(

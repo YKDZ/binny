@@ -17,18 +17,24 @@ import { z } from "zod";
 import type { SourceAccessClient } from "./source-access.ts";
 
 export {
+  createSourceAccessCoordinator,
   createSourceAccessClient,
   sourceAccessConfigFromAdapterConfig,
   sourceAccessConfigSchema,
   sourceAccessGroupSchema,
+  sourceAccessPersistentStateSchema,
 } from "./source-access.ts";
 export type {
   SourceAccessAcquireInput,
   SourceAccessClient,
+  SourceAccessClock,
+  SourceAccessCoordinator,
   SourceAccessConfig,
   SourceAccessGroup,
   SourceAccessKind,
   SourceAccessLease,
+  SourceAccessPersistentState,
+  SourceAccessPersistentStore,
   SourceAccessRequest,
   SourceAccessSnapshot,
   SourceAccessTransport,
