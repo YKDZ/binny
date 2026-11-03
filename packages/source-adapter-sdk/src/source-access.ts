@@ -53,6 +53,17 @@ export const sourceAccessPersistentStateSchema = z
   .object({
     version: z.literal(1),
     lastAdmittedAt: z.record(z.string(), z.number().int().nonnegative()),
+    cooldownByGroup: z
+      .record(
+        sourceAccessGroupIdSchema,
+        z.object({
+          notBeforeEpochMs: z.number().int().nonnegative(),
+          status: z.union([z.literal(429), z.literal(503)]),
+          observedAtEpochMs: z.number().int().nonnegative(),
+          retryAfter: z.string().max(256),
+        }),
+      )
+      .optional(),
   })
   .strict();
 
@@ -62,6 +73,26 @@ export type SourceAccessKind = SourceAccessGroup["sources"][number];
 export type SourceAccessPersistentState = z.output<
   typeof sourceAccessPersistentStateSchema
 >;
+export type SourceAccessCooldown = {
+  readonly notBeforeEpochMs: number;
+  readonly status: 429 | 503;
+  readonly observedAtEpochMs: number;
+  readonly retryAfter: string;
+};
+export type SourceAccessResponse = {
+  readonly status: number;
+  readonly retryAfter?: string;
+};
+export type SourceAccessResponseObservation = {
+  readonly status: 429 | 503;
+  readonly observedAtEpochMs: number;
+  readonly outcome: "cooled" | "missing" | "invalid" | "past";
+  readonly cooldownUntilEpochMs?: number;
+};
+export type SourceAccessCoordinatorSnapshot = {
+  readonly lastAdmittedAt: Readonly<Record<string, number>>;
+  readonly cooldownByGroup: Readonly<Record<string, SourceAccessCooldown>>;
+};
 
 export type SourceAccessPersistentStore = {
   /** 不存在时返回 undefined；损坏状态由 SDK 拒绝载入。 */
@@ -87,6 +118,8 @@ export type SourceAccessAcquireInput = {
   readonly maxConcurrency: number;
   /** 后续冷却或重试策略可提供的最早准入时刻；与最小间隔一次取最大值。 */
   readonly notBeforeEpochMs?: number;
+  /** 本轮允许开始访问的最后时刻；超过它时SDK立即拒绝，不创建长等待。 */
+  readonly deadlineEpochMs?: number;
 };
 
 export type SourceAccessLease = {
@@ -100,6 +133,10 @@ export type SourceAccessTransport = {
     signal: AbortSignal,
   ): Promise<SourceAccessLease>;
   release(leaseId: string): Promise<void>;
+  observeResponse(
+    input: SourceAccessAcquireInput,
+    response: SourceAccessResponse,
+  ): Promise<SourceAccessResponseObservation>;
 };
 
 export type SourceAccessRequest = {
@@ -108,6 +145,11 @@ export type SourceAccessRequest = {
   readonly origin: string;
   /** 后续冷却或重试策略可提供的最早准入时刻；不触发第二层等待。 */
   readonly notBeforeEpochMs?: number;
+};
+
+export type SourceAccessAdmissionOptions = {
+  readonly signal?: AbortSignal;
+  readonly deadlineEpochMs?: number;
 };
 
 export type SourceAccessSnapshot = {
@@ -123,9 +165,34 @@ export type SourceAccessCoordinator = {
     declarations: SourceAccessConfig,
     signal: AbortSignal,
   ): Promise<SourceAccessLease>;
+  observeResponse(
+    ownerId: string,
+    request: SourceAccessAcquireInput,
+    declarations: SourceAccessConfig,
+    response: SourceAccessResponse,
+  ): Promise<SourceAccessResponseObservation>;
+  snapshot(): SourceAccessCoordinatorSnapshot;
   release(ownerId: string, leaseId: string): Promise<void>;
   closeOwner(ownerId: string): void;
 };
+
+export class SourceAccessDeadlineExceededError extends Error {
+  readonly code = "source_access_deadline_exceeded";
+
+  constructor() {
+    super("本轮剩余时间不足以等待来源准入。", { cause: undefined });
+    this.name = "SourceAccessDeadlineExceededError";
+  }
+}
+
+export class SourceAccessPersistentStoreError extends Error {
+  readonly code = "source_access_persistent_store_failed";
+
+  constructor(cause: unknown) {
+    super("来源准入状态无法持久保存，相关来源访问已停止。", { cause });
+    this.name = "SourceAccessPersistentStoreError";
+  }
+}
 
 type CoordinatorWaiter = {
   readonly ownerId: string;
@@ -164,7 +231,11 @@ export async function createSourceAccessCoordinator(input: {
   readonly clock?: SourceAccessClock;
 }): Promise<SourceAccessCoordinator> {
   const saved = await input.store.load();
-  const parsed = { version: 1 as const, lastAdmittedAt: {} };
+  const parsed = {
+    version: 1 as const,
+    lastAdmittedAt: {},
+    cooldownByGroup: {},
+  };
   if (saved !== undefined) {
     const checked = sourceAccessPersistentStateSchema.safeParse(saved);
     if (!checked.success)
@@ -186,6 +257,7 @@ export async function createSourceAccessCoordinator(input: {
 
 class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
   private readonly lastAdmittedAt = new Map<string, number>();
+  private readonly cooldownByGroup = new Map<string, SourceAccessCooldown>();
   private readonly groups = new Map<string, CoordinatorGroupState>();
   private readonly leases = new Map<string, CoordinatorLease>();
   private persistTail: Promise<void> = Promise.resolve();
@@ -201,6 +273,10 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     this.clock = clock;
     for (const [groupId, timestamp] of Object.entries(saved.lastAdmittedAt))
       this.lastAdmittedAt.set(groupId, timestamp);
+    for (const [groupId, cooldown] of Object.entries(
+      saved.cooldownByGroup ?? {},
+    ))
+      this.cooldownByGroup.set(groupId, cooldown);
   }
 
   acquire(
@@ -219,7 +295,10 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       !validSourceAccessOrigin(request.origin) ||
       (request.notBeforeEpochMs !== undefined &&
         (!Number.isSafeInteger(request.notBeforeEpochMs) ||
-          request.notBeforeEpochMs < 0))
+          request.notBeforeEpochMs < 0)) ||
+      (request.deadlineEpochMs !== undefined &&
+        (!Number.isSafeInteger(request.deadlineEpochMs) ||
+          request.deadlineEpochMs < 0))
     )
       return Promise.reject(
         new Error("worker 请求与本次运行声明的来源准入策略不一致。"),
@@ -251,6 +330,84 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       signal.addEventListener("abort", waiter.abort, { once: true });
       this.schedulePump(request.groupId, state);
     });
+  }
+
+  async observeResponse(
+    _ownerId: string,
+    request: SourceAccessAcquireInput,
+    rawDeclarations: SourceAccessConfig,
+    response: SourceAccessResponse,
+  ): Promise<SourceAccessResponseObservation> {
+    const declarations = sourceAccessConfigSchema.parse(rawDeclarations);
+    const group = declarations.groups[request.groupId];
+    if (
+      group === undefined ||
+      !group.sources.includes(request.source) ||
+      group.minimumIntervalMs !== request.minimumIntervalMs ||
+      group.maxConcurrency !== request.maxConcurrency ||
+      !validSourceAccessOrigin(request.origin)
+    )
+      throw new Error("worker 响应与本次运行声明的来源准入策略不一致。");
+    if (
+      !Number.isSafeInteger(response.status) ||
+      response.status < 100 ||
+      response.status > 599 ||
+      (response.retryAfter !== undefined &&
+        (typeof response.retryAfter !== "string" ||
+          response.retryAfter.length > 256))
+    )
+      throw new Error("来源响应冷却依据格式无效。");
+
+    if (response.status !== 429 && response.status !== 503)
+      throw new Error("只有 429 与 503 响应可以设置来源冷却。");
+    const status = response.status;
+    const observedAtEpochMs = Math.floor(this.clock.epochNow());
+    if (!Number.isSafeInteger(observedAtEpochMs) || observedAtEpochMs < 0)
+      throw new Error("来源准入时钟返回了无效的 epoch 时间。");
+    if (response.retryAfter === undefined || response.retryAfter.trim() === "")
+      return { status: response.status, observedAtEpochMs, outcome: "missing" };
+
+    const retryAfter = response.retryAfter.trim();
+    const requestedUntil = parseRetryAfter(retryAfter, observedAtEpochMs);
+    if (requestedUntil === undefined)
+      return { status: response.status, observedAtEpochMs, outcome: "invalid" };
+    if (requestedUntil < observedAtEpochMs)
+      return { status: response.status, observedAtEpochMs, outcome: "past" };
+
+    const previous = this.cooldownByGroup.get(request.groupId);
+    const cooldownUntilEpochMs = Math.max(
+      requestedUntil,
+      previous?.notBeforeEpochMs ?? 0,
+    );
+    if (cooldownUntilEpochMs !== previous?.notBeforeEpochMs) {
+      await this.persistMutation(
+        () =>
+          this.cooldownByGroup.set(request.groupId, {
+            notBeforeEpochMs: cooldownUntilEpochMs,
+            status,
+            observedAtEpochMs,
+            retryAfter,
+          }),
+        () => {
+          if (previous === undefined)
+            this.cooldownByGroup.delete(request.groupId);
+          else this.cooldownByGroup.set(request.groupId, previous);
+        },
+      );
+    }
+    return {
+      status: response.status,
+      observedAtEpochMs,
+      outcome: "cooled",
+      cooldownUntilEpochMs,
+    };
+  }
+
+  snapshot(): SourceAccessCoordinatorSnapshot {
+    return {
+      lastAdmittedAt: Object.fromEntries(this.lastAdmittedAt),
+      cooldownByGroup: Object.fromEntries(this.cooldownByGroup),
+    };
   }
 
   async release(ownerId: string, leaseId: string): Promise<void> {
@@ -310,12 +467,38 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     }
     if (state.timer !== undefined) this.clock.clearTimer(state.timer);
     const waiter = state.queue[0]!;
-    if (state.leases.size >= waiter.group.maxConcurrency) return;
     const nextAt = Math.max(
       state.lastAdmittedAt + waiter.group.minimumIntervalMs,
       waiter.request.notBeforeEpochMs ?? 0,
+      this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
     );
-    const waitMs = Math.max(0, nextAt - this.clock.epochNow());
+    const now = this.clock.epochNow();
+    if (
+      waiter.request.deadlineEpochMs !== undefined &&
+      nextAt > waiter.request.deadlineEpochMs
+    ) {
+      this.removeWaiter(state, waiter);
+      waiter.reject(new SourceAccessDeadlineExceededError());
+      this.schedulePump(groupId, state);
+      return;
+    }
+    if (state.leases.size >= waiter.group.maxConcurrency) {
+      if (waiter.request.deadlineEpochMs !== undefined) {
+        const untilDeadline = waiter.request.deadlineEpochMs - now + 1;
+        if (untilDeadline <= 0) {
+          this.removeWaiter(state, waiter);
+          waiter.reject(new SourceAccessDeadlineExceededError());
+          this.schedulePump(groupId, state);
+          return;
+        }
+        state.timer = this.clock.setTimer(() => {
+          state.timer = undefined;
+          this.schedulePump(groupId, state);
+        }, untilDeadline);
+      }
+      return;
+    }
+    const waitMs = Math.max(0, nextAt - now);
     if (waitMs > 0) {
       state.timer = this.clock.setTimer(() => {
         state.timer = undefined;
@@ -347,8 +530,21 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
         waiter.reject(new Error("来源准入时钟返回了无效的 epoch 时间。"));
         return;
       }
+      const requiredAt = Math.max(
+        state.lastAdmittedAt + waiter.group.minimumIntervalMs,
+        waiter.request.notBeforeEpochMs ?? 0,
+        this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
+      );
+      if (
+        waiter.request.deadlineEpochMs !== undefined &&
+        Math.max(requiredAt, timestamp) > waiter.request.deadlineEpochMs
+      ) {
+        this.removeWaiter(state, waiter);
+        waiter.reject(new SourceAccessDeadlineExceededError());
+        return;
+      }
       try {
-        await this.persistAdmission(groupId, state.lastAdmittedAt, timestamp);
+        await this.persistAdmission(groupId, timestamp);
       } catch (error) {
         this.removeWaiter(state, waiter);
         waiter.reject(error);
@@ -389,8 +585,21 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
 
   private async persistAdmission(
     groupId: string,
-    previous: number,
     timestamp: number,
+  ): Promise<void> {
+    const previous = this.lastAdmittedAt.get(groupId);
+    await this.persistMutation(
+      () => this.lastAdmittedAt.set(groupId, timestamp),
+      () => {
+        if (previous === undefined) this.lastAdmittedAt.delete(groupId);
+        else this.lastAdmittedAt.set(groupId, previous);
+      },
+    );
+  }
+
+  private async persistMutation(
+    apply: () => void,
+    rollback: () => void,
   ): Promise<void> {
     const prior = this.persistTail;
     let release!: () => void;
@@ -398,20 +607,47 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       release = resolve;
     });
     await prior;
-    this.lastAdmittedAt.set(groupId, timestamp);
+    apply();
     try {
       await this.store.save({
         version: 1,
         lastAdmittedAt: Object.fromEntries(this.lastAdmittedAt),
+        cooldownByGroup: Object.fromEntries(this.cooldownByGroup),
       });
     } catch (error) {
-      if (previous === 0) this.lastAdmittedAt.delete(groupId);
-      else this.lastAdmittedAt.set(groupId, previous);
-      throw error;
+      rollback();
+      throw new SourceAccessPersistentStoreError(error);
     } finally {
       release();
     }
   }
+}
+
+function parseRetryAfter(
+  value: string,
+  nowEpochMs: number,
+): number | undefined {
+  if (/^[0-9]+$/u.test(value)) {
+    const delayMs = Number(value) * 1_000;
+    const result = nowEpochMs + delayMs;
+    return Number.isSafeInteger(delayMs) && Number.isSafeInteger(result)
+      ? result
+      : undefined;
+  }
+
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  const isHttpDate =
+    /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(
+      value,
+    ) ||
+    /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/u.test(
+      value,
+    ) ||
+    /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) {1,2}\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/u.test(
+      value,
+    );
+  return isHttpDate && Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function validSourceAccessOrigin(origin: string): boolean {
@@ -446,7 +682,12 @@ export type SourceAccessClient = {
   withAdmission<T>(
     request: SourceAccessRequest,
     operation: () => Promise<T>,
+    options?: SourceAccessAdmissionOptions,
   ): Promise<T>;
+  observeResponse(
+    request: SourceAccessRequest,
+    response: SourceAccessResponse,
+  ): Promise<SourceAccessResponseObservation>;
   snapshot(): SourceAccessSnapshot;
 };
 
@@ -467,6 +708,7 @@ export function createSourceAccessClient(input: {
     async withAdmission<T>(
       request: SourceAccessRequest,
       operation: () => Promise<T>,
+      options?: SourceAccessAdmissionOptions,
     ): Promise<T> {
       const group = groups[request.groupId];
       if (group === undefined || !group.sources.includes(request.source))
@@ -477,6 +719,12 @@ export function createSourceAccessClient(input: {
           request.notBeforeEpochMs < 0)
       )
         throw new Error("来源准入最早时刻必须是非负安全整数毫秒时间戳。");
+      const deadlineEpochMs = options?.deadlineEpochMs;
+      if (
+        deadlineEpochMs !== undefined &&
+        (!Number.isSafeInteger(deadlineEpochMs) || deadlineEpochMs < 0)
+      )
+        throw new Error("来源准入期限必须是非负安全整数毫秒时间戳。");
       let origin: string;
       try {
         const parsedOrigin = new URL(request.origin);
@@ -491,6 +739,10 @@ export function createSourceAccessClient(input: {
         throw new Error("来源准入必须使用不含路径的 HTTP(S) origin。");
       }
 
+      const effectiveSignal =
+        options?.signal === undefined
+          ? input.signal
+          : AbortSignal.any([input.signal, options.signal]);
       const lease = await input.transport.acquire(
         {
           runId: input.runId,
@@ -502,12 +754,15 @@ export function createSourceAccessClient(input: {
           ...(request.notBeforeEpochMs === undefined
             ? {}
             : { notBeforeEpochMs: request.notBeforeEpochMs }),
+          ...(deadlineEpochMs === undefined ? {} : { deadlineEpochMs }),
         },
-        input.signal,
+        effectiveSignal,
       );
-      if (input.signal.aborted) {
+      if (effectiveSignal.aborted) {
         await input.transport.release(lease.leaseId).catch(() => undefined);
-        throw input.signal.reason ?? new DOMException("已取消", "AbortError");
+        throw (
+          effectiveSignal.reason ?? new DOMException("已取消", "AbortError")
+        );
       }
       admittedAttempts++;
       waitedMs += lease.waitedMs;
@@ -534,6 +789,30 @@ export function createSourceAccessClient(input: {
       if (operationFailed) throw operationFailure;
       if (releaseFailed) throw releaseFailure;
       return result as T;
+    },
+    async observeResponse(request, response) {
+      const group = groups[request.groupId];
+      if (group === undefined || !group.sources.includes(request.source))
+        throw new Error("本次来源响应没有声明对应的来源准入组或来源类型。");
+      const origin = new URL(request.origin);
+      if (
+        (origin.protocol !== "http:" && origin.protocol !== "https:") ||
+        origin.origin !== request.origin
+      )
+        throw new Error("来源响应必须使用不含路径的 HTTP(S) origin。");
+      if (response.status !== 429 && response.status !== 503)
+        throw new Error("只有 429 与 503 响应可以设置来源冷却。");
+      return await input.transport.observeResponse(
+        {
+          runId: input.runId,
+          groupId: request.groupId,
+          source: request.source,
+          origin: origin.origin,
+          minimumIntervalMs: group.minimumIntervalMs,
+          maxConcurrency: group.maxConcurrency,
+        },
+        response,
+      );
     },
     snapshot() {
       return {
