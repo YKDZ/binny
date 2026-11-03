@@ -488,8 +488,25 @@ function postRangeFixtures(
           },
         ]
       : [];
+  const dailyChildReply: Record<string, unknown>[] =
+    activeState.dailyCollectionEnabled && activeState.syncScenarioStage >= 1
+      ? [
+          {
+            ...post(
+              70_040_001,
+              2,
+              "<p>全日子板块范围重叠回复。</p>",
+              "2026-11-02T00:15:00.000Z",
+              1,
+            ),
+            topic_id: 700_400,
+            created_at: "2026-11-02T00:15:00.000Z",
+          },
+        ]
+      : [];
   return [
     ...(includeInserted ? [insertion] : []),
+    ...dailyChildReply,
     ...syncTopic,
     ...syncReplies,
     ...oldSyncReply,
