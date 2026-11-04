@@ -36,6 +36,7 @@ type SourceState = {
   readonly postRangeResponseStatus: number | null;
   readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
+  readonly postCategoryCandidateScenario: boolean;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
@@ -129,6 +130,7 @@ let activeState: SourceState = {
   postRangeResponseStatus: null,
   postRangeRetryAfter: null,
   postRangePageSize: 2,
+  postCategoryCandidateScenario: false,
   paginationOrderMutationEnabled: false,
   invalidCreatedAtTopicIds: [],
   topicVersion: 1,
@@ -371,6 +373,48 @@ function posts(): readonly Record<string, unknown>[] {
 function postRangeFixtures(
   includeInserted: boolean,
 ): Record<string, unknown>[] {
+  if (activeState.postCategoryCandidateScenario) {
+    const createdAt = "2026-10-28T02:15:00.000Z";
+    const candidatePost = (
+      id: number,
+      topicId: number,
+      categoryId: unknown,
+      text: string,
+      postNumber = 2,
+    ): Record<string, unknown> => ({
+      id,
+      topic_id: topicId,
+      post_number: postNumber,
+      reply_to_post_number: 1,
+      username: "fixture-category-candidate-author",
+      name: "分类候选示例作者",
+      created_at: createdAt,
+      updated_at: createdAt,
+      cooked: `<p>${text}</p>`,
+      ...(categoryId === undefined ? {} : { category_id: categoryId }),
+    });
+    const nonmatching = Array.from({ length: 25 }, (_, index) =>
+      candidatePost(
+        351_000 - index * 2,
+        2601 + index,
+        42,
+        `应由帖子分类跳过的主题 ${String(2601 + index)}`,
+      ),
+    );
+    return [
+      ...nonmatching,
+      candidatePost(350_950, 2700, 44, "明确匹配分类的帖子"),
+      candidatePost(350_948, 2701, 42, "同主题中分类不匹配的帖子"),
+      candidatePost(
+        350_946,
+        2701,
+        undefined,
+        "同主题缺失分类字段的帖子仍应保留",
+        3,
+      ),
+      candidatePost(350_944, 2702, "44", "无效分类字段仍应回退主题读取"),
+    ].toSorted((first, second) => Number(second.id) - Number(first.id));
+  }
   const existing = posts();
   const firstReply = existing[1];
   const secondReply = existing[2];
@@ -602,6 +646,12 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
   const createdAt =
     activeState.topicCreatedAtOverrides?.[topicId] ??
     (topicId === 2401 ? defaultCreatedAt : legacyTopicCreatedAt(topicId));
+  const categoryId =
+    activeState.postCategoryCandidateScenario &&
+    topicId >= 2700 &&
+    topicId <= 2702
+      ? 44
+      : 42;
   if (topicId === 2401) {
     const availablePosts = posts();
     return {
@@ -612,7 +662,7 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
       updated_at: `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
       posts_count: availablePosts.length,
       reply_count: availablePosts.length - 1,
-      category_id: 42,
+      category_id: categoryId,
       tags: activeState.legacyTags
         ? ["受控", "归档"]
         : [
@@ -633,7 +683,7 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
     title: topicName,
     slug: `controlled-topic-${String(topicId)}`,
     created_at: createdAt,
-    category_id: 42,
+    category_id: categoryId,
     post_stream: {
       posts: [
         {
@@ -928,6 +978,7 @@ function updateState(value: unknown): boolean {
     "postRangeEnabled",
     "postRangeAddAfterFirstPage",
     "postRangeRepeatPage",
+    "postCategoryCandidateScenario",
     "paginationOrderMutationEnabled",
   ] as const) {
     if (key in updates && typeof updates[key] !== "boolean") return false;

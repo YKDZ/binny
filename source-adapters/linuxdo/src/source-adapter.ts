@@ -4464,6 +4464,23 @@ async function collectPostCreatedRange(
     ) {
       continue;
     }
+    if (
+      readCache !== undefined &&
+      !selection.allVisible &&
+      !selection.topicIds.has(topicId) &&
+      selection.categoryIds.size > 0 &&
+      posts.every((post) => {
+        const categoryId = post.category_id;
+        return (
+          typeof categoryId === "number" &&
+          Number.isSafeInteger(categoryId) &&
+          categoryId > 0 &&
+          !selection.categoryIds.has(categoryId)
+        );
+      })
+    ) {
+      continue;
+    }
     const topicResult = await collectPostRangeTopic(
       context,
       page,

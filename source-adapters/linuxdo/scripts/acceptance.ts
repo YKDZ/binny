@@ -85,6 +85,7 @@ type FixtureState = {
   readonly postRangeResponseStatus: number | null;
   readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
+  readonly postCategoryCandidateScenario: boolean;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
   readonly topicVersion: number;
@@ -5588,6 +5589,110 @@ async function verifyCorruptSyncStateVisibility(): Promise<void> {
   );
 }
 
+async function verifySyncPostCategoryCandidates(): Promise<void> {
+  const categoryTarget = {
+    id: "category-44",
+    kind: "category",
+    categoryId: 44,
+    categorySlugPath: "other",
+  } as const;
+  const explicitTopicTarget = {
+    id: "topic-2601",
+    kind: "topic",
+    topicId: 2601,
+  } as const;
+  const targets = [categoryTarget, explicitTopicTarget];
+  await setSourceAccessPolicy(0, 1);
+  await updateFixtureState({
+    dailyCollectionEnabled: false,
+    postRangeEnabled: true,
+    postRangeAddAfterFirstPage: false,
+    postRangeRepeatPage: false,
+    postRangeInvalidPage: null,
+    postRangeResponseStatus: null,
+    postRangeRetryAfter: null,
+    postRangePageSize: 5,
+    postCategoryCandidateScenario: true,
+    syncScenarioStage: 0,
+  });
+  try {
+    await setTestClockAt("2026-10-28T02:00:00.000Z");
+    const initialized = await trigger("sync", {
+      targets,
+      maxPages: 20,
+      maxRequests: 20,
+      maxElapsedMs: 120_000,
+    });
+    assert.equal(initialized.status, "completed", JSON.stringify(initialized));
+    assert.equal(syncOutput(initialized).outcome, "initialized");
+    const nextUpperBound = new Date(
+      Date.parse(syncReport(initialized).upperBound) + 30 * 60_000,
+    ).toISOString();
+    await setTestClockAt(nextUpperBound);
+    await clearSourceEvents();
+
+    const increment = await trigger("sync", {
+      targets,
+      maxPages: 20,
+      maxRequests: 20,
+      maxElapsedMs: 120_000,
+    });
+    assert.equal(increment.status, "completed", JSON.stringify(increment));
+    const report = syncReport(increment);
+    assert.equal(report.phase, "completed", JSON.stringify(report));
+    assert.equal(report.budget.maxRequests, 20);
+    assert.equal(report.budget.stopReason, undefined, JSON.stringify(report));
+    assert.deepEqual(
+      report.scopes.map(({ scope, status }) => ({ scope, status })),
+      [
+        { scope: { kind: "category", id: 44 }, status: "completed" },
+        { scope: { kind: "topic", id: 2601 }, status: "completed" },
+      ],
+      JSON.stringify(report.scopes),
+    );
+    assert.equal(syncOutput(increment).observedPosts, 5);
+
+    const events = (await sourceState()).events;
+    assert.equal(
+      events.filter(({ action }) => action === "post-list").length,
+      8,
+      JSON.stringify(events.filter(({ action }) => action === "post-list")),
+    );
+    assert.deepEqual(
+      events
+        .filter(({ action }) => action === "topic")
+        .map(({ path }) => path)
+        .toSorted(),
+      ["/t/2601.json", "/t/2700.json", "/t/2701.json", "/t/2702.json"],
+    );
+    for (const text of [
+      "明确匹配分类的帖子",
+      "同主题中分类不匹配的帖子",
+      "同主题缺失分类字段的帖子仍应保留",
+      "无效分类字段仍应回退主题读取",
+      "应由帖子分类跳过的主题 2601",
+    ]) {
+      assert.ok(
+        (await searchArchiveItem(text)).sourceKey.key.startsWith("post:"),
+      );
+    }
+  } finally {
+    await updateFixtureState({
+      dailyCollectionEnabled: false,
+      postRangeEnabled: false,
+      postRangeAddAfterFirstPage: false,
+      postRangeRepeatPage: false,
+      postRangeInvalidPage: null,
+      postRangeResponseStatus: null,
+      postRangeRetryAfter: null,
+      postRangePageSize: 2,
+      postCategoryCandidateScenario: false,
+      syncScenarioStage: 0,
+    });
+    await setTestClockAt(new Date().toISOString());
+  }
+}
+
 async function verifySyncScopeTransitions(): Promise<void> {
   type SyncStateEntry = {
     readonly binId: string;
@@ -6782,6 +6887,7 @@ async function main(): Promise<void> {
       internalStep !== "sync-interruption" &&
       internalStep !== "state-corruption" &&
       internalStep !== "native-category-tree" &&
+      internalStep !== "sync-category-candidates" &&
       internalStep !== "scope-transitions"
     )
       throw new Error(`未知 Linux.do 验收内部步骤：${internalStep}`);
@@ -6885,6 +6991,13 @@ async function main(): Promise<void> {
       );
       return;
     }
+    if (internalStep === "sync-category-candidates") {
+      await verifySyncPostCategoryCandidates();
+      process.stdout.write(
+        "帖子流分类候选的安全跳过、混合字段回退与显式主题范围通过。\n",
+      );
+      return;
+    }
     if (internalStep === "scope-transitions") {
       await verifySyncScopeTransitions();
       process.stdout.write("sync 范围身份、重叠、变化、隔离和未知状态通过。\n");
@@ -6963,6 +7076,10 @@ async function main(): Promise<void> {
     await verifySourceStateFreshness(manifest);
     process.stdout.write(
       "公开 heartbeat 省略状态时旧快照转为 stale，正式运行器重启后恢复 current。\n",
+    );
+    await verifySyncPostCategoryCandidates();
+    process.stdout.write(
+      "帖子流分类候选的安全跳过、混合字段回退与显式主题范围通过。\n",
     );
     await verifyLogout();
     process.stdout.write("退出登录后的全新检查和采集语义通过。\n");
