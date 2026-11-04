@@ -4250,6 +4250,15 @@ async function verifySyncWorkerInterruption(
     await clearSourceEvents();
     const resumed = await trigger("sync", params);
     assert.equal(resumed.status, "completed", JSON.stringify(resumed));
+    assert.equal(
+      (resumed.result?.commits ?? []).some(({ items }) =>
+        items.some(
+          ({ itemId }) => itemId === archivedBeforeInterruption.itemId,
+        ),
+      ),
+      false,
+      "worker恢复后的sync不得再次提交窗口外的旧回复条目。",
+    );
     const resumedReport = syncReport(resumed);
     assert.equal(
       resumedReport.scopes[0]?.range?.from,
@@ -5234,6 +5243,13 @@ async function verifyBoundedSync(): Promise<void> {
       "超过一小时范围的旧回复",
     );
     assert.equal(archiveAfterLongQueue.itemId, interruptedArchive.itemId);
+    assert.equal(
+      (afterLongQueue.result?.commits ?? []).some(({ items }) =>
+        items.some(({ itemId }) => itemId === interruptedArchive.itemId),
+      ),
+      false,
+      "长时间排队后的sync不得再次提交一小时窗口外的旧回复条目。",
+    );
     assert.equal(
       archiveAfterLongQueue.revisions.length,
       interruptedArchive.revisions.length,
