@@ -49,10 +49,23 @@ export const sourceAccessConfigSchema = z
   })
   .describe("信源适配器声明的共享来源访问准入组及有限调度策略。");
 
+const sourceAccessAdmissionRecoverySchema = z.discriminatedUnion("phase", [
+  z.object({ phase: z.literal("pending") }).strict(),
+  z
+    .object({
+      phase: z.literal("recovered"),
+      upperBoundEpochMs: z.number().int().nonnegative(),
+    })
+    .strict(),
+]);
+
 export const sourceAccessPersistentStateSchema = z
   .object({
     version: z.literal(1),
     lastAdmittedAt: z.record(z.string(), z.number().int().nonnegative()),
+    admissionRecoveryByGroup: z
+      .record(sourceAccessGroupIdSchema, sourceAccessAdmissionRecoverySchema)
+      .optional(),
     cooldownByGroup: z
       .record(
         sourceAccessGroupIdSchema,
@@ -90,6 +103,7 @@ export type SourceAccessResponseObservation = {
   readonly cooldownUntilEpochMs?: number;
 };
 export type SourceAccessCoordinatorSnapshot = {
+  readonly status: "available" | "unavailable";
   readonly lastAdmittedAt: Readonly<Record<string, number>>;
   readonly cooldownByGroup: Readonly<Record<string, SourceAccessCooldown>>;
 };
@@ -173,7 +187,7 @@ export type SourceAccessCoordinator = {
   ): Promise<SourceAccessResponseObservation>;
   snapshot(): SourceAccessCoordinatorSnapshot;
   release(ownerId: string, leaseId: string): Promise<void>;
-  closeOwner(ownerId: string): void;
+  closeOwner(ownerId: string): Promise<void>;
 };
 
 export class SourceAccessDeadlineExceededError extends Error {
@@ -225,7 +239,13 @@ type CoordinatorGroupState = {
 type CoordinatorLease = {
   readonly ownerId: string;
   readonly groupId: string;
+  readonly acknowledgement: Promise<void>;
+  releasePromise?: Promise<void>;
 };
+
+type SourceAccessAdmissionRecovery = z.output<
+  typeof sourceAccessAdmissionRecoverySchema
+>;
 
 const systemSourceAccessClock: SourceAccessClock = {
   epochNow: () => Math.floor(performance.timeOrigin + performance.now()),
@@ -240,6 +260,7 @@ export async function createSourceAccessCoordinator(input: {
   readonly clock?: SourceAccessClock;
 }): Promise<SourceAccessCoordinator> {
   const saved = await input.store.load();
+  const clock = input.clock ?? systemSourceAccessClock;
   const parsed = {
     version: 1 as const,
     lastAdmittedAt: {},
@@ -251,27 +272,59 @@ export async function createSourceAccessCoordinator(input: {
       throw new Error("来源准入持久状态格式无效，拒绝载入。", {
         cause: checked.error,
       });
-    return new SdkSourceAccessCoordinator(
-      input.store,
-      input.clock ?? systemSourceAccessClock,
-      checked.data,
+    const recoveryByGroup = {
+      ...checked.data.admissionRecoveryByGroup,
+    };
+    const pendingGroups = Object.entries(recoveryByGroup).filter(
+      ([, recovery]) => recovery.phase === "pending",
     );
+    if (pendingGroups.length > 0) {
+      const startupNow = Math.floor(clock.epochNow());
+      if (!Number.isSafeInteger(startupNow) || startupNow < 0)
+        throw new Error("来源准入时钟返回了无效的 epoch 时间。");
+      for (const [groupId] of pendingGroups)
+        recoveryByGroup[groupId] = {
+          phase: "recovered",
+          upperBoundEpochMs: startupNow,
+        };
+      try {
+        await input.store.save({
+          ...checked.data,
+          admissionRecoveryByGroup:
+            Object.keys(recoveryByGroup).length === 0
+              ? undefined
+              : recoveryByGroup,
+        });
+      } catch (error) {
+        throw new SourceAccessPersistentStoreError(error);
+      }
+    }
+    const recoveredState = {
+      ...checked.data,
+      ...(Object.keys(recoveryByGroup).length === 0
+        ? { admissionRecoveryByGroup: undefined }
+        : { admissionRecoveryByGroup: recoveryByGroup }),
+    };
+    return new SdkSourceAccessCoordinator(input.store, clock, recoveredState);
   }
-  return new SdkSourceAccessCoordinator(
-    input.store,
-    input.clock ?? systemSourceAccessClock,
-    parsed,
-  );
+  return new SdkSourceAccessCoordinator(input.store, clock, parsed);
 }
 
 class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
   private readonly lastAdmittedAt = new Map<string, number>();
+  private readonly admissionRecoveryByGroup = new Map<
+    string,
+    SourceAccessAdmissionRecovery
+  >();
   private readonly cooldownByGroup = new Map<string, SourceAccessCooldown>();
   private readonly groups = new Map<string, CoordinatorGroupState>();
   private readonly leases = new Map<string, CoordinatorLease>();
+  private readonly closedOwners = new Set<string>();
+  private readonly ownerTasks = new Map<string, Set<Promise<void>>>();
   private persistTail: Promise<void> = Promise.resolve();
   private readonly store: SourceAccessPersistentStore;
   private readonly clock: SourceAccessClock;
+  private unavailable = false;
 
   constructor(
     store: SourceAccessPersistentStore,
@@ -282,6 +335,10 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     this.clock = clock;
     for (const [groupId, timestamp] of Object.entries(saved.lastAdmittedAt))
       this.lastAdmittedAt.set(groupId, timestamp);
+    for (const [groupId, recovery] of Object.entries(
+      saved.admissionRecoveryByGroup ?? {},
+    ))
+      this.admissionRecoveryByGroup.set(groupId, recovery);
     for (const [groupId, cooldown] of Object.entries(
       saved.cooldownByGroup ?? {},
     ))
@@ -294,6 +351,10 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     rawDeclarations: SourceAccessConfig,
     signal: AbortSignal,
   ): Promise<SourceAccessLease> {
+    if (this.unavailable)
+      return Promise.reject(new SourceAccessStateUnavailableError());
+    if (this.closedOwners.has(ownerId))
+      return Promise.reject(new DOMException("worker 已结束", "AbortError"));
     const declarations = sourceAccessConfigSchema.parse(rawDeclarations);
     const group = declarations.groups[request.groupId];
     if (
@@ -347,6 +408,7 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     rawDeclarations: SourceAccessConfig,
     response: SourceAccessResponse,
   ): Promise<SourceAccessResponseObservation> {
+    if (this.unavailable) throw new SourceAccessStateUnavailableError();
     const declarations = sourceAccessConfigSchema.parse(rawDeclarations);
     const group = declarations.groups[request.groupId];
     if (
@@ -415,6 +477,7 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
 
   snapshot(): SourceAccessCoordinatorSnapshot {
     return {
+      status: this.unavailable ? "unavailable" : "available",
       lastAdmittedAt: Object.fromEntries(this.lastAdmittedAt),
       cooldownByGroup: Object.fromEntries(this.cooldownByGroup),
     };
@@ -424,10 +487,11 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     const lease = this.leases.get(leaseId);
     if (lease === undefined || lease.ownerId !== ownerId)
       throw new Error("worker 不能释放不属于自己的来源准入许可。");
-    this.releaseLease(leaseId, lease);
+    await this.releaseLease(leaseId, lease);
   }
 
-  closeOwner(ownerId: string): void {
+  async closeOwner(ownerId: string): Promise<void> {
+    this.closedOwners.add(ownerId);
     for (const [groupId, state] of this.groups) {
       for (let index = state.queue.length - 1; index >= 0; index--) {
         const waiter = state.queue[index]!;
@@ -435,12 +499,22 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
         this.removeWaiter(state, waiter);
         waiter.reject(new DOMException("worker 已结束", "AbortError"));
       }
-      for (const leaseId of state.leases) {
-        const lease = this.leases.get(leaseId);
-        if (lease?.ownerId === ownerId) this.releaseLease(leaseId, lease);
-      }
-      if (state.queue.length > 0) this.schedulePump(groupId, state);
+      if (state.queue.length > 0 || !state.pumping)
+        this.schedulePump(groupId, state);
     }
+
+    const tasks = [...(this.ownerTasks.get(ownerId) ?? [])];
+    await Promise.allSettled(tasks);
+
+    const releaseResults = await Promise.allSettled(
+      [...this.leases.entries()]
+        .filter(([, lease]) => lease.ownerId === ownerId)
+        .map(([leaseId, lease]) => this.releaseLease(leaseId, lease)),
+    );
+    const failure = releaseResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure !== undefined) throw failure.reason;
   }
 
   private groupState(groupId: string): CoordinatorGroupState {
@@ -458,6 +532,14 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     return state;
   }
 
+  private effectiveLastAdmittedAt(groupId: string): number {
+    const recovery = this.admissionRecoveryByGroup.get(groupId);
+    return Math.max(
+      this.lastAdmittedAt.get(groupId) ?? 0,
+      recovery?.phase === "recovered" ? recovery.upperBoundEpochMs : 0,
+    );
+  }
+
   private removeWaiter(
     state: CoordinatorGroupState,
     waiter: CoordinatorWaiter,
@@ -470,6 +552,16 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
 
   private schedulePump(groupId: string, state: CoordinatorGroupState): void {
     if (state.pumping) return;
+    if (this.unavailable) {
+      if (state.timer !== undefined) this.clock.clearTimer(state.timer);
+      state.timer = undefined;
+      while (state.queue.length > 0) {
+        const waiter = state.queue[0]!;
+        this.removeWaiter(state, waiter);
+        waiter.reject(new SourceAccessStateUnavailableError());
+      }
+      return;
+    }
     if (state.queue.length === 0) {
       if (state.timer !== undefined) this.clock.clearTimer(state.timer);
       state.timer = undefined;
@@ -478,7 +570,7 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     if (state.timer !== undefined) this.clock.clearTimer(state.timer);
     const waiter = state.queue[0]!;
     const nextAt = Math.max(
-      state.lastAdmittedAt + waiter.group.minimumIntervalMs,
+      this.effectiveLastAdmittedAt(groupId) + waiter.group.minimumIntervalMs,
       waiter.request.notBeforeEpochMs ?? 0,
       this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
     );
@@ -517,7 +609,8 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       return;
     }
     state.pumping = true;
-    void this.grantNext(groupId, state);
+    const task = this.grantNext(groupId, state);
+    this.trackOwnerTask(waiter.ownerId, task);
   }
 
   private async grantNext(
@@ -527,21 +620,61 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     try {
       const waiter = state.queue[0];
       if (waiter === undefined) return;
-      if (waiter.signal.aborted) {
+      if (this.unavailable) {
+        this.removeWaiter(state, waiter);
+        waiter.reject(new SourceAccessStateUnavailableError());
+        return;
+      }
+      if (waiter.signal.aborted || this.closedOwners.has(waiter.ownerId)) {
         this.removeWaiter(state, waiter);
         waiter.reject(
-          waiter.signal.reason ?? new DOMException("已取消", "AbortError"),
+          waiter.signal.reason ??
+            new DOMException("worker 已结束", "AbortError"),
         );
         return;
       }
+      const previousRecovery = this.admissionRecoveryByGroup.get(groupId);
+      try {
+        await this.persistMutation(
+          () =>
+            this.admissionRecoveryByGroup.set(groupId, { phase: "pending" }),
+          () => this.restoreRecovery(groupId, previousRecovery),
+        );
+      } catch (error) {
+        this.removeWaiter(state, waiter);
+        waiter.reject(error);
+        return;
+      }
+
+      if (this.unavailable) {
+        this.removeWaiter(state, waiter);
+        waiter.reject(new SourceAccessStateUnavailableError());
+        return;
+      }
+      const stillQueued = state.queue.includes(waiter);
+      if (
+        !stillQueued ||
+        waiter.signal.aborted ||
+        this.closedOwners.has(waiter.ownerId)
+      ) {
+        await this.restorePreparedAdmission(groupId, previousRecovery);
+        if (stillQueued) this.removeWaiter(state, waiter);
+        waiter.reject(
+          waiter.signal.reason ??
+            new DOMException("worker 已结束", "AbortError"),
+        );
+        return;
+      }
+
       const timestamp = Math.floor(this.clock.epochNow());
       if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+        await this.restorePreparedAdmission(groupId, previousRecovery);
         this.removeWaiter(state, waiter);
         waiter.reject(new Error("来源准入时钟返回了无效的 epoch 时间。"));
         return;
       }
       const requiredAt = Math.max(
-        state.lastAdmittedAt + waiter.group.minimumIntervalMs,
+        this.effectiveLastAdmittedAt(groupId) + waiter.group.minimumIntervalMs,
         waiter.request.notBeforeEpochMs ?? 0,
         this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
       );
@@ -549,29 +682,37 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
         waiter.request.deadlineEpochMs !== undefined &&
         Math.max(requiredAt, timestamp) > waiter.request.deadlineEpochMs
       ) {
+        await this.restorePreparedAdmission(groupId, previousRecovery);
         this.removeWaiter(state, waiter);
         waiter.reject(new SourceAccessDeadlineExceededError());
         return;
       }
-      try {
-        await this.persistAdmission(groupId, timestamp);
-      } catch (error) {
-        this.removeWaiter(state, waiter);
-        waiter.reject(error);
+      if (timestamp < requiredAt) {
+        await this.restorePreparedAdmission(groupId, previousRecovery);
         return;
       }
-      state.lastAdmittedAt = timestamp;
-      if (waiter.signal.aborted) {
-        this.removeWaiter(state, waiter);
-        waiter.reject(
-          waiter.signal.reason ?? new DOMException("已取消", "AbortError"),
-        );
-        return;
-      }
+
       this.removeWaiter(state, waiter);
       const leaseId = randomUUID();
       state.leases.add(leaseId);
-      this.leases.set(leaseId, { ownerId: waiter.ownerId, groupId });
+      state.lastAdmittedAt = timestamp;
+      const previousLastAdmittedAt = this.lastAdmittedAt.get(groupId);
+      const acknowledgement = this.persistMutation(
+        () => {
+          this.lastAdmittedAt.set(groupId, timestamp);
+          this.admissionRecoveryByGroup.delete(groupId);
+        },
+        () => {
+          this.restoreLastAdmittedAt(groupId, previousLastAdmittedAt);
+          this.admissionRecoveryByGroup.set(groupId, { phase: "pending" });
+        },
+      );
+      void acknowledgement.catch(() => undefined);
+      this.leases.set(leaseId, {
+        ownerId: waiter.ownerId,
+        groupId,
+        acknowledgement,
+      });
       waiter.resolve({
         leaseId,
         waitedMs: Math.max(
@@ -579,32 +720,73 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
           Math.ceil(this.clock.monotonicNow() - waiter.queuedAt),
         ),
       });
+      await acknowledgement.catch(() => undefined);
     } finally {
       state.pumping = false;
       this.schedulePump(groupId, state);
     }
   }
 
-  private releaseLease(leaseId: string, lease: CoordinatorLease): void {
-    const state = this.groups.get(lease.groupId);
-    if (state === undefined) return;
-    state.leases.delete(leaseId);
-    this.leases.delete(leaseId);
-    this.schedulePump(lease.groupId, state);
+  private trackOwnerTask(ownerId: string, task: Promise<void>): void {
+    let tasks = this.ownerTasks.get(ownerId);
+    if (tasks === undefined) {
+      tasks = new Set();
+      this.ownerTasks.set(ownerId, tasks);
+    }
+    tasks.add(task);
+    const remove = () => {
+      tasks.delete(task);
+      if (tasks.size === 0) this.ownerTasks.delete(ownerId);
+    };
+    void task.then(remove, remove);
   }
 
-  private async persistAdmission(
+  private async restorePreparedAdmission(
     groupId: string,
-    timestamp: number,
+    previous: SourceAccessAdmissionRecovery | undefined,
   ): Promise<void> {
-    const previous = this.lastAdmittedAt.get(groupId);
     await this.persistMutation(
-      () => this.lastAdmittedAt.set(groupId, timestamp),
-      () => {
-        if (previous === undefined) this.lastAdmittedAt.delete(groupId);
-        else this.lastAdmittedAt.set(groupId, previous);
-      },
+      () => this.restoreRecovery(groupId, previous),
+      () => this.admissionRecoveryByGroup.set(groupId, { phase: "pending" }),
     );
+  }
+
+  private restoreRecovery(
+    groupId: string,
+    previous: SourceAccessAdmissionRecovery | undefined,
+  ): void {
+    if (previous === undefined) this.admissionRecoveryByGroup.delete(groupId);
+    else this.admissionRecoveryByGroup.set(groupId, previous);
+  }
+
+  private restoreLastAdmittedAt(
+    groupId: string,
+    previous: number | undefined,
+  ): void {
+    if (previous === undefined) this.lastAdmittedAt.delete(groupId);
+    else this.lastAdmittedAt.set(groupId, previous);
+  }
+
+  private async releaseLease(
+    leaseId: string,
+    lease: CoordinatorLease,
+  ): Promise<void> {
+    if (lease.releasePromise !== undefined) return await lease.releasePromise;
+    lease.releasePromise = (async () => {
+      let acknowledgementError: unknown;
+      try {
+        await lease.acknowledgement;
+      } catch (error) {
+        acknowledgementError = error;
+      } finally {
+        const state = this.groups.get(lease.groupId);
+        state?.leases.delete(leaseId);
+        this.leases.delete(leaseId);
+        if (state !== undefined) this.schedulePump(lease.groupId, state);
+      }
+      if (acknowledgementError !== undefined) throw acknowledgementError;
+    })();
+    return await lease.releasePromise;
   }
 
   private async persistMutation(
@@ -617,18 +799,45 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       release = resolve;
     });
     await prior;
-    apply();
+    let applied = false;
     try {
+      if (this.unavailable) throw new SourceAccessStateUnavailableError();
+      apply();
+      applied = true;
       await this.store.save({
         version: 1,
         lastAdmittedAt: Object.fromEntries(this.lastAdmittedAt),
+        ...(this.admissionRecoveryByGroup.size === 0
+          ? {}
+          : {
+              admissionRecoveryByGroup: Object.fromEntries(
+                this.admissionRecoveryByGroup,
+              ),
+            }),
         cooldownByGroup: Object.fromEntries(this.cooldownByGroup),
       });
     } catch (error) {
-      rollback();
-      throw new SourceAccessPersistentStoreError(error);
+      if (applied) rollback();
+      const stateUnavailable = hasErrorCode(
+        error,
+        "source_access_state_unavailable",
+      );
+      const failure = stateUnavailable
+        ? error
+        : new SourceAccessPersistentStoreError(error);
+      if (!stateUnavailable) this.latchUnavailable();
+      throw failure;
     } finally {
       release();
+    }
+  }
+
+  private latchUnavailable(): void {
+    this.unavailable = true;
+    for (const [groupId, state] of this.groups) {
+      if (state.timer !== undefined) this.clock.clearTimer(state.timer);
+      state.timer = undefined;
+      if (!state.pumping) this.schedulePump(groupId, state);
     }
   }
 }
@@ -670,6 +879,15 @@ function validSourceAccessOrigin(origin: string): boolean {
   } catch {
     return false;
   }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 /** 从适配器原生配置读取可发现的来源准入声明；未声明时保持可选。 */

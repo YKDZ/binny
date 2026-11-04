@@ -77,6 +77,555 @@ function createControlledClock(startEpochMs = 1_000_000): {
   };
 }
 
+function createDelayedStore(
+  controlled: ReturnType<typeof createControlledClock>,
+  saveDelaysMs: readonly number[],
+) {
+  let saved: unknown;
+  let saves = 0;
+  return {
+    store: {
+      async load() {
+        return saved;
+      },
+      async save(state: SourceAccessPersistentState) {
+        const delayMs = saveDelaysMs[saves] ?? 0;
+        saves++;
+        if (delayMs > 0) await controlled.advanceBy(delayMs);
+        saved = state;
+      },
+    },
+    saves: () => saves,
+  };
+}
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const pacingRequest = {
+  runId: "run-pacing",
+  groupId: "linuxdo",
+  source: "site" as const,
+  origin: "https://linux.do",
+  minimumIntervalMs: 1_500,
+  maxConcurrency: 1,
+};
+
+const pacingDeclarations = sourceAccessConfigSchema.parse({
+  groups: {
+    linuxdo: {
+      sources: ["site"],
+      minimumIntervalMs: 1_500,
+      maxConcurrency: 1,
+    },
+  },
+});
+
+void test("来源准入间隔从实际许可时刻计算，而非持久写入开始时刻", async () => {
+  const controlled = createControlledClock();
+  const persistence = createDelayedStore(controlled, [250, 0, 0, 0]);
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  const first = await coordinator.acquire(
+    "owner-pacing",
+    pacingRequest,
+    pacingDeclarations,
+    new AbortController().signal,
+  );
+  const firstGrantedAt = controlled.clock.monotonicNow();
+  await coordinator.release("owner-pacing", first.leaseId);
+
+  let secondGrantedAt: number | undefined;
+  const secondPending = coordinator
+    .acquire(
+      "owner-pacing",
+      { ...pacingRequest, runId: "run-pacing-next" },
+      pacingDeclarations,
+      new AbortController().signal,
+    )
+    .then((lease) => {
+      secondGrantedAt = controlled.clock.monotonicNow();
+      return lease;
+    });
+
+  await controlled.advanceBy(1_499);
+  assert.equal(secondGrantedAt, undefined);
+  await controlled.advanceBy(1);
+  const second = await secondPending;
+  assert.ok(secondGrantedAt !== undefined);
+  assert.ok(
+    secondGrantedAt - firstGrantedAt >= 1_500,
+    `许可间隔过短：${secondGrantedAt - firstGrantedAt} 毫秒`,
+  );
+  await coordinator.release("owner-pacing", second.leaseId);
+});
+
+void test("立即重建协调器仍按实际许可时刻保留来源准入间隔", async () => {
+  const controlled = createControlledClock();
+  const persistence = createDelayedStore(controlled, [250, 0, 0, 0]);
+  const firstCoordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  const first = await firstCoordinator.acquire(
+    "owner-pacing-restart",
+    pacingRequest,
+    pacingDeclarations,
+    new AbortController().signal,
+  );
+  const firstGrantedAt = controlled.clock.monotonicNow();
+  await firstCoordinator.release("owner-pacing-restart", first.leaseId);
+
+  const restarted = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  let secondGrantedAt: number | undefined;
+  const secondPending = restarted
+    .acquire(
+      "next-owner-pacing",
+      { ...pacingRequest, runId: "run-pacing-after-restart" },
+      pacingDeclarations,
+      new AbortController().signal,
+    )
+    .then((lease) => {
+      secondGrantedAt = controlled.clock.monotonicNow();
+      return lease;
+    });
+
+  await controlled.advanceBy(1_499);
+  assert.equal(secondGrantedAt, undefined);
+  await controlled.advanceBy(1);
+  const second = await secondPending;
+  assert.ok(secondGrantedAt !== undefined);
+  assert.ok(secondGrantedAt - firstGrantedAt >= 1_500);
+  await restarted.release("next-owner-pacing", second.leaseId);
+});
+
+void test("持久准入写入跨过期限时不得发放许可", async () => {
+  const controlled = createControlledClock();
+  const persistence = createDelayedStore(controlled, [250, 0]);
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  const deadlineEpochMs = controlled.clock.epochNow() + 100;
+
+  await assert.rejects(
+    coordinator.acquire(
+      "owner-pacing-deadline",
+      { ...pacingRequest, deadlineEpochMs },
+      pacingDeclarations,
+      new AbortController().signal,
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "source_access_deadline_exceeded",
+  );
+  assert.equal(persistence.saves(), 2);
+
+  const restarted = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  const next = await restarted.acquire(
+    "next-owner-pacing-deadline",
+    { ...pacingRequest, runId: "run-after-crossed-deadline" },
+    pacingDeclarations,
+    new AbortController().signal,
+  );
+  assert.equal(next.waitedMs, 0);
+  await restarted.release("next-owner-pacing-deadline", next.leaseId);
+});
+
+void test("许可 ACK 的延迟不重置重建后的剩余间隔", async () => {
+  const controlled = createControlledClock();
+  const persistence = createDelayedStore(controlled, [250, 250, 0, 0]);
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+  const first = await coordinator.acquire(
+    "owner-pacing-ack-delay",
+    pacingRequest,
+    pacingDeclarations,
+    new AbortController().signal,
+  );
+  const firstGrantedAt = first.waitedMs;
+  await coordinator.release("owner-pacing-ack-delay", first.leaseId);
+  const restarted = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: persistence.store,
+  });
+
+  let secondGrantedAt: number | undefined;
+  const secondPending = restarted
+    .acquire(
+      "next-owner-pacing-ack-delay",
+      { ...pacingRequest, runId: "run-after-delayed-ack" },
+      pacingDeclarations,
+      new AbortController().signal,
+    )
+    .then((lease) => {
+      secondGrantedAt = controlled.clock.monotonicNow();
+      return lease;
+    });
+  await controlled.advanceBy(1_249);
+  assert.equal(secondGrantedAt, undefined);
+  await controlled.advanceBy(1);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const grantedAfterRemainingInterval = secondGrantedAt !== undefined;
+  if (!grantedAfterRemainingInterval) await controlled.advanceBy(250);
+  const second = await secondPending;
+  assert.equal(grantedAfterRemainingInterval, true);
+  assert.equal(secondGrantedAt, firstGrantedAt + 1_500);
+  await restarted.release("next-owner-pacing-ack-delay", second.leaseId);
+});
+
+void test("pending 准入只在首次重建时采恢复上界", async () => {
+  const controlled = createControlledClock();
+  let persisted: unknown = {
+    version: 1,
+    lastAdmittedAt: {},
+    admissionRecoveryByGroup: { linuxdo: { phase: "pending" } },
+  };
+  const store = {
+    async load() {
+      return persisted;
+    },
+    async save(state: SourceAccessPersistentState) {
+      persisted = state;
+    },
+  };
+  await createSourceAccessCoordinator({ clock: controlled.clock, store });
+  assert.deepEqual(persisted, {
+    version: 1,
+    lastAdmittedAt: {},
+    admissionRecoveryByGroup: {
+      linuxdo: { phase: "recovered", upperBoundEpochMs: 1_000_000 },
+    },
+  });
+
+  await controlled.advanceBy(500);
+  const restarted = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store,
+  });
+  let settled = false;
+  const pending = restarted
+    .acquire(
+      "owner-recovered-pending",
+      pacingRequest,
+      pacingDeclarations,
+      new AbortController().signal,
+    )
+    .then((lease) => {
+      settled = true;
+      return lease;
+    });
+  await controlled.advanceBy(999);
+  assert.equal(settled, false);
+  await controlled.advanceBy(1);
+  const lease = await pending;
+  assert.equal(settled, true);
+  await restarted.release("owner-recovered-pending", lease.leaseId);
+});
+
+void test("准入许可先开放操作，release 与 closeOwner 等待持久 ACK", async () => {
+  const ackStarted = createDeferred();
+  const finishAck = createDeferred();
+  let persisted: unknown;
+  let saves = 0;
+  const coordinator = await createSourceAccessCoordinator({
+    store: {
+      async load() {
+        return persisted;
+      },
+      async save(state) {
+        saves++;
+        if (saves === 2) {
+          ackStarted.resolve();
+          await finishAck.promise;
+        }
+        persisted = state;
+      },
+    },
+  });
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 2,
+      },
+    },
+  });
+  const ownerId = "owner-ack-pending";
+  const transport: SourceAccessTransport = {
+    async acquire(request, signal) {
+      return await coordinator.acquire(ownerId, request, config, signal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-ack-pending",
+    signal: new AbortController().signal,
+    declarations: config,
+    transport,
+  });
+  let operationStarted = false;
+  let completed = false;
+  const operation = access
+    .withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operationStarted = true;
+        return "done";
+      },
+    )
+    .then((value) => {
+      completed = true;
+      return value;
+    });
+
+  await ackStarted.promise;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(operationStarted, true);
+  assert.equal(completed, false);
+  const closing = coordinator.closeOwner(ownerId);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(completed, false);
+  finishAck.resolve();
+  assert.equal(await operation, "done");
+  await closing;
+  assert.equal(completed, true);
+});
+
+void test("持久 ACK 失败锁存 unavailable 并拒绝后续来源访问", async () => {
+  let saves = 0;
+  const coordinator = await createSourceAccessCoordinator({
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {
+        saves++;
+        if (saves === 2) throw new Error("ack disk write failed");
+      },
+    },
+  });
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const ownerId = "owner-ack-failed";
+  const transport: SourceAccessTransport = {
+    async acquire(request, signal) {
+      return await coordinator.acquire(ownerId, request, config, signal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-ack-failed",
+    signal: new AbortController().signal,
+    declarations: config,
+    transport,
+  });
+  let operations = 0;
+
+  await assert.rejects(
+    access.withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operations++;
+      },
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "source_access_persistent_store_failed",
+  );
+  assert.equal(operations, 1);
+  assert.equal(coordinator.snapshot().status, "unavailable");
+
+  await assert.rejects(
+    access.withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        operations++;
+      },
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "source_access_state_unavailable",
+  );
+  assert.equal(operations, 1);
+  assert.equal(coordinator.snapshot().status, "unavailable");
+  await coordinator.closeOwner(ownerId).catch(() => undefined);
+});
+
+void test("其他来源组持久写失败后不得放行已完成准备写的准入", async () => {
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      first: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+      second: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  let saves = 0;
+  const coordinator = await createSourceAccessCoordinator({
+    store: {
+      async load() {
+        return undefined;
+      },
+      save() {
+        saves++;
+        if (saves === 2) throw new Error("disk write failed");
+        return Promise.resolve();
+      },
+    },
+  });
+  const attempt = async (groupId: "first" | "second") => {
+    try {
+      const lease = await coordinator.acquire(
+        groupId,
+        {
+          runId: `run-${groupId}`,
+          groupId,
+          source: "site",
+          origin: "https://linux.do",
+          minimumIntervalMs: 0,
+          maxConcurrency: 1,
+        },
+        config,
+        new AbortController().signal,
+      );
+      await coordinator.release(groupId, lease.leaseId).catch(() => undefined);
+      return { groupId, kind: "granted" as const };
+    } catch (error) {
+      return {
+        groupId,
+        kind: "rejected" as const,
+        code:
+          typeof error === "object" && error !== null && "code" in error
+            ? error.code
+            : undefined,
+      };
+    }
+  };
+
+  const outcomes = await Promise.all([attempt("first"), attempt("second")]);
+  assert.deepEqual(
+    outcomes.map(({ groupId, kind }) => ({ groupId, kind })),
+    [
+      { groupId: "first", kind: "rejected" },
+      { groupId: "second", kind: "rejected" },
+    ],
+  );
+  const firstOutcome = outcomes[0]!;
+  assert.equal(firstOutcome.kind, "rejected");
+  if (firstOutcome.kind === "rejected")
+    assert.equal(firstOutcome.code, "source_access_state_unavailable");
+  assert.equal(coordinator.snapshot().status, "unavailable");
+});
+
+void test("取消准备或关闭 owner 会恢复旧准入状态且不留下许可", async () => {
+  for (const endMode of ["cancel", "close"] as const) {
+    const controlled = createControlledClock();
+    const saveStarted = createDeferred();
+    const finishSave = createDeferred();
+    let persisted: unknown;
+    let saves = 0;
+    const store = {
+      async load() {
+        return persisted;
+      },
+      async save(state: SourceAccessPersistentState) {
+        saves++;
+        if (saves === 1) {
+          saveStarted.resolve();
+          await finishSave.promise;
+        }
+        persisted = state;
+      },
+    };
+    const coordinator = await createSourceAccessCoordinator({
+      clock: controlled.clock,
+      store,
+    });
+    const ownerId = `owner-prepare-${endMode}`;
+    const abort = new AbortController();
+    const pending = coordinator.acquire(
+      ownerId,
+      pacingRequest,
+      pacingDeclarations,
+      abort.signal,
+    );
+    await saveStarted.promise;
+    const closing =
+      endMode === "close" ? coordinator.closeOwner(ownerId) : undefined;
+    if (endMode === "cancel") abort.abort();
+    finishSave.resolve();
+    await assert.rejects(pending, { name: "AbortError" });
+    if (closing !== undefined) await closing;
+    else await coordinator.closeOwner(ownerId);
+
+    const restarted = await createSourceAccessCoordinator({
+      clock: controlled.clock,
+      store,
+    });
+    const next = await restarted.acquire(
+      `next-${ownerId}`,
+      { ...pacingRequest, runId: `run-next-${endMode}` },
+      pacingDeclarations,
+      new AbortController().signal,
+    );
+    assert.equal(next.waitedMs, 0);
+    await restarted.release(`next-${ownerId}`, next.leaseId);
+  }
+});
+
 void test("SDK 调度器按注入时钟等待并从持久状态合并最早准入时刻", async () => {
   const controlledClock = createControlledClock();
   const clock = controlledClock.clock;
@@ -898,7 +1447,7 @@ void test("单轮预算在同一来源准入前预留并限制主动请求数", 
     if (!heldReleased)
       await coordinator.release(ownerId, held.leaseId).catch(() => undefined);
     budget.close();
-    coordinator.closeOwner(ownerId);
+    await coordinator.closeOwner(ownerId);
   }
 });
 
@@ -998,7 +1547,7 @@ void test("关闭单轮预算时撤销排队请求但不伪造预算耗尽", asy
     actionAbort.abort(new DOMException("test cleanup", "AbortError"));
     budget.close();
     await coordinator.release(ownerId, held.leaseId).catch(() => undefined);
-    coordinator.closeOwner(ownerId);
+    await coordinator.closeOwner(ownerId);
   }
 });
 
@@ -1104,7 +1653,7 @@ void test("单轮预算耗尽时取消在途操作并记录精确单调耗时", 
     actionAbort.abort(new DOMException("test cleanup", "AbortError"));
     await result;
     budget.close();
-    coordinator.closeOwner("owner-time-budget");
+    await coordinator.closeOwner("owner-time-budget");
   }
 });
 
@@ -1217,7 +1766,7 @@ void test("单轮耗时预算到期会撤销同一协调器中排队的准入", 
     await pending;
     budget.close();
     await coordinator.release(ownerId, held.leaseId);
-    coordinator.closeOwner(ownerId);
+    await coordinator.closeOwner(ownerId);
   }
 });
 
@@ -1300,6 +1849,6 @@ void test("最早来源准入时刻晚于预算期限时立即停止本轮等待
     assert.equal(budget.budgetSnapshot().elapsedMs, 0);
   } finally {
     budget.close();
-    coordinator.closeOwner(ownerId);
+    await coordinator.closeOwner(ownerId);
   }
 });

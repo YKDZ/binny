@@ -40,8 +40,6 @@ import {
   type SourceAccessCoordinator,
   type SourceAccessConfig,
   type SourceAccessResponse,
-  SourceAccessDeadlineExceededError,
-  SourceAccessPersistentStoreError,
 } from "@binny/source-adapter-sdk";
 
 import {
@@ -150,7 +148,19 @@ async function findOwnerLockDescriptor(): Promise<{
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
+function isSourceAccessUnavailableError(error: unknown): boolean {
+  return (
+    hasErrorCode(error, "source_access_state_unavailable") ||
+    hasErrorCode(error, "source_access_persistent_store_failed")
+  );
 }
 
 async function advanceOwnerGeneration(
@@ -602,7 +612,12 @@ function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
       }
     }
   }
-  if (sourceAccessUnavailable || sourceAccessCoordinator === undefined) {
+  const access = sourceAccessCoordinator?.snapshot();
+  if (
+    sourceAccessUnavailable ||
+    access === undefined ||
+    access.status === "unavailable"
+  ) {
     return {
       updatedAt,
       sourceAccess: {
@@ -612,11 +627,10 @@ function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
       ...(sync === undefined ? {} : { sync }),
     };
   }
-  const saved = sourceAccessCoordinator.snapshot();
   const groupIds = [
     ...new Set([
-      ...Object.keys(saved.lastAdmittedAt),
-      ...Object.keys(saved.cooldownByGroup),
+      ...Object.keys(access.lastAdmittedAt),
+      ...Object.keys(access.cooldownByGroup),
     ]),
   ];
   return {
@@ -625,8 +639,8 @@ function runtimeSourceStateSnapshot(): RuntimeSourceStateSnapshot {
       status: "available",
       groups: Object.fromEntries(
         groupIds.map((groupId) => {
-          const cooldown = saved.cooldownByGroup[groupId];
-          const lastAdmittedAt = saved.lastAdmittedAt[groupId];
+          const cooldown = access.cooldownByGroup[groupId];
+          const lastAdmittedAt = access.lastAdmittedAt[groupId];
           return [
             groupId,
             {
@@ -823,8 +837,10 @@ function startActionWorker(
           }
         })
         .catch(async (error: unknown) => {
-          if (error instanceof SourceAccessPersistentStoreError)
+          if (isSourceAccessUnavailableError(error)) {
             sourceAccessUnavailable = true;
+            await sendHeartbeatNow(false, false).catch(() => undefined);
+          }
           accessRequests.delete(record.requestId as string);
           if (!worker.child.connected) return;
           const errorCode =
@@ -834,10 +850,9 @@ function startActionWorker(
           await sendWorkerMessage(worker, {
             type: "source-access-rejected",
             requestId: record.requestId,
-            ...(error instanceof SourceAccessPersistentStoreError
+            ...(isSourceAccessUnavailableError(error)
               ? { code: "source_access_state_unavailable" }
-              : error instanceof SourceAccessDeadlineExceededError ||
-                  errorCode === "source_access_deadline_exceeded"
+              : errorCode === "source_access_deadline_exceeded"
                 ? { code: "source_access_deadline_exceeded" }
                 : {}),
             message:
@@ -882,12 +897,14 @@ function startActionWorker(
           }),
         )
         .catch((error: unknown) => {
-          if (error instanceof SourceAccessPersistentStoreError)
+          if (isSourceAccessUnavailableError(error)) {
             sourceAccessUnavailable = true;
+            void sendHeartbeatNow(false, false).catch(() => undefined);
+          }
           return sendWorkerMessage(worker, {
             type: "source-access-rejected",
             requestId: record.requestId,
-            ...(error instanceof SourceAccessPersistentStoreError
+            ...(isSourceAccessUnavailableError(error)
               ? { code: "source_access_state_unavailable" }
               : {}),
             message:
@@ -932,11 +949,21 @@ function startActionWorker(
           }),
         )
         .catch((error: unknown) =>
-          sendWorkerMessage(worker, {
-            type: "source-access-rejected",
-            requestId: record.requestId,
-            message: error instanceof Error ? error.message : "许可释放失败。",
-          }).catch(() => undefined),
+          (async () => {
+            if (isSourceAccessUnavailableError(error)) {
+              sourceAccessUnavailable = true;
+              await sendHeartbeatNow(false, false).catch(() => undefined);
+            }
+            await sendWorkerMessage(worker, {
+              type: "source-access-rejected",
+              requestId: record.requestId,
+              ...(isSourceAccessUnavailableError(error)
+                ? { code: "source_access_state_unavailable" }
+                : {}),
+              message:
+                error instanceof Error ? error.message : "许可释放失败。",
+            }).catch(() => undefined);
+          })(),
         );
       return;
     }
@@ -1186,7 +1213,17 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
     if (worker !== undefined) {
       for (const pending of worker.accessRequests.values()) pending.abort();
       worker.accessRequests.clear();
-      sourceAccessCoordinator?.closeOwner(worker.ownerId);
+      try {
+        await sourceAccessCoordinator?.closeOwner(worker.ownerId);
+      } catch (error) {
+        if (isSourceAccessUnavailableError(error)) {
+          sourceAccessUnavailable = true;
+          await sendHeartbeatNow(false, false).catch(() => undefined);
+        }
+        process.stderr.write(
+          `关闭来源访问 owner 时持久确认失败：${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
     }
   }
   try {
