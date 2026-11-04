@@ -5891,7 +5891,7 @@ async function verifySyncScopeTransitions(): Promise<void> {
     await updateFixtureState({ syncScenarioStage: 1 });
     await setTestClockAt("2026-11-02T00:30:00.000Z");
     await clearSourceEvents();
-    const parentChildOverlap = await trigger("sync", {});
+    const parentChildOverlap = await trigger("sync", { maxRequests: 30 });
     assert.equal(
       parentChildOverlap.status,
       "completed",
@@ -5899,6 +5899,19 @@ async function verifySyncScopeTransitions(): Promise<void> {
     );
     const costReport = syncReport(parentChildOverlap);
     const costEvents = (await sourceState()).events;
+    assert.equal(costReport.phase, "completed", JSON.stringify(costReport));
+    assert.equal(costReport.budget.maxRequests, 30);
+    assert.equal(costReport.budget.stopReason, undefined);
+    assert.equal(costReport.scopes.length, 6);
+    assert.ok(
+      costReport.scopes.every(({ status }) => status === "completed"),
+      `30次主动请求额度内应完成全部6个独立范围：${JSON.stringify(costReport)}`,
+    );
+    assert.equal(
+      costEvents.filter(({ action }) => action === "post-list").length,
+      8,
+      `同一run应只扫描一份8页帖子流：${JSON.stringify(costEvents)}`,
+    );
     const costCounts = Object.fromEntries(
       [...new Set(costEvents.map(({ action }) => action))].map((action) => [
         action,

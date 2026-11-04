@@ -3060,6 +3060,10 @@ type PostRangeScan = {
   readonly complete: boolean;
   readonly issue?: PostRangeScanIssue;
 };
+type PostRangeReadCache = {
+  scan?: Promise<PostRangeScan>;
+  readonly topics: Map<number, Promise<TopicAccess>>;
+};
 
 async function readPostFeedPage(
   page: Page,
@@ -3709,8 +3713,14 @@ async function collectPostRangeTopic(
   completedScopes: string[],
   incompleteScopes: CollectionIncompleteScope[],
   seenPostIds?: Set<number>,
+  readCache?: PostRangeReadCache,
 ): Promise<"processed" | "skipped" | "limited"> {
-  const access = await readTopic(page, site, topicId, context.signal);
+  let accessPromise = readCache?.topics.get(topicId);
+  if (accessPromise === undefined) {
+    accessPromise = readTopic(page, site, topicId, context.signal);
+    readCache?.topics.set(topicId, accessPromise);
+  }
+  const access = await accessPromise;
   if (access.kind === "unavailable") {
     incompleteScopes.push({
       scope: topicScope(topicId),
@@ -4325,6 +4335,7 @@ async function collectPostCreatedRange(
   publishReport: (report: CollectionReportUpdate) => Promise<void>,
   selectionOverride?: PostRangeTargetSelection,
   seenPostIds?: Set<number>,
+  readCache?: PostRangeReadCache,
 ): Promise<
   Omit<z.output<typeof collectOutputSchema>, "challengeRecovery"> & {
     readonly observedPosts: number;
@@ -4362,12 +4373,17 @@ async function collectPostCreatedRange(
   const selection =
     selectionOverride ??
     (await resolvePostRangeTargets(page, site, params, context.signal));
-  const scan = await scanPostCreatedRange(
-    page,
-    site.origin,
-    context.signal,
-    params.postCreatedRange.maxPages,
-  );
+  let scanPromise = readCache?.scan;
+  if (scanPromise === undefined) {
+    scanPromise = scanPostCreatedRange(
+      page,
+      site.origin,
+      context.signal,
+      params.postCreatedRange.maxPages,
+    );
+    if (readCache !== undefined) readCache.scan = scanPromise;
+  }
+  const scan = await scanPromise;
   if (scan.issue !== undefined) {
     incompleteScopes.push({
       scope: rangeScope,
@@ -4428,6 +4444,7 @@ async function collectPostCreatedRange(
       completedScopes,
       incompleteScopes,
       seenPostIds,
+      readCache,
     );
     if (topicResult === "limited") break;
     if (topicResult === "processed") {
@@ -4866,6 +4883,7 @@ async function sync(
   const incompleteScopes: CollectionIncompleteScope[] = [];
   const completedScopes: string[] = [];
   const seenPostIds = new Set<number>();
+  const postRangeReadCache: PostRangeReadCache = { topics: new Map() };
   let observedPosts = 0;
   let topicsExamined = 0;
   let state: SyncPersistentState | undefined;
@@ -5092,6 +5110,7 @@ async function sync(
             },
             selected,
             seenPostIds,
+            postRangeReadCache,
           );
           observedPosts += result.observedPosts;
           topicsExamined += result.topicsExamined;
