@@ -217,7 +217,9 @@ const postCreatedRangeSchema = z
       .describe("帖子创建时间的包含起点，必须带明确时区偏移。"),
     to: z.iso
       .datetime({ offset: true })
-      .describe("帖子创建时间的不包含终点，必须带明确时区偏移。"),
+      .describe(
+        "帖子创建时间的不包含终点，必须带明确时区偏移，且不得晚于本次动作实际开始时刻。",
+      ),
     maxPages: z
       .number()
       .int()
@@ -239,7 +241,9 @@ const postCreatedRangeSchema = z
       });
     }
   })
-  .describe("按帖子创建时间筛选的左闭右开区间；与 date/timeZone 模式互斥。")
+  .describe(
+    "按帖子创建时间筛选的左闭右开区间；其 to 不得晚于本次动作实际开始时刻；与 date/timeZone 模式互斥。",
+  )
   .meta({
     examples: [
       {
@@ -320,7 +324,7 @@ const collectParamsSchema = z
     }
   })
   .describe(
-    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
+    "必须使用 date 与 timeZone，或 postCreatedRange 其中一种模式；date 与 timeZone 成对提供且日期、时区有效，帖子区间的 from 必须早于 to 且 to 不得晚于动作实际开始时刻。topicId 与 targets 互斥；targets 省略时使用当前可见板块，显式列表不可为空且 id 不可重复。",
   )
   .meta({
     examples: [
@@ -4138,10 +4142,23 @@ function dateCollectionParams(params: CollectParams): DateCollectionParams {
 
 function postCreatedWindow(
   range: PostRangeCollectionParams["postCreatedRange"],
+  actionStartedAt: number,
 ): CollectionDateWindow {
+  const endExclusive = Date.parse(range.to);
+  if (endExclusive > actionStartedAt) {
+    throw sourceAdapterActionError({
+      code: "linuxdo_post_created_range_in_future",
+      message: "帖子创建时间区间的终点不能晚于本次动作实际开始时刻。",
+      impact:
+        "区间包含尚未发生的内容，无法完整取得；本次没有访问信源或归档资料。",
+      suggestion:
+        "等待区间终点到达后重新运行，或将 to 调整到本次动作开始时刻及之前。",
+      requiresHuman: false,
+    });
+  }
   return {
     startInclusive: Date.parse(range.from),
-    endExclusive: Date.parse(range.to),
+    endExclusive,
   };
 }
 
@@ -4552,6 +4569,7 @@ async function collectTopic(
   >,
   params: CollectParams,
 ): Promise<z.output<typeof collectOutputSchema>> {
+  const actionStartedAt = Date.now();
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
   const incompleteScopes: CollectionIncompleteScope[] = [];
@@ -4605,7 +4623,7 @@ async function collectTopic(
             dateCollectionParams(params),
             context.referenceTime,
           )
-        : postCreatedWindow(rangeParams.postCreatedRange);
+        : postCreatedWindow(rangeParams.postCreatedRange, actionStartedAt);
     const range = {
       from: new Date(dateWindow.startInclusive).toISOString(),
       to: new Date(dateWindow.endExclusive).toISOString(),
