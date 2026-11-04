@@ -4059,6 +4059,8 @@ type SyncRunReport = {
   };
   readonly sourceAccess: {
     readonly admittedAttempts: number;
+    readonly waitedMs: number;
+    readonly bySource: { readonly site: number; readonly media: number };
     readonly rateLimitResponses: readonly {
       readonly source: "site" | "media";
       readonly origin: string;
@@ -4068,6 +4070,19 @@ type SyncRunReport = {
       readonly observedAt: string;
       readonly cooldownUntil?: string;
     }[];
+    readonly pageRequestEventsObserved: {
+      readonly total: number;
+      readonly get: number;
+      readonly nonGet: number;
+      readonly sameOriginGet: number;
+      readonly otherOriginGet: number;
+      readonly byResourceType: {
+        readonly document: number;
+        readonly fetch: number;
+        readonly xhr: number;
+        readonly other: number;
+      };
+    };
   };
   readonly scopes: readonly {
     readonly scope: {
@@ -5875,15 +5890,35 @@ async function verifySyncScopeTransitions(): Promise<void> {
 
     await updateFixtureState({ syncScenarioStage: 1 });
     await setTestClockAt("2026-11-02T00:30:00.000Z");
-    const parentChildOverlap = await trigger("sync", {
-      maxPages: 20,
-      maxRequests: 100,
-      maxElapsedMs: 120_000,
-    });
+    await clearSourceEvents();
+    const parentChildOverlap = await trigger("sync", {});
     assert.equal(
       parentChildOverlap.status,
       "completed",
       JSON.stringify(parentChildOverlap),
+    );
+    const costReport = syncReport(parentChildOverlap);
+    const costEvents = (await sourceState()).events;
+    const costCounts = Object.fromEntries(
+      [...new Set(costEvents.map(({ action }) => action))].map((action) => [
+        action,
+        costEvents.filter((event) => event.action === action).length,
+      ]),
+    );
+    process.stdout.write(
+      `sync multi-scope default-cost ${JSON.stringify({
+        runId: parentChildOverlap.runId,
+        scopes: costReport.scopes.map(({ scope, status }) => ({
+          scope,
+          status,
+        })),
+        budget: costReport.budget,
+        sourceAccess: costReport.sourceAccess,
+        sourceEventCounts: costCounts,
+        postListPaths: costEvents
+          .filter(({ action }) => action === "post-list")
+          .map(({ path }) => path),
+      })}\n`,
     );
     const childReply = await searchArchiveItem("全日子板块范围重叠回复");
     assert.equal(childReply.sourceKey.key, "post:70040001");
