@@ -5770,6 +5770,27 @@ async function verifyLogout(): Promise<void> {
   assert.equal(collect.result?.error?.requiresHuman, true);
 }
 
+async function runScopeTransitionsAcceptance(): Promise<void> {
+  process.stdout.write("运行范围变化专项正式验收。\n");
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--conditions=source", path.resolve("scripts/acceptance.ts")],
+      {
+        env: {
+          ...process.env,
+          BINNY_E2E_INTERNAL_STEP: "scope-transitions",
+        },
+        stdio: "inherit",
+      },
+    );
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+  assert.equal(exitCode, 0, "默认正式验收中的范围变化专项失败。");
+  process.stdout.write("范围变化专项正式验收通过。\n");
+}
+
 async function main(): Promise<void> {
   try {
     if (
@@ -5979,6 +6000,9 @@ async function main(): Promise<void> {
     ]).catch(() => undefined);
     if (overlayDirectory !== undefined)
       await rm(overlayDirectory, { recursive: true, force: true });
+  }
+  if (internalStep === undefined && acceptanceFocus === undefined) {
+    await runScopeTransitionsAcceptance();
   }
 }
 
