@@ -1472,21 +1472,44 @@ async function browserProcesses(service: string): Promise<ProcessResult> {
 
 async function activeBrowserMainProcessCount(): Promise<number> {
   const processes = await Promise.all(
-    ["browser-one", "browser-two"].map(
-      async (service) => await browserProcesses(service),
-    ),
+    ["browser-one", "browser-two"].map(async (service) => {
+      const containers = await compose(["ps", "--all", "--quiet", service]);
+      const containerId = containers.stdout.trim();
+      assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
+      const result = await run("docker", [
+        "top",
+        containerId,
+        "-eo",
+        "pid,ppid,stat,comm,args",
+      ]);
+      assert.equal(result.code, 0, result.stderr);
+      return result.stdout.split("\n").flatMap((line) => {
+        const columns = /^(\s*\d+)\s+\d+\s+(\S+)\s+\S+(?:\s+(.*))?$/u.exec(
+          line,
+        );
+        if (columns === null) return [];
+        const pid = columns[1]!.trim();
+        const state = columns[2]!;
+        const args = columns[3] ?? "";
+        return [
+          {
+            state,
+            command: `${pid} ${args}`,
+          },
+        ];
+      });
+    }),
   );
   return processes.reduce(
     (count, result) =>
       count +
-      result.stdout
-        .split("\n")
-        .filter(
-          (line) =>
-            /(?:chrom(?:e|ium))/iu.test(line) &&
-            !line.includes("--type=") &&
-            !line.includes("chrome_crashpad_handler"),
-        ).length,
+      result.filter(
+        ({ state, command }) =>
+          !/^[ZXx]/u.test(state) &&
+          /(?:chrom(?:e|ium))/iu.test(command) &&
+          !command.includes("--type=") &&
+          !command.includes("chrome_crashpad_handler"),
+      ).length,
     0,
   );
 }
