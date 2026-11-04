@@ -93,7 +93,7 @@ const sourceAdapterConfigSchema = z
         },
       })
       .describe(
-        "Linux.do 主动访问策略：同一组覆盖站点 JSON、显式导航、挑战恢复重读和站内／外部媒体；当前默认间隔 1000 毫秒，最终值待真实站点校准。",
+        "Linux.do 的站点 JSON、显式导航、挑战恢复重读和媒体下载共用该访问策略；默认间隔与并发上限由默认配置确定，实际准入次数和等待时长以运行报告为准。",
       ),
   })
   .strict();
@@ -5127,9 +5127,16 @@ async function sync(
           discovery: "complete",
         });
 
-        for (const plan of plans) {
-          if (plan.mode === "initialized" || plan.mode === "no-forward-range")
-            continue;
+        const executionPlans = plans
+          .filter(
+            (plan) => plan.mode === "continued" || plan.mode === "truncated",
+          )
+          .toSorted(
+            (first, second) =>
+              Date.parse(first.previousPosition!) -
+              Date.parse(second.previousPosition!),
+          );
+        for (const plan of executionPlans) {
           budget.signal.throwIfAborted();
           budget.remainingMs();
           budget.signal.throwIfAborted();
@@ -5312,7 +5319,7 @@ export const sourceAdapter = defineSourceAdapter({
     }),
     sync: defineSourceAdapterAction(sourceAdapterConfigSchema, {
       description:
-        "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复。",
+        "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
       params: syncParamsSchema,
       output: syncOutputSchema,
       report: syncReportSchema,

@@ -1038,6 +1038,7 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
     readonly actions: Record<
       string,
       {
+        readonly description?: string;
         readonly params?: unknown;
         readonly output?: unknown;
         readonly report?: unknown;
@@ -1160,6 +1161,8 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.ok(sync?.params !== undefined, "动作发现应公开 sync 参数。 ");
   assert.ok(sync.output !== undefined, "动作发现应公开 sync 结果。 ");
   assert.ok(sync.report !== undefined, "sync 应声明可发现的运行报告。 ");
+  assert.match(sync.description ?? "", /已有范围按接续位置从旧到新处理/u);
+  assert.match(sync.description ?? "", /同一位置沿用原范围顺序/u);
   const syncParams = sync.params as {
     readonly properties?: Readonly<Record<string, unknown>>;
   };
@@ -6502,8 +6505,137 @@ async function verifySyncScopeTransitions(): Promise<void> {
       "另一个垃圾桶的运行不得改动当前 bin 的接续位置。",
     );
 
+    const childCategoryTarget = {
+      id: "category-43",
+      kind: "category" as const,
+      categoryId: 43,
+      categorySlugPath: "controlled/child",
+    };
+    const priorityBaseUpperBound = syncReport(secondBinSync).upperBound;
+    const minutesAfterPriorityBase = (minutes: number) =>
+      new Date(
+        Date.parse(priorityBaseUpperBound) + minutes * 60_000,
+      ).toISOString();
+    await setTestClockAt(minutesAfterPriorityBase(30));
+    const newerScopeAdvanced = await triggerLinuxdoRun(
+      cli,
+      "linuxdo-two",
+      "sync",
+      {
+        targets: [childCategoryTarget],
+        maxPages: 20,
+        maxRequests: 100,
+        maxElapsedMs: 120_000,
+      },
+    );
+    assert.equal(
+      newerScopeAdvanced.status,
+      "completed",
+      JSON.stringify(newerScopeAdvanced),
+    );
+    assert.equal(syncReport(newerScopeAdvanced).phase, "completed");
+    assert.equal(syncReport(newerScopeAdvanced).scopes[0]?.mode, "continued");
+    assert.equal(syncReport(newerScopeAdvanced).scopes[0]?.status, "completed");
+    const advancedScopes = await readSyncScopes("linuxdo-two");
+    const category42BeforeLimit = advancedScopes.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 42,
+    );
+    const category43BeforeLimit = advancedScopes.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 43,
+    );
+    assert.ok(category42BeforeLimit);
+    assert.ok(category43BeforeLimit);
+    assert.equal(category42BeforeLimit.position, priorityBaseUpperBound);
+    assert.equal(
+      category43BeforeLimit.position,
+      syncReport(newerScopeAdvanced).upperBound,
+    );
+
+    await setTestClockAt(minutesAfterPriorityBase(60));
+    await clearSourceEvents();
+    const limitedRun = await triggerLinuxdoRun(cli, "linuxdo-two", "sync", {
+      targets: [categoryTarget, childCategoryTarget],
+      maxPages: 20,
+      maxRequests: 3,
+      maxElapsedMs: 120_000,
+    });
+    assert.equal(limitedRun.status, "completed", JSON.stringify(limitedRun));
+    assert.equal(syncReport(limitedRun).phase, "budget-exhausted");
+    assert.equal(syncReport(limitedRun).budget.stopReason, "request-limit");
+    assert.deepEqual(
+      syncReport(limitedRun).scopes.map(({ scope, status }) => ({
+        scope,
+        status,
+      })),
+      [
+        { scope: { kind: "category", id: 42 }, status: "unknown" },
+        { scope: { kind: "category", id: 43 }, status: "unstarted" },
+      ],
+      JSON.stringify(syncReport(limitedRun).scopes),
+    );
+    const limitedState = await readSyncScopes("linuxdo-two");
+    const category42AfterLimit = limitedState.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 42,
+    );
+    const category43BeforePriority = limitedState.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 43,
+    );
+    assert.ok(category42AfterLimit);
+    assert.ok(category43BeforePriority);
+    assert.equal(
+      category42AfterLimit.position,
+      syncReport(limitedRun).upperBound,
+    );
+    assert.equal(category42AfterLimit.lastRunId, limitedRun.runId);
+    assert.equal(
+      category43BeforePriority.position,
+      syncReport(newerScopeAdvanced).upperBound,
+    );
+    assert.equal(category43BeforePriority.lastRunId, newerScopeAdvanced.runId);
+
+    await setTestClockAt(minutesAfterPriorityBase(90));
+    await clearSourceEvents();
+    const priorityRun = await triggerLinuxdoRun(cli, "linuxdo-two", "sync", {
+      targets: [categoryTarget, childCategoryTarget],
+      maxPages: 20,
+      maxRequests: 3,
+      maxElapsedMs: 120_000,
+    });
+    assert.equal(priorityRun.status, "completed", JSON.stringify(priorityRun));
+    assert.equal(syncReport(priorityRun).phase, "budget-exhausted");
+    assert.equal(syncReport(priorityRun).budget.stopReason, "request-limit");
+    assert.deepEqual(
+      syncReport(priorityRun).scopes.map(({ scope, status }) => ({
+        scope,
+        status,
+      })),
+      [
+        { scope: { kind: "category", id: 42 }, status: "unstarted" },
+        { scope: { kind: "category", id: 43 }, status: "unknown" },
+      ],
+      `预算优先处理已有位置较旧的 category:43，同时保留发现顺序与 category:42 的原位置：${JSON.stringify(syncReport(priorityRun).scopes)}`,
+    );
+    const priorityState = await readSyncScopes("linuxdo-two");
+    const category42AfterPriority = priorityState.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 42,
+    );
+    const category43AfterPriority = priorityState.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 43,
+    );
+    assert.deepEqual(category42AfterPriority, category42AfterLimit);
+    assert.equal(
+      category43AfterPriority?.position,
+      syncReport(priorityRun).upperBound,
+    );
+    assert.equal(category43AfterPriority?.lastRunId, priorityRun.runId);
+    assert.equal(
+      (await sourceState()).events.some(({ action }) => action === "post-list"),
+      false,
+      "小请求额度应在首次帖子流读取前耗尽；范围仍通过公开运行报告体现排序。",
+    );
+
     await updateFixtureState({ categoriesUnavailable: true });
-    await setTestClockAt("2026-11-02T02:30:00.000Z");
+    await setTestClockAt(minutesAfterPriorityBase(120));
     const stateBeforeDiscoveryFailure = await readSyncScopes();
     await clearSourceEvents();
     const discoveryFailure = await trigger("sync", {

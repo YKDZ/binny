@@ -26,7 +26,7 @@ export const sourceAccessGroupSchema = z
   })
   .strict()
   .describe(
-    "同一來源组内主动访问共享最小间隔与并发上限。站点包含 JSON、显式导航和恢复重读；媒体包含站内及外部媒体下载。",
+    "同一来源组内主动访问共享最小间隔与并发上限。站点包含 JSON、显式导航和恢复重读；媒体包含站内及外部媒体下载。",
   );
 
 export const sourceAccessConfigSchema = z
