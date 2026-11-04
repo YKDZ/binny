@@ -25,6 +25,7 @@ type SourceState = {
   readonly targetEarlyEndPage: number | null;
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
+  readonly nativeCategoryTree: boolean;
   readonly dailyCollectionEnabled: boolean;
   readonly dailyParentIncludesChild: boolean;
   readonly dailyTopicOverlapCount: number;
@@ -117,6 +118,7 @@ let activeState: SourceState = {
   targetEarlyEndPage: null,
   categoriesUnavailable: false,
   categoriesInvalidResponse: false,
+  nativeCategoryTree: false,
   dailyCollectionEnabled: false,
   dailyParentIncludesChild: false,
   dailyTopicOverlapCount: 1,
@@ -920,6 +922,7 @@ function updateState(value: unknown): boolean {
     "discoveryAddedReply",
     "categoriesUnavailable",
     "categoriesInvalidResponse",
+    "nativeCategoryTree",
     "dailyCollectionEnabled",
     "dailyParentIncludesChild",
     "postRangeEnabled",
@@ -1323,9 +1326,52 @@ const server = createServer((request, response) => {
         sendJson(response, 200, { category_list: { categories: [{}] } });
         return;
       }
-      sendJson(response, 200, {
-        category_list: {
-          categories: [
+      const categories = activeState.nativeCategoryTree
+        ? [
+            {
+              id: 42,
+              name: "受控板块",
+              slug: "controlled",
+              parent_category_id: null,
+              position: 1,
+              subcategory_list: [],
+            },
+            {
+              id: 42,
+              name: "受控板块",
+              slug: "controlled",
+              parent_category_id: null,
+              position: 1,
+              subcategory_list: [
+                {
+                  id: 43,
+                  name: "可见子板块",
+                  slug: "child",
+                  parent_category_id: 42,
+                  position: 1,
+                  subcategory_list: [
+                    {
+                      id: 48,
+                      name: "可见孙板块",
+                      slug: "grandchild",
+                      parent_category_id: 43,
+                      position: 1,
+                      subcategory_list: [],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              id: 44,
+              name: "另一可见板块",
+              slug: "other",
+              parent_category_id: null,
+              position: 2,
+              subcategory_list: [],
+            },
+          ]
+        : [
             {
               id: 42,
               name: "受控板块",
@@ -1372,9 +1418,8 @@ const server = createServer((request, response) => {
                   },
                 ]
               : []),
-          ],
-        },
-      });
+          ];
+      sendJson(response, 200, { category_list: { categories } });
       return;
     }
     if (request.method === "GET" && pathname === "/posts.json") {
