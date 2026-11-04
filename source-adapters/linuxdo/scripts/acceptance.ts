@@ -1071,6 +1071,14 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.deepEqual(postCreatedRange.required, ["from", "to"]);
   assert.ok(postCreatedRange.properties?.from !== undefined);
   assert.ok(postCreatedRange.properties?.to !== undefined);
+  assert.match(
+    (
+      postCreatedRange.properties?.to as
+        | { readonly description?: string }
+        | undefined
+    )?.description ?? "",
+    /不得晚于本次动作实际开始时刻/u,
+  );
   assert.equal(
     (
       postCreatedRange.properties?.maxPages as
@@ -4009,6 +4017,55 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     ),
     JSON.stringify(pageLimit),
   );
+
+  await setTestClockAt("2026-10-28T03:00:00.000Z");
+  const archiveBeforeFutureRange = await searchArchiveItem("区间新增回复内容");
+  for (const postCreatedRange of [
+    {
+      from: "2026-10-28T02:00:00.000Z",
+      to: "2026-10-28T04:00:00.000Z",
+    },
+    {
+      from: "2099-01-01T00:00:00.000Z",
+      to: "2099-01-02T00:00:00.000Z",
+    },
+  ]) {
+    await clearSourceEvents();
+    const futureRange = await trigger("collect", {
+      targets: linuxdoTargets("latest"),
+      postCreatedRange,
+    });
+    const futureSourceEvents = (await sourceState()).events;
+    const archiveAfterFutureRange = await searchArchiveItem("区间新增回复内容");
+    assert.equal(
+      futureRange.status,
+      "failed",
+      JSON.stringify({
+        futureRange,
+        sourceEvents: futureSourceEvents,
+        archiveAfterFutureRange,
+      }),
+    );
+    assert.equal(
+      futureRange.result?.error?.code,
+      "linuxdo_post_created_range_in_future",
+      JSON.stringify(futureRange),
+    );
+    assert.equal(futureRange.report?.phase, "failed");
+    assert.deepEqual(futureRange.result?.commits ?? [], []);
+    assert.deepEqual(futureSourceEvents, []);
+    assert.equal(
+      archiveAfterFutureRange.itemId,
+      archiveBeforeFutureRange.itemId,
+    );
+    assert.deepEqual(
+      archiveAfterFutureRange.revisions.map(({ revisionId }) => revisionId),
+      archiveBeforeFutureRange.revisions.map(({ revisionId }) => revisionId),
+    );
+    await setTestClockAt("2026-10-28T03:00:00.000Z");
+  }
+  await setTestClockOffset(0);
+
   await updateFixtureState({
     postRangeEnabled: false,
     postRangeAddAfterFirstPage: false,
@@ -6656,7 +6713,8 @@ async function main(): Promise<void> {
       internalStep !== "bounded-sync" &&
       internalStep !== "sync-interruption" &&
       internalStep !== "state-corruption" &&
-      internalStep !== "scope-transitions"
+      internalStep !== "scope-transitions" &&
+      internalStep !== "post-range"
     )
       throw new Error(`未知 Linux.do 验收内部步骤：${internalStep}`);
     await createOverlay();
@@ -6755,6 +6813,11 @@ async function main(): Promise<void> {
     if (internalStep === "scope-transitions") {
       await verifySyncScopeTransitions();
       process.stdout.write("sync 范围身份、重叠、变化、隔离和未知状态通过。\n");
+      return;
+    }
+    if (internalStep === "post-range") {
+      await verifyPostCreatedRangeCollection();
+      process.stdout.write("postCreatedRange 边界、归档与未来范围通过。\n");
       return;
     }
     if (internalStep === "bounded-sync") {
