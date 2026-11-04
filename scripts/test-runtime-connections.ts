@@ -380,10 +380,10 @@ try {
   assert.notEqual(onlineOne.execution.runtimeId, onlineTwo.execution.runtimeId);
   assert.equal(onlineOne.execution.environment?.kind, "lightweight");
   assert.equal(onlineTwo.execution.environment?.kind, "lightweight");
-  const discovered = cliData<{
+  const currentBin = cliData<{
     readonly execution: RuntimeStatus;
-  }>(await cli(["bin", "actions", "binny-runtime-one"]), "discovered");
-  assert.equal(discovered.execution.status, "online");
+  }>(await cli(["bin", "get", "binny-runtime-one"]), "found");
+  assert.equal(currentBin.execution.status, "online");
   assert.equal(
     await containerImage("runtime-one"),
     await containerImage("runtime-two"),
