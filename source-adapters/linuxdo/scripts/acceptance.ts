@@ -85,6 +85,7 @@ type FixtureState = {
   readonly postRangeResponseStatus: number | null;
   readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
+  readonly postRangeTopicRootShape: "missing-cooked" | "stream-only" | null;
   readonly postCategoryCandidateScenario: boolean;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
@@ -3974,6 +3975,66 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     },
   });
 
+  const mixedRange = {
+    from: "2026-10-28T02:00:00.000Z",
+    to: "2026-10-28T04:00:00.000Z",
+  };
+  const mixedTargetsCollected = await trigger("collect", {
+    targets: linuxdoTargets("pinned", "category"),
+    postCreatedRange: mixedRange,
+  });
+  assert.equal(
+    mixedTargetsCollected.status,
+    "completed",
+    JSON.stringify(mixedTargetsCollected),
+  );
+  assert.equal(
+    mixedTargetsCollected.result?.output?.collectionCompleteness,
+    "complete",
+    JSON.stringify(mixedTargetsCollected),
+  );
+  const mixedCategoryTopic = await searchArchiveItem("发现主题 2499");
+  assert.equal(mixedCategoryTopic.sourceKey.key, "post:249900");
+  const mixedCategoryReply = await searchArchiveItem("扫描期间插入的区间回复");
+  assert.equal(mixedCategoryReply.sourceKey.key, "post:249901");
+  assert.ok(
+    mixedTargetsCollected.result?.output?.completedScopes?.includes(
+      "post:249900",
+    ),
+  );
+  assert.ok(
+    mixedTargetsCollected.result?.output?.completedScopes?.includes(
+      "post:249901",
+    ),
+  );
+
+  await clearSourceEvents();
+  const topicOnlyCollected = await trigger("collect", {
+    targets: linuxdoTargets("pinned"),
+    postCreatedRange: mixedRange,
+  });
+  assert.equal(
+    topicOnlyCollected.status,
+    "completed",
+    JSON.stringify(topicOnlyCollected),
+  );
+  assert.equal(
+    topicOnlyCollected.result?.output?.collectionCompleteness,
+    "complete",
+    JSON.stringify(topicOnlyCollected),
+  );
+  assert.ok(
+    !topicOnlyCollected.result?.output?.completedScopes?.includes(
+      "post:249900",
+    ),
+  );
+  assert.ok(
+    !(await sourceState()).events.some(
+      ({ action, path }) => action === "topic" && path === "/t/2499.json",
+    ),
+    "仅选择主题2401时不得读取区间内未选中的主题2499。",
+  );
+
   const before = await sourceState();
   const rangeParams = {
     targets: linuxdoTargets("latest"),
@@ -4071,6 +4132,59 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
       ({ state }) => state?.to.sourceKey?.key === "post:240002",
     ),
   );
+  for (const rootShape of ["missing-cooked", "stream-only"] as const) {
+    await updateFixtureState({
+      postRangeAddAfterFirstPage: false,
+      postRangeTopicRootShape: rootShape,
+    });
+    await clearSourceEvents();
+    const rootSupplement = await trigger("collect", rangeParams);
+    assert.equal(
+      rootSupplement.status,
+      "completed",
+      JSON.stringify(rootSupplement),
+    );
+    assert.equal(
+      rootSupplement.result?.output?.collectionCompleteness,
+      "complete",
+      JSON.stringify(rootSupplement),
+    );
+    assert.ok(
+      rootSupplement.result?.output?.completedScopes?.includes(
+        "context:post:240001",
+      ),
+      JSON.stringify(rootSupplement.result?.output?.completedScopes),
+    );
+    assert.ok(
+      !rootSupplement.result?.output?.completedScopes?.includes("post:240001"),
+      JSON.stringify(rootSupplement.result?.output?.completedScopes),
+    );
+    assert.ok(
+      rootSupplement.result?.output?.completedScopes?.includes("post:240002"),
+      JSON.stringify(rootSupplement.result?.output?.completedScopes),
+    );
+    const rootSupplementRequests = (await sourceState()).events.filter(
+      ({ action, path }) =>
+        action === "posts" && path.startsWith("/t/2401/posts.json"),
+    );
+    assert.ok(
+      rootSupplementRequests.length > 0,
+      JSON.stringify(rootSupplementRequests),
+    );
+    const requestedPostIds = rootSupplementRequests.flatMap(({ path }) =>
+      new URL(path, "http://linuxdo-e2e-source").searchParams
+        .getAll("post_ids[]")
+        .map(Number),
+    );
+    assert.deepEqual(requestedPostIds, [240001]);
+    const supplementedRoot = await searchArchiveItem("主题正文版本 3");
+    assert.equal(supplementedRoot.sourceKey.key, "post:240001");
+    assert.equal(
+      binState(supplementedRoot).metadata?.createdAt,
+      "2026-10-28T01:00:00.000Z",
+    );
+  }
+  await updateFixtureState({ postRangeTopicRootShape: null });
   assert.deepEqual(await searchArchiveSourceKeys("终点边界之外的帖子"), []);
   assert.deepEqual(
     await searchArchiveSourceKeys("早于起点的旧时间戳帖子甲"),
@@ -4204,6 +4318,7 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     postRangeAddAfterFirstPage: false,
     postRangeRepeatPage: false,
     postRangeInvalidPage: null,
+    postRangeTopicRootShape: null,
     topicCreatedAtOverrides: {},
   });
 }

@@ -3799,6 +3799,7 @@ async function collectPostRangeTopic(
     [...new Set(requestedBodyIds)],
     context.signal,
   );
+  const inRangePostIds = new Set(inRangePosts.map(({ id }) => id));
   const selectedPosts = new Map<number, DiscoursePost>();
   for (const post of inRangePosts) selectedPosts.set(post.id, post);
   for (const [postId, post] of selectedRead.posts) {
@@ -3893,7 +3894,7 @@ async function collectPostRangeTopic(
     for (const post of batch) {
       seenPostIds?.add(post.id);
       completedScopes.push(
-        selectedPosts.has(post.id)
+        inRangePostIds.has(post.id)
           ? `post:${String(post.id)}`
           : `context:post:${String(post.id)}`,
       );
@@ -4444,11 +4445,7 @@ async function collectPostCreatedRange(
 
   const postsByTopic = new Map<number, DiscoursePost[]>();
   for (const post of scan.posts) {
-    if (
-      post.topic_id === undefined ||
-      seenPostIds?.has(post.id) === true ||
-      (selection.topicIds.size > 0 && !selection.topicIds.has(post.topic_id))
-    ) {
+    if (post.topic_id === undefined || seenPostIds?.has(post.id) === true) {
       continue;
     }
     const createdAt =

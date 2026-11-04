@@ -36,6 +36,7 @@ type SourceState = {
   readonly postRangeResponseStatus: number | null;
   readonly postRangeRetryAfter: string | null;
   readonly postRangePageSize: number;
+  readonly postRangeTopicRootShape: "missing-cooked" | "stream-only" | null;
   readonly postCategoryCandidateScenario: boolean;
   readonly paginationOrderMutationEnabled: boolean;
   readonly invalidCreatedAtTopicIds: readonly number[];
@@ -134,6 +135,7 @@ let activeState: SourceState = {
   postRangeResponseStatus: null,
   postRangeRetryAfter: null,
   postRangePageSize: 2,
+  postRangeTopicRootShape: null,
   postCategoryCandidateScenario: false,
   paginationOrderMutationEnabled: false,
   invalidCreatedAtTopicIds: [],
@@ -680,6 +682,13 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
         : 42;
   if (topicId === 2401) {
     const availablePosts = posts();
+    const sourceRoot = availablePosts[0];
+    if (sourceRoot === undefined) throw new Error("主题夹具缺少主帖正文。");
+    const topicRoot = { ...sourceRoot };
+    if (activeState.postRangeTopicRootShape === "missing-cooked")
+      delete topicRoot.cooked;
+    const topicPosts =
+      activeState.postRangeTopicRootShape === "stream-only" ? [] : [topicRoot];
     return {
       id: topicId,
       title: `受控主题标题版本 ${String(activeState.topicVersion)}`,
@@ -696,7 +705,7 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
             { id: 43, name: "归档", slug: "archive" },
           ],
       post_stream: {
-        posts: [availablePosts[0]],
+        posts: topicPosts,
         stream: availablePosts.map(({ id }) => id),
       },
     };
@@ -1148,6 +1157,14 @@ function updateState(value: unknown): boolean {
     (!Number.isSafeInteger(updates.rateLimitRemaining) ||
       Number(updates.rateLimitRemaining) < 0 ||
       Number(updates.rateLimitRemaining) > 10)
+  ) {
+    return false;
+  }
+  if (
+    "postRangeTopicRootShape" in updates &&
+    updates.postRangeTopicRootShape !== null &&
+    updates.postRangeTopicRootShape !== "missing-cooked" &&
+    updates.postRangeTopicRootShape !== "stream-only"
   ) {
     return false;
   }
