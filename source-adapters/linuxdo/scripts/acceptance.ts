@@ -109,6 +109,10 @@ type FixtureState = {
     readonly page: number;
     readonly milliseconds: number;
   } | null;
+  readonly topicResponsePause: {
+    readonly topicId: number;
+    readonly milliseconds: number;
+  } | null;
 };
 
 const targetDefinitions = {
@@ -4324,7 +4328,8 @@ async function verifySyncWorkerInterruption(
     postRangeResponseStatus: null,
     postRangeRetryAfter: null,
     postRangePageSize: 50,
-    postRangePause: { page: 4, milliseconds: 20_000 },
+    postRangePause: null,
+    topicResponsePause: { topicId: 2499, milliseconds: 20_000 },
     syncScenarioStage: 3,
   });
   await clearSourceEvents();
@@ -4341,7 +4346,14 @@ async function verifySyncWorkerInterruption(
       ]),
       "triggered",
     );
-    await waitForSourceEvent("post-list", 4);
+    await waitFor(
+      async () => sourceState(),
+      ({ events }) =>
+        events.some(
+          ({ action, path }) => action === "topic" && path === "/t/2499.json",
+        ),
+      "分类 43 的主题正文请求",
+    );
     const processing = await waitFor(
       async () =>
         cliData<ManualRun>(
@@ -4408,6 +4420,9 @@ async function verifySyncWorkerInterruption(
       "超过一小时范围的旧回复",
     );
     assert.equal(archivedBeforeInterruption.sourceKey.key, "post:240012");
+    const postListCountBeforeInterruption = (await sourceState()).events.filter(
+      ({ action }) => action === "post-list",
+    ).length;
 
     const childProcesses = await compose([
       "exec",
@@ -4462,11 +4477,15 @@ async function verifySyncWorkerInterruption(
       (await sourceState()).events.filter(
         ({ action }) => action === "post-list",
       ).length,
-      4,
+      postListCountBeforeInterruption,
       "worker 退出后不应自动恢复旧同步或继续扫描帖子流。",
     );
 
-    await updateFixtureState({ postRangePause: null, postRangePageSize: 2 });
+    await updateFixtureState({
+      postRangePause: null,
+      postRangePageSize: 2,
+      topicResponsePause: null,
+    });
     await setTestClockAt("2026-10-28T05:00:00.000Z");
     await clearSourceEvents();
     const resumed = await trigger("sync", params);
@@ -4515,6 +4534,7 @@ async function verifySyncWorkerInterruption(
     await updateFixtureState({
       postRangePause: null,
       postRangePageSize: 2,
+      topicResponsePause: null,
       syncScenarioStage: 0,
     });
   }

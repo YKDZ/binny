@@ -60,6 +60,10 @@ type SourceState = {
     readonly page: number;
     readonly milliseconds: number;
   } | null;
+  readonly topicResponsePause: {
+    readonly topicId: number;
+    readonly milliseconds: number;
+  } | null;
 };
 
 type SourceEvent = {
@@ -151,6 +155,7 @@ let activeState: SourceState = {
   retryAfterHeader: "1",
   rateLimitRemaining: 0,
   postRangePause: null,
+  topicResponsePause: null,
 };
 const events: SourceEvent[] = [];
 let navigationRequested = false;
@@ -430,9 +435,13 @@ function postRangeFixtures(
       readonly posts: readonly Record<string, unknown>[];
     };
   };
-  const newTopicRoot = newTopic.post_stream.posts[0];
-  if (newTopicRoot === undefined)
+  const sourceNewTopicRoot = newTopic.post_stream.posts[0];
+  if (sourceNewTopicRoot === undefined)
     throw new Error("帖子区间夹具缺少新主题主帖。");
+  const newTopicRoot = {
+    ...sourceNewTopicRoot,
+    ...(activeState.syncScenarioStage >= 3 ? { category_id: 43 } : {}),
+  };
   const insertion = {
     ...newTopicRoot,
     id: 249_901,
@@ -442,6 +451,20 @@ function postRangeFixtures(
     updated_at: "2026-10-28T03:30:00.000Z",
     cooked: "<p>扫描期间插入的区间回复。</p>",
   };
+  const interruptedCategoryReply: Record<string, unknown>[] =
+    activeState.syncScenarioStage >= 3
+      ? [
+          {
+            ...newTopicRoot,
+            id: 249_902,
+            post_number: 2,
+            reply_to_post_number: 1,
+            created_at: "2026-10-28T04:15:00.000Z",
+            updated_at: "2026-10-28T04:15:00.000Z",
+            cooked: "<p>中断窗口内属于分类 43 的新回复。</p>",
+          },
+        ]
+      : [];
   const values: Record<string, unknown>[] = [
     {
       ...newTopicRoot,
@@ -557,6 +580,7 @@ function postRangeFixtures(
       : [];
   return [
     ...(includeInserted ? [insertion] : []),
+    ...interruptedCategoryReply,
     ...dailyChildReply,
     ...syncTopic,
     ...syncReplies,
@@ -651,7 +675,9 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
     topicId >= 2700 &&
     topicId <= 2702
       ? 44
-      : 42;
+      : activeState.syncScenarioStage >= 3 && topicId === 2499
+        ? 43
+        : 42;
   if (topicId === 2401) {
     const availablePosts = posts();
     return {
@@ -1147,6 +1173,23 @@ function updateState(value: unknown): boolean {
     )
       return false;
   }
+  if ("topicResponsePause" in updates && updates.topicResponsePause !== null) {
+    const pause = updates.topicResponsePause;
+    if (
+      typeof pause !== "object" ||
+      Array.isArray(pause) ||
+      !("topicId" in pause) ||
+      !("milliseconds" in pause) ||
+      typeof pause.topicId !== "number" ||
+      typeof pause.milliseconds !== "number" ||
+      !Number.isSafeInteger(pause.topicId) ||
+      pause.topicId < 1 ||
+      !Number.isSafeInteger(pause.milliseconds) ||
+      pause.milliseconds < 1 ||
+      pause.milliseconds > 30_000
+    )
+      return false;
+  }
   if (updates.navigationRace === true) navigationRequested = false;
   postRangeReadCount = 0;
   activeState = {
@@ -1543,6 +1586,9 @@ const server = createServer((request, response) => {
         sendJson(response, 404, { errors: ["主题当前不可见。"] });
         return;
       }
+      const topicPause = activeState.topicResponsePause;
+      if (topicPause?.topicId === topicId) await delay(topicPause.milliseconds);
+      if (response.destroyed) return;
       sendJson(response, 200, discoveredTopic(topicId));
       return;
     }
