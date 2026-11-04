@@ -1815,7 +1815,13 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
   );
 
   await compose(["stop", "runtime-linuxdo"]);
-  const offline = await readBinRuntime("binny-discovery-topic");
+  const offline = await waitFor(
+    async () => await readBinRuntime("binny-discovery-topic"),
+    (runtime) =>
+      runtime.status === "offline" &&
+      runtime.sourceStateSnapshot.freshness === "stale",
+    "运行器停止后的离线快照收敛",
+  );
   assert.equal(offline.status, "offline");
   assert.equal(offline.sourceStateSnapshot.freshness, "stale");
   const offlineAccess = offline.sourceStateSnapshot.sourceAccess;
