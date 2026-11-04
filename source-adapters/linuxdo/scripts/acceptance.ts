@@ -37,6 +37,19 @@ type CliWire<T> = {
 
 type ManualRun = LinuxdoManualRun;
 
+type DiscoveredCategoryResult = {
+  readonly id: number;
+  readonly name: string;
+  readonly parentId: number | null;
+  readonly collectTarget: {
+    readonly id: string;
+    readonly kind: "category";
+    readonly categoryId: number;
+    readonly categorySlugPath: string;
+  };
+  readonly children: readonly DiscoveredCategoryResult[];
+};
+
 type FixtureState = {
   readonly nativeChallenge: boolean;
   readonly nativeChallengeWait: boolean;
@@ -61,6 +74,7 @@ type FixtureState = {
   readonly targetEarlyEndPage: number | null;
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
+  readonly nativeCategoryTree: boolean;
   readonly dailyCollectionEnabled: boolean;
   readonly dailyParentIncludesChild: boolean;
   readonly dailyTopicOverlapCount: number;
@@ -1289,7 +1303,118 @@ async function verifySharedSourceAccess(): Promise<void> {
   }
 }
 
+async function verifyNativeCategoryTree(): Promise<void> {
+  await updateFixtureState({ nativeCategoryTree: true });
+  try {
+    await clearSourceEvents();
+    const listed = await trigger("list-categories", {});
+    assert.equal(listed.status, "completed", JSON.stringify(listed));
+    const output = listed.result?.output as
+      | { readonly categories?: readonly DiscoveredCategoryResult[] }
+      | undefined;
+    assert.ok(output !== undefined);
+    assert.deepEqual(
+      output.categories?.map(({ id, name, parentId }) => ({
+        id,
+        name,
+        parentId,
+      })),
+      [
+        { id: 42, name: "受控板块", parentId: null },
+        { id: 44, name: "另一可见板块", parentId: null },
+      ],
+    );
+    const parent = output.categories?.find(({ id }) => id === 42);
+    assert.ok(parent !== undefined);
+    assert.deepEqual(
+      parent.children.map(({ id, name, parentId }) => ({
+        id,
+        name,
+        parentId,
+      })),
+      [{ id: 43, name: "可见子板块", parentId: 42 }],
+    );
+    const child = parent.children[0];
+    assert.ok(child !== undefined);
+    assert.deepEqual(
+      child.children.map(({ id, name, parentId, collectTarget }) => ({
+        id,
+        name,
+        parentId,
+        collectTarget,
+      })),
+      [
+        {
+          id: 48,
+          name: "可见孙板块",
+          parentId: 43,
+          collectTarget: {
+            id: "category-48",
+            kind: "category",
+            categoryId: 48,
+            categorySlugPath: "controlled/child/grandchild",
+          },
+        },
+      ],
+    );
+    assert.deepEqual(listed.result?.commits ?? [], []);
+    assert.equal((await sourceState()).events.at(-1)?.action, "categories");
+
+    const initialized = await trigger("sync", {
+      targets: [child.children[0]!.collectTarget],
+      maxPages: 20,
+      maxRequests: 20,
+      maxElapsedMs: 30_000,
+    });
+    assert.equal(initialized.status, "completed", JSON.stringify(initialized));
+    assert.equal(syncOutput(initialized).outcome, "initialized");
+    const report = syncReport(initialized);
+    assert.equal(report.discovery, "complete");
+    assert.deepEqual(
+      report.scopes.map(({ scope, mode, status, position }) => ({
+        scope,
+        mode,
+        status,
+        position,
+      })),
+      [
+        {
+          scope: { kind: "category", id: 48 },
+          mode: "initialized",
+          status: "initialized",
+          position: report.upperBound,
+        },
+      ],
+    );
+    const publicState = (await readBinRuntime("binny-discovery-topic"))
+      .sourceStateSnapshot.sync as
+      | {
+          readonly scopes?: readonly {
+            readonly scope?: { readonly kind: string; readonly id: number };
+            readonly position?: string;
+            readonly lastRunId?: string;
+          }[];
+        }
+      | undefined;
+    assert.equal(
+      publicState?.scopes?.find(
+        ({ scope }) => scope?.kind === "category" && scope.id === 48,
+      )?.position,
+      report.upperBound,
+    );
+    assert.equal(
+      publicState?.scopes?.find(
+        ({ scope }) => scope?.kind === "category" && scope.id === 48,
+      )?.lastRunId,
+      initialized.runId,
+    );
+  } finally {
+    await updateFixtureState({ nativeCategoryTree: false });
+  }
+}
+
 async function verifyCategoryDiscovery(): Promise<void> {
+  await verifyNativeCategoryTree();
   const unscopedCheck = await trigger("check", {});
   assert.equal(
     unscopedCheck.status,
@@ -6713,8 +6838,9 @@ async function main(): Promise<void> {
       internalStep !== "bounded-sync" &&
       internalStep !== "sync-interruption" &&
       internalStep !== "state-corruption" &&
-      internalStep !== "scope-transitions" &&
-      internalStep !== "post-range"
+      internalStep !== "post-range" &&
+      internalStep !== "native-category-tree" &&
+      internalStep !== "scope-transitions"
     )
       throw new Error(`未知 Linux.do 验收内部步骤：${internalStep}`);
     await createOverlay();
@@ -6807,6 +6933,13 @@ async function main(): Promise<void> {
       await verifyCorruptSyncStateVisibility();
       process.stdout.write(
         "sync队列/执行中取消、worker/runtime退出、U接续与状态损坏保护通过。\n",
+      );
+      return;
+    }
+    if (internalStep === "native-category-tree") {
+      await verifyNativeCategoryTree();
+      process.stdout.write(
+        "原生嵌套子板块树、重复节点后代去重与新范围U初始化通过。\n",
       );
       return;
     }

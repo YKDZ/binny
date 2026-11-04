@@ -469,20 +469,30 @@ const listCategoriesOutputSchema = z
     challengeRecovery: challengeRecoverySchema,
   })
   .strict();
-const discourseCategorySchema = z
-  .object({
-    id: topicIdSchema,
-    name: z.string().min(1),
-    slug: categorySlugSchema,
-    parent_category_id: z
-      .number()
-      .int()
-      .safe()
-      .nonnegative()
-      .nullable()
-      .optional(),
-  })
-  .passthrough();
+type DiscourseCategory = {
+  readonly id: number;
+  readonly name: string;
+  readonly slug: string;
+  readonly parent_category_id?: number | null | undefined;
+  readonly subcategory_list?: readonly DiscourseCategory[] | null | undefined;
+};
+const discourseCategorySchema: z.ZodType<DiscourseCategory> = z.lazy(() =>
+  z
+    .object({
+      id: topicIdSchema,
+      name: z.string().min(1),
+      slug: categorySlugSchema,
+      parent_category_id: z
+        .number()
+        .int()
+        .safe()
+        .nonnegative()
+        .nullable()
+        .optional(),
+      subcategory_list: z.array(discourseCategorySchema).nullable().optional(),
+    })
+    .passthrough(),
+);
 const discourseCategoryListSchema = z
   .object({
     category_list: z
@@ -2168,17 +2178,45 @@ function categoryListFailure(
 }
 
 function buildDiscoveredCategories(
-  sourceCategories: readonly z.infer<typeof discourseCategorySchema>[],
+  sourceCategories: readonly DiscourseCategory[],
 ): DiscoveredCategory[] {
-  const categoriesById = new Map<
-    number,
-    z.infer<typeof discourseCategorySchema>
-  >();
-  for (const category of sourceCategories) {
-    if (!categoriesById.has(category.id)) {
-      categoriesById.set(category.id, category);
+  const categoriesById = new Map<number, DiscourseCategory>();
+  const parentIdById = new Map<number, number | null>();
+  const addCategory = (
+    category: DiscourseCategory,
+    nestedParentId?: number,
+  ): void => {
+    const declaredParentId = category.parent_category_id;
+    if (
+      nestedParentId !== undefined &&
+      declaredParentId !== undefined &&
+      declaredParentId !== null &&
+      declaredParentId !== 0 &&
+      declaredParentId !== nestedParentId
+    ) {
+      throw categoryListFailure(
+        "discourse_category_list_response_invalid",
+        "Linux.do 板块响应中的嵌套层级与父板块 ID 不一致。",
+      );
     }
-  }
+    const parentId =
+      nestedParentId ??
+      (declaredParentId === 0 ? null : (declaredParentId ?? null));
+    if (!categoriesById.has(category.id))
+      categoriesById.set(category.id, category);
+    const existingParentId = parentIdById.get(category.id);
+    if (existingParentId === undefined || existingParentId === null) {
+      parentIdById.set(category.id, parentId);
+    } else if (parentId !== null && parentId !== existingParentId) {
+      throw categoryListFailure(
+        "discourse_category_list_response_invalid",
+        "Linux.do 板块响应为同一板块声明了不同的父板块。",
+      );
+    }
+    for (const child of category.subcategory_list ?? [])
+      addCategory(child, category.id);
+  };
+  for (const category of sourceCategories) addCategory(category);
 
   const slugPathById = new Map<number, string>();
   const resolveSlugPath = (
@@ -2202,7 +2240,7 @@ function buildDiscoveredCategories(
     }
     const nextVisiting = new Set(visiting);
     nextVisiting.add(categoryId);
-    const parentId = category.parent_category_id;
+    const parentId = parentIdById.get(categoryId) ?? null;
     const parent =
       parentId === undefined || parentId === null || parentId === 0
         ? undefined
@@ -2220,12 +2258,7 @@ function buildDiscoveredCategories(
     nodesById.set(category.id, {
       id: category.id,
       name: category.name,
-      parentId:
-        category.parent_category_id === undefined ||
-        category.parent_category_id === null ||
-        category.parent_category_id === 0
-          ? null
-          : category.parent_category_id,
+      parentId: parentIdById.get(category.id) ?? null,
       collectTarget: {
         id: `category-${String(category.id)}`,
         kind: "category",
