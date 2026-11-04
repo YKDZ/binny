@@ -3708,6 +3708,7 @@ async function collectPostRangeTopic(
   collectedTopics: number,
   completedScopes: string[],
   incompleteScopes: CollectionIncompleteScope[],
+  seenPostIds?: Set<number>,
 ): Promise<"processed" | "skipped" | "limited"> {
   const access = await readTopic(page, site, topicId, context.signal);
   if (access.kind === "unavailable") {
@@ -3787,10 +3788,12 @@ async function collectPostRangeTopic(
   const postsToArchive = [
     root,
     ...[...selectedPosts.values()].filter(({ id }) => id !== root.id),
-  ].toSorted(
-    (first, second) =>
-      first.post_number - second.post_number || first.id - second.id,
-  );
+  ]
+    .filter(({ id }) => !seenPostIds?.has(id))
+    .toSorted(
+      (first, second) =>
+        first.post_number - second.post_number || first.id - second.id,
+    );
   const diagnostics = postDiagnostics(
     topicId,
     selectedRead.missingPostIds,
@@ -3841,6 +3844,7 @@ async function collectPostRangeTopic(
       );
     await context.archive.submit({ items, relations });
     for (const post of batch) {
+      seenPostIds?.add(post.id);
       completedScopes.push(
         selectedPosts.has(post.id)
           ? `post:${String(post.id)}`
@@ -4320,6 +4324,7 @@ async function collectPostCreatedRange(
   incompleteScopes: CollectionIncompleteScope[],
   publishReport: (report: CollectionReportUpdate) => Promise<void>,
   selectionOverride?: PostRangeTargetSelection,
+  seenPostIds?: Set<number>,
 ): Promise<
   Omit<z.output<typeof collectOutputSchema>, "challengeRecovery"> & {
     readonly observedPosts: number;
@@ -4375,6 +4380,7 @@ async function collectPostCreatedRange(
   for (const post of scan.posts) {
     if (
       post.topic_id === undefined ||
+      seenPostIds?.has(post.id) === true ||
       (selection.topicIds.size > 0 && !selection.topicIds.has(post.topic_id))
     ) {
       continue;
@@ -4421,6 +4427,7 @@ async function collectPostCreatedRange(
       collectedTopics,
       completedScopes,
       incompleteScopes,
+      seenPostIds,
     );
     if (topicResult === "limited") break;
     if (topicResult === "processed") {
@@ -4858,6 +4865,7 @@ async function sync(
   const reportScopes = new Map<string, SyncReport["scopes"][number]>();
   const incompleteScopes: CollectionIncompleteScope[] = [];
   const completedScopes: string[] = [];
+  const seenPostIds = new Set<number>();
   let observedPosts = 0;
   let topicsExamined = 0;
   let state: SyncPersistentState | undefined;
@@ -5083,6 +5091,7 @@ async function sync(
               scopeDiscovery = rangeReport.discovery;
             },
             selected,
+            seenPostIds,
           );
           observedPosts += result.observedPosts;
           topicsExamined += result.topicsExamined;

@@ -26,6 +26,7 @@ type SourceState = {
   readonly categoriesUnavailable: boolean;
   readonly categoriesInvalidResponse: boolean;
   readonly dailyCollectionEnabled: boolean;
+  readonly dailyParentIncludesChild: boolean;
   readonly dailyTopicOverlapCount: number;
   readonly postRangeEnabled: boolean;
   readonly postRangeAddAfterFirstPage: boolean;
@@ -117,6 +118,7 @@ let activeState: SourceState = {
   categoriesUnavailable: false,
   categoriesInvalidResponse: false,
   dailyCollectionEnabled: false,
+  dailyParentIncludesChild: false,
   dailyTopicOverlapCount: 1,
   postRangeEnabled: false,
   postRangeAddAfterFirstPage: false,
@@ -491,8 +493,25 @@ function postRangeFixtures(
           },
         ]
       : [];
+  const dailyChildReply: Record<string, unknown>[] =
+    activeState.dailyCollectionEnabled && activeState.syncScenarioStage >= 1
+      ? [
+          {
+            ...post(
+              70_040_001,
+              2,
+              "<p>全日子板块范围重叠回复。</p>",
+              "2026-11-02T00:15:00.000Z",
+              1,
+            ),
+            topic_id: 700_400,
+            created_at: "2026-11-02T00:15:00.000Z",
+          },
+        ]
+      : [];
   return [
     ...(includeInserted ? [insertion] : []),
+    ...dailyChildReply,
     ...syncTopic,
     ...syncReplies,
     ...oldSyncReply,
@@ -677,6 +696,11 @@ function discoveredTopicList(
         : categoryId === undefined
           ? dailyTopicsForAllVisibleCategories()
           : [];
+    if (categoryId === 45 && activeState.dailyParentIncludesChild) {
+      rows = [...rows, ...dailyTopicsForCategory(46)].toSorted(
+        (first, second) => second.createdAt.localeCompare(first.createdAt),
+      );
+    }
     const overlapCount = perPage === 1 ? 0 : activeState.dailyTopicOverlapCount;
     const offset = page === 0 ? 0 : page * (perPage - overlapCount);
     const pageRows = rows.slice(offset, offset + perPage);
@@ -897,6 +921,7 @@ function updateState(value: unknown): boolean {
     "categoriesUnavailable",
     "categoriesInvalidResponse",
     "dailyCollectionEnabled",
+    "dailyParentIncludesChild",
     "postRangeEnabled",
     "postRangeAddAfterFirstPage",
     "postRangeRepeatPage",
