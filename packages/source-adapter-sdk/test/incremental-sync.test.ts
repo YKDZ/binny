@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  computeOngoingDocumentHash,
   createEmptyIncrementalSyncState,
+  getIncrementalScopeOngoingDocument,
   hasIncrementalEntryChanged,
+  hasOngoingDocumentChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   isSourceAdapterActionError,
   loadIncrementalSyncState,
+  pruneInactiveOngoingDocuments,
   saveIncrementalSyncState,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -291,6 +295,125 @@ void test("incremental sync state schema and helpers", async (t) => {
       assert.equal(
         state.scopes["feed-1"]?.ongoingDocuments?.["doc-1"]?.contentHash,
         "doc-hash-1",
+      );
+    },
+  );
+
+  await t.test(
+    "ongoing-document baseline initialization, change detection, and pruning",
+    () => {
+      const hash1 = computeOngoingDocumentHash(
+        "# Heading\n\nContent",
+        "Content",
+      );
+      const hash1Copy = computeOngoingDocumentHash(
+        "# Heading\n\nContent",
+        "Content",
+      );
+      const hash2 = computeOngoingDocumentHash(
+        "# Heading\n\nModified",
+        "Modified",
+      );
+
+      assert.equal(hash1, hash1Copy, "hash calculation must be deterministic");
+      assert.notEqual(
+        hash1,
+        hash2,
+        "different content produces different hash",
+      );
+
+      const state = createEmptyIncrementalSyncState();
+      initializeIncrementalScope(state, "scope-changelog", {
+        scopeUrl: "https://example.com/changelog.md",
+        initializedAt: "2026-11-07T00:00:00Z",
+        ongoingDocuments: {
+          "doc-main": {
+            contentHash: hash1,
+            updatedAt: "2026-11-07T00:00:00Z",
+          },
+        },
+      });
+
+      const retrieved = getIncrementalScopeOngoingDocument(
+        state,
+        "scope-changelog",
+        "doc-main",
+      );
+      assert.ok(retrieved !== undefined);
+      assert.equal(retrieved.contentHash, hash1);
+
+      assert.equal(
+        getIncrementalScopeOngoingDocument(state, "scope-changelog", "unknown"),
+        undefined,
+      );
+      assert.equal(
+        getIncrementalScopeOngoingDocument(state, "unknown-scope", "doc-main"),
+        undefined,
+      );
+
+      assert.equal(
+        hasOngoingDocumentChanged(undefined, hash1),
+        true,
+        "undefined previous record indicates change",
+      );
+      assert.equal(
+        hasOngoingDocumentChanged(retrieved, hash1),
+        false,
+        "matching content hash indicates no change",
+      );
+      assert.equal(
+        hasOngoingDocumentChanged(retrieved, hash2),
+        true,
+        "different content hash indicates change",
+      );
+
+      upsertIncrementalScopeOngoingDocument(
+        state,
+        "scope-changelog",
+        "doc-event",
+        {
+          contentHash: "event-hash",
+        },
+      );
+      upsertIncrementalScopeOngoingDocument(
+        state,
+        "scope-changelog",
+        "doc-old",
+        {
+          contentHash: "old-hash",
+        },
+      );
+
+      const removed = pruneInactiveOngoingDocuments(state, "scope-changelog", [
+        "doc-main",
+        "doc-event",
+      ]);
+      assert.deepEqual(
+        removed,
+        ["doc-old"],
+        "inactive document key must be pruned and returned",
+      );
+      assert.equal(
+        getIncrementalScopeOngoingDocument(state, "scope-changelog", "doc-old"),
+        undefined,
+      );
+      assert.ok(
+        getIncrementalScopeOngoingDocument(
+          state,
+          "scope-changelog",
+          "doc-main",
+        ) !== undefined,
+      );
+
+      const emptyPrune = pruneInactiveOngoingDocuments(
+        state,
+        "non-existent-scope",
+        ["doc-main"],
+      );
+      assert.deepEqual(
+        emptyPrune,
+        [],
+        "pruning non-existent scope returns empty list",
       );
     },
   );

@@ -1,4 +1,6 @@
 // Shared incremental synchronization state schemas and management helpers.
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import {
@@ -273,4 +275,57 @@ export function upsertIncrementalScopeOngoingDocument(
     scope.ongoingDocuments = {};
   }
   scope.ongoingDocuments[documentKey] = record;
+}
+
+/** Computes a deterministic SHA-256 hex digest of cleaned markdown and text content. */
+export function computeOngoingDocumentHash(
+  markdown: string,
+  text: string,
+): string {
+  return createHash("sha256")
+    .update(markdown)
+    .update("\0")
+    .update(text)
+    .digest("hex");
+}
+
+/** Determines whether an ongoing document's content hash has changed from its previous state. */
+export function hasOngoingDocumentChanged(
+  previous: IncrementalOngoingDocumentRecord | undefined,
+  currentContentHash: string,
+): boolean {
+  if (previous === undefined) {
+    return true;
+  }
+  return previous.contentHash !== currentContentHash;
+}
+
+/** Retrieves an ongoing document record for a scope and document key if present. */
+export function getIncrementalScopeOngoingDocument(
+  state: IncrementalSyncState,
+  scopeId: string,
+  documentKey: string,
+): IncrementalOngoingDocumentRecord | undefined {
+  return state.scopes[scopeId]?.ongoingDocuments?.[documentKey];
+}
+
+/** Prunes ongoing document records from a scope that are no longer in the active document keys, returning the removed keys. */
+export function pruneInactiveOngoingDocuments(
+  state: IncrementalSyncState,
+  scopeId: string,
+  activeDocumentKeys: Iterable<string>,
+): string[] {
+  const scope = state.scopes[scopeId];
+  if (scope?.ongoingDocuments === undefined) {
+    return [];
+  }
+  const activeSet = new Set(activeDocumentKeys);
+  const removed: string[] = [];
+  for (const key of Object.keys(scope.ongoingDocuments)) {
+    if (!activeSet.has(key)) {
+      delete scope.ongoingDocuments[key];
+      removed.push(key);
+    }
+  }
+  return removed;
 }
