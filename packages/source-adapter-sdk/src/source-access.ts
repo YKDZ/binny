@@ -54,7 +54,7 @@ const sourceAccessAdmissionRecoverySchema = z.discriminatedUnion("phase", [
   z
     .object({
       phase: z.literal("recovered"),
-      upperBoundEpochMs: z.number().int().nonnegative(),
+      upperBoundEpochMs: z.int().nonnegative(),
     })
     .strict(),
 ]);
@@ -62,7 +62,7 @@ const sourceAccessAdmissionRecoverySchema = z.discriminatedUnion("phase", [
 export const sourceAccessPersistentStateSchema = z
   .object({
     version: z.literal(1),
-    lastAdmittedAt: z.record(z.string(), z.number().int().nonnegative()),
+    lastAdmittedAt: z.record(z.string(), z.int().nonnegative()),
     admissionRecoveryByGroup: z
       .record(sourceAccessGroupIdSchema, sourceAccessAdmissionRecoverySchema)
       .optional(),
@@ -70,9 +70,9 @@ export const sourceAccessPersistentStateSchema = z
       .record(
         sourceAccessGroupIdSchema,
         z.object({
-          notBeforeEpochMs: z.number().int().nonnegative(),
+          notBeforeEpochMs: z.int().nonnegative(),
           status: z.union([z.literal(429), z.literal(503)]),
-          observedAtEpochMs: z.number().int().nonnegative(),
+          observedAtEpochMs: z.int().nonnegative(),
           retryAfter: z.string().max(256),
         }),
       )

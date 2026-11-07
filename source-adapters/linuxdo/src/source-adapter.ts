@@ -24,16 +24,14 @@ import { z } from "zod";
 
 import { ChallengeRecovery } from "#/challenge-recovery";
 
-const challengeRecoverySchema = z
-  .object({
-    rounds: z.number().int().nonnegative(),
-    elapsedMs: z.number().int().nonnegative(),
-    successes: z.number().int().nonnegative(),
-  })
-  .strict();
+const challengeRecoverySchema = z.strictObject({
+  rounds: z.int().nonnegative(),
+  elapsedMs: z.int().nonnegative(),
+  successes: z.int().nonnegative(),
+});
 type ChallengeRecoverySummary = z.output<typeof challengeRecoverySchema>;
 
-const topicIdSchema = z.number().int().safe().positive();
+const topicIdSchema = z.int().positive();
 const targetIdSchema = z
   .string()
   .min(1, "目标标识不能为空。")
@@ -75,28 +73,26 @@ const linuxDoSourceAccessSchema = sourceAccessConfigSchema.superRefine(
   },
 );
 
-const sourceAdapterConfigSchema = z
-  .object({
-    origin: siteOriginSchema
-      .describe(
-        "Linux.do 站点的 HTTP(S) origin，只填协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
-      )
-      .meta({ examples: ["https://linux.do"] }),
-    sourceAccess: linuxDoSourceAccessSchema
-      .default({
-        groups: {
-          linuxdo: {
-            sources: ["site", "media"],
-            minimumIntervalMs: 1_000,
-            maxConcurrency: 1,
-          },
+const sourceAdapterConfigSchema = z.strictObject({
+  origin: siteOriginSchema
+    .describe(
+      "Linux.do 站点的 HTTP(S) origin，只填协议、主机和可选端口，不含路径、查询、片段或登录凭据。",
+    )
+    .meta({ examples: ["https://linux.do"] }),
+  sourceAccess: linuxDoSourceAccessSchema
+    .default({
+      groups: {
+        linuxdo: {
+          sources: ["site", "media"],
+          minimumIntervalMs: 1_000,
+          maxConcurrency: 1,
         },
-      })
-      .describe(
-        "Linux.do 的站点 JSON、显式导航、挑战恢复重读和媒体下载共用该访问策略；默认间隔与并发上限由默认配置确定，实际准入次数和等待时长以运行报告为准。",
-      ),
-  })
-  .strict();
+      },
+    })
+    .describe(
+      "Linux.do 的站点 JSON、显式导航、挑战恢复重读和媒体下载共用该访问策略；默认间隔与并发上限由默认配置确定，实际准入次数和等待时长以运行报告为准。",
+    ),
+});
 const categorySlugPathSchema = z
   .string()
   .min(1)
@@ -107,31 +103,25 @@ const categorySlugSchema = z
   .min(1)
   .max(512)
   .regex(/^[^/?#]+$/u);
-const categoryReferenceSchema = z
-  .object({
-    id: targetIdSchema,
-    kind: z.literal("category"),
-    categoryId: topicIdSchema.describe("Linux.do 板块数字 ID。"),
-    categorySlugPath: categorySlugPathSchema.describe(
-      "板块路径中的 slug，不含 /c/ 前缀；多级板块以斜杠分隔。",
-    ),
-  })
-  .strict();
+const categoryReferenceSchema = z.strictObject({
+  id: targetIdSchema,
+  kind: z.literal("category"),
+  categoryId: topicIdSchema.describe("Linux.do 板块数字 ID。"),
+  categorySlugPath: categorySlugPathSchema.describe(
+    "板块路径中的 slug，不含 /c/ 前缀；多级板块以斜杠分隔。",
+  ),
+});
 const configuredTargetSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
-      kind: z.literal("latest").describe("按最新主题流发现主题。"),
-    })
-    .strict(),
+  z.strictObject({
+    id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+    kind: z.literal("latest").describe("按最新主题流发现主题。"),
+  }),
   categoryReferenceSchema,
-  z
-    .object({
-      id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
-      kind: z.literal("topic").describe("直接引用一个主题。"),
-      topicId: topicIdSchema.describe("Linux.do 主题数字 ID。"),
-    })
-    .strict(),
+  z.strictObject({
+    id: targetIdSchema.describe("此目标在本配置中的唯一名称。"),
+    kind: z.literal("topic").describe("直接引用一个主题。"),
+    topicId: topicIdSchema.describe("Linux.do 主题数字 ID。"),
+  }),
 ]);
 const actionTargetsSchema = z
   .array(configuredTargetSchema)
@@ -164,14 +154,13 @@ const actionTargetsSchema = z
     }
   });
 const checkParamsSchema = z
-  .object({
+  .strictObject({
     topicId: topicIdSchema
       .optional()
       .describe("只检查此主题；与 targets 互斥。")
       .meta({ examples: [2401] }),
     targets: actionTargetsSchema.optional(),
   })
-  .strict()
   .superRefine((params, context) => {
     if (params.topicId !== undefined && params.targets !== undefined) {
       context.addIssue({
@@ -211,7 +200,7 @@ const collectionTimeZoneSchema = z
   )
   .meta({ examples: ["UTC", "Asia/Tokyo"] });
 const postCreatedRangeSchema = z
-  .object({
+  .strictObject({
     from: z.iso
       .datetime({ offset: true })
       .describe("帖子创建时间的包含起点，必须带明确时区偏移。"),
@@ -221,17 +210,14 @@ const postCreatedRangeSchema = z
         "帖子创建时间的不包含终点，必须带明确时区偏移，且不得晚于本次动作实际开始时刻。",
       ),
     maxPages: z
-      .number()
       .int()
       .positive()
       .max(1_000)
-      .safe()
       .default(20)
       .describe(
         "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
       ),
   })
-  .strict()
   .superRefine((range, context) => {
     if (Date.parse(range.from) >= Date.parse(range.to)) {
       context.addIssue({
@@ -254,7 +240,7 @@ const postCreatedRangeSchema = z
     ],
   });
 const collectParamsSchema = z
-  .object({
+  .strictObject({
     topicId: topicIdSchema
       .optional()
       .describe("只处理此主题；与 targets 互斥。")
@@ -274,15 +260,12 @@ const collectParamsSchema = z
       .optional()
       .meta(postCreatedRangeSchema.meta() ?? {}),
     maxTopics: z
-      .number()
       .int()
       .positive()
-      .safe()
       .optional()
       .describe("本轮主题处理数量上限；省略时不额外限制主题数。")
       .meta({ examples: [25] }),
   })
-  .strict()
   .superRefine((params, context) => {
     if (params.topicId !== undefined && params.targets !== undefined) {
       context.addIssue({
@@ -338,40 +321,31 @@ const collectParamsSchema = z
     ],
   });
 const syncTargetIntentSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("all-visible") }).strict(),
-  z
-    .object({ kind: z.literal("targets"), targets: actionTargetsSchema })
-    .strict(),
+  z.strictObject({ kind: z.literal("all-visible") }),
+  z.strictObject({ kind: z.literal("targets"), targets: actionTargetsSchema }),
 ]);
 const syncParamsSchema = z
-  .object({
+  .strictObject({
     targets: actionTargetsSchema.optional(),
     maxPages: z
-      .number()
       .int()
       .positive()
       .max(100)
-      .safe()
       .default(20)
       .describe("每个已接续范围扫描帖子流的页数上限，默认 20 页。"),
     maxRequests: z
-      .number()
       .int()
       .positive()
       .max(500)
-      .safe()
       .default(200)
       .describe("本轮主动来源请求总数上限，含等待获准的请求。"),
     maxElapsedMs: z
-      .number()
       .int()
       .positive()
       .max(900_000)
-      .safe()
       .default(300_000)
       .describe("本轮动作执行总时长上限，默认 5 分钟，最高 15 分钟。"),
   })
-  .strict()
   .superRefine((params, context) => {
     if (params.targets?.length === 0) {
       context.addIssue({
@@ -381,31 +355,28 @@ const syncParamsSchema = z
       });
     }
   });
-const syncScopeReferenceSchema = z
-  .object({ kind: z.enum(["category", "topic"]), id: topicIdSchema })
-  .strict();
-const syncScopeIdentitySchema = z
-  .object({
-    binId: z.string().min(1),
-    identityId: z.string().min(1),
-    origin: siteOriginSchema,
-    scope: syncScopeReferenceSchema,
-  })
-  .strict();
-const syncProgressEntrySchema = syncScopeIdentitySchema
-  .extend({
-    position: z.iso
-      .datetime()
-      .describe("本轮已分配的接续位置；不代表此前内容完整覆盖。"),
-    lastRunId: z.string().min(1).describe("最近一次分配该位置的运行 ID。"),
-  })
-  .strict();
+const syncScopeReferenceSchema = z.strictObject({
+  kind: z.enum(["category", "topic"]),
+  id: topicIdSchema,
+});
+const syncScopeIdentitySchema = z.strictObject({
+  binId: z.string().min(1),
+  identityId: z.string().min(1),
+  origin: siteOriginSchema,
+  scope: syncScopeReferenceSchema,
+});
+const syncProgressEntrySchema = syncScopeIdentitySchema.extend({
+  position: z.iso
+    .datetime()
+    .describe("本轮已分配的接续位置；不代表此前内容完整覆盖。"),
+  lastRunId: z.string().min(1).describe("最近一次分配该位置的运行 ID。"),
+});
 const syncPersistentStateSchema = z
-  .object({
+  .strictObject({
     version: z.literal(1),
     scopes: z.array(syncProgressEntrySchema),
     lastIntent: z
-      .object({
+      .strictObject({
         runId: z.string().min(1),
         upperBound: z.iso.datetime(),
         target: syncTargetIntentSchema,
@@ -422,22 +393,18 @@ const syncPersistentStateSchema = z
           ])
           .describe("崩溃前最后持久化的阶段；非终结阶段表示该运行事实未知。"),
       })
-      .strict()
       .describe("最近一次已持久记录的运行意图。")
       .optional(),
   })
-  .strict()
   .describe(
     "Linux.do 当前接续状态；每项由 bin、访问身份、规范站点 origin 和真实板块或主题定位。position 是接续位置，不代表资料完整性。",
   );
-const syncUnavailableStateSchema = z
-  .object({
-    status: z.literal("unavailable"),
-    reason: z
-      .literal("persistent_state_unavailable")
-      .describe("运行器无法读取或保存接续状态，已停止相关 sync 来源访问。"),
-  })
-  .strict();
+const syncUnavailableStateSchema = z.strictObject({
+  status: z.literal("unavailable"),
+  reason: z
+    .literal("persistent_state_unavailable")
+    .describe("运行器无法读取或保存接续状态，已停止相关 sync 来源访问。"),
+});
 const syncPublicStateSchema = z
   .union([syncPersistentStateSchema, syncUnavailableStateSchema])
   .describe(
@@ -453,22 +420,18 @@ type DiscoveredCategory = {
   children: DiscoveredCategory[];
 };
 const discoveredCategorySchema: z.ZodType<DiscoveredCategory> = z.lazy(() =>
-  z
-    .object({
-      id: topicIdSchema,
-      name: z.string().min(1),
-      parentId: topicIdSchema.nullable(),
-      collectTarget: categoryReferenceSchema,
-      children: z.array(discoveredCategorySchema),
-    })
-    .strict(),
+  z.strictObject({
+    id: topicIdSchema,
+    name: z.string().min(1),
+    parentId: topicIdSchema.nullable(),
+    collectTarget: categoryReferenceSchema,
+    children: z.array(discoveredCategorySchema),
+  }),
 );
-const listCategoriesOutputSchema = z
-  .object({
-    categories: z.array(discoveredCategorySchema),
-    challengeRecovery: challengeRecoverySchema,
-  })
-  .strict();
+const listCategoriesOutputSchema = z.strictObject({
+  categories: z.array(discoveredCategorySchema),
+  challengeRecovery: challengeRecoverySchema,
+});
 type DiscourseCategory = {
   readonly id: number;
   readonly name: string;
@@ -477,46 +440,33 @@ type DiscourseCategory = {
   readonly subcategory_list?: readonly DiscourseCategory[] | null | undefined;
 };
 const discourseCategorySchema: z.ZodType<DiscourseCategory> = z.lazy(() =>
-  z
-    .object({
-      id: topicIdSchema,
-      name: z.string().min(1),
-      slug: categorySlugSchema,
-      parent_category_id: z
-        .number()
-        .int()
-        .safe()
-        .nonnegative()
-        .nullable()
-        .optional(),
-      subcategory_list: z.array(discourseCategorySchema).nullable().optional(),
-    })
-    .passthrough(),
+  z.looseObject({
+    id: topicIdSchema,
+    name: z.string().min(1),
+    slug: categorySlugSchema,
+    parent_category_id: z.int().nonnegative().nullable().optional(),
+    subcategory_list: z.array(discourseCategorySchema).nullable().optional(),
+  }),
 );
-const discourseCategoryListSchema = z
-  .object({
-    category_list: z
-      .object({ categories: z.array(discourseCategorySchema) })
-      .passthrough(),
-  })
-  .passthrough();
-const discoveredTopicSchema = z
-  .object({ id: topicIdSchema, created_at: z.string().optional() })
-  .passthrough();
-const topicListResponseSchema = z
-  .object({
-    topic_list: z
-      .object({
-        topics: z.array(discoveredTopicSchema),
-        more_topics_url: z.string().nullable().optional(),
-      })
-      .passthrough(),
-  })
-  .passthrough();
-const discoursePostFeedSchema = z
-  .object({ latest_posts: z.array(z.unknown()) })
-  .passthrough();
-const postIdSchema = z.number().int().safe().positive();
+const discourseCategoryListSchema = z.looseObject({
+  category_list: z.looseObject({
+    categories: z.array(discourseCategorySchema),
+  }),
+});
+const discoveredTopicSchema = z.looseObject({
+  id: topicIdSchema,
+  created_at: z.string().optional(),
+});
+const topicListResponseSchema = z.looseObject({
+  topic_list: z.looseObject({
+    topics: z.array(discoveredTopicSchema),
+    more_topics_url: z.string().nullable().optional(),
+  }),
+});
+const discoursePostFeedSchema = z.looseObject({
+  latest_posts: z.array(z.unknown()),
+});
+const postIdSchema = z.int().positive();
 const discourseReplyPostNumberSchema = z
   .union([
     postIdSchema,
@@ -529,64 +479,53 @@ const discourseReplyPostNumberSchema = z
   .nullable()
   .optional();
 
-const discourseSessionSchema = z
-  .object({
-    current_user: z
-      .object({ id: postIdSchema, username: z.string().min(1) })
-      .passthrough(),
-  })
-  .passthrough();
-
-const discoursePostSchema = z
-  .object({
+const discourseSessionSchema = z.looseObject({
+  current_user: z.looseObject({
     id: postIdSchema,
-    topic_id: topicIdSchema.optional(),
-    post_number: postIdSchema,
-    cooked: z.string().nullable().optional(),
-    username: z.string().optional(),
-    name: z.string().nullable().optional(),
-    created_at: z.string().optional(),
-    updated_at: z.string().optional(),
-    reply_to_post_number: discourseReplyPostNumberSchema,
-    reply_count: z.number().int().nonnegative().optional(),
-  })
-  .passthrough();
+    username: z.string().min(1),
+  }),
+});
+
+const discoursePostSchema = z.looseObject({
+  id: postIdSchema,
+  topic_id: topicIdSchema.optional(),
+  post_number: postIdSchema,
+  cooked: z.string().nullable().optional(),
+  username: z.string().optional(),
+  name: z.string().nullable().optional(),
+  created_at: z.string().optional(),
+  updated_at: z.string().optional(),
+  reply_to_post_number: discourseReplyPostNumberSchema,
+  reply_count: z.int().nonnegative().optional(),
+});
 
 const discourseTopicTagSchema = z.union([
   z.string(),
-  z
-    .object({
-      id: postIdSchema,
-      name: z.string(),
-      slug: z.string(),
-    })
-    .passthrough(),
+  z.looseObject({
+    id: postIdSchema,
+    name: z.string(),
+    slug: z.string(),
+  }),
 ]);
 
-const discourseTopicSchema = z
-  .object({
-    id: topicIdSchema,
-    title: z.string().optional(),
-    slug: z.string().optional(),
-    created_at: z.string().optional(),
-    category_id: topicIdSchema.nullable().optional(),
-    tags: z.array(discourseTopicTagSchema).optional(),
-    post_stream: z
-      .object({
-        posts: z.array(discoursePostSchema),
-        stream: z.array(postIdSchema).optional(),
-        isMegaTopic: z.boolean().optional(),
-        lastId: postIdSchema.optional(),
-      })
-      .passthrough(),
-  })
-  .passthrough();
+const discourseTopicSchema = z.looseObject({
+  id: topicIdSchema,
+  title: z.string().optional(),
+  slug: z.string().optional(),
+  created_at: z.string().optional(),
+  category_id: topicIdSchema.nullable().optional(),
+  tags: z.array(discourseTopicTagSchema).optional(),
+  post_stream: z.looseObject({
+    posts: z.array(discoursePostSchema),
+    stream: z.array(postIdSchema).optional(),
+    isMegaTopic: z.boolean().optional(),
+    lastId: postIdSchema.optional(),
+  }),
+});
 
-const topicPostsResponseSchema = z
-  .object({
-    post_stream: z.object({ posts: z.array(z.unknown()) }).passthrough(),
-  })
-  .passthrough();
+const topicPostsResponseSchema = z.looseObject({
+  post_stream: z.looseObject({ posts: z.array(z.unknown()) }),
+});
 
 type DiscoursePost = z.infer<typeof discoursePostSchema>;
 type DiscourseTopic = z.infer<typeof discourseTopicSchema>;
@@ -623,273 +562,231 @@ type DiscourseProblem = {
   readonly suggestion: string;
   readonly requiresHuman: boolean;
 };
-const checkOutputSchema = z
-  .object({
-    challengeRecovery: challengeRecoverySchema,
-    availability: z.enum(["available", "unavailable", "unknown"]),
-    scope: z.array(z.string().min(1)),
-    basis: z.string().min(1),
-    problems: z.array(
-      z
-        .object({
-          code: z.string().min(1),
-          message: z.string().min(1),
-          impact: z.string().min(1),
-          path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
-          requiresHuman: z.boolean(),
-        })
-        .strict(),
-    ),
-  })
-  .strict();
+const checkOutputSchema = z.strictObject({
+  challengeRecovery: challengeRecoverySchema,
+  availability: z.enum(["available", "unavailable", "unknown"]),
+  scope: z.array(z.string().min(1)),
+  basis: z.string().min(1),
+  problems: z.array(
+    z.strictObject({
+      code: z.string().min(1),
+      message: z.string().min(1),
+      impact: z.string().min(1),
+      path: z.array(z.union([z.string(), z.number()])).optional(),
+      suggestion: z.string().min(1),
+      requiresHuman: z.boolean(),
+    }),
+  ),
+});
 const sourceAccessReportSchema = z
-  .object({
+  .strictObject({
     admittedAttempts: z
-      .number()
       .int()
       .nonnegative()
       .describe("通过共享准入且即将调用主动传输的操作次数；失败尝试也计入。"),
     waitedMs: z
-      .number()
       .int()
       .nonnegative()
       .describe("本动作等待共享来源准入的累计毫秒数。"),
     bySource: z
-      .object({
-        site: z.number().int().nonnegative(),
-        media: z.number().int().nonnegative(),
+      .strictObject({
+        site: z.int().nonnegative(),
+        media: z.int().nonnegative(),
       })
-      .strict()
       .describe("按适配器声明的站点或媒体来源类别统计的主动准入操作数。"),
     rateLimitResponses: z
       .array(
-        z
-          .object({
-            source: z.enum(["site", "media"]),
-            origin: siteOriginSchema,
-            status: z.union([z.literal(429), z.literal(503)]),
-            retryAfter: z.string().max(256).optional(),
-            outcome: z.enum(["cooled", "missing", "invalid", "past"]),
-            observedAt: z.iso.datetime(),
-            cooldownUntil: z.iso.datetime().optional(),
-          })
-          .strict(),
+        z.strictObject({
+          source: z.enum(["site", "media"]),
+          origin: siteOriginSchema,
+          status: z.union([z.literal(429), z.literal(503)]),
+          retryAfter: z.string().max(256).optional(),
+          outcome: z.enum(["cooled", "missing", "invalid", "past"]),
+          observedAt: z.iso.datetime(),
+          cooldownUntil: z.iso.datetime().optional(),
+        }),
       )
       .describe("主动传输收到的429/503及其冷却处理结果；不会自动重试。"),
     pageRequestEventsObserved: z
       .object({
-        total: z.number().int().nonnegative(),
-        get: z.number().int().nonnegative(),
-        nonGet: z.number().int().nonnegative(),
-        sameOriginGet: z.number().int().nonnegative(),
-        otherOriginGet: z.number().int().nonnegative(),
-        byResourceType: z
-          .object({
-            document: z.number().int().nonnegative(),
-            fetch: z.number().int().nonnegative(),
-            xhr: z.number().int().nonnegative(),
-            other: z.number().int().nonnegative(),
-          })
-          .strict(),
+        total: z.int().nonnegative(),
+        get: z.int().nonnegative(),
+        nonGet: z.int().nonnegative(),
+        sameOriginGet: z.int().nonnegative(),
+        otherOriginGet: z.int().nonnegative(),
+        byResourceType: z.strictObject({
+          document: z.int().nonnegative(),
+          fetch: z.int().nonnegative(),
+          xhr: z.int().nonnegative(),
+          other: z.int().nonnegative(),
+        }),
       })
-      .strict()
       .describe(
         "浏览器 Page request 事件观测，含自动子请求；与主动准入操作分开记录，不能当作全部 HTTP 数量。",
       ),
   })
-  .strict()
   .describe("解释本次主动访问和浏览器自动请求观测的统计。");
-const checkReportSchema = z
-  .object({
-    phase: z.enum([
+const checkReportSchema = z.strictObject({
+  phase: z.enum(["preparing", "checking", "completed", "failed", "cancelled"]),
+  intent: checkParamsSchema.describe("来源访问前记录的检查主题或目标。"),
+  sourceAccess: sourceAccessReportSchema,
+});
+const listCategoriesReportSchema = z.strictObject({
+  phase: z.enum([
+    "preparing",
+    "discovering",
+    "completed",
+    "failed",
+    "cancelled",
+  ]),
+  intent: z
+    .literal("list-categories")
+    .describe("来源访问前记录的板块发现意图。"),
+  sourceAccess: sourceAccessReportSchema,
+});
+const collectionIncompleteScopeSchema = z.strictObject({
+  scope: z.string().min(1),
+  reasonCode: z.string().min(1),
+  message: z.string().min(1),
+});
+const collectOutputSchema = z.strictObject({
+  challengeRecovery: challengeRecoverySchema,
+  completedScopes: z.array(z.string()).readonly(),
+  collectionCompleteness: z.enum(["complete", "partial"]),
+  incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+});
+const collectReportSchema = z.strictObject({
+  phase: z
+    .enum([
       "preparing",
-      "checking",
+      "checking-access",
+      "discovering-targets",
+      "collecting",
       "completed",
       "failed",
       "cancelled",
-    ]),
-    intent: checkParamsSchema.describe("来源访问前记录的检查主题或目标。"),
-    sourceAccess: sourceAccessReportSchema,
-  })
-  .strict();
-const listCategoriesReportSchema = z
-  .object({
-    phase: z.enum([
-      "preparing",
-      "discovering",
-      "completed",
-      "failed",
-      "cancelled",
-    ]),
-    intent: z
-      .literal("list-categories")
-      .describe("来源访问前记录的板块发现意图。"),
-    sourceAccess: sourceAccessReportSchema,
-  })
-  .strict();
-const collectionIncompleteScopeSchema = z
-  .object({
-    scope: z.string().min(1),
-    reasonCode: z.string().min(1),
-    message: z.string().min(1),
-  })
-  .strict();
-const collectOutputSchema = z
-  .object({
-    challengeRecovery: challengeRecoverySchema,
-    completedScopes: z.array(z.string()).readonly(),
-    collectionCompleteness: z.enum(["complete", "partial"]),
-    incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
-  })
-  .strict();
-const collectReportSchema = z
-  .object({
-    phase: z
-      .enum([
-        "preparing",
-        "checking-access",
-        "discovering-targets",
-        "collecting",
-        "completed",
-        "failed",
-        "cancelled",
-      ])
-      .describe("当前运行阶段；中断时保留最后一个已持久化阶段。"),
-    referenceTime: z.iso
-      .datetime()
-      .describe("此运行固定使用的时间依据，不随排队或后续运行变化。"),
-    intent: z
-      .object({
-        date: collectionDateSchema
-          .optional()
-          .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
-        timeZone: collectionTimeZoneSchema
-          .optional()
-          .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
-        postCreatedRange: postCreatedRangeSchema
-          .optional()
-          .describe("按帖子创建时间筛选的左闭右开区间及有限页数上限。"),
-        target: z
-          .discriminatedUnion("kind", [
-            z
-              .object({ kind: z.literal("topic"), topicId: topicIdSchema })
-              .strict(),
-            z.object({ kind: z.literal("all-visible") }).strict(),
-            z
-              .object({
-                kind: z.literal("targets"),
-                targets: actionTargetsSchema,
-              })
-              .strict(),
-          ])
-          .describe("触发时请求的主题、可见范围或显式目标。"),
-        maxTopics: z
-          .number()
-          .int()
-          .positive()
-          .safe()
-          .optional()
-          .describe("本轮请求的主题数量上限。"),
-      })
-      .strict()
-      .superRefine((intent, context) => {
-        if (intent.postCreatedRange !== undefined) {
-          if (intent.date !== undefined || intent.timeZone !== undefined) {
-            context.addIssue({
-              code: "custom",
-              path: ["postCreatedRange"],
-              message: "帖子创建时间区间不能与日期模式混用。",
-            });
-          }
-        } else if (intent.date === undefined || intent.timeZone === undefined) {
+    ])
+    .describe("当前运行阶段；中断时保留最后一个已持久化阶段。"),
+  referenceTime: z.iso
+    .datetime()
+    .describe("此运行固定使用的时间依据，不随排队或后续运行变化。"),
+  intent: z
+    .strictObject({
+      date: collectionDateSchema
+        .optional()
+        .describe("按时区解释的逻辑采集日期；与帖子创建时间区间互斥。"),
+      timeZone: collectionTimeZoneSchema
+        .optional()
+        .describe("解释逻辑日期的 IANA 时区；与帖子创建时间区间互斥。"),
+      postCreatedRange: postCreatedRangeSchema
+        .optional()
+        .describe("按帖子创建时间筛选的左闭右开区间及有限页数上限。"),
+      target: z
+        .discriminatedUnion("kind", [
+          z.strictObject({
+            kind: z.literal("topic"),
+            topicId: topicIdSchema,
+          }),
+          z.strictObject({ kind: z.literal("all-visible") }),
+          z.strictObject({
+            kind: z.literal("targets"),
+            targets: actionTargetsSchema,
+          }),
+        ])
+        .describe("触发时请求的主题、可见范围或显式目标。"),
+      maxTopics: z
+        .int()
+        .positive()
+        .optional()
+        .describe("本轮请求的主题数量上限。"),
+    })
+    .superRefine((intent, context) => {
+      if (intent.postCreatedRange !== undefined) {
+        if (intent.date !== undefined || intent.timeZone !== undefined) {
           context.addIssue({
             code: "custom",
-            path: [intent.date === undefined ? "date" : "timeZone"],
-            message: "运行意图必须声明完整的日期模式或帖子创建时间区间。",
+            path: ["postCreatedRange"],
+            message: "帖子创建时间区间不能与日期模式混用。",
           });
         }
-      })
-      .describe("来源访问前记录的运行意图。"),
-    window: z
-      .object({
-        from: z.iso.datetime().describe("实际范围的包含起点。"),
-        to: z.iso.datetime().describe("实际范围的不包含终点。"),
-      })
-      .strict()
-      .optional()
-      .describe("本轮筛选的左闭右开创建时间范围，可按主题日期或帖子日期解释。"),
-    discovery: z
-      .enum(["not-started", "in-progress", "complete", "partial", "failed"])
-      .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
-    sourceAccess: sourceAccessReportSchema,
-    scopes: z
-      .array(
-        z
-          .object({
-            scope: z
-              .string()
-              .min(1)
-              .describe("本次运行已确认的 Linux.do 目标标识。"),
-            from: z.iso.datetime().describe("该范围的包含起点。"),
-            to: z.iso.datetime().describe("该范围的不包含终点。"),
-            status: z
-              .enum([
-                "unstarted",
-                "in-progress",
-                "completed",
-                "incomplete",
-                "unknown",
-              ])
-              .describe("该范围本轮的最后确认状态。"),
-          })
-          .strict(),
-      )
-      .describe("动态发现并分配的实际范围及其状态。")
-      .readonly(),
-  })
-  .strict();
-const syncRangeSchema = z
-  .object({
-    from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
-    to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
-  })
-  .strict();
-const syncScopeReportSchema = z
-  .object({
-    scope: syncScopeReferenceSchema,
-    mode: z.enum(["initialized", "continued", "truncated", "no-forward-range"]),
-    position: z.iso.datetime().describe("已持久化的接续位置，不代表完整覆盖。"),
-    range: syncRangeSchema.optional(),
-    skippedBefore: z.iso
-      .datetime()
-      .describe("被一小时上限截去的旧范围起点；本轮从 range.from 接续。")
-      .optional(),
-    status: z.enum([
-      "initializing",
-      "initialized",
-      "unstarted",
-      "in-progress",
-      "completed",
-      "partial",
-      "unknown",
-      "no-forward-range",
-    ]),
-  })
-  .strict();
-const syncBudgetReportSchema = z
-  .object({
-    maxRequests: z.number().int().positive(),
-    maxElapsedMs: z.number().int().positive(),
-    elapsedMs: z.number().int().nonnegative(),
-    remainingMs: z.number().int().nonnegative(),
-    stopReason: z
-      .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
-      .optional(),
-  })
-  .strict();
+      } else if (intent.date === undefined || intent.timeZone === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: [intent.date === undefined ? "date" : "timeZone"],
+          message: "运行意图必须声明完整的日期模式或帖子创建时间区间。",
+        });
+      }
+    })
+    .describe("来源访问前记录的运行意图。"),
+  window: z
+    .strictObject({
+      from: z.iso.datetime().describe("实际范围的包含起点。"),
+      to: z.iso.datetime().describe("实际范围的不包含终点。"),
+    })
+    .optional()
+    .describe("本轮筛选的左闭右开创建时间范围，可按主题日期或帖子日期解释。"),
+  discovery: z
+    .enum(["not-started", "in-progress", "complete", "partial", "failed"])
+    .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
+  sourceAccess: sourceAccessReportSchema,
+  scopes: z
+    .array(
+      z.strictObject({
+        scope: z
+          .string()
+          .min(1)
+          .describe("本次运行已确认的 Linux.do 目标标识。"),
+        from: z.iso.datetime().describe("该范围的包含起点。"),
+        to: z.iso.datetime().describe("该范围的不包含终点。"),
+        status: z
+          .enum([
+            "unstarted",
+            "in-progress",
+            "completed",
+            "incomplete",
+            "unknown",
+          ])
+          .describe("该范围本轮的最后确认状态。"),
+      }),
+    )
+    .describe("动态发现并分配的实际范围及其状态。")
+    .readonly(),
+});
+const syncRangeSchema = z.strictObject({
+  from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
+  to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
+});
+const syncScopeReportSchema = z.strictObject({
+  scope: syncScopeReferenceSchema,
+  mode: z.enum(["initialized", "continued", "truncated", "no-forward-range"]),
+  position: z.iso.datetime().describe("已持久化的接续位置，不代表完整覆盖。"),
+  range: syncRangeSchema.optional(),
+  skippedBefore: z.iso
+    .datetime()
+    .describe("被一小时上限截去的旧范围起点；本轮从 range.from 接续。")
+    .optional(),
+  status: z.enum([
+    "initializing",
+    "initialized",
+    "unstarted",
+    "in-progress",
+    "completed",
+    "partial",
+    "unknown",
+    "no-forward-range",
+  ]),
+});
+const syncBudgetReportSchema = z.strictObject({
+  maxRequests: z.int().positive(),
+  maxElapsedMs: z.int().positive(),
+  elapsedMs: z.int().nonnegative(),
+  remainingMs: z.int().nonnegative(),
+  stopReason: z
+    .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
+    .optional(),
+});
 const syncReportSchema = z
-  .object({
+  .strictObject({
     phase: z.enum([
       "preparing",
       "discovering-targets",
@@ -913,42 +810,37 @@ const syncReportSchema = z
     budget: syncBudgetReportSchema,
     sourceAccess: sourceAccessReportSchema,
     scopes: z.array(syncScopeReportSchema).readonly(),
-    observedPosts: z.number().int().nonnegative(),
-    topicsExamined: z.number().int().nonnegative(),
+    observedPosts: z.int().nonnegative(),
+    topicsExamined: z.int().nonnegative(),
     incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
   })
-  .strict()
   .describe("本轮新增内容发现、接续位置、来源访问预算和未确认范围事实。");
-const syncOutputSchema = z
-  .object({
-    challengeRecovery: challengeRecoverySchema,
-    outcome: z.enum(["initialized", "advanced", "no-forward-range", "partial"]),
-    upperBound: z.iso.datetime(),
-    scopes: z
-      .array(
-        z
-          .object({
-            scope: syncScopeReferenceSchema,
-            position: z.iso.datetime(),
-            status: z.enum([
-              "initialized",
-              "advanced",
-              "partial",
-              "unknown",
-              "unstarted",
-              "no-forward-range",
-            ]),
-            range: syncRangeSchema.optional(),
-            skippedBefore: z.iso.datetime().optional(),
-          })
-          .strict(),
-      )
-      .readonly(),
-    observedPosts: z.number().int().nonnegative(),
-    topicsExamined: z.number().int().nonnegative(),
-    incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
-  })
-  .strict();
+const syncOutputSchema = z.strictObject({
+  challengeRecovery: challengeRecoverySchema,
+  outcome: z.enum(["initialized", "advanced", "no-forward-range", "partial"]),
+  upperBound: z.iso.datetime(),
+  scopes: z
+    .array(
+      z.strictObject({
+        scope: syncScopeReferenceSchema,
+        position: z.iso.datetime(),
+        status: z.enum([
+          "initialized",
+          "advanced",
+          "partial",
+          "unknown",
+          "unstarted",
+          "no-forward-range",
+        ]),
+        range: syncRangeSchema.optional(),
+        skippedBefore: z.iso.datetime().optional(),
+      }),
+    )
+    .readonly(),
+  observedPosts: z.int().nonnegative(),
+  topicsExamined: z.int().nonnegative(),
+  incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+});
 type CollectionReport = z.output<typeof collectReportSchema>;
 type CollectionReportUpdate = Omit<CollectionReport, "sourceAccess"> & {
   readonly sourceAccess?: CollectionReport["sourceAccess"];

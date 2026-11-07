@@ -50,9 +50,9 @@ const collectParamsSchema = z
       .default("collect")
       .transform((value) => value + "!"),
     invalidOutput: z.boolean().optional(),
-    waitBeforeSourceMs: z.number().int().min(0).max(60_000).optional(),
-    waitAfterCommitMs: z.number().int().min(0).max(60_000).optional(),
-    validationDelayMs: z.number().int().min(0).max(10_000).optional(),
+    waitBeforeSourceMs: z.int().min(0).max(60_000).optional(),
+    waitAfterCommitMs: z.int().min(0).max(60_000).optional(),
+    validationDelayMs: z.int().min(0).max(10_000).optional(),
   })
   .refine(
     async ({ gateKey, validationDelayMs }) => {

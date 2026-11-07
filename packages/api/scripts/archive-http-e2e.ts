@@ -423,7 +423,7 @@ const archiveJourneySchema = z.object({
   relationAsOf: archiveSnapshotSequenceSchema,
   replayRequest: archiveSubmissionInputSchema,
   replayCommitId: archiveIdentifierSchema,
-  expectedObservationCount: z.number().int().nonnegative(),
+  expectedObservationCount: z.int().nonnegative(),
   resourceItemId: archiveIdentifierSchema,
   resourceRevisionId: archiveIdentifierSchema,
   resourcePartialRevisionId: archiveIdentifierSchema,

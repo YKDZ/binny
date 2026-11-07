@@ -26,7 +26,7 @@ export const serviceMetadataSchema = z
       .strict(),
     protocols: z
       .object({
-        httpApi: z.number().int().positive(),
+        httpApi: z.int().positive(),
       })
       .strict(),
     capabilities: z.array(postgresTextSchema.min(1)).min(1),
@@ -34,7 +34,7 @@ export const serviceMetadataSchema = z
       .object({
         archiveQuery: z
           .object({
-            version: z.number().int().positive(),
+            version: z.int().positive(),
             path: postgresTextSchema.min(1),
           })
           .strict(),

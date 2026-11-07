@@ -66,7 +66,7 @@ const manualRunListCursorFilterSchema = z
     status: manualRunStatusSchema.optional(),
     createdFrom: timestampSchema.optional(),
     createdBefore: timestampSchema.optional(),
-    limit: z.number().int().min(1).max(100),
+    limit: z.int().min(1).max(100),
   })
   .strict();
 

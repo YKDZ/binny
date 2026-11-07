@@ -462,7 +462,7 @@ export const archiveResourceMetadataSchema = z
     resourceId: archiveIdSchema,
     sha256: archiveSha256Schema,
     mediaType: archiveResourceMediaTypeSchema,
-    size: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    size: z.int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
 export type ArchiveResourceMetadata = z.infer<
@@ -494,7 +494,7 @@ const archiveCommitItemSchema = z
 
 const archiveCommitRelationFields = {
   relationId: nonEmptyText.max(256),
-  ordinal: z.number().int().nonnegative(),
+  ordinal: z.int().nonnegative(),
 };
 
 const archiveCommitRelationSchema = z.union([
@@ -517,7 +517,7 @@ const archiveCommitRelationSchema = z.union([
 const archiveCommitItemGapSchema = z
   .object({
     itemId: archiveIdSchema,
-    ordinal: z.number().int().nonnegative(),
+    ordinal: z.int().nonnegative(),
     sourceKey: sourceKeySchema,
   })
   .strict();
@@ -525,7 +525,7 @@ const archiveCommitItemGapSchema = z
 const archiveCommitRelationGapSchema = z
   .object({
     relationId: nonEmptyText.max(256),
-    ordinal: z.number().int().nonnegative(),
+    ordinal: z.int().nonnegative(),
   })
   .strict();
 
@@ -540,7 +540,7 @@ export const archiveObservationSchema = z
   .object({
     commitId: archiveIdSchema,
     archiveSeq: archiveSequenceSchema,
-    ordinal: z.number().int().nonnegative(),
+    ordinal: z.int().nonnegative(),
     binId: binIdSchema,
     runId: nonEmptyText.max(128).optional(),
     sourceAdapterVersion: nonEmptyText.max(256).optional(),
@@ -758,9 +758,7 @@ export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
 const archiveSearchJsonFieldSchema = z.enum(["metadata", "properties"]);
 export const archiveSearchJsonPathSchema = z
-  .array(
-    z.union([postgresTextSchema, z.number().int().min(0).max(2_147_483_647)]),
-  )
+  .array(z.union([postgresTextSchema, z.int().min(0).max(2_147_483_647)]))
   .max(16)
   .describe(
     "JSON 路径使用对象键字符串或数组下标数字；空路径表示整个自定义字段。",
@@ -1353,7 +1351,7 @@ const archiveSearchTargetFilterNodeSchema: z.ZodType<
 const archiveSearchRelationCountSchema = z
   .object({
     operator: z.enum(["eq", "gt", "gte", "lt", "lte"]),
-    value: z.number().int().min(0).max(1_000_000),
+    value: z.int().min(0).max(1_000_000),
   })
   .strict()
   .describe("按不同终点条目或源引用计数；多条关系或路径指向同一终点只计一次。");
@@ -1790,14 +1788,14 @@ const archiveSearchHitSchema = z
     position: z
       .object({
         encoding: z.literal("unicode-code-point"),
-        start: z.number().int().nonnegative(),
-        end: z.number().int().nonnegative(),
+        start: z.int().nonnegative(),
+        end: z.int().nonnegative(),
       })
       .strict(),
     context: z
       .object({
-        start: z.number().int().nonnegative(),
-        end: z.number().int().nonnegative(),
+        start: z.int().nonnegative(),
+        end: z.int().nonnegative(),
         text: postgresTextSchema,
       })
       .strict()
@@ -1869,7 +1867,7 @@ const archiveSearchExpansionObservationSchema = z
   .object({
     commitId: archiveIdentifierSchema,
     archiveSeq: archiveSequenceSchema,
-    ordinal: z.number().int().nonnegative(),
+    ordinal: z.int().nonnegative(),
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     runId: nonEmptyText.max(128).optional(),
@@ -1968,7 +1966,7 @@ const archiveSearchResultSchema = z
     sourceKey: sourceKeySchema.optional(),
     revisionId: archiveIdentifierSchema.optional(),
     commitId: archiveIdentifierSchema.optional(),
-    ordinal: z.number().int().nonnegative().optional(),
+    ordinal: z.int().nonnegative().optional(),
     matches: z.array(archiveSearchMatchSchema).min(1),
   })
   .strict();

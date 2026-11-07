@@ -61,7 +61,7 @@ export default defineSourceAdapter({
     }),
     sample: defineSourceAdapterAction(configSchema, {
       description: sampleActionDescription,
-      params: z.object({ limit: z.number().int().min(1) }),
+      params: z.object({ limit: z.int().min(1) }),
       output: z.object({ sampled: z.boolean() }),
       async execute() {
         return { sampled: true };

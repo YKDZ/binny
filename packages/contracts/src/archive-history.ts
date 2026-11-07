@@ -39,7 +39,7 @@ export const archiveItemReadQuerySchema = z
 const archiveTimelineMetadata = {
   commitId: archiveIdentifierSchema,
   archiveSeq: archiveSequenceSchema,
-  ordinal: z.number().int().nonnegative(),
+  ordinal: z.int().nonnegative(),
   binId: binIdSchema,
   runId: nonEmptyText.max(128).optional(),
   sourceAdapterVersion: nonEmptyText.max(256).optional(),
@@ -145,7 +145,7 @@ export const archiveTimelineCursorSchema = z
     after: z
       .object({
         archiveSeq: archiveSequenceSchema,
-        ordinal: z.number().int().nonnegative(),
+        ordinal: z.int().nonnegative(),
         commitId: archiveIdentifierSchema,
       })
       .strict(),

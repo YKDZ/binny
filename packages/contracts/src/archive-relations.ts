@@ -73,7 +73,7 @@ const archiveRelationObservationProvenanceSchema = z
   .object({
     commitId: archiveIdentifierSchema,
     archiveSeq: z.string().regex(/^[1-9][0-9]*$/u),
-    ordinal: z.number().int().nonnegative(),
+    ordinal: z.int().nonnegative(),
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     runId: nonEmptyText.max(128).optional(),
