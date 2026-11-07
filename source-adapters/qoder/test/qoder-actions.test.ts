@@ -30,7 +30,22 @@ import {
   parseArticleDate,
 } from "../src/international-blog.ts";
 import {
+  CN_CHANGELOGS_SCOPE_ID,
+  DEFAULT_INTERNATIONAL_CHANGELOG_URL,
+  discoverCnChangelogDocs,
+  discoverInternationalChangelogDocs,
+  extractCardLinks,
+  extractVersion,
+  INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+  isChangelogSectionHeading,
+  isNavigationDocKey,
+  isNavigationPageContent,
+  parseChangelogMetadata,
+  parseUpdateDate,
+} from "../src/regional-changelogs.ts";
+import {
   configSchema,
+  determineActiveScopes,
   sourceAdapter,
   type QoderConfig,
 } from "../src/source-adapter.ts";
@@ -1053,6 +1068,908 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
         namespace: "qoder:cn-docs",
         key: "events/purchase-offer",
       });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+void describe("Qoder Scope Resolution and Regional Changelogs Unit Tests", () => {
+  void test("determineActiveScopes activates appropriate scopes based on config and requestedScopes", () => {
+    // Default config activates all 4 scopes
+    const defaultConfig = configSchema.parse({});
+    assert.deepEqual(determineActiveScopes(defaultConfig), [
+      INTERNATIONAL_BLOG_SCOPE_ID,
+      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+      CN_CHANGELOGS_SCOPE_ID,
+      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+    ]);
+
+    // Explicit requestedScopes overrides config
+    assert.deepEqual(
+      determineActiveScopes(defaultConfig, [CN_CHANGELOGS_SCOPE_ID]),
+      [CN_CHANGELOGS_SCOPE_ID],
+    );
+    assert.deepEqual(
+      determineActiveScopes(defaultConfig, [
+        CN_CHANGELOGS_SCOPE_ID,
+        INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+      ]),
+      [CN_CHANGELOGS_SCOPE_ID, INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+    );
+
+    // Custom blogListUrl only activates blog
+    const blogConfig = configSchema.parse({
+      blogListUrl: "https://example.com/custom-blog",
+    });
+    assert.deepEqual(determineActiveScopes(blogConfig), [
+      INTERNATIONAL_BLOG_SCOPE_ID,
+    ]);
+
+    // Custom cnDocsIndexUrl only activates cn announcements/events (backward compat with ticket 10)
+    const cnDocsConfig = configSchema.parse({
+      cnDocsIndexUrl: "https://example.com/custom-llms.txt",
+    });
+    assert.deepEqual(determineActiveScopes(cnDocsConfig), [
+      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+    ]);
+
+    // Custom intChangelogIndexUrl activates international changelogs
+    const intChangelogConfig = configSchema.parse({
+      intChangelogIndexUrl: "https://example.com/custom-changelog.txt",
+    });
+    assert.deepEqual(determineActiveScopes(intChangelogConfig), [
+      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+    ]);
+
+    // Multiple custom URLs activate matching scopes
+    const multiConfig = configSchema.parse({
+      cnDocsIndexUrl: "https://example.com/custom-llms.txt",
+      intChangelogIndexUrl: "https://example.com/custom-changelog.txt",
+    });
+    assert.deepEqual(determineActiveScopes(multiConfig), [
+      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+      CN_CHANGELOGS_SCOPE_ID,
+      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+    ]);
+  });
+
+  void test("isChangelogSectionHeading identifies changelog sections and ignores other sections", () => {
+    assert.equal(isChangelogSectionHeading("更新日志"), true);
+    assert.equal(isChangelogSectionHeading("变更日志"), true);
+    assert.equal(isChangelogSectionHeading("Changelogs"), true);
+    assert.equal(isChangelogSectionHeading("Release Notes"), true);
+    assert.equal(isChangelogSectionHeading("产品公告"), false);
+    assert.equal(isChangelogSectionHeading("事件"), false);
+    assert.equal(isChangelogSectionHeading("计费"), false);
+  });
+
+  void test("isNavigationDocKey and isNavigationPageContent identify overview pages and protect actual changelogs", () => {
+    // Navigation overview keys
+    assert.equal(
+      isNavigationDocKey("product-overview/qoder-cn-update-log"),
+      true,
+    );
+    assert.equal(
+      isNavigationDocKey("zh/release-notes/qoder-cn-update-log"),
+      true,
+    );
+    assert.equal(isNavigationDocKey("changelogs"), true);
+    assert.equal(isNavigationDocKey("content/overview"), true);
+
+    // Actual changelog keys MUST NOT be matched as navigation
+    assert.equal(
+      isNavigationDocKey("product-overview/qoder-update-log"),
+      false,
+    );
+    assert.equal(isNavigationDocKey("product-overview/qoder-cn-cli"), false);
+    assert.equal(isNavigationDocKey("content/changelog"), false);
+    assert.equal(isNavigationDocKey("content/changelog-cli"), false);
+
+    // Navigation content with <Card> and no <Update>
+    const navContent = `
+# 更新日志汇总
+<CardGroup>
+  <Card title="Qoder 桌面端" href="/product-overview/qoder-update-log.md">桌面端更新</Card>
+  <Card title="CLI" href="/product-overview/qoder-cn-cli.md">CLI更新</Card>
+</CardGroup>
+`;
+    assert.equal(isNavigationPageContent(navContent), true);
+
+    // Actual changelog content with <Update>
+    const changelogContent = `
+# Qoder CLI 更新日志
+<Update label="2026-11-03" description="1.1.82">
+  - Added new login command.
+</Update>
+`;
+    assert.equal(isNavigationPageContent(changelogContent), false);
+  });
+
+  void test("extractCardLinks extracts card href and title from MDX", () => {
+    const mdx = `
+<Card title="Qoder IDE" href="/product-overview/qoder-update-log.md">
+  Qoder IDE 更新日志
+</Card>
+<Card href="/product-overview/qoder-cn-cli.md">
+  Qoder CLI 工具
+</Card>
+`;
+    const cards = extractCardLinks(mdx);
+    assert.equal(cards.length, 2);
+    assert.equal(cards[0]?.title, "Qoder IDE");
+    assert.equal(cards[0]?.href, "/product-overview/qoder-update-log.md");
+    assert.equal(cards[1]?.title, "Qoder CLI 工具");
+    assert.equal(cards[1]?.href, "/product-overview/qoder-cn-cli.md");
+  });
+
+  void test("parseUpdateDate, extractVersion, and parseChangelogMetadata preserve date precision without timestamp fabrication", () => {
+    // Day precision: YYYY-MM-DD
+    const dayResult = parseUpdateDate("2026-10-29");
+    assert.deepEqual(dayResult, { date: "2026-10-29", precision: "day" });
+
+    // Day precision: dot notation
+    const dotResult = parseUpdateDate("2026.11.03");
+    assert.deepEqual(dotResult, { date: "2026-11-03", precision: "day" });
+
+    // Day precision: Chinese
+    const cnResult = parseUpdateDate("2026年10月29日");
+    assert.deepEqual(cnResult, { date: "2026-10-29", precision: "day" });
+
+    // Month precision: English
+    const monthResult = parseUpdateDate("October 2026");
+    assert.deepEqual(monthResult, { date: "2026-10", precision: "month" });
+
+    // Month precision: YYYY-MM
+    const ymResult = parseUpdateDate("2026-10");
+    assert.deepEqual(ymResult, { date: "2026-10", precision: "month" });
+
+    // extractVersion
+    assert.equal(extractVersion("CLI 1.1.82"), "1.1.82");
+    assert.equal(extractVersion("Qoder 0.5.3"), "0.5.3");
+    assert.equal(extractVersion("v0.2.30"), "0.2.30");
+
+    // parseChangelogMetadata with Update items
+    const meta1 = parseChangelogMetadata(
+      [{ label: "2026-10-29", description: "0.2.30" }],
+      "",
+    );
+    assert.equal(meta1.latestUpdateLabel, "2026-10-29");
+    assert.equal(meta1.latestUpdateDate, "2026-10-29");
+    assert.equal(meta1.datePrecision, "day");
+    assert.equal(meta1.latestVersion, "0.2.30");
+
+    const meta2 = parseChangelogMetadata(
+      [{ label: "October 2026", description: "Qoder 0.5.3" }],
+      "",
+    );
+    assert.equal(meta2.latestUpdateLabel, "October 2026");
+    assert.equal(meta2.latestUpdateDate, "2026-10");
+    assert.equal(meta2.datePrecision, "month");
+    assert.equal(meta2.latestVersion, "0.5.3");
+  });
+
+  void test("discoverCnChangelogDocs traverses navigation overview page to discover linked changelogs and excludes navigation page", async () => {
+    const mockLlmsTxt = `
+# Qoder CN Docs
+
+## 产品公告
+- [Fast 模式上线](/product-overview/fast-mode-announcement.md)
+
+## 更新日志
+- [Qoder CN 更新日志汇总](/product-overview/qoder-cn-update-log.md): 导航汇总
+- [Qoder Quest 更新日志](/product-overview/qoder-cn-quest.md): Quest 产品日志
+`;
+    const mockNavMd = `
+# Qoder CN 更新日志
+
+<CardGroup>
+  <Card title="Qoder 桌面端" href="/product-overview/qoder-update-log.md">桌面端日志</Card>
+  <Card title="Qoder CLI" href="/product-overview/qoder-cn-cli.md">CLI 日志</Card>
+</CardGroup>
+`;
+
+    const fetchMock = async (url: string) => {
+      if (url.includes("qoder-cn-update-log")) {
+        return mockNavMd;
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    };
+
+    const docs = await discoverCnChangelogDocs(
+      mockLlmsTxt,
+      "https://docs.qoder.cn/llms.txt",
+      fetchMock,
+    );
+
+    // CRITICAL: qoder-cn-update-log must NOT be in the returned changelog docs!
+    const docKeys = docs.map((d) => d.docKey);
+    assert.ok(!docKeys.includes("product-overview/qoder-cn-update-log"));
+
+    // Linked product changelogs discovered from Card elements:
+    assert.ok(docKeys.includes("product-overview/qoder-update-log"));
+    assert.ok(docKeys.includes("product-overview/qoder-cn-cli"));
+    // Direct product changelog from llms.txt:
+    assert.ok(docKeys.includes("product-overview/qoder-cn-quest"));
+    assert.equal(docs.length, 3);
+  });
+
+  void test("discoverInternationalChangelogDocs extracts changelog documents from international index", async () => {
+    assert.equal(
+      DEFAULT_INTERNATIONAL_CHANGELOG_URL,
+      "https://changelog.qoder.com/llms.txt",
+    );
+
+    const intLlmsTxt = `
+# Qoder International Changelogs
+
+## Changelogs
+- [Qoder IDE](https://changelog.qoder.com/content/changelog.md): Desktop IDE updates
+- [CLI Tool](https://changelog.qoder.com/content/changelog-cli.md): Command line tool
+`;
+    const docs = await discoverInternationalChangelogDocs(
+      intLlmsTxt,
+      DEFAULT_INTERNATIONAL_CHANGELOG_URL,
+    );
+    assert.equal(docs.length, 2);
+    assert.equal(docs[0]?.docKey, "content/changelog");
+    assert.equal(docs[0]?.title, "Qoder IDE");
+    assert.equal(docs[1]?.docKey, "content/changelog-cli");
+    assert.equal(docs[1]?.title, "CLI Tool");
+  });
+});
+
+void describe("Qoder CN Product Changelogs Action Flow", () => {
+  void test("full CN product changelog lifecycle: navigation discovery exclusion, baseline, change detection, and collect", async () => {
+    let cliContentVersion = 1;
+    let cliServerError = false;
+    const detailRequests: string[] = [];
+    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const uploadedResources: ArchiveResourceMetadata[] = [];
+
+    const server = createServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const path = url.pathname;
+
+      if (path === "/llms.txt") {
+        response.writeHead(200, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end(`
+# Qoder CN Docs
+
+## 产品公告
+- [Fast 模式上线](/product-overview/fast-mode-announcement.md)
+
+## 更新日志
+- [Qoder CN 更新日志](/product-overview/qoder-cn-update-log.md): 导航页
+- [Qoder Quest](/product-overview/qoder-cn-quest.md): Quest 产品日志
+        `);
+        return;
+      }
+
+      // Navigation overview page containing cards
+      if (path === "/product-overview/qoder-cn-update-log.md") {
+        detailRequests.push(path);
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`
+# Qoder CN 更新日志
+
+以下为各产品最新更新日志入口：
+
+<CardGroup>
+  <Card title="Qoder 桌面端" href="/product-overview/qoder-update-log.md">
+    Qoder 桌面端 IDE 更新日志
+  </Card>
+  <Card title="Qoder CLI" href="/product-overview/qoder-cn-cli.md">
+    Qoder CLI 工具更新日志
+  </Card>
+</CardGroup>
+        `);
+        return;
+      }
+
+      // Actual IDE changelog with Update tag, Mintlify noise, and image
+      if (path === "/product-overview/qoder-update-log.md") {
+        detailRequests.push(path);
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.qoder.cn/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Qoder 桌面端更新日志
+
+<style>
+  .custom-style { color: red; }
+</style>
+
+<Update label="2026-11-03" description="Qoder 0.5.3">
+  - 优化代码补全性能。
+  - 修复多光标编辑偶发卡顿问题。
+</Update>
+
+<a id="ide-screenshot" style={{ display: "block" }} />
+
+![Qoder IDE Screenshot](/media/ide.png)
+
+<Update label="2026-10-20" description="Qoder 0.5.2">
+  - 新增智能问答模式。
+</Update>
+        `);
+        return;
+      }
+
+      // CLI changelog
+      if (path === "/product-overview/qoder-cn-cli.md") {
+        detailRequests.push(path);
+        if (cliServerError) {
+          response.writeHead(500);
+          response.end("Internal Server Error");
+          return;
+        }
+
+        let updatesMd = `
+<Update label="2026-10-29" description="CLI 1.1.80">
+  - 新增 qoder login 命令行工具支持。
+</Update>
+`;
+        if (cliContentVersion >= 2) {
+          updatesMd = `
+<Update label="2026-11-05" description="CLI 1.1.82">
+  - 增强网络重试策略。
+</Update>
+
+${updatesMd}
+`;
+        }
+
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`
+# Qoder CLI 更新日志
+
+${updatesMd}
+        `);
+        return;
+      }
+
+      // Quest changelog
+      if (path === "/product-overview/qoder-cn-quest.md") {
+        detailRequests.push(path);
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`
+# Qoder Quest 更新日志
+
+<Update label="2026-10-15" description="0.1.0">
+  - Qoder Quest 首个公开版本发布。
+</Update>
+        `);
+        return;
+      }
+
+      // Media image
+      if (path === "/media/ide.png") {
+        response.writeHead(200, { "content-type": "image/png" });
+        response.end(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        return;
+      }
+
+      response.writeHead(404);
+      response.end("Not Found");
+    });
+
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    let storedState: IncrementalSyncState | undefined;
+    const persistentStateStore = {
+      async load() {
+        return storedState;
+      },
+      async save(state: unknown) {
+        storedState = state as IncrementalSyncState;
+      },
+    };
+
+    let commitSeq = 0;
+    function createContext(
+      rawConfig: Partial<QoderConfig>,
+    ): SourceAdapterContext<QoderConfig> {
+      const config = configSchema.parse(rawConfig);
+      const runId = randomUUID();
+      return {
+        binId: "qoder-test-bin",
+        identityId: "qoder-test-identity",
+        runId,
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config,
+        signal: new AbortController().signal,
+        persistentState: persistentStateStore,
+        archive: {
+          async submit(input) {
+            submissions.push(input);
+            commitSeq += 1;
+            return {
+              commitId: randomUUID(),
+              archiveSeq: String(commitSeq),
+              binId: "qoder-test-bin",
+              runId,
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T12:00:00.000Z",
+              recordedAt: "2026-11-07T12:00:00.000Z",
+              items: input.items.map((item) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: item.sourceKey,
+              })),
+              relations: [],
+            } satisfies ArchiveCommit;
+          },
+        },
+        resources: {
+          async resolve() {
+            return { resources: [], items: [], mediaByUrl: {} };
+          },
+          async upload(body, mediaType) {
+            const bytes = await new Response(body).arrayBuffer();
+            const resource = {
+              resourceId: randomUUID(),
+              sha256: "0".repeat(64),
+              mediaType,
+              size: bytes.byteLength,
+            } satisfies ArchiveResourceMetadata;
+            uploadedResources.push(resource);
+            return { ok: true, resource } as const;
+          },
+        },
+      };
+    }
+
+    try {
+      const context = createContext({
+        cnDocsIndexUrl: `${origin}/llms.txt`,
+      });
+
+      // 1. Check Action
+      const checkResult = await sourceAdapter.actions.check.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(checkResult.availability, "available");
+      assert.deepEqual(checkResult.scope, [CN_CHANGELOGS_SCOPE_ID]);
+      assert.equal(checkResult.problems.length, 0);
+
+      // 2. Initial Sync establishes baseline WITHOUT archiving (0 commits)
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const initialSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(initialSync, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+        initializedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      // CRITICAL: 0 archive submissions on baseline!
+      assert.equal(submissions.length, 0);
+
+      // Verify persistent state baseline entries
+      assert.ok(storedState !== undefined);
+      const scopeState = storedState.scopes[CN_CHANGELOGS_SCOPE_ID];
+      assert.ok(scopeState !== undefined);
+      assert.ok(scopeState.ongoingDocuments !== undefined);
+      // Actual product changelogs ARE tracked
+      assert.ok(
+        scopeState.ongoingDocuments["product-overview/qoder-update-log"]
+          ?.contentHash !== undefined,
+      );
+      assert.ok(
+        scopeState.ongoingDocuments["product-overview/qoder-cn-cli"]
+          ?.contentHash !== undefined,
+      );
+      assert.ok(
+        scopeState.ongoingDocuments["product-overview/qoder-cn-quest"]
+          ?.contentHash !== undefined,
+      );
+      // CRITICAL: Navigation overview page is NOT tracked or archived as changelog
+      assert.equal(
+        scopeState.ongoingDocuments["product-overview/qoder-cn-update-log"],
+        undefined,
+      );
+
+      // 3. Second Sync with no content changes makes 0 submissions
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const repeatSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(repeatSync, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 0);
+
+      // 4. Third Sync when CLI changelog has new <Update> added
+      cliContentVersion = 2;
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const changedSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(changedSync, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      // Exactly 1 new revision submitted for the changed document!
+      assert.equal(submissions.length, 1);
+
+      const submission = submissions[0]!;
+      const item = submission.items[0]!;
+
+      // Identity verification: regional namespace and route key
+      assert.deepEqual(item.sourceKey, {
+        namespace: "qoder:cn:changelog",
+        key: "product-overview/qoder-cn-cli",
+      });
+      assert.equal(item.sourceRef, `${origin}/product-overview/qoder-cn-cli`);
+      // Date and version metadata verification
+      assert.equal(item.sourceModifiedAt, undefined); // NEVER fabricate!
+      assert.equal(item.metadata?.region, "cn");
+      assert.equal(item.metadata?.language, "zh-CN");
+      assert.equal(item.metadata?.category, "changelog");
+      assert.equal(item.metadata?.latestUpdateDate, "2026-11-05");
+      assert.equal(item.metadata?.datePrecision, "day");
+      assert.equal(item.metadata?.latestVersion, "1.1.82");
+
+      // Verify transformed body structure: Update block converted to Markdown heading
+      const body = item.body as { markdown: string; text: string };
+      assert.ok(typeof body.markdown === "string");
+      assert.match(body.markdown, /## 2026-11-05 \(CLI 1.1\.82\)/u);
+      assert.match(body.markdown, /增强网络重试策略/u);
+      assert.doesNotMatch(body.markdown, /<Update/u);
+
+      // 5. Fourth Sync: server error on product changelog fails sync without advancing state
+      cliServerError = true;
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      await assert.rejects(
+        async () => {
+          await sourceAdapter.actions.sync.execute(context, {
+            scopes: [CN_CHANGELOGS_SCOPE_ID],
+          });
+        },
+        (error: unknown) => {
+          assert.ok(isSourceAdapterActionError(error));
+          return true;
+        },
+      );
+      assert.equal(submissions.length, 0);
+      cliServerError = false;
+
+      // 6. Collect Action on specific product changelog document
+      detailRequests.length = 0;
+      submissions.length = 0;
+      uploadedResources.length = 0;
+
+      const collectResult = await sourceAdapter.actions.collect.execute(
+        context,
+        {
+          scopes: [CN_CHANGELOGS_SCOPE_ID],
+          articleUrls: [`${origin}/product-overview/qoder-update-log.md`],
+        },
+      );
+      assert.deepEqual(collectResult, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 1);
+
+      const collectedItem = submissions[0]!.items[0]!;
+      assert.deepEqual(collectedItem.sourceKey, {
+        namespace: "qoder:cn:changelog",
+        key: "product-overview/qoder-update-log",
+      });
+      assert.equal(collectedItem.metadata?.region, "cn");
+      assert.equal(collectedItem.metadata?.language, "zh-CN");
+      assert.equal(collectedItem.metadata?.category, "changelog");
+      assert.equal(collectedItem.metadata?.latestUpdateDate, "2026-11-03");
+      assert.equal(collectedItem.metadata?.latestVersion, "0.5.3");
+
+      // Media upload and URL rewriting verification
+      assert.equal(uploadedResources.length, 1);
+      const ideBody = collectedItem.body as { markdown: string };
+      assert.match(ideBody.markdown, /binny:\/\/resource\//u);
+      // Noise elements stripped from body
+      assert.doesNotMatch(ideBody.markdown, /Documentation Index/u);
+      assert.doesNotMatch(ideBody.markdown, /<style>/u);
+      assert.doesNotMatch(ideBody.markdown, /<a id=/u);
+
+      // 7. Explicit Collect rejects navigation overview page
+      await assert.rejects(
+        async () => {
+          await sourceAdapter.actions.collect.execute(context, {
+            scopes: [CN_CHANGELOGS_SCOPE_ID],
+            articleUrls: [`${origin}/product-overview/qoder-cn-update-log.md`],
+          });
+        },
+        (error: unknown) => {
+          assert.ok(isSourceAdapterActionError(error));
+          assert.match(
+            error.failure.message,
+            /navigation overview page.*cannot be archived/iu,
+          );
+          return true;
+        },
+      );
+    } finally {
+      server.close();
+    }
+  });
+});
+
+void describe("Qoder International Product Changelogs Action Flow", () => {
+  void test("full International product changelog lifecycle: baseline, change detection, and collect", async () => {
+    let cliContentVersion = 1;
+    const detailRequests: string[] = [];
+    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const uploadedResources: ArchiveResourceMetadata[] = [];
+
+    const server = createServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const path = url.pathname;
+
+      if (path === "/llms.txt") {
+        response.writeHead(200, {
+          "content-type": "text/plain; charset=utf-8",
+        });
+        response.end(`
+# Qoder International Changelogs
+
+## Changelogs
+- [Qoder IDE](/content/changelog.md): Desktop IDE updates
+- [Qoder CLI](/content/changelog-cli.md): Command line tool updates
+        `);
+        return;
+      }
+
+      if (path === "/content/changelog.md") {
+        detailRequests.push(path);
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`
+# Qoder IDE Changelog
+
+<Update label="October 2026" description="v0.5.3">
+  - Added fast generation mode.
+  - Multi-tab completion improvements.
+</Update>
+        `);
+        return;
+      }
+
+      if (path === "/content/changelog-cli.md") {
+        detailRequests.push(path);
+        let updatesMd = `
+<Update label="2026-10-25" description="1.1.80">
+  - Initial public CLI release.
+</Update>
+`;
+        if (cliContentVersion >= 2) {
+          updatesMd = `
+<Update label="2026-11-02" description="1.1.82">
+  - Fixed proxy authentication bug.
+</Update>
+
+${updatesMd}
+`;
+        }
+
+        response.writeHead(200, {
+          "content-type": "text/markdown; charset=utf-8",
+        });
+        response.end(`
+# Qoder CLI Changelog
+
+${updatesMd}
+        `);
+        return;
+      }
+
+      response.writeHead(404);
+      response.end("Not Found");
+    });
+
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    let storedState: IncrementalSyncState | undefined;
+    const persistentStateStore = {
+      async load() {
+        return storedState;
+      },
+      async save(state: unknown) {
+        storedState = state as IncrementalSyncState;
+      },
+    };
+
+    let commitSeq = 0;
+    function createContext(
+      rawConfig: Partial<QoderConfig>,
+    ): SourceAdapterContext<QoderConfig> {
+      const config = configSchema.parse(rawConfig);
+      const runId = randomUUID();
+      return {
+        binId: "qoder-test-bin",
+        identityId: "qoder-test-identity",
+        runId,
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config,
+        signal: new AbortController().signal,
+        persistentState: persistentStateStore,
+        archive: {
+          async submit(input) {
+            submissions.push(input);
+            commitSeq += 1;
+            return {
+              commitId: randomUUID(),
+              archiveSeq: String(commitSeq),
+              binId: "qoder-test-bin",
+              runId,
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T12:00:00.000Z",
+              recordedAt: "2026-11-07T12:00:00.000Z",
+              items: input.items.map((item) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: item.sourceKey,
+              })),
+              relations: [],
+            } satisfies ArchiveCommit;
+          },
+        },
+        resources: {
+          async resolve() {
+            return { resources: [], items: [], mediaByUrl: {} };
+          },
+          async upload(body, mediaType) {
+            const bytes = await new Response(body).arrayBuffer();
+            const resource = {
+              resourceId: randomUUID(),
+              sha256: "0".repeat(64),
+              mediaType,
+              size: bytes.byteLength,
+            } satisfies ArchiveResourceMetadata;
+            uploadedResources.push(resource);
+            return { ok: true, resource } as const;
+          },
+        },
+      };
+    }
+
+    try {
+      const context = createContext({
+        intChangelogIndexUrl: `${origin}/llms.txt`,
+      });
+
+      // 1. Check Action
+      const checkResult = await sourceAdapter.actions.check.execute(context, {
+        scopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(checkResult.availability, "available");
+      assert.deepEqual(checkResult.scope, [INTERNATIONAL_CHANGELOGS_SCOPE_ID]);
+      assert.equal(checkResult.problems.length, 0);
+
+      // 2. Initial Sync establishes baseline WITHOUT archiving (0 commits)
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const initialSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(initialSync, {
+        completedScopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+        initializedScopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 0);
+
+      // Verify ongoing documents hashes in state
+      assert.ok(storedState !== undefined);
+      const scopeState = storedState.scopes[INTERNATIONAL_CHANGELOGS_SCOPE_ID];
+      assert.ok(scopeState !== undefined);
+      assert.ok(scopeState.ongoingDocuments !== undefined);
+      assert.ok(
+        scopeState.ongoingDocuments["content/changelog"]?.contentHash !==
+          undefined,
+      );
+      assert.ok(
+        scopeState.ongoingDocuments["content/changelog-cli"]?.contentHash !==
+          undefined,
+      );
+
+      // 3. Second Sync with unchanged content makes 0 submissions
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const repeatSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(repeatSync, {
+        completedScopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 0);
+
+      // 4. Third Sync when CLI changelog is updated
+      cliContentVersion = 2;
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const changedSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(changedSync, {
+        completedScopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 1);
+
+      const submission = submissions[0]!;
+      const item = submission.items[0]!;
+
+      // Verify international changelog identity
+      assert.deepEqual(item.sourceKey, {
+        namespace: "qoder:international:changelog",
+        key: "content/changelog-cli",
+      });
+      assert.equal(item.sourceRef, `${origin}/content/changelog-cli`);
+      assert.equal(item.sourceModifiedAt, undefined);
+      assert.equal(item.metadata?.region, "international");
+      assert.equal(item.metadata?.language, "en");
+      assert.equal(item.metadata?.category, "changelog");
+      assert.equal(item.metadata?.latestUpdateDate, "2026-11-02");
+      assert.equal(item.metadata?.datePrecision, "day");
+      assert.equal(item.metadata?.latestVersion, "1.1.82");
+
+      // 5. Collect Action on specific changelog document
+      detailRequests.length = 0;
+      submissions.length = 0;
+
+      const collectResult = await sourceAdapter.actions.collect.execute(
+        context,
+        {
+          scopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+          articleUrls: [`${origin}/content/changelog.md`],
+        },
+      );
+      assert.deepEqual(collectResult, {
+        completedScopes: [INTERNATIONAL_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 1);
+
+      const collectedItem = submissions[0]!.items[0]!;
+      assert.deepEqual(collectedItem.sourceKey, {
+        namespace: "qoder:international:changelog",
+        key: "content/changelog",
+      });
+      assert.equal(collectedItem.metadata?.region, "international");
+      assert.equal(collectedItem.metadata?.language, "en");
+      assert.equal(collectedItem.metadata?.category, "changelog");
+      assert.equal(collectedItem.metadata?.latestUpdateDate, "2026-10");
+      assert.equal(collectedItem.metadata?.datePrecision, "month");
+      assert.equal(collectedItem.metadata?.latestVersion, "0.5.3");
     } finally {
       server.close();
     }
