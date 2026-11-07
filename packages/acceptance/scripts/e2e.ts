@@ -1182,7 +1182,7 @@ async function resourceFiles(): Promise<readonly string[]> {
   const files: unknown = JSON.parse(result.stdout);
   assert.ok(Array.isArray(files));
   assert.ok(files.every((file) => typeof file === "string"));
-  return files as string[];
+  return files;
 }
 
 async function waitFor<T>(
@@ -4422,76 +4422,48 @@ async function manualRunsCliStep(
   );
   assert.equal(nextCompleted.result?.stopReason.code, "completed");
 
-  const ownerBeforeStorageFailure = await readRuntimeExecutionState(
+  const ownerBeforeRecreation = await readRuntimeExecutionState(
     baseUrl,
     "binny-runs-one",
   );
-  assert.equal(ownerBeforeStorageFailure.status, "online");
-  assert.ok(ownerBeforeStorageFailure.runtimeId !== undefined);
-  const runningContainer = await compose(["ps", "-q", "runtime-fifteen-one"]);
-  const runningContainerId = runningContainer.stdout.trim().split("\n")[0];
-  assert.ok(runningContainerId);
-  const makeOwnerVolumeReadOnly = await run("docker", [
-    "exec",
-    "--user",
-    "0",
-    runningContainerId,
-    "chmod",
-    "0555",
-    "/var/lib/binny/runtime",
-  ]);
-  assert.equal(makeOwnerVolumeReadOnly.code, 0, makeOwnerVolumeReadOnly.stderr);
+  assert.equal(ownerBeforeRecreation.status, "online");
+  assert.ok(ownerBeforeRecreation.runtimeId !== undefined);
+
+  const generationBefore = (
+    await run(
+      "docker",
+      postgresExecArgs([
+        "-c",
+        "SELECT owner_generation FROM runtime_connections WHERE bin_id = 'binny-runs-one';",
+      ]),
+    )
+  ).stdout.trim();
+  assert.ok(generationBefore.length > 0);
+
+  const putInitialStateResponse = await fetch(
+    `${baseUrl}/bins/binny-runs-one/runtime/state`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runtimeId: ownerBeforeRecreation.runtimeId,
+        ownerGeneration: generationBefore,
+        persistentState: { testSyncCursor: "item-12345" },
+        sourceAccess: { lease: "active", budgetRemaining: 99 },
+      }),
+    },
+  );
+  assert.equal(putInitialStateResponse.status, 200);
+
   await compose(["stop", "runtime-fifteen-one"]);
   await waitFor(
     () => readRuntimeExecutionState(baseUrl, "binny-runs-one"),
     (current) =>
       current.status === "offline" &&
-      current.runtimeId === ownerBeforeStorageFailure.runtimeId,
-    "存储故障前的运行器断开",
+      current.runtimeId === ownerBeforeRecreation.runtimeId,
+    "重建前的运行器断开",
   );
-  await compose([
-    "up",
-    "--detach",
-    "--no-build",
-    "--force-recreate",
-    "runtime-fifteen-one",
-  ]);
-  const failedContainer = await compose([
-    "ps",
-    "--all",
-    "-q",
-    "runtime-fifteen-one",
-  ]);
-  const failedContainerId = failedContainer.stdout.trim().split("\n")[0];
-  assert.ok(failedContainerId);
-  await waitFor(
-    async () =>
-      await run("docker", [
-        "inspect",
-        "--format",
-        "{{.State.Status}} {{.RestartCount}}",
-        failedContainerId,
-      ]),
-    (state) =>
-      state.code === 0 &&
-      /^(?:exited|restarting) [1-9][0-9]*$/u.test(state.stdout.trim()),
-    "代际不能持久发布时 controller 启动失败",
-  );
-  const failedContainerLogs = await run("docker", ["logs", failedContainerId]);
-  assert.match(
-    failedContainerLogs.stdout + failedContainerLogs.stderr,
-    /无法持久发布运行器所有权代际/u,
-  );
-  const ownerAfterStorageFailure = await readRuntimeExecutionState(
-    baseUrl,
-    "binny-runs-one",
-  );
-  assert.equal(ownerAfterStorageFailure.status, "offline");
-  assert.equal(
-    ownerAfterStorageFailure.runtimeId,
-    ownerBeforeStorageFailure.runtimeId,
-    "代际持久发布失败后，controller 不能向 core 自报为新 owner。",
-  );
+
   cliFailure<{ readonly code: string }>(
     await cli(baseUrl, [
       "run",
@@ -4531,21 +4503,72 @@ async function manualRunsCliStep(
     offlineScheduleInput.code,
     "runtime_action_validation_unavailable",
   );
+
   await compose([
-    "run",
-    "--rm",
-    "--no-deps",
-    "--user",
-    "0",
-    "--entrypoint",
-    "chmod",
+    "up",
+    "--detach",
+    "--no-build",
+    "--force-recreate",
     "runtime-fifteen-one",
-    "0755",
-    "/var/lib/binny/runtime",
   ]);
-  await compose(["restart", "runtime-fifteen-one"]);
   await waitForRuntimeHealth("runtime-fifteen-one");
   await waitForRuntime(baseUrl, "binny-runs-one");
+
+  const ownerAfterRecreation = await waitFor(
+    () => readRuntimeExecutionState(baseUrl, "binny-runs-one"),
+    (current) =>
+      current.status === "online" &&
+      current.runtimeId !== undefined &&
+      current.runtimeId !== ownerBeforeRecreation.runtimeId,
+    "无本地持久卷的轻量运行器重建后成功重新上线并申领新所有权",
+  );
+
+  const generationAfter = (
+    await run(
+      "docker",
+      postgresExecArgs([
+        "-c",
+        "SELECT owner_generation FROM runtime_connections WHERE bin_id = 'binny-runs-one';",
+      ]),
+    )
+  ).stdout.trim();
+  assert.ok(BigInt(generationAfter) > BigInt(generationBefore));
+
+  const stalePutResponse = await fetch(
+    `${baseUrl}/bins/binny-runs-one/runtime/state`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runtimeId: ownerBeforeRecreation.runtimeId,
+        ownerGeneration: generationBefore,
+        persistentState: { testSyncCursor: "stale-overwrite" },
+      }),
+    },
+  );
+  assert.equal(stalePutResponse.status, 409);
+  const stalePutBody = (await stalePutResponse.json()) as {
+    error: { code: string };
+  };
+  assert.equal(stalePutBody.error.code, "runtime_owner_mismatch");
+
+  const getStateResponse = await fetch(
+    `${baseUrl}/bins/binny-runs-one/runtime/state?runtimeId=${encodeURIComponent(
+      ownerAfterRecreation.runtimeId!,
+    )}&ownerGeneration=${encodeURIComponent(generationAfter)}`,
+  );
+  assert.equal(getStateResponse.status, 200);
+  const getStateBody = (await getStateResponse.json()) as {
+    persistentState?: { testSyncCursor?: string };
+    sourceAccess?: { lease?: string; budgetRemaining?: number };
+  };
+  assert.deepEqual(getStateBody.persistentState, {
+    testSyncCursor: "item-12345",
+  });
+  assert.deepEqual(getStateBody.sourceAccess, {
+    lease: "active",
+    budgetRemaining: 99,
+  });
 
   const scheduleParameters = {
     sourceUrl: manualRunSourceRuntimeUrl(),

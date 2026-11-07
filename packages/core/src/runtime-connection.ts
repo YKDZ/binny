@@ -8,6 +8,9 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatInputSchema,
   runtimeHeartbeatTimeoutMs,
+  runtimeOwnershipClaimInputSchema,
+  runtimeStateQuerySchema,
+  runtimeStateUpdateInputSchema,
   runtimeSourceStateSnapshotSchema,
   runtimeProtocolVersion,
   type SourceStateSnapshot,
@@ -488,6 +491,8 @@ export function createRuntimeConnectionStore(
             id: binConfigurations.id,
             sourceAdapter: binConfigurations.sourceAdapter,
             config: binConfigurations.config,
+            lastIssuedOwnerGeneration:
+              binConfigurations.lastIssuedOwnerGeneration,
           })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
@@ -510,12 +515,15 @@ export function createRuntimeConnectionStore(
               configNativeValid: registration.nativeValid,
               browserIdleTimeoutSeconds: 300,
               status: "active",
+              lastIssuedOwnerGeneration: "0",
             })
             .onConflictDoNothing({ target: binConfigurations.id })
             .returning({
               id: binConfigurations.id,
               sourceAdapter: binConfigurations.sourceAdapter,
               config: binConfigurations.config,
+              lastIssuedOwnerGeneration:
+                binConfigurations.lastIssuedOwnerGeneration,
             });
           [bin] =
             created === undefined
@@ -524,6 +532,8 @@ export function createRuntimeConnectionStore(
                     id: binConfigurations.id,
                     sourceAdapter: binConfigurations.sourceAdapter,
                     config: binConfigurations.config,
+                    lastIssuedOwnerGeneration:
+                      binConfigurations.lastIssuedOwnerGeneration,
                   })
                   .from(binConfigurations)
                   .where(eq(binConfigurations.id, binId))
@@ -751,6 +761,15 @@ export function createRuntimeConnectionStore(
             },
           });
 
+        if (incomingGeneration > BigInt(bin.lastIssuedOwnerGeneration ?? "0")) {
+          await transaction
+            .update(binConfigurations)
+            .set({
+              lastIssuedOwnerGeneration: incomingGeneration.toString(),
+            })
+            .where(eq(binConfigurations.id, binId));
+        }
+
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
@@ -853,6 +872,279 @@ export function createRuntimeConnectionStore(
           throw new Error("运行器断开后 bin 配置意外消失。");
         // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
         return { ok: true, value: rowExecution(current) };
+      });
+    },
+
+    async claimOwnership(binId, input) {
+      const checked = runtimeOwnershipClaimInputSchema.safeParse(input);
+      if (!checked.success) {
+        const issue = checked.error.issues[0];
+        return failure(400, {
+          code: "invalid_input",
+          message: issue?.message ?? "运行器所有权申领信息无效。",
+          ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
+        });
+      }
+
+      return await database.transaction(async (transaction) => {
+        let [bin] = await transaction
+          .select({
+            id: binConfigurations.id,
+            sourceAdapter: binConfigurations.sourceAdapter,
+            config: binConfigurations.config,
+            lastIssuedOwnerGeneration:
+              binConfigurations.lastIssuedOwnerGeneration,
+          })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+
+        if (bin === undefined) {
+          const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+            checked.data.sourceAdapter,
+          );
+          const validation = await validateConfigurationAtRuntime(
+            checked.data.runtimeControlUrl,
+            sourceAdapter,
+            jsonObjectSchema.parse({}),
+          );
+          if (!validation.ok && validation.kind === "unavailable") {
+            return failure(409, validation.error);
+          }
+          const [created] = await transaction
+            .insert(binConfigurations)
+            .values({
+              id: binId,
+              sourceAdapter: checked.data.sourceAdapter,
+              identityId: binId,
+              config: jsonObjectSchema.parse({}),
+              configNativeValid: validation.ok,
+              browserIdleTimeoutSeconds: 300,
+              status: "active",
+              lastIssuedOwnerGeneration: "0",
+            })
+            .onConflictDoNothing({ target: binConfigurations.id })
+            .returning({
+              id: binConfigurations.id,
+              sourceAdapter: binConfigurations.sourceAdapter,
+              config: binConfigurations.config,
+              lastIssuedOwnerGeneration:
+                binConfigurations.lastIssuedOwnerGeneration,
+            });
+          [bin] =
+            created === undefined
+              ? await transaction
+                  .select({
+                    id: binConfigurations.id,
+                    sourceAdapter: binConfigurations.sourceAdapter,
+                    config: binConfigurations.config,
+                    lastIssuedOwnerGeneration:
+                      binConfigurations.lastIssuedOwnerGeneration,
+                  })
+                  .from(binConfigurations)
+                  .where(eq(binConfigurations.id, binId))
+                  .for("update")
+              : [created];
+          if (bin === undefined) throw new Error("自注册后没有找到 bin。");
+        }
+
+        const [existing] = await transaction
+          .select({
+            runtimeId: runtimeConnections.runtimeId,
+            ownerGeneration: runtimeConnections.ownerGeneration,
+            runtimeControlUrl: runtimeConnections.runtimeControlUrl,
+            disconnected: runtimeConnections.disconnected,
+            lastHeartbeatAt: runtimeConnections.lastHeartbeatAt,
+          })
+          .from(runtimeConnections)
+          .where(eq(runtimeConnections.binId, binId));
+
+        const now = Date.now();
+        const isActive =
+          existing !== undefined &&
+          !existing.disconnected &&
+          now - existing.lastHeartbeatAt.getTime() <= runtimeHeartbeatTimeoutMs;
+
+        if (
+          existing !== undefined &&
+          existing.runtimeId !== checked.data.runtimeId &&
+          isActive
+        ) {
+          if (existing.runtimeControlUrl !== checked.data.runtimeControlUrl) {
+            return failure(409, {
+              code: "runtime_owner_active",
+              message: "当前 bin 已有活动运行器持有所有权。",
+            });
+          }
+        }
+
+        let nextGeneration: bigint;
+        if (
+          existing !== undefined &&
+          existing.runtimeId === checked.data.runtimeId &&
+          existing.ownerGeneration > 0n
+        ) {
+          nextGeneration = existing.ownerGeneration;
+        } else {
+          const existingGen = existing?.ownerGeneration ?? 0n;
+          const lastIssued = BigInt(bin.lastIssuedOwnerGeneration ?? "0");
+          const maxGen = existingGen > lastIssued ? existingGen : lastIssued;
+          nextGeneration = maxGen + 1n;
+          await transaction
+            .update(binConfigurations)
+            .set({
+              lastIssuedOwnerGeneration: nextGeneration.toString(),
+              updatedAt: sql`now()`,
+            })
+            .where(eq(binConfigurations.id, binId));
+        }
+
+        return {
+          ok: true,
+          value: {
+            ownerGeneration: nextGeneration.toString(),
+          },
+        };
+      });
+    },
+
+    async getState(binId, query) {
+      const checked = runtimeStateQuerySchema.safeParse(query);
+      if (!checked.success) {
+        const issue = checked.error.issues[0];
+        return failure(400, {
+          code: "invalid_input",
+          message: issue?.message ?? "运行器状态查询参数无效。",
+          ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
+        });
+      }
+
+      const [bin] = await database
+        .select({
+          id: binConfigurations.id,
+          persistentState: binConfigurations.persistentState,
+          sourceAccessState: binConfigurations.sourceAccessState,
+        })
+        .from(binConfigurations)
+        .where(eq(binConfigurations.id, binId));
+
+      if (bin === undefined) {
+        return failure(404, {
+          code: "bin_not_found",
+          message: "没有找到这个 bin。",
+          path: ["binId"],
+        });
+      }
+
+      const [existing] = await database
+        .select({
+          runtimeId: runtimeConnections.runtimeId,
+          ownerGeneration: runtimeConnections.ownerGeneration,
+          disconnected: runtimeConnections.disconnected,
+        })
+        .from(runtimeConnections)
+        .where(eq(runtimeConnections.binId, binId));
+
+      if (
+        existing === undefined ||
+        existing.runtimeId !== checked.data.runtimeId ||
+        existing.ownerGeneration.toString() !== checked.data.ownerGeneration ||
+        existing.disconnected
+      ) {
+        return failure(409, {
+          code: "runtime_owner_mismatch",
+          message: "运行器所有权代际或标识不匹配。",
+        });
+      }
+
+      return {
+        ok: true,
+        value: {
+          persistentState:
+            (bin.persistentState as JsonObject | null) ?? undefined,
+          sourceAccess: bin.sourceAccessState ?? undefined,
+        },
+      };
+    },
+
+    async putState(binId, input) {
+      const checked = runtimeStateUpdateInputSchema.safeParse(input);
+      if (!checked.success) {
+        const issue = checked.error.issues[0];
+        return failure(400, {
+          code: "invalid_input",
+          message: issue?.message ?? "运行器状态更新参数无效。",
+          ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
+        });
+      }
+
+      return await database.transaction(async (transaction) => {
+        const [bin] = await transaction
+          .select({ id: binConfigurations.id })
+          .from(binConfigurations)
+          .where(eq(binConfigurations.id, binId))
+          .for("update");
+
+        if (bin === undefined) {
+          return failure(404, {
+            code: "bin_not_found",
+            message: "没有找到这个 bin。",
+            path: ["binId"],
+          });
+        }
+
+        const [existing] = await transaction
+          .select({
+            runtimeId: runtimeConnections.runtimeId,
+            ownerGeneration: runtimeConnections.ownerGeneration,
+            disconnected: runtimeConnections.disconnected,
+          })
+          .from(runtimeConnections)
+          .where(eq(runtimeConnections.binId, binId))
+          .for("update");
+
+        if (
+          existing === undefined ||
+          existing.runtimeId !== checked.data.runtimeId ||
+          existing.ownerGeneration.toString() !==
+            checked.data.ownerGeneration ||
+          existing.disconnected
+        ) {
+          return failure(409, {
+            code: "runtime_owner_mismatch",
+            message: "运行器所有权代际或标识不匹配。",
+          });
+        }
+
+        const updates: Record<string, unknown> = {
+          updatedAt: sql`now()`,
+        };
+        if (checked.data.persistentState !== undefined) {
+          updates.persistentState = checked.data.persistentState;
+        }
+        if (checked.data.sourceAccess !== undefined) {
+          updates.sourceAccessState = checked.data.sourceAccess;
+        }
+        await transaction
+          .update(binConfigurations)
+          .set(updates)
+          .where(eq(binConfigurations.id, binId));
+
+        if (
+          typeof checked.data.sourceAccess === "object" &&
+          checked.data.sourceAccess !== null &&
+          "snapshot" in checked.data.sourceAccess &&
+          checked.data.sourceAccess.snapshot !== undefined
+        ) {
+          await transaction
+            .update(runtimeConnections)
+            .set({
+              sourceStateSnapshot: checked.data.sourceAccess.snapshot,
+            })
+            .where(eq(runtimeConnections.binId, binId));
+        }
+
+        return { ok: true, value: { ok: true as const } };
       });
     },
   };

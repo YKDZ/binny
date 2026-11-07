@@ -230,11 +230,11 @@ export function defineSourceAdapterAction<
     readonly params: TParams;
     readonly output: TOutput;
     execute(
-      context: SourceAdapterContext<z.output<TConfig>, never>,
+      context: SourceAdapterContext<z.output<TConfig>>,
       params: z.output<TParams>,
     ): Promise<z.input<TOutput>>;
   },
-): SourceAdapterAction<TConfig, TParams, TOutput, never>;
+): SourceAdapterAction<TConfig, TParams, TOutput>;
 export function defineSourceAdapterAction<
   TConfig extends z.ZodType,
   TParams extends z.ZodType,

@@ -313,6 +313,68 @@ async function configureBin(binId: string, section: string): Promise<void> {
   assert.equal(configured.id, binId);
 }
 
+async function queryDb(sql: string): Promise<string> {
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    "postgres",
+    "psql",
+    "-X",
+    "-qAt",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    sql,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function getRuntimeState(
+  binId: string,
+  runtimeId: string,
+  ownerGeneration: string,
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const response = await fetch(
+    `http://${publishedHost}:${serverPort}/bins/${encodeURIComponent(
+      binId,
+    )}/runtime/state?runtimeId=${encodeURIComponent(
+      runtimeId,
+    )}&ownerGeneration=${encodeURIComponent(ownerGeneration)}`,
+  );
+  return {
+    status: response.status,
+    body: await response.json(),
+  };
+}
+
+async function putRuntimeState(
+  binId: string,
+  payload: {
+    readonly runtimeId: string;
+    readonly ownerGeneration: string;
+    readonly persistentState?: Record<string, unknown>;
+    readonly sourceAccess?: unknown;
+  },
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const response = await fetch(
+    `http://${publishedHost}:${serverPort}/bins/${encodeURIComponent(
+      binId,
+    )}/runtime/state`,
+    {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    },
+  );
+  return {
+    status: response.status,
+    body: await response.json(),
+  };
+}
+
 async function postDisconnect(
   binId: string,
   runtimeId: string,
@@ -389,6 +451,36 @@ try {
     await containerImage("runtime-two"),
   );
 
+  const initialRuntimeId = onlineOne.execution.runtimeId!;
+  assert.ok(initialRuntimeId !== undefined);
+  const initialGeneration = await queryDb(
+    "SELECT owner_generation FROM runtime_connections WHERE bin_id = 'binny-runtime-one';",
+  );
+  assert.ok(initialGeneration.length > 0);
+
+  const initialPut = await putRuntimeState("binny-runtime-one", {
+    runtimeId: initialRuntimeId,
+    ownerGeneration: initialGeneration,
+    persistentState: { syncCursor: "initial-cursor-10" },
+    sourceAccess: { lease: "active", budgetRemaining: 50 },
+  });
+  assert.equal(initialPut.status, 200);
+
+  const initialGet = await getRuntimeState(
+    "binny-runtime-one",
+    initialRuntimeId,
+    initialGeneration,
+  );
+  assert.equal(initialGet.status, 200);
+  assert.deepEqual(
+    (initialGet.body as Record<string, unknown>).persistentState,
+    { syncCursor: "initial-cursor-10" },
+  );
+  assert.deepEqual((initialGet.body as Record<string, unknown>).sourceAccess, {
+    lease: "active",
+    budgetRemaining: 50,
+  });
+
   await compose(["stop", "runtime-one"]);
   const stoppedOne = await waitForCliStatus(
     "binny-runtime-one",
@@ -396,10 +488,43 @@ try {
     "runtime_not_connected",
   );
   const disconnectedId = stoppedOne.execution.runtimeId;
-  await compose(["start", "runtime-one"]);
+  assert.equal(disconnectedId, initialRuntimeId);
+
+  await compose(["up", "--detach", "--force-recreate", "runtime-one"]);
   const reconnectedOne = await waitForCliStatus("binny-runtime-one", "online");
   assert.notEqual(reconnectedOne.execution.runtimeId, disconnectedId);
   assert.ok(disconnectedId !== undefined);
+
+  const newGeneration = await queryDb(
+    "SELECT owner_generation FROM runtime_connections WHERE bin_id = 'binny-runtime-one';",
+  );
+  assert.ok(BigInt(newGeneration) > BigInt(initialGeneration));
+
+  const staleStatePut = await putRuntimeState("binny-runtime-one", {
+    runtimeId: initialRuntimeId,
+    ownerGeneration: initialGeneration,
+    persistentState: { syncCursor: "stale-overwrite" },
+  });
+  assert.equal(staleStatePut.status, 409);
+  assert.equal(
+    (staleStatePut.body as { error: { code: string } }).error.code,
+    "runtime_owner_mismatch",
+  );
+
+  const persistedStateGet = await getRuntimeState(
+    "binny-runtime-one",
+    reconnectedOne.execution.runtimeId!,
+    newGeneration,
+  );
+  assert.equal(persistedStateGet.status, 200);
+  assert.deepEqual(
+    (persistedStateGet.body as Record<string, unknown>).persistentState,
+    { syncCursor: "initial-cursor-10" },
+  );
+  assert.deepEqual(
+    (persistedStateGet.body as Record<string, unknown>).sourceAccess,
+    { lease: "active", budgetRemaining: 50 },
+  );
   const staleDisconnect = await postDisconnect(
     "binny-runtime-one",
     disconnectedId,

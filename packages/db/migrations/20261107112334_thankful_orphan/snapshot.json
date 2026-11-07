@@ -1,0 +1,104 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "9355d89d-bf61-433d-bf16-c87c86695592",
+  "prevIds": ["ea541111-c981-4f6e-8477-42fb81cd1c79"],
+  "footprints": [
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "persistent_state"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.persistent_state",
+        "n|col|public.bin_configurations.persistent_state",
+        "e|col|public.bin_configurations.persistent_state"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "source_access_state"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.source_access_state",
+        "n|col|public.bin_configurations.source_access_state",
+        "e|col|public.bin_configurations.source_access_state"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "last_issued_owner_generation"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.last_issued_owner_generation",
+        "n|col|public.bin_configurations.last_issued_owner_generation",
+        "e|col|public.bin_configurations.last_issued_owner_generation"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "persistent_state",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "source_access_state",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "last_issued_owner_generation",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "'0'",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    }
+  ]
+}
