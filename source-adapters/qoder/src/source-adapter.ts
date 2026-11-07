@@ -3,19 +3,32 @@ import {
   defineSourceAdapter,
   defineSourceAdapterAction,
   incrementalSyncStateSchema,
+  type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
 
 import {
+  checkCnAnnouncementsEvents,
+  CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+  collectCnAnnouncementsEvents,
+  DEFAULT_CN_DOCS_INDEX_URL,
+  syncCnAnnouncementsEvents,
+} from "./cn-announcements-events.ts";
+import {
   checkInternationalBlog,
   collectInternationalBlog,
   DEFAULT_INTERNATIONAL_BLOG_URL,
+  INTERNATIONAL_BLOG_SCOPE_ID,
   syncInternationalBlog,
 } from "./international-blog.ts";
+
+export { CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID, DEFAULT_CN_DOCS_INDEX_URL };
+export { DEFAULT_INTERNATIONAL_BLOG_URL, INTERNATIONAL_BLOG_SCOPE_ID };
 
 export const configSchema = z
   .object({
     blogListUrl: z.string().url().default(DEFAULT_INTERNATIONAL_BLOG_URL),
+    cnDocsIndexUrl: z.string().url().default(DEFAULT_CN_DOCS_INDEX_URL),
   })
   .strict();
 
@@ -78,6 +91,139 @@ export type QoderCheckOutput = z.infer<typeof checkOutputSchema>;
 export type QoderCollectOutput = z.infer<typeof collectOutputSchema>;
 export type QoderSyncOutput = z.infer<typeof syncOutputSchema>;
 
+/**
+ * Determines which scopes to activate based on explicit parameters and configuration.
+ */
+export function determineActiveScopes(
+  config: QoderConfig,
+  requestedScopes?: readonly string[],
+): string[] {
+  if (requestedScopes && requestedScopes.length > 0) {
+    return [...requestedScopes];
+  }
+  const isCustomBlog =
+    config.blogListUrl !== undefined &&
+    config.blogListUrl !== DEFAULT_INTERNATIONAL_BLOG_URL;
+  const isCustomCn =
+    config.cnDocsIndexUrl !== undefined &&
+    config.cnDocsIndexUrl !== DEFAULT_CN_DOCS_INDEX_URL;
+
+  if (isCustomBlog && !isCustomCn) {
+    return [INTERNATIONAL_BLOG_SCOPE_ID];
+  }
+  if (isCustomCn && !isCustomBlog) {
+    return [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID];
+  }
+  return [INTERNATIONAL_BLOG_SCOPE_ID, CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID];
+}
+
+async function executeCheck(
+  context: SourceAdapterContext<QoderConfig>,
+  params: QoderCheckParams,
+): Promise<QoderCheckOutput> {
+  const activeScopes = determineActiveScopes(context.config, params.scopes);
+  const results: QoderCheckOutput[] = [];
+
+  if (activeScopes.includes(INTERNATIONAL_BLOG_SCOPE_ID)) {
+    results.push(await checkInternationalBlog(context));
+  }
+  if (activeScopes.includes(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID)) {
+    results.push(await checkCnAnnouncementsEvents(context));
+  }
+
+  const allProblems = results.flatMap((r) => r.problems);
+  const allScopes = results.flatMap((r) => r.scope);
+  const isAvailable =
+    results.length > 0 && results.every((r) => r.availability === "available");
+
+  return {
+    availability: isAvailable ? "available" : "unavailable",
+    scope: allScopes,
+    basis: results.map((r) => r.basis).join(" | "),
+    problems: allProblems,
+  };
+}
+
+async function executeSync(
+  context: SourceAdapterContext<QoderConfig>,
+  params: QoderSyncParams,
+): Promise<QoderSyncOutput> {
+  const activeScopes = determineActiveScopes(context.config, params.scopes);
+  const completedScopes: string[] = [];
+  const initializedScopes: string[] = [];
+  const actionErrors: unknown[] = [];
+
+  if (activeScopes.includes(INTERNATIONAL_BLOG_SCOPE_ID)) {
+    try {
+      const res = await syncInternationalBlog(context);
+      completedScopes.push(...res.completedScopes);
+      if (res.initializedScopes) {
+        initializedScopes.push(...res.initializedScopes);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+  if (activeScopes.includes(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID)) {
+    try {
+      const res = await syncCnAnnouncementsEvents(context);
+      completedScopes.push(...res.completedScopes);
+      if (res.initializedScopes) {
+        initializedScopes.push(...res.initializedScopes);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+
+  if (actionErrors.length > 0) {
+    throw actionErrors[0];
+  }
+
+  return {
+    completedScopes,
+    ...(initializedScopes.length > 0 ? { initializedScopes } : {}),
+  };
+}
+
+async function executeCollect(
+  context: SourceAdapterContext<QoderConfig>,
+  params: QoderCollectParams,
+): Promise<QoderCollectOutput> {
+  const activeScopes = determineActiveScopes(context.config, params.scopes);
+  const completedScopes: string[] = [];
+  const actionErrors: unknown[] = [];
+
+  if (activeScopes.includes(INTERNATIONAL_BLOG_SCOPE_ID)) {
+    try {
+      const res = await collectInternationalBlog(context, params);
+      completedScopes.push(...res.completedScopes);
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+  if (activeScopes.includes(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID)) {
+    try {
+      const res = await collectCnAnnouncementsEvents(context, params);
+      completedScopes.push(...res.completedScopes);
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+
+  if (actionErrors.length > 0) {
+    throw actionErrors[0];
+  }
+
+  return {
+    completedScopes,
+  };
+}
+
 export const sourceAdapter = defineSourceAdapter({
   id: "qoder",
   version: "0.1.0",
@@ -93,19 +239,19 @@ export const sourceAdapter = defineSourceAdapter({
       description: "Check Qoder source availability.",
       params: checkParamsSchema,
       output: checkOutputSchema,
-      execute: (context) => checkInternationalBlog(context),
+      execute: (context, params) => executeCheck(context, params),
     }),
     collect: defineSourceAdapterAction(configSchema, {
       description: "Collect Qoder source items.",
       params: collectParamsSchema,
       output: collectOutputSchema,
-      execute: (context, params) => collectInternationalBlog(context, params),
+      execute: (context, params) => executeCollect(context, params),
     }),
     sync: defineSourceAdapterAction(configSchema, {
       description: "Incrementally synchronize Qoder source items.",
       params: syncParamsSchema,
       output: syncOutputSchema,
-      execute: (context) => syncInternationalBlog(context),
+      execute: (context, params) => executeSync(context, params),
     }),
   },
 });
