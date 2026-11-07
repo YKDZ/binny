@@ -559,6 +559,176 @@ importers:
         specifier: 'catalog:'
         version: typescript@7.0.2
 
+  source-adapters/anthropic:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/deepseek:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/google:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/huggingface:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/kimi:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
   source-adapters/linuxdo:
     dependencies:
       '@binny/source-adapter-sdk':
@@ -567,6 +737,176 @@ importers:
       patchright-core:
         specifier: 1.64.2
         version: 1.64.2
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/minimax:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/mistral:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/openai:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/qoder:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@binny/tooling-config':
+        specifier: workspace:*
+        version: link:../../packages/tooling-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.71.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.89.0(oxlint-tsgolint@7.0.2005)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2005
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  source-adapters/qwen:
+    dependencies:
+      '@binny/source-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/source-adapter-sdk
+      '@rowanmanning/feed-parser':
+        specifier: 2.1.5
+        version: 2.1.5
+      parse5:
+        specifier: ^8.0.0
+        version: 8.0.1
       zod:
         specifier: 'catalog:'
         version: 4.6.7

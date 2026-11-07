@@ -32,6 +32,19 @@ export type {
 } from "./content-cleaner.ts";
 
 export {
+  fetchValidatedMedia,
+  MediaFetchError,
+  submitCleanedArticle,
+  uploadCleanedMedia,
+} from "./article-archive.ts";
+export type {
+  MediaFetchOptions,
+  SubmitCleanedArticleInput,
+  SubmitCleanedArticleResult,
+  UploadedCleanMediaResult,
+} from "./article-archive.ts";
+
+export {
   createEmptyIncrementalSyncState,
   hasIncrementalEntryChanged,
   incrementalEntryRecordSchema,

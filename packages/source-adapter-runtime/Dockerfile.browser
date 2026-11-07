@@ -61,7 +61,17 @@ COPY packages/core/package.json packages/core/
 COPY packages/db/package.json packages/db/
 COPY packages/server/package.json packages/server/
 COPY packages/tooling-config/package.json packages/tooling-config/
+COPY source-adapters/anthropic/package.json source-adapters/anthropic/
+COPY source-adapters/deepseek/package.json source-adapters/deepseek/
+COPY source-adapters/google/package.json source-adapters/google/
+COPY source-adapters/huggingface/package.json source-adapters/huggingface/
+COPY source-adapters/kimi/package.json source-adapters/kimi/
 COPY source-adapters/linuxdo/package.json source-adapters/linuxdo/
+COPY source-adapters/minimax/package.json source-adapters/minimax/
+COPY source-adapters/mistral/package.json source-adapters/mistral/
+COPY source-adapters/openai/package.json source-adapters/openai/
+COPY source-adapters/qoder/package.json source-adapters/qoder/
+COPY source-adapters/qwen/package.json source-adapters/qwen/
 COPY source-adapters/rss/package.json source-adapters/rss/
 RUN pnpm install --frozen-lockfile
 COPY . .

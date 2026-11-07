@@ -1,0 +1,50 @@
+{
+  "name": "@binny/source-adapter-anthropic",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Anthropic News, Research, and Engineering source adapter.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "test": "node --conditions=source --test 'test/**/*.test.ts'",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false"
+  },
+  "dependencies": {
+    "@binny/source-adapter-sdk": "workspace:*",
+    "@rowanmanning/feed-parser": "2.1.5",
+    "parse5": "^8.0.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "workspace:*",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}
