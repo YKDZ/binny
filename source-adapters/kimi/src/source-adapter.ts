@@ -60,12 +60,7 @@ export async function executeKimiCheck(
     }
   }
 
-  const availability =
-    problems.length === 0
-      ? "available"
-      : scope.length > 0 && problems.length < scope.length
-        ? "unavailable"
-        : "unavailable";
+  const availability = problems.length === 0 ? "available" : "unavailable";
 
   return {
     availability,

@@ -1085,8 +1085,37 @@ export function createRuntimeConnectionStore(
         origin: string;
         scope: { kind: string; id: number };
       }> = [];
+      const initializedStringScopes = new Set<string>();
 
       for (const row of previousSyncRuns) {
+        const checkOutputs = [row.output, row.report];
+        for (const out of checkOutputs) {
+          if (typeof out === "object" && out !== null) {
+            const outRecord = out as Record<string, unknown>;
+            if (Array.isArray(outRecord.initializedScopes)) {
+              for (const scopeId of outRecord.initializedScopes) {
+                if (typeof scopeId === "string" && scopeId.length > 0) {
+                  initializedStringScopes.add(scopeId);
+                }
+              }
+            }
+            if (Array.isArray(outRecord.advancedScopes)) {
+              for (const scopeId of outRecord.advancedScopes) {
+                if (typeof scopeId === "string" && scopeId.length > 0) {
+                  initializedStringScopes.add(scopeId);
+                }
+              }
+            }
+            if (Array.isArray(outRecord.completedScopes)) {
+              for (const scopeId of outRecord.completedScopes) {
+                if (typeof scopeId === "string" && scopeId.length > 0) {
+                  initializedStringScopes.add(scopeId);
+                }
+              }
+            }
+          }
+        }
+
         let origin: string | undefined;
         const rawOrigin =
           typeof row.configSnapshot === "object" && row.configSnapshot !== null
@@ -1169,7 +1198,7 @@ export function createRuntimeConnectionStore(
         }
       }
 
-      if (initializedScopes.length > 0) {
+      if (initializedScopes.length > 0 || initializedStringScopes.size > 0) {
         if (bin.persistentState === null || bin.persistentState === undefined) {
           persistentState = {
             status: "unavailable",
@@ -1177,33 +1206,71 @@ export function createRuntimeConnectionStore(
           };
         } else if (
           typeof bin.persistentState === "object" &&
-          bin.persistentState !== null &&
-          "scopes" in bin.persistentState &&
-          Array.isArray(bin.persistentState.scopes)
+          bin.persistentState !== null
         ) {
-          const stateScopes = bin.persistentState.scopes as unknown[];
-          const missingAny = initializedScopes.some((init) => {
-            return !stateScopes.some((entry) => {
-              if (typeof entry !== "object" || entry === null) return false;
-              const rec = entry as Record<string, unknown>;
-              if (
-                rec.binId !== init.binId ||
-                rec.identityId !== init.identityId ||
-                rec.origin !== init.origin
-              ) {
-                return false;
-              }
-              if (typeof rec.scope !== "object" || rec.scope === null)
-                return false;
-              const s = rec.scope as Record<string, unknown>;
-              return s.kind === init.scope.kind && s.id === init.scope.id;
+          const stateRecord = bin.persistentState as Record<string, unknown>;
+          if (
+            "scopes" in stateRecord &&
+            Array.isArray(stateRecord.scopes) &&
+            initializedScopes.length > 0
+          ) {
+            const stateScopes = stateRecord.scopes as unknown[];
+            const missingAny = initializedScopes.some((init) => {
+              return !stateScopes.some((entry) => {
+                if (typeof entry !== "object" || entry === null) return false;
+                const rec = entry as Record<string, unknown>;
+                if (
+                  rec.binId !== init.binId ||
+                  rec.identityId !== init.identityId ||
+                  rec.origin !== init.origin
+                ) {
+                  return false;
+                }
+                if (typeof rec.scope !== "object" || rec.scope === null)
+                  return false;
+                const s = rec.scope as Record<string, unknown>;
+                return s.kind === init.scope.kind && s.id === init.scope.id;
+              });
             });
-          });
-          if (missingAny) {
-            persistentState = {
-              status: "unavailable",
-              reason: "persistent_state_missing",
-            };
+            if (missingAny) {
+              persistentState = {
+                status: "unavailable",
+                reason: "persistent_state_missing",
+              };
+            }
+          }
+
+          if (
+            initializedStringScopes.size > 0 &&
+            persistentState?.status !== "unavailable"
+          ) {
+            const scopesVal = stateRecord.scopes;
+            if (
+              typeof scopesVal !== "object" ||
+              scopesVal === null ||
+              Array.isArray(scopesVal)
+            ) {
+              persistentState = {
+                status: "unavailable",
+                reason: "persistent_state_missing",
+              };
+            } else {
+              const scopesObj = scopesVal as Record<string, unknown>;
+              let missingAny = false;
+              for (const scopeId of initializedStringScopes) {
+                const stripped = scopeId.replace(/^feed:/u, "");
+                if (!(scopeId in scopesObj) && !(stripped in scopesObj)) {
+                  missingAny = true;
+                  break;
+                }
+              }
+              if (missingAny) {
+                persistentState = {
+                  status: "unavailable",
+                  reason: "persistent_state_missing",
+                };
+              }
+            }
           }
         }
       }

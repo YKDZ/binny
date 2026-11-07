@@ -18,15 +18,17 @@ import {
 
 import {
   configSchema,
+  sourceAdapter,
+  type DeepSeekConfig,
+} from "../src/index.ts";
+import {
   executeDeepSeekCheck,
   executeDeepSeekCollect,
   executeDeepSeekSync,
   extractNewsSlug,
   isHomepageFallback,
   normalizeDate,
-  sourceAdapter,
-  type DeepSeekConfig,
-} from "../src/index.ts";
+} from "../src/source-adapter.ts";
 
 function createTestContext(
   config: DeepSeekConfig,
@@ -305,7 +307,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
       // Verify each submission item
       for (const sub of submissions) {
         for (const item of sub.items) {
-          // Rule: No body.html副本
+          // Rule: No duplicate body.html
           assert.equal(
             (item.body as Record<string, unknown> | undefined)?.html,
             undefined,

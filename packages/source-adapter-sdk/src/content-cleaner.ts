@@ -189,6 +189,10 @@ export function cleanContent(
     return cleanPlainText(content, options);
   }
 
+  if (format === "markdown") {
+    return cleanMarkdown(content, options);
+  }
+
   const rewritesMap = new Map<string, ArchiveResourceMetadata>();
   if (options.mediaRewrites !== undefined) {
     if (options.mediaRewrites instanceof Map) {
@@ -946,6 +950,294 @@ function cleanPlainText(
     media: allMedia,
     invalidMedia: [],
     hasSubstantialContent: content.trim().length > 0 || allMedia.length > 0,
+    renderArchiveBody,
+  };
+}
+
+function cleanMarkdown(
+  content: string,
+  options: CleanContentOptions,
+): CleanContentResult {
+  const normalizedContent = content.replace(/\r\n/gu, "\n");
+  const baseUrl = options.baseUrl;
+
+  const rewritesMap = new Map<string, ArchiveResourceMetadata>();
+  if (options.mediaRewrites !== undefined) {
+    if (options.mediaRewrites instanceof Map) {
+      for (const [key, value] of options.mediaRewrites.entries()) {
+        rewritesMap.set(key, value);
+      }
+    } else {
+      for (const [key, value] of Object.entries(options.mediaRewrites)) {
+        rewritesMap.set(key, value);
+      }
+    }
+  }
+
+  const mediaMap = new Map<string, CleanContentMediaCandidate>();
+  const invalidMedia: string[] = [];
+
+  for (const extra of options.extraMedia ?? []) {
+    const url = httpUrl(extra.url, options.baseUrl);
+    if (url !== undefined) {
+      mediaMap.set(url, { ...extra, url });
+    }
+  }
+
+  function addMediaCandidate(
+    rawUrl: string,
+    kind: CleanContentMediaKind,
+    title?: string,
+    alt?: string,
+    mediaType?: string,
+  ): CleanContentMediaCandidate | undefined {
+    if (rawUrl.startsWith("data:")) return undefined;
+    const url = httpUrl(rawUrl, baseUrl);
+    if (url === undefined) {
+      invalidMedia.push(rawUrl);
+      return undefined;
+    }
+    const existing = mediaMap.get(url);
+    const candidate: CleanContentMediaCandidate = {
+      url,
+      kind,
+      mediaType: mediaType ?? existing?.mediaType,
+      title: title ?? existing?.title,
+      alt: alt ?? existing?.alt,
+    };
+    mediaMap.set(url, candidate);
+    return candidate;
+  }
+
+  interface CodeBlockEntry {
+    readonly markdown: string;
+    readonly text: string;
+  }
+  const codeBlocks: CodeBlockEntry[] = [];
+  let placeholderCount = 0;
+
+  // 1. Extract fenced code blocks
+  const fencedRegex = /(^|\n)(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n\2(?=\n|$)/g;
+  const withFencedPlaceholders = normalizedContent.replace(
+    fencedRegex,
+    (match, prefix: string) => {
+      const block = match.slice(prefix.length);
+      const firstNewline = block.indexOf("\n");
+      const lastNewline = block.lastIndexOf("\n");
+      const body =
+        firstNewline !== -1 && lastNewline !== -1 && lastNewline >= firstNewline
+          ? block.slice(firstNewline + 1, lastNewline)
+          : "";
+      const index = placeholderCount++;
+      const id = `\uE000__BINNY_CODE_${index}__\uE000`;
+      codeBlocks.push({ markdown: block, text: body });
+      return prefix + id;
+    },
+  );
+
+  // 2. Extract inline code spans
+  const inlineRegex = /`+[^`\n]+`+/g;
+  const withAllPlaceholders = withFencedPlaceholders.replace(
+    inlineRegex,
+    (match) => {
+      const stripped = match.replace(/^`+|`+$/g, "");
+      const index = placeholderCount++;
+      const id = `\uE000__BINNY_CODE_${index}__\uE000`;
+      codeBlocks.push({ markdown: match, text: stripped });
+      return id;
+    },
+  );
+
+  // 3. Strip noise HTML elements outside code blocks
+  const noiseTagRegex =
+    /<(script|style|noscript|template|iframe|nav|header|footer|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+  const selfClosingNoiseRegex =
+    /<(script|style|noscript|template|iframe|nav|header|footer|form)\b[^>]*\/?>/gi;
+
+  let stripped = withAllPlaceholders;
+  let prev: string;
+  do {
+    prev = stripped;
+    stripped = stripped.replace(noiseTagRegex, "");
+  } while (stripped !== prev);
+  stripped = stripped.replace(selfClosingNoiseRegex, "");
+  stripped = stripped.replace(/\n{3,}/gu, "\n\n");
+
+  // 4. Tokenize remaining text, restoring code blocks and extracting images
+  const tokenizerRegex =
+    /(\uE000__BINNY_CODE_(\d+)__\uE000)|(!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(?:\s+["']([\s\S]*?)["'])?\))|(<img\b([^>]*)\/?>(?:<\/img>)?)/gi;
+
+  const tokens: ContentToken[] = [];
+  const textPieces: string[] = [];
+  const inlinedUrls = new Set<string>();
+
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenizerRegex.exec(stripped)) !== null) {
+    if (match.index > lastIndex) {
+      const textChunk = stripped.slice(lastIndex, match.index);
+      tokens.push(textChunk);
+      textPieces.push(textChunk);
+    }
+    lastIndex = tokenizerRegex.lastIndex;
+
+    if (match[1] !== undefined) {
+      // Code placeholder
+      const idx = Number(match[2]);
+      const entry = codeBlocks[idx];
+      if (entry !== undefined) {
+        tokens.push(entry.markdown);
+        textPieces.push(entry.text);
+      }
+    } else if (match[3] !== undefined) {
+      // Markdown image: ![alt](url)
+      const alt = match[4] ?? "";
+      const rawUrl = (match[5] ?? "").replace(/^<|>$/g, "").trim();
+      const title = match[6];
+      const candidate = addMediaCandidate(rawUrl, "inline-image", title, alt);
+      if (candidate !== undefined) {
+        inlinedUrls.add(candidate.url);
+        tokens.push({
+          kind: "media-token",
+          candidate,
+          display: "image",
+          alt,
+        });
+      } else {
+        tokens.push(`![${markdownSafeText(alt)}](${rawUrl})`);
+      }
+      if (alt.length > 0) {
+        textPieces.push(alt);
+      }
+    } else if (match[7] !== undefined) {
+      // HTML image: <img ...>
+      const attrsStr = match[8] ?? "";
+      const getAttr = (name: string): string | undefined => {
+        const re = new RegExp(
+          `(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`,
+          "i",
+        );
+        const m = re.exec(attrsStr);
+        return m ? (m[1] ?? m[2] ?? m[3]) : undefined;
+      };
+      const src = getAttr("src");
+      const alt = getAttr("alt") ?? getAttr("title") ?? "";
+      const title = getAttr("title");
+      const className = getAttr("class") ?? "";
+
+      const isEmoji =
+        className.includes("emoji") ||
+        (src !== undefined && /\/(?:emoji|_avatar)(?:\/|\.)/iu.test(src));
+
+      if (isEmoji) {
+        if (alt.length > 0) {
+          tokens.push(escapeMarkdownText(alt));
+          textPieces.push(alt);
+        }
+      } else if (src !== undefined) {
+        const candidate = addMediaCandidate(src, "inline-image", title, alt);
+        if (candidate !== undefined) {
+          inlinedUrls.add(candidate.url);
+          tokens.push({
+            kind: "media-token",
+            candidate,
+            display: "image",
+            alt,
+          });
+        } else {
+          tokens.push(`![${markdownSafeText(alt)}](${src})`);
+        }
+        if (alt.length > 0) {
+          textPieces.push(alt);
+        }
+      }
+    }
+  }
+
+  if (lastIndex < stripped.length) {
+    const trailingText = stripped.slice(lastIndex);
+    tokens.push(trailingText);
+    textPieces.push(trailingText);
+  }
+
+  const rawText = textPieces.join("").trim();
+  const allMedia = [...mediaMap.values()];
+  const hasSubstantial = rawText.length > 0 || allMedia.length > 0;
+
+  function renderArchiveBody(
+    uploadedResources: ReadonlyMap<string, ArchiveResourceMetadata>,
+  ): {
+    readonly markdown: string;
+    readonly resources: readonly ArchiveResourceReference[];
+  } {
+    const parts: (string | ReturnType<typeof archivedMedia>)[] = [];
+
+    for (const token of tokens) {
+      if (typeof token === "string") {
+        parts.push(token);
+      } else {
+        const resource =
+          uploadedResources.get(token.candidate.url) ??
+          rewritesMap.get(token.candidate.url);
+        const alt = markdownSafeText(token.alt);
+        if (token.display === "image") {
+          parts.push(`![${alt}](`);
+          parts.push(
+            resource === undefined
+              ? token.candidate.url
+              : archivedMedia(resource),
+          );
+          parts.push(")");
+        } else {
+          parts.push(`[${alt}](`);
+          parts.push(
+            resource === undefined
+              ? token.candidate.url
+              : archivedMedia(resource),
+          );
+          parts.push(")");
+        }
+      }
+    }
+
+    const attachments = allMedia.filter((m) => !inlinedUrls.has(m.url));
+    if (attachments.length > 0) {
+      parts.push("\n\n附件：");
+      for (const [index, candidate] of attachments.entries()) {
+        if (index > 0) parts.push("；");
+        const resource =
+          uploadedResources.get(candidate.url) ??
+          rewritesMap.get(candidate.url);
+        const candTitle = markdownSafeText(
+          candidate.title ?? `媒体 ${index + 1}`,
+        );
+        parts.push(candTitle, " (");
+        parts.push(
+          resource === undefined ? candidate.url : archivedMedia(resource),
+        );
+        parts.push(")");
+      }
+    }
+
+    const bodyWithResources = archiveBodyWithResources(parts);
+    const normalizedMarkdown = normalizeMarkdownSpacing(
+      bodyWithResources.content,
+    );
+    return {
+      markdown: normalizedMarkdown,
+      resources: bodyWithResources.resources,
+    };
+  }
+
+  const defaultMarkdown = renderArchiveBody(rewritesMap).markdown;
+
+  return {
+    text: rawText,
+    markdown: defaultMarkdown,
+    media: allMedia,
+    invalidMedia,
+    hasSubstantialContent: hasSubstantial,
     renderArchiveBody,
   };
 }

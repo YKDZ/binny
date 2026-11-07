@@ -780,7 +780,6 @@ function startActionWorker(
       const coordinator = sourceAccessCoordinator;
       if (
         declarations === undefined ||
-        persistentSourceAdapterStateUnavailable ||
         sourceAccessUnavailable ||
         coordinator === undefined ||
         typeof record.requestId !== "string" ||
@@ -789,14 +788,11 @@ function startActionWorker(
         void sendWorkerMessage(worker, {
           type: "source-access-rejected",
           requestId: record.requestId,
-          ...(persistentSourceAdapterStateUnavailable ||
-          sourceAccessUnavailable ||
-          coordinator === undefined
+          ...(sourceAccessUnavailable || coordinator === undefined
             ? { code: "source_access_state_unavailable" }
             : {}),
-          message: persistentSourceAdapterStateUnavailable
-            ? "信源适配器持久状态不可用，相关来源访问已停止。"
-            : sourceAccessUnavailable || coordinator === undefined
+          message:
+            sourceAccessUnavailable || coordinator === undefined
               ? "来源访问状态不可用，相关来源访问已停止。"
               : "本次运行没有可用的来源准入声明。",
         });

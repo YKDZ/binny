@@ -1,2 +1,16 @@
-export { sourceAdapter as default, sourceAdapter } from "./source-adapter.ts";
-export * from "./source-adapter.ts";
+export {
+  DEFAULT_MINIMAX_SOURCES,
+  checkOutputSchema,
+  collectOutputSchema,
+  configSchema,
+  minimaxRegionSchema,
+  minimaxSourceSchema,
+  paramsSchema,
+  sourceAdapter as default,
+  sourceAdapter,
+  syncOutputSchema,
+  type MinimaxConfig,
+  type MinimaxParams,
+  type MinimaxRegion,
+  type MinimaxSourceDefinition,
+} from "./source-adapter.ts";

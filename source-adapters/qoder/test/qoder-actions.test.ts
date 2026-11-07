@@ -392,10 +392,9 @@ qoder init</code></pre>
       });
 
       // 1. Check Action
-      const checkResult = await sourceAdapter.actions.check.execute(
-        context,
-        {},
-      );
+      const checkResult = await sourceAdapter.actions.check.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+      });
       assert.equal(checkResult.availability, "available");
       assert.deepEqual(checkResult.scope, [INTERNATIONAL_BLOG_SCOPE_ID]);
       assert.equal(checkResult.problems.length, 0);
@@ -406,7 +405,9 @@ qoder init</code></pre>
       });
       const failedCheck = await sourceAdapter.actions.check.execute(
         brokenContext,
-        {},
+        {
+          scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+        },
       );
       assert.equal(failedCheck.availability, "unavailable");
       assert.ok(failedCheck.problems.length > 0);
@@ -416,7 +417,9 @@ qoder init</code></pre>
       submissions.length = 0;
 
       // 2. Initial Sync establishes baseline WITHOUT fetching historical detail pages
-      const initialSync = await sourceAdapter.actions.sync.execute(context, {});
+      const initialSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+      });
       assert.deepEqual(initialSync, {
         completedScopes: [INTERNATIONAL_BLOG_SCOPE_ID],
         initializedScopes: [INTERNATIONAL_BLOG_SCOPE_ID],
@@ -444,10 +447,9 @@ qoder init</code></pre>
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const noChangeSync = await sourceAdapter.actions.sync.execute(
-        context,
-        {},
-      );
+      const noChangeSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+      });
       assert.deepEqual(noChangeSync, {
         completedScopes: [INTERNATIONAL_BLOG_SCOPE_ID],
       });
@@ -459,10 +461,9 @@ qoder init</code></pre>
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const newArticleSync = await sourceAdapter.actions.sync.execute(
-        context,
-        {},
-      );
+      const newArticleSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+      });
       assert.deepEqual(newArticleSync, {
         completedScopes: [INTERNATIONAL_BLOG_SCOPE_ID],
       });
@@ -483,6 +484,7 @@ qoder init</code></pre>
         context,
         {
           articleUrls: [`${origin}/blog/introducing-qoder-cli`],
+          scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
         },
       );
       assert.deepEqual(collectResult, {
@@ -550,6 +552,7 @@ qoder init</code></pre>
         async () => {
           await sourceAdapter.actions.collect.execute(context, {
             articleUrls: [`${origin}/blog/empty-shell`],
+            scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
           });
         },
         (error: unknown) => {
@@ -569,6 +572,7 @@ qoder init</code></pre>
         async () => {
           await sourceAdapter.actions.collect.execute(context, {
             articleUrls: [`${origin}/blog/server-error`],
+            scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
           });
         },
         (error: unknown) => {
@@ -911,10 +915,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       });
 
       // 1. Check Action
-      const checkResult = await sourceAdapter.actions.check.execute(
-        context,
-        {},
-      );
+      const checkResult = await sourceAdapter.actions.check.execute(context, {
+        scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      });
       assert.equal(checkResult.availability, "available");
       assert.deepEqual(checkResult.scope, [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID]);
       assert.equal(checkResult.problems.length, 0);
@@ -925,7 +928,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       });
       const failedCheck = await sourceAdapter.actions.check.execute(
         brokenContext,
-        {},
+        {
+          scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+        },
       );
       assert.equal(failedCheck.availability, "unavailable");
       assert.ok(failedCheck.problems.length > 0);
@@ -934,7 +939,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const initialSync = await sourceAdapter.actions.sync.execute(context, {});
+      const initialSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      });
       assert.deepEqual(initialSync, {
         completedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
         initializedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
@@ -968,7 +975,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const repeatSync = await sourceAdapter.actions.sync.execute(context, {});
+      const repeatSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      });
       assert.deepEqual(repeatSync, {
         completedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
       });
@@ -980,10 +989,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const modifiedSync = await sourceAdapter.actions.sync.execute(
-        context,
-        {},
-      );
+      const modifiedSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      });
       assert.deepEqual(modifiedSync, {
         completedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
       });
@@ -1032,7 +1040,9 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       detailRequests.length = 0;
       submissions.length = 0;
 
-      const prunedSync = await sourceAdapter.actions.sync.execute(context, {});
+      const prunedSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      });
       assert.deepEqual(prunedSync, {
         completedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
       });
@@ -1060,6 +1070,7 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
         context,
         {
           articleUrls: [`${origin}/events/purchase-offer.md`],
+          scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
         },
       );
       assert.deepEqual(collectResult, {
@@ -1100,36 +1111,19 @@ void describe("Qoder Scope Resolution and Regional Changelogs Unit Tests", () =>
       [CN_CHANGELOGS_SCOPE_ID, INTERNATIONAL_CHANGELOGS_SCOPE_ID],
     );
 
-    // Custom blogListUrl only activates blog
-    const blogConfig = configSchema.parse({
-      blogListUrl: "https://example.com/custom-blog",
-    });
-    assert.deepEqual(determineActiveScopes(blogConfig), [
-      INTERNATIONAL_BLOG_SCOPE_ID,
-    ]);
-
-    // Custom cnDocsIndexUrl only activates cn announcements/events (backward compat with ticket 10)
     const cnDocsConfig = configSchema.parse({
       cnDocsIndexUrl: "https://example.com/custom-llms.txt",
     });
+    assert.deepEqual(
+      determineActiveScopes(cnDocsConfig, [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID]),
+      [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+    );
+    assert.deepEqual(
+      determineActiveScopes(cnDocsConfig, ["cn_announcements", "cn_events"]),
+      ["cn_announcements", "cn_events"],
+    );
     assert.deepEqual(determineActiveScopes(cnDocsConfig), [
-      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
-    ]);
-
-    // Custom intChangelogIndexUrl activates international changelogs
-    const intChangelogConfig = configSchema.parse({
-      intChangelogIndexUrl: "https://example.com/custom-changelog.txt",
-    });
-    assert.deepEqual(determineActiveScopes(intChangelogConfig), [
-      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
-    ]);
-
-    // Multiple custom URLs activate matching scopes
-    const multiConfig = configSchema.parse({
-      cnDocsIndexUrl: "https://example.com/custom-llms.txt",
-      intChangelogIndexUrl: "https://example.com/custom-changelog.txt",
-    });
-    assert.deepEqual(determineActiveScopes(multiConfig), [
+      INTERNATIONAL_BLOG_SCOPE_ID,
       CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
       CN_CHANGELOGS_SCOPE_ID,
       INTERNATIONAL_CHANGELOGS_SCOPE_ID,

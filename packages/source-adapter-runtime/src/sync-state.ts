@@ -1,7 +1,7 @@
 import { jsonObjectSchema, type JsonObject } from "@binny/contracts";
 import type { ZodType } from "zod";
 
-/** 每个运行器 owner 上唯一的一份信源适配器状态。 */
+/** The unique source adapter state on each runner owner. */
 export type PersistentSourceAdapterState = {
   snapshot(): JsonObject | undefined;
   load(): Promise<JsonObject | undefined>;

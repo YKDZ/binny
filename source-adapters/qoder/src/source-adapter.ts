@@ -113,55 +113,24 @@ export type QoderCheckOutput = z.infer<typeof checkOutputSchema>;
 export type QoderCollectOutput = z.infer<typeof collectOutputSchema>;
 export type QoderSyncOutput = z.infer<typeof syncOutputSchema>;
 
+export const ACTIVE_SCOPES = [
+  INTERNATIONAL_BLOG_SCOPE_ID,
+  CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+  CN_CHANGELOGS_SCOPE_ID,
+  INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+] as const;
+
 /**
  * Determines which scopes to activate based on explicit parameters and configuration.
  */
 export function determineActiveScopes(
-  config: QoderConfig,
+  _config: QoderConfig,
   requestedScopes?: readonly string[],
 ): string[] {
   if (requestedScopes && requestedScopes.length > 0) {
     return [...requestedScopes];
   }
-  const isCustomBlog =
-    config.blogListUrl !== undefined &&
-    config.blogListUrl !== DEFAULT_INTERNATIONAL_BLOG_URL;
-  const isCustomCn =
-    config.cnDocsIndexUrl !== undefined &&
-    config.cnDocsIndexUrl !== DEFAULT_CN_DOCS_INDEX_URL;
-  const isCustomIntChangelog =
-    config.intChangelogIndexUrl !== undefined &&
-    config.intChangelogIndexUrl !== DEFAULT_INTERNATIONAL_CHANGELOG_URL;
-
-  if (isCustomBlog && !isCustomCn && !isCustomIntChangelog) {
-    return [INTERNATIONAL_BLOG_SCOPE_ID];
-  }
-  if (isCustomIntChangelog && !isCustomBlog && !isCustomCn) {
-    return [INTERNATIONAL_CHANGELOGS_SCOPE_ID];
-  }
-  if (isCustomCn && !isCustomBlog && !isCustomIntChangelog) {
-    return [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID];
-  }
-
-  // Default: if none are customized, all 4 scopes are active
-  if (!isCustomBlog && !isCustomCn && !isCustomIntChangelog) {
-    return [
-      INTERNATIONAL_BLOG_SCOPE_ID,
-      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
-      CN_CHANGELOGS_SCOPE_ID,
-      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
-    ];
-  }
-
-  // Multiple customizations:
-  const scopes: string[] = [];
-  if (isCustomBlog) scopes.push(INTERNATIONAL_BLOG_SCOPE_ID);
-  if (isCustomCn) {
-    scopes.push(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID);
-    scopes.push(CN_CHANGELOGS_SCOPE_ID);
-  }
-  if (isCustomIntChangelog) scopes.push(INTERNATIONAL_CHANGELOGS_SCOPE_ID);
-  return scopes;
+  return [...ACTIVE_SCOPES];
 }
 
 async function executeCheck(

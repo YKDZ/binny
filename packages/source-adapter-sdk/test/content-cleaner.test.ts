@@ -498,4 +498,121 @@ void describe("content-cleaner", () => {
       /\[Report\.pdf\]\(binny:\/\/resource\/pdf-res-002\)/u,
     );
   });
+
+  void it("handles markdown format preserving code blocks, html tags, and indentation in markdown and text while rewriting images", () => {
+    const input = `
+# Markdown Document
+
+Outside noise to strip:
+<header><nav><a href="/home">Home</a></nav></header>
+<script>alert("evil")</script>
+<style>.hide { display: none; }</style>
+
+Outside content with inline code: \`<script>alert("ok")</script>\` and \`<header>\`.
+
+\`\`\`html
+<header>
+  <nav>
+    <script>inside code</script>
+  </nav>
+</header>
+\`\`\`
+
+\`\`\`typescript
+function calculate(x: number): number {
+  // Multi-line indentation
+  const y = x * 2;
+  return y + 1;
+}
+\`\`\`
+
+Here is an image outside code blocks:
+![Cover Image](https://example.com/cover.png)
+<img src="https://example.com/figure.png" alt="Figure 1" />
+`;
+
+    const cleaned = cleanContent(input, {
+      format: "markdown",
+      baseUrl: "https://example.com",
+    });
+
+    // 1. Noise HTML outside code blocks is stripped from both markdown and text
+    assert.doesNotMatch(cleaned.markdown, /<header><nav>/u);
+    assert.doesNotMatch(cleaned.markdown, /alert\("evil"\)/u);
+    assert.doesNotMatch(cleaned.text, /alert\("evil"\)/u);
+    assert.doesNotMatch(cleaned.markdown, /\.hide/u);
+    assert.doesNotMatch(cleaned.text, /\.hide/u);
+
+    // 2. Inline code spans preserve tags in both markdown and text
+    assert.match(cleaned.markdown, /`<script>alert\("ok"\)<\/script>`/u);
+    assert.match(cleaned.text, /<script>alert\("ok"\)<\/script>/u);
+    assert.match(cleaned.markdown, /`<header>`/u);
+    assert.match(cleaned.text, /<header>/u);
+
+    // 3. Fenced code blocks preserve <script>, <nav>, <header>, and multi-line indentation in markdown
+    assert.match(
+      cleaned.markdown,
+      /```html\n<header>\n  <nav>\n    <script>inside code<\/script>\n  <\/nav>\n<\/header>\n```/u,
+    );
+    assert.match(
+      cleaned.markdown,
+      /```typescript\nfunction calculate\(x: number\): number \{\n  \/\/ Multi-line indentation\n  const y = x \* 2;\n  return y \+ 1;\n\}\n```/u,
+    );
+
+    // 4. In text, fence markers are stripped, while code content, indentation, and newlines are preserved
+    assert.match(
+      cleaned.text,
+      /<header>\n  <nav>\n    <script>inside code<\/script>\n  <\/nav>\n<\/header>/u,
+    );
+    assert.match(
+      cleaned.text,
+      /function calculate\(x: number\): number \{\n  \/\/ Multi-line indentation\n  const y = x \* 2;\n  return y \+ 1;\n\}/u,
+    );
+    assert.doesNotMatch(cleaned.text, /```html/u);
+    assert.doesNotMatch(cleaned.text, /```typescript/u);
+
+    // 5. Media candidates extracted from Markdown images and HTML images outside code blocks
+    const urls = cleaned.media.map((m) => m.url);
+    assert.ok(urls.includes("https://example.com/cover.png"));
+    assert.ok(urls.includes("https://example.com/figure.png"));
+
+    // 6. renderArchiveBody rewrites Markdown images outside code blocks
+    const rewrites = new Map<string, ArchiveResourceMetadata>([
+      [
+        "https://example.com/cover.png",
+        {
+          resourceId: "res-cover-123",
+          sha256: "0".repeat(64),
+          mediaType: "image/png",
+          size: 1024,
+        },
+      ],
+      [
+        "https://example.com/figure.png",
+        {
+          resourceId: "res-fig-456",
+          sha256: "1".repeat(64),
+          mediaType: "image/png",
+          size: 2048,
+        },
+      ],
+    ]);
+
+    const rendered = cleaned.renderArchiveBody(rewrites);
+    assert.match(
+      rendered.markdown,
+      /!\[Cover Image\]\(binny:\/\/resource\/res-cover-123\)/u,
+    );
+    assert.match(
+      rendered.markdown,
+      /!\[Figure 1\]\(binny:\/\/resource\/res-fig-456\)/u,
+    );
+    assert.equal(rendered.resources.length, 2);
+
+    // Ensure code blocks in rendered markdown remain intact after resource rewrite
+    assert.match(
+      rendered.markdown,
+      /```html\n<header>\n  <nav>\n    <script>inside code<\/script>\n  <\/nav>\n<\/header>\n```/u,
+    );
+  });
 });

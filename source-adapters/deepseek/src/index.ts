@@ -1,2 +1,14 @@
-export * from "./source-adapter.ts";
-export { sourceAdapter as default } from "./source-adapter.ts";
+export {
+  DEFAULT_DEEPSEEK_SOURCES,
+  checkOutputSchema,
+  collectOutputSchema,
+  configSchema,
+  deepSeekSourceDefinitionSchema,
+  paramsSchema,
+  sourceAdapter as default,
+  sourceAdapter,
+  syncOutputSchema,
+  type DeepSeekConfig,
+  type DeepSeekParams,
+  type DeepSeekSourceDefinition,
+} from "./source-adapter.ts";

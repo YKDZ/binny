@@ -11,7 +11,7 @@ export type PersistentSourceAccessOptions = {
   readonly ownerGeneration: string;
 };
 
-/** 运行器为 SDK 协调器提供核心数据库持久状态读写。 */
+/** The runner provides core database persistent state read/write access to the SDK coordinator. */
 export async function openPersistentSourceAccessCoordinator(
   options: PersistentSourceAccessOptions,
 ): Promise<SourceAccessCoordinator> {

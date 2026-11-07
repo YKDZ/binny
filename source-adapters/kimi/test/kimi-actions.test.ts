@@ -16,13 +16,11 @@ import {
 } from "@binny/source-adapter-sdk";
 
 import {
-  configSchema,
   DEFAULT_KIMI_CHANGELOG_SOURCES,
   DEFAULT_KIMI_RESEARCH_SOURCES,
   DEFAULT_KIMI_SOURCES,
-  type KimiConfig,
-} from "../src/index.ts";
-import sourceAdapter from "../src/index.ts";
+} from "../src/changelog.ts";
+import { configSchema, sourceAdapter, type KimiConfig } from "../src/index.ts";
 
 function createTestContext(
   config: KimiConfig,

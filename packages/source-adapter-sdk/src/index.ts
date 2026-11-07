@@ -426,7 +426,7 @@ export function sourceAdapterActionError(
   return new SourceAdapterActionError(failure, completedScopes);
 }
 
-/** 给动作提供固定 run/bin/version 的正式 API 归档提交能力。 */
+/** Provides actions with formal API archive submission capabilities bound to run/bin/version. */
 export function createSourceAdapterContext<
   TConfig,
   TReport extends z.ZodType = z.ZodType,

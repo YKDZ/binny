@@ -6,9 +6,6 @@ import {
   hasOngoingDocumentChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
-  loadIncrementalSyncState,
-  saveIncrementalSyncState,
-  sourceAdapterActionError,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeOngoingDocument,
@@ -530,54 +527,6 @@ export async function checkChangelogSource(
   }
 }
 
-/** Executes check action on Kimi changelog sources. */
-export async function executeChangelogCheck(
-  context: SourceAdapterContext<KimiConfig>,
-  params: ActionParams,
-): Promise<z.infer<typeof checkOutputSchema>> {
-  const { sources, missing } = selectedSources(context.config, params);
-  const problems: z.infer<typeof checkOutputSchema>["problems"] = [];
-  const scope: string[] = [];
-
-  for (const missingId of missing) {
-    problems.push({
-      code: "kimi_source_not_found",
-      message: `Configured source "${missingId}" was not found.`,
-      impact: `Source "${missingId}" cannot be checked.`,
-      path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
-      requiresHuman: false,
-    });
-  }
-
-  for (const source of sources) {
-    scope.push(source.id);
-    if (source.kind !== "changelog") {
-      continue;
-    }
-    await checkChangelogSource(source, context, problems);
-  }
-
-  const availability =
-    problems.length === 0
-      ? "available"
-      : scope.length > 0 && problems.length < scope.length
-        ? "unavailable"
-        : "unavailable";
-
-  return {
-    availability,
-    scope,
-    basis:
-      problems.length === 0
-        ? `Successfully verified reachability and content for ${scope.length} Kimi platform changelog source(s).`
-        : `Kimi platform changelog availability check completed with ${problems.length} problem(s).`,
-    problems,
-  };
-}
-export const executeKimiCheck = executeChangelogCheck;
-
 /** Collects a single Kimi changelog source immediately. */
 export async function collectChangelogSource(
   source: KimiSourceDefinition,
@@ -639,64 +588,6 @@ export async function collectChangelogSource(
     });
   }
 }
-
-/** Executes collect action: immediately archives whole-page changelog and updates ongoing document hash. */
-export async function executeChangelogCollect(
-  context: SourceAdapterContext<KimiConfig>,
-  params: ActionParams,
-): Promise<z.infer<typeof collectOutputSchema>> {
-  const { sources, missing } = selectedSources(context.config, params);
-  const completedScopes: string[] = [];
-  const problems: ManualRunFailure[] = [];
-
-  for (const missingId of missing) {
-    problems.push({
-      code: "kimi_source_not_found",
-      message: `Configured source "${missingId}" was not found.`,
-      impact: `Source "${missingId}" cannot be collected.`,
-      path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
-      requiresHuman: false,
-    });
-  }
-
-  let state: IncrementalSyncState | undefined;
-  if (context.persistentState !== undefined) {
-    try {
-      state = await loadIncrementalSyncState(context);
-    } catch {
-      // Ignore state load errors during explicit collect if persistentState is uninitialized or optional
-    }
-  }
-
-  for (const source of sources) {
-    if (source.kind !== "changelog") {
-      continue;
-    }
-    await collectChangelogSource(
-      source,
-      context,
-      state,
-      completedScopes,
-      problems,
-    );
-  }
-
-  if (state !== undefined && context.persistentState !== undefined) {
-    await saveIncrementalSyncState(context, state);
-  }
-
-  if (problems.length > 0) {
-    const firstProblem = problems[0];
-    if (firstProblem !== undefined) {
-      throw sourceAdapterActionError(firstProblem, completedScopes);
-    }
-  }
-
-  return { completedScopes };
-}
-export const executeKimiCollect = executeChangelogCollect;
 
 /** Synchronizes a single Kimi changelog source. */
 export async function syncChangelogSource(
@@ -790,58 +681,3 @@ export async function syncChangelogSource(
     });
   }
 }
-
-/** Executes sync action on Kimi changelog sources. */
-export async function executeChangelogSync(
-  context: SourceAdapterContext<KimiConfig>,
-  params: ActionParams,
-): Promise<z.infer<typeof syncOutputSchema>> {
-  const { sources, missing } = selectedSources(context.config, params);
-  const completedScopes: string[] = [];
-  const initializedScopes: string[] = [];
-  const problems: ManualRunFailure[] = [];
-
-  for (const missingId of missing) {
-    problems.push({
-      code: "kimi_source_not_found",
-      message: `Configured source "${missingId}" was not found.`,
-      impact: `Source "${missingId}" cannot be synchronized.`,
-      path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
-      requiresHuman: false,
-    });
-  }
-
-  const state = await loadIncrementalSyncState(context);
-
-  for (const source of sources) {
-    if (source.kind !== "changelog") {
-      continue;
-    }
-    await syncChangelogSource(
-      source,
-      context,
-      state,
-      initializedScopes,
-      completedScopes,
-      problems,
-    );
-  }
-
-  // Save state for any successfully processed scopes
-  await saveIncrementalSyncState(context, state);
-
-  if (problems.length > 0) {
-    const firstProblem = problems[0];
-    if (firstProblem !== undefined) {
-      throw sourceAdapterActionError(firstProblem, completedScopes);
-    }
-  }
-
-  return {
-    completedScopes,
-    ...(initializedScopes.length > 0 ? { initializedScopes } : {}),
-  };
-}
-export const executeKimiSync = executeChangelogSync;
