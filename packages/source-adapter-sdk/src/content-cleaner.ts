@@ -28,6 +28,10 @@ export interface CleanContentOptions {
     element: DefaultTreeAdapterMap["element"],
   ) => boolean;
   readonly extraMedia?: readonly CleanContentMediaCandidate[] | undefined;
+  readonly mediaRewrites?:
+    | Readonly<Record<string, ArchiveResourceMetadata>>
+    | ReadonlyMap<string, ArchiveResourceMetadata>
+    | undefined;
 }
 
 type MediaToken = {
@@ -183,6 +187,19 @@ export function cleanContent(
 
   if (format === "text") {
     return cleanPlainText(content, options);
+  }
+
+  const rewritesMap = new Map<string, ArchiveResourceMetadata>();
+  if (options.mediaRewrites !== undefined) {
+    if (options.mediaRewrites instanceof Map) {
+      for (const [key, value] of options.mediaRewrites.entries()) {
+        rewritesMap.set(key, value);
+      }
+    } else {
+      for (const [key, value] of Object.entries(options.mediaRewrites)) {
+        rewritesMap.set(key, value);
+      }
+    }
   }
 
   const fragment = parseFragment(content);
@@ -458,8 +475,23 @@ export function cleanContent(
       return;
     }
 
-    if (src !== undefined) {
-      const candidate = addMediaCandidate(src, "inline-image", undefined, alt);
+    const imageSrc =
+      src ??
+      (() => {
+        const srcset = getAttribute(element, "srcset");
+        if (srcset !== undefined) {
+          return parseSrcset(srcset)[0]?.url;
+        }
+        return undefined;
+      })();
+
+    if (imageSrc !== undefined) {
+      const candidate = addMediaCandidate(
+        imageSrc,
+        "inline-image",
+        undefined,
+        alt,
+      );
       if (candidate !== undefined) {
         inlinedUrls.add(candidate.url);
         tokens.push({
@@ -469,16 +501,9 @@ export function cleanContent(
           alt,
         });
       } else {
-        tokens.push(`![${markdownSafeText(alt)}](${src})`);
+        tokens.push(`![${markdownSafeText(alt)}](${imageSrc})`);
       }
       if (alt.length > 0) textPieces.push(alt);
-    }
-
-    const srcset = getAttribute(element, "srcset");
-    if (srcset !== undefined) {
-      for (const item of parseSrcset(srcset)) {
-        addMediaCandidate(item.url, "inline-image", undefined, alt);
-      }
     }
   }
 
@@ -765,7 +790,7 @@ export function cleanContent(
 
     const subTokens = tokens.splice(savedTokensLength);
     const subText = textPieces.splice(savedTextLength).join("");
-    const subMarkdown = tokensToMarkdown(subTokens, new Map());
+    const subMarkdown = tokensToMarkdown(subTokens, rewritesMap);
     return { markdown: subMarkdown, text: subText };
   }
 
@@ -794,7 +819,9 @@ export function cleanContent(
       if (typeof token === "string") {
         parts.push(token);
       } else {
-        const resource = uploadedResources.get(token.candidate.url);
+        const resource =
+          uploadedResources.get(token.candidate.url) ??
+          rewritesMap.get(token.candidate.url);
         const alt = markdownSafeText(token.alt);
         if (token.display === "image") {
           parts.push(`![${alt}](`);
@@ -821,7 +848,9 @@ export function cleanContent(
       parts.push("\n\n附件：");
       for (const [index, candidate] of attachments.entries()) {
         if (index > 0) parts.push("；");
-        const resource = uploadedResources.get(candidate.url);
+        const resource =
+          uploadedResources.get(candidate.url) ??
+          rewritesMap.get(candidate.url);
         const title = markdownSafeText(candidate.title ?? `媒体 ${index + 1}`);
         parts.push(title, " (");
         parts.push(
@@ -841,7 +870,7 @@ export function cleanContent(
     };
   }
 
-  const defaultMarkdown = renderArchiveBody(new Map()).markdown;
+  const defaultMarkdown = renderArchiveBody(rewritesMap).markdown;
 
   return {
     text: rawText,
@@ -867,6 +896,19 @@ function cleanPlainText(
   }
   const allMedia = [...mediaMap.values()];
 
+  const rewritesMap = new Map<string, ArchiveResourceMetadata>();
+  if (options.mediaRewrites !== undefined) {
+    if (options.mediaRewrites instanceof Map) {
+      for (const [key, value] of options.mediaRewrites.entries()) {
+        rewritesMap.set(key, value);
+      }
+    } else {
+      for (const [key, value] of Object.entries(options.mediaRewrites)) {
+        rewritesMap.set(key, value);
+      }
+    }
+  }
+
   function renderArchiveBody(
     uploadedResources: ReadonlyMap<string, ArchiveResourceMetadata>,
   ): {
@@ -880,7 +922,9 @@ function cleanPlainText(
       parts.push("\n\n附件：");
       for (const [index, candidate] of allMedia.entries()) {
         if (index > 0) parts.push("；");
-        const resource = uploadedResources.get(candidate.url);
+        const resource =
+          uploadedResources.get(candidate.url) ??
+          rewritesMap.get(candidate.url);
         const title = markdownSafeText(candidate.title ?? `媒体 ${index + 1}`);
         parts.push(title, " (");
         parts.push(
@@ -898,7 +942,7 @@ function cleanPlainText(
 
   return {
     text: content,
-    markdown: renderArchiveBody(new Map()).markdown,
+    markdown: renderArchiveBody(rewritesMap).markdown,
     media: allMedia,
     invalidMedia: [],
     hasSubstantialContent: content.trim().length > 0 || allMedia.length > 0,
@@ -949,6 +993,7 @@ const challengeHtmlPatterns = [
   /<form[^>]*>[\s\S]*?<input[^>]+type=["']?password["']?/iu,
   /<input[^>]+type=["']?password["']?/iu,
   /<title>\s*(?:Just a moment\.\.\.|Attention Required!|Security Check|Cloudflare)\s*<\/title>/iu,
+  /<title>[^<]*(?:登录|挑战|验证|login\s*challenge|access\s*denied)[^<]*<\/title>/iu,
 ];
 
 export function isAcceptableMediaResponse(

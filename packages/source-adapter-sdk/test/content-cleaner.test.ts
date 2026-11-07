@@ -431,4 +431,71 @@ void describe("content-cleaner", () => {
     const res = validateMediaResponse(inlineCandidate, "image/png");
     assert.equal(res.ok, true);
   });
+
+  void it("detects Chinese and English login/challenge titles in HTML attachments", () => {
+    const htmlAttachment = {
+      url: "https://linux.do/uploads/login-challenge.html",
+      kind: "attachment" as const,
+    };
+    const challengeHtml = isAcceptableMediaResponse(
+      htmlAttachment,
+      "text/html",
+      "<!doctype html><html><title>登录挑战</title></html>",
+    );
+    assert.equal(challengeHtml.acceptable, false);
+    assert.match(challengeHtml.reason ?? "", /人机验证或登录错误页面/u);
+
+    const genuineHtml = isAcceptableMediaResponse(
+      htmlAttachment,
+      "text/html",
+      "<!doctype html><html><head><title>基准测试报告</title></head><body><h1>报告正文</h1></body></html>",
+    );
+    assert.equal(genuineHtml.acceptable, true);
+  });
+
+  void it("does not add srcset responsive variants as separate media candidates when src is present", () => {
+    const html = `
+      <p>Image with responsive srcset:</p>
+      <img src="https://example.com/cover.png" srcset="https://example.com/cover-small.webp 1x, https://example.com/cover-large.webp 2x" alt="Cover" />
+    `;
+    const cleaned = cleanContent(html, { format: "html" });
+    assert.deepEqual(
+      cleaned.media.map((m) => m.url),
+      ["https://example.com/cover.png"],
+    );
+  });
+
+  void it("rewrites media URLs directly to binny://resource references using mediaRewrites option", () => {
+    const html = `
+      <p>Topic body</p>
+      <img src="https://linux.do/uploads/photo.png" alt="Photo" />
+      <p><a class="attachment" href="https://linux.do/uploads/report.pdf">Report.pdf</a></p>
+    `;
+    const mediaRewrites = {
+      "https://linux.do/uploads/photo.png": {
+        resourceId: "photo-res-001",
+        sha256: "0".repeat(64),
+        mediaType: "image/png",
+        size: 1024,
+      },
+      "https://linux.do/uploads/report.pdf": {
+        resourceId: "pdf-res-002",
+        sha256: "1".repeat(64),
+        mediaType: "application/pdf",
+        size: 2048,
+      },
+    };
+    const cleaned = cleanContent(html, {
+      format: "html",
+      mediaRewrites,
+    });
+    assert.match(
+      cleaned.markdown,
+      /!\[Photo\]\(binny:\/\/resource\/photo-res-001\)/u,
+    );
+    assert.match(
+      cleaned.markdown,
+      /\[Report\.pdf\]\(binny:\/\/resource\/pdf-res-002\)/u,
+    );
+  });
 });

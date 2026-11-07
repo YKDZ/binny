@@ -1,16 +1,17 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import {
-  archivedMedia,
   archiveResourceManifest,
-  sourceAdapterActionError,
+  cleanContent,
+  createSourceAccessBudget,
   defineSourceAdapter,
   defineSourceAdapterAction,
-  createSourceAccessBudget,
-  SourceAccessBudgetExceededError,
   isSourceAdapterActionError,
   sourceAccessConfigSchema,
+  sourceAdapterActionError,
+  validateMediaResponse,
   type ArchiveResourceMetadata,
+  type CleanContentMediaCandidate,
   type JsonObject,
   type SourceAccessBudgetClient,
   type SourceAccessKind,
@@ -18,6 +19,7 @@ import {
   type SourceAccessResponseObservation,
   type SourceAccessSnapshot,
   type SourceAdapterContext,
+  SourceAccessBudgetExceededError,
 } from "@binny/source-adapter-sdk";
 import { chromium, type APIRequestContext, type Page } from "patchright-core";
 import { z } from "zod";
@@ -912,15 +914,9 @@ type TopicPostRead = {
   readonly challenge?: DiscourseProblem;
 };
 type MediaCandidate = {
-  readonly index: number;
-  readonly kind: "image" | "attachment";
-  readonly url: string;
+  readonly candidate: CleanContentMediaCandidate;
+  readonly kind: "inline-image" | "attachment";
   readonly path: string;
-};
-type PreparedBody = {
-  readonly html: string;
-  readonly text: string;
-  readonly media: readonly MediaCandidate[];
 };
 type MediaDownload =
   | { readonly ok: true; readonly resource: ArchiveResourceMetadata }
@@ -3271,117 +3267,10 @@ async function scanPostCreatedRange(
   };
 }
 
-async function prepareCookedBody(
-  page: Page,
-  cooked: string,
-): Promise<PreparedBody> {
-  return await page.evaluate((html) => {
-    const document = new DOMParser().parseFromString(html, "text/html");
-    const media: MediaCandidate[] = [];
-    const imageLightboxes = new Set<Element>();
-    let imageNumber = 0;
-    let attachmentNumber = 0;
-
-    for (const image of document.body.querySelectorAll("img")) {
-      const source = image.getAttribute("src");
-      const isEmoji =
-        image.classList.contains("emoji") ||
-        (source !== null && /\/(?:emoji|_avatar)(?:\/|\.)/iu.test(source));
-      if (isEmoji) {
-        image.replaceWith(
-          document.createTextNode(
-            image.getAttribute("alt") || image.getAttribute("title") || "",
-          ),
-        );
-        continue;
-      }
-      if (source === null || source.length === 0) continue;
-
-      const lightbox = image.closest("a.lightbox[href]");
-      const url = lightbox?.getAttribute("href") ?? source;
-      const index = media.length;
-      const path = `body.images[${String(imageNumber)}]`;
-      imageNumber += 1;
-      image.setAttribute("data-binny-media-index", String(index));
-      if (lightbox !== null) {
-        lightbox.setAttribute("data-binny-media-index", String(index));
-        imageLightboxes.add(lightbox);
-      }
-      media.push({ index, kind: "image", url, path });
-    }
-
-    for (const attachment of document.body.querySelectorAll(
-      "a.attachment[href], a[data-download-href]",
-    )) {
-      // Discourse 的 lightbox 下载别名指向图片变体，不是另一份附件。
-      if (imageLightboxes.has(attachment)) continue;
-      const url =
-        attachment.getAttribute("data-download-href") ??
-        attachment.getAttribute("href");
-      if (url === null || url.length === 0) continue;
-      const index = media.length;
-      attachment.setAttribute("data-binny-media-index", String(index));
-      media.push({
-        index,
-        kind: "attachment",
-        url,
-        path: `body.attachments[${String(attachmentNumber)}]`,
-      });
-      attachmentNumber += 1;
-    }
-
-    return {
-      html: document.body.innerHTML,
-      text: (document.body.textContent ?? "").replace(/\s+/gu, " ").trim(),
-      media,
-    };
-  }, cooked);
-}
-
-async function rewriteCookedBody(
-  page: Page,
-  html: string,
-  references: ReadonlyMap<number, string>,
-): Promise<{ readonly html: string; readonly text: string }> {
-  return await page.evaluate(
-    ({ source, replacements }) => {
-      const document = new DOMParser().parseFromString(source, "text/html");
-      for (const element of document.body.querySelectorAll(
-        "[data-binny-media-index]",
-      )) {
-        const key = Number(element.getAttribute("data-binny-media-index"));
-        const reference = replacements.find(([index]) => index === key)?.[1];
-        if (reference !== undefined) {
-          if (element instanceof HTMLImageElement) {
-            element.setAttribute("src", reference);
-            // 移除源站自适应候选，避免浏览器绕过已归档的 src 再次取图。
-            element.removeAttribute("srcset");
-            element
-              .closest("picture")
-              ?.querySelectorAll("source[srcset]")
-              .forEach((source) => source.removeAttribute("srcset"));
-          } else if (element instanceof HTMLAnchorElement) {
-            element.setAttribute("href", reference);
-            if (element.hasAttribute("data-download-href")) {
-              element.setAttribute("data-download-href", reference);
-            }
-          }
-        }
-        element.removeAttribute("data-binny-media-index");
-      }
-      return {
-        html: document.body.innerHTML,
-        text: (document.body.textContent ?? "").replace(/\s+/gu, " ").trim(),
-      };
-    },
-    { source: html, replacements: [...references.entries()] },
-  );
-}
-
 async function downloadMedia(
   page: Page,
   request: APIRequestContext,
-  kind: MediaCandidate["kind"],
+  kind: "inline-image" | "attachment" | "image",
   url: string,
   siteOrigin: URL,
   context: SourceAdapterContext,
@@ -3413,12 +3302,22 @@ async function downloadMedia(
         "*/*",
         "base64",
         undefined,
-        (value) =>
-          mediaProblem(
-            kind,
-            value.contentType,
-            Buffer.from(value.body, "base64").byteLength,
-          ) === undefined,
+        (value) => {
+          const bodyBytes = Buffer.from(value.body, "base64");
+          const contentType = value.contentType;
+          const isText =
+            contentType.includes("html") || contentType.includes("json");
+          const bodyText = isText ? bodyBytes.toString("utf8") : undefined;
+          return (
+            mediaProblem(
+              kind,
+              mediaUrl.href,
+              contentType,
+              bodyBytes.byteLength,
+              bodyText,
+            ) === undefined
+          );
+        },
         "media",
       );
       status = response.status;
@@ -3468,7 +3367,18 @@ async function downloadMedia(
       .split(";", 1)[0]
       ?.trim()
       .toLowerCase() ?? "application/octet-stream";
-  const problem = mediaProblem(kind, mediaType, body.byteLength);
+  const isText =
+    mediaType.includes("html") ||
+    mediaType.includes("json") ||
+    mediaType.startsWith("text/");
+  const bodyText = isText ? new TextDecoder().decode(body) : undefined;
+  const problem = mediaProblem(
+    kind,
+    mediaUrl.href,
+    mediaType,
+    body.byteLength,
+    bodyText,
+  );
   if (problem !== undefined) return { ok: false, reason: problem };
 
   const upload = await context.resources.upload(
@@ -3481,21 +3391,24 @@ async function downloadMedia(
 }
 
 function mediaProblem(
-  kind: MediaCandidate["kind"],
+  kind: "inline-image" | "attachment" | "image",
+  url: string,
   contentType: string,
   byteLength: number,
+  bodyText?: string,
 ): string | undefined {
-  const mediaType = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  if (
-    mediaType === "text/html" ||
-    mediaType === "application/xhtml+xml" ||
-    (kind === "image" &&
-      (mediaType.startsWith("text/") ||
-        mediaType === "application/json" ||
-        mediaType.endsWith("+json")))
-  )
-    return "媒体端点返回了页面或结构化内容，未取得媒体字节。";
   if (byteLength === 0) return "媒体端点返回了空文件。";
+  const validation = validateMediaResponse(
+    {
+      url,
+      kind: kind === "image" ? "inline-image" : kind,
+    },
+    contentType,
+    bodyText,
+  );
+  if (!validation.ok) {
+    return validation.reason ?? "媒体响应不符合要求。";
+  }
   return undefined;
 }
 
@@ -3587,6 +3500,15 @@ export async function archivePost(
         const state = {
           sourceKey: archivedOp.sourceKey,
           ...archivedOp.state,
+          ...(archivedOp.state.body
+            ? {
+                body: {
+                  markdown: archivedOp.state.body.markdown,
+                  text: archivedOp.state.body.text,
+                  searchText: archivedOp.state.body.searchText,
+                },
+              }
+            : {}),
           ...(itemDiagnostics.length > 0
             ? { diagnostics: itemDiagnostics }
             : {}),
@@ -3598,8 +3520,25 @@ export async function archivePost(
     }
   }
 
-  const prepared = await prepareCookedBody(page, post.cooked ?? "");
-  const references = new Map<number, string>();
+  const cleaned = cleanContent(post.cooked ?? "", {
+    format: "html",
+    baseUrl: siteOrigin.href,
+  });
+
+  let imageNumber = 0;
+  let attachmentNumber = 0;
+  const mediaCandidates: MediaCandidate[] = cleaned.media.map((candidate) => {
+    const isImage = candidate.kind === "inline-image";
+    const path = isImage
+      ? `body.images[${String(imageNumber++)}]`
+      : `body.attachments[${String(attachmentNumber++)}]`;
+    return {
+      candidate,
+      kind: isImage ? "inline-image" : "attachment",
+      path,
+    };
+  });
+
   const resources: ArchiveResourceMetadata[] = [];
   const missing: { path: string; reason: string }[] = [];
   const recordedMedia: { url: string; resourceId: string }[] = [];
@@ -3607,8 +3546,8 @@ export async function archivePost(
   // Pre-resolve immutable Discourse media URLs that are not yet cached
   const immutableCandidateUrls = [
     ...new Set(
-      prepared.media
-        .map((candidate) => {
+      mediaCandidates
+        .map(({ candidate }) => {
           try {
             return new URL(candidate.url, siteOrigin).href;
           } catch {
@@ -3642,7 +3581,7 @@ export async function archivePost(
   }
 
   const downloads = await Promise.all(
-    prepared.media.map(async (candidate) => {
+    mediaCandidates.map(async ({ candidate, kind, path }) => {
       let mediaUrl = candidate.url;
       try {
         mediaUrl = new URL(candidate.url, siteOrigin).href;
@@ -3654,21 +3593,24 @@ export async function archivePost(
         pending = downloadMedia(
           page,
           request,
-          candidate.kind,
+          kind,
           mediaUrl,
           siteOrigin,
           context,
         );
         mediaCache.set(mediaUrl, pending);
       }
-      return { candidate, mediaUrl, downloaded: await pending };
+      return { candidate, path, mediaUrl, downloaded: await pending };
     }),
   );
-  for (const { candidate, mediaUrl, downloaded } of downloads) {
+
+  const mediaRewrites: Record<string, ArchiveResourceMetadata> = {};
+
+  for (const { candidate, path, mediaUrl, downloaded } of downloads) {
     if (downloaded.ok) {
-      const mediaPart = archivedMedia(downloaded.resource);
-      references.set(candidate.index, mediaPart.reference);
       resources.push(downloaded.resource);
+      mediaRewrites[candidate.url] = downloaded.resource;
+      mediaRewrites[mediaUrl] = downloaded.resource;
       recordedMedia.push({
         url: mediaUrl,
         resourceId: downloaded.resource.resourceId,
@@ -3676,7 +3618,7 @@ export async function archivePost(
     } else {
       // 缺失原因属于版本状态；具体响应差异只记在本次观察诊断中。
       missing.push({
-        path: candidate.path,
+        path,
         reason: "媒体资源未能归档。",
       });
       itemDiagnostics.push({
@@ -3685,7 +3627,7 @@ export async function archivePost(
         details: {
           topicId: topic.id,
           postId: post.id,
-          path: candidate.path,
+          path,
           reason: downloaded.reason,
         },
         suggestion: "检查媒体端点响应后重新运行 collect。",
@@ -3695,11 +3637,17 @@ export async function archivePost(
 
   if ((post.cooked ?? "").trim().length === 0) {
     missing.push({
-      path: "body.html",
+      path: "body.markdown",
       reason: "帖子没有返回可归档的 cooked 正文。",
     });
   }
-  const body = await rewriteCookedBody(page, prepared.html, references);
+
+  const body = cleanContent(post.cooked ?? "", {
+    format: "html",
+    baseUrl: siteOrigin.href,
+    mediaRewrites,
+  });
+
   const searchText = [
     post.post_number === 1 ? topic.title?.trim() : undefined,
     body.text.trim(),
@@ -3742,7 +3690,7 @@ export async function archivePost(
           }
         : {}),
     },
-    body: { html: body.html, text: body.text, searchText },
+    body: { markdown: body.markdown, text: body.text, searchText },
     resources: [...archiveResourceManifest(resources)],
     capture: {
       scope: {

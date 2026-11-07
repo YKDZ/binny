@@ -1905,7 +1905,12 @@ async function collectLinuxdoOnSchedule(
           readonly binId: string;
           readonly revisionId: string;
           readonly runId?: string;
-          readonly state: { readonly body?: { readonly html?: string } };
+          readonly state: {
+            readonly body?: {
+              readonly html?: string;
+              readonly markdown?: string;
+            };
+          };
         }[];
       }>(
         await cli(baseUrl, ["archive", "item", rootItemId, "--bin", binId]),
@@ -1916,7 +1921,7 @@ async function collectLinuxdoOnSchedule(
     (view) =>
       view?.runId !== undefined &&
       view.runId !== previousRunId &&
-      (view.state.body?.html ?? "").includes("主题正文版本 2"),
+      (view.state.body?.markdown ?? "").includes("主题正文版本 2"),
     "计划采集提交 Linux.do 主题更新",
   );
   assert.ok(currentRoot !== undefined);
@@ -2091,7 +2096,10 @@ async function verifyLinuxdoArchiveJourney(
       readonly binId: string;
       readonly revisionId: string;
       readonly state: {
-        readonly body?: { readonly html?: string };
+        readonly body?: {
+          readonly html?: string;
+          readonly markdown?: string;
+        };
         readonly resources?: readonly { readonly resourceId: string }[];
         readonly capture: {
           readonly completeness: "complete" | "partial";
@@ -2144,14 +2152,18 @@ async function verifyLinuxdoArchiveJourney(
     readonly revisionId: string;
     readonly itemId: string;
     readonly state: {
-      readonly body?: { readonly html?: string };
+      readonly body?: {
+        readonly html?: string;
+        readonly markdown?: string;
+      };
       readonly resources?: readonly { readonly resourceId: string }[];
       readonly capture: { readonly completeness: string };
     };
   }>(await cliForLinuxdo(["archive", "revision", firstRevisionId]), "found");
   assert.equal(firstRevision.itemId, rootItemId);
   assert.equal(firstRevision.state.capture.completeness, "complete");
-  assert.match(firstRevision.state.body?.html ?? "", /主题正文版本 1/u);
+  assert.equal(firstRevision.state.body?.html, undefined);
+  assert.match(firstRevision.state.body?.markdown ?? "", /主题正文版本 1/u);
   const firstResourceIds =
     firstRevision.state.resources?.map(({ resourceId }) => resourceId) ?? [];
   assert.ok(firstResourceIds.length === 3);
