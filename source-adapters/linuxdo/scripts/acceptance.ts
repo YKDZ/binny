@@ -158,6 +158,7 @@ type ArchiveItemState = {
   readonly metadata?: Record<string, unknown>;
   readonly body?: {
     readonly html?: string;
+    readonly markdown?: string;
     readonly text?: string;
     readonly searchText?: string;
   };
@@ -2042,7 +2043,7 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
     dateCooldownSnapshot.sourceStateSnapshot.sourceAccess;
   assert.equal(dateCooldownUntil.status, "available");
   assert.ok(dateCooldownUntil.groups.linuxdo?.cooldownUntil !== undefined);
-  const dateCooldownAt = dateCooldownUntil.groups.linuxdo!.cooldownUntil!;
+  const dateCooldownAt = dateCooldownUntil.groups.linuxdo.cooldownUntil;
   const eventsBeforeDateFollowUp = await sourceState();
   const dateLimitedFollowUp = await trigger("check", { topicId: 2401 });
   assert.equal(dateLimitedFollowUp.status, "completed");
@@ -2896,7 +2897,8 @@ async function verifyTopicArchive(
     rootState.metadata?.author && typeof rootState.metadata.author,
     "object",
   );
-  assert.ok(rootState.body?.html?.includes("binny://resource/"));
+  assert.equal(rootState.body?.html, undefined);
+  assert.ok(rootState.body?.markdown?.includes("binny://resource/"));
   assert.equal(rootState.resources?.length, 3);
   const storedResources = await Promise.all(
     (rootState.resources ?? []).map(({ resourceId }) =>
@@ -2914,10 +2916,10 @@ async function verifyTopicArchive(
   const pdfResource = rootState.resources?.[pdfResourceIndex];
   assert.ok(pdfResource !== undefined);
   assert.ok(
-    rootState.body?.html?.includes(
-      `href="binny://resource/${pdfResource.resourceId}"`,
+    rootState.body?.markdown?.includes(
+      `binny://resource/${pdfResource.resourceId}`,
     ),
-    rootState.body?.html,
+    rootState.body?.markdown,
   );
   const jsonResourceIndex = resourceTypes.indexOf("application/json");
   assert.ok(jsonResourceIndex >= 0);
@@ -2930,39 +2932,30 @@ async function verifyTopicArchive(
     { topic: "linuxdo-fixture" },
   );
   assert.ok(
-    rootState.body?.html?.includes(
-      `href="binny://resource/${jsonResource.resourceId}"`,
+    rootState.body?.markdown?.includes(
+      `binny://resource/${jsonResource.resourceId}`,
     ),
-    rootState.body?.html,
+    rootState.body?.markdown,
   );
   const imageResourceIndex = resourceTypes.indexOf("image/png");
   assert.ok(imageResourceIndex >= 0);
   const imageResource = rootState.resources?.[imageResourceIndex];
   assert.ok(imageResource !== undefined);
   assert.ok(
-    rootState.body?.html?.includes(
-      `src="binny://resource/${imageResource.resourceId}"`,
+    rootState.body?.markdown?.includes(
+      `![主题封面](binny://resource/${imageResource.resourceId})`,
     ),
-    rootState.body?.html,
+    rootState.body?.markdown,
+  );
+  assert.ok(!rootState.body?.markdown?.includes("topic-photo-download-hash"));
+  assert.ok(
+    !rootState.body?.markdown?.includes("srcset="),
+    rootState.body?.markdown,
   );
   assert.ok(
-    rootState.body?.html?.includes(
-      `href="binny://resource/${imageResource.resourceId}"`,
-    ),
-    rootState.body?.html,
-  );
-  assert.ok(
-    rootState.body?.html?.includes(
-      `data-download-href="binny://resource/${imageResource.resourceId}"`,
-    ),
-    rootState.body?.html,
-  );
-  assert.ok(!rootState.body?.html?.includes("topic-photo-download-hash"));
-  assert.ok(!rootState.body?.html?.includes("srcset="), rootState.body?.html);
-  assert.ok(
-    !rootState.body?.html?.includes("topic-photo-small.webp") &&
-      !rootState.body?.html?.includes("topic-photo-large.webp"),
-    rootState.body?.html,
+    !rootState.body?.markdown?.includes("topic-photo-small.webp") &&
+      !rootState.body?.markdown?.includes("topic-photo-large.webp"),
+    rootState.body?.markdown,
   );
   assert.ok(
     firstCollection.result?.output?.completedScopes?.includes("topic:2401"),
@@ -3166,10 +3159,10 @@ async function verifyTopicArchive(
     ),
   );
   assert.ok(
-    challengedRootState.body?.html?.includes(
-      'src="/uploads/default/original/2X/topic-photo.png"',
+    challengedRootState.body?.markdown?.includes(
+      "/uploads/default/original/2X/topic-photo.png",
     ),
-    challengedRootState.body?.html,
+    challengedRootState.body?.markdown,
   );
   const challengedRevisionCount = challengedRoot.revisions.length;
   await updateFixtureState({ unavailableMedia: [] });
@@ -3189,12 +3182,16 @@ async function verifyTopicArchive(
     ),
   );
   assert.equal(backfilledRootState.resources?.length, 3);
-  assert.ok(backfilledRootState.body?.html?.includes('src="binny://resource/'));
   assert.ok(
-    !backfilledRootState.body?.html?.includes(
-      'src="/uploads/default/original/2X/topic-photo.png"',
+    backfilledRootState.body?.markdown?.includes(
+      "![主题封面](binny://resource/",
     ),
-    backfilledRootState.body?.html,
+  );
+  assert.ok(
+    !backfilledRootState.body?.markdown?.includes(
+      "/uploads/default/original/2X/topic-photo.png",
+    ),
+    backfilledRootState.body?.markdown,
   );
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
   await updateFixtureState({
@@ -3215,7 +3212,9 @@ async function verifyTopicArchive(
     const recovered = binState(await readArchiveItem(root.itemId));
     assert.equal(recovered.capture.completeness, "complete");
     assert.equal(recovered.resources?.length, 3);
-    assert.ok(recovered.body?.html?.includes('src="binny://resource/'));
+    assert.ok(
+      recovered.body?.markdown?.includes("![主题封面](binny://resource/"),
+    );
     await updateFixtureState({
       nativeChallengeMedia: true,
       nativeChallengeNavigationDelayMs: 35_000,
@@ -4624,7 +4623,7 @@ async function verifySyncWorkerInterruption(
     );
     assert.ok(
       Date.parse(resumedReport.upperBound) >
-        Date.parse(resumedReport.scopes[0]!.range!.from),
+        Date.parse(resumedReport.scopes[0].range.from),
     );
     const oldRunAfterResume = cliData<ManualRun>(
       await cli([
@@ -4681,7 +4680,7 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     const snapshot = (await readBinRuntime("binny-discovery-topic"))
       .sourceStateSnapshot.sync;
     assert.ok(typeof snapshot === "object" && snapshot !== null);
-    return snapshot as SyncState;
+    return snapshot;
   };
   const findScope = (state: SyncState, id: number) =>
     state.scopes?.find(
@@ -7422,6 +7421,7 @@ async function main(): Promise<void> {
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,
+      { cause: error },
     );
   } finally {
     await viewerBrowser?.close().catch(() => undefined);

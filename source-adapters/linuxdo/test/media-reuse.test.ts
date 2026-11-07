@@ -97,7 +97,8 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
         },
       },
       body: {
-        html: '<p>主帖正文内容：<img src="binny://resource/00000000-0000-0000-0000-000000000001"></p>',
+        markdown:
+          "主帖正文内容：![封面](binny://resource/00000000-0000-0000-0000-000000000001)",
         text: "主帖正文内容",
         searchText: "Linux.do 架构探讨\n主帖正文内容",
       },
@@ -270,7 +271,7 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
         },
       },
       body: {
-        html: `<p>旧主帖正文：<img src="binny://resource/${verifiedResource.resourceId}"></p>`,
+        markdown: `旧主帖正文：![封面](binny://resource/${verifiedResource.resourceId})`,
         text: "旧主帖正文",
         searchText: "测试主题\n旧主帖正文",
       },
@@ -374,6 +375,15 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
   assert.equal(mockPage.evaluateCount(), 0);
   assert.equal(result.complete, true);
   assert.equal(result.state.sourceKey.key, "post:2001");
+  assert.equal(
+    (result.state.body as { html?: string } | undefined)?.html,
+    undefined,
+  );
+  assert.ok(
+    result.state.body?.markdown?.includes(
+      `binny://resource/${verifiedResource.resourceId}`,
+    ),
+  );
   assert.deepEqual(result.state.resources, [
     { resourceId: verifiedResource.resourceId },
   ]);
@@ -478,11 +488,15 @@ void test("Immutable 40-hex SHA-1 Discourse upload URLs reuse Core-verified Arch
   assert.equal(sourceDownloadCount, 0);
   assert.equal(uploadCount, 0);
   assert.equal(result.complete, true);
+  assert.equal(
+    (result.state.body as { html?: string } | undefined)?.html,
+    undefined,
+  );
   assert.deepEqual(result.state.resources, [
     { resourceId: verifiedResource.resourceId },
   ]);
   assert.ok(
-    result.state.body?.html?.includes(
+    result.state.body?.markdown?.includes(
       `binny://resource/${verifiedResource.resourceId}`,
     ),
   );
@@ -598,11 +612,15 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
   assert.equal(sourceDownloadCount, 1);
   assert.equal(uploadCount, 1);
   assert.equal(result.complete, true);
+  assert.equal(
+    (result.state.body as { html?: string } | undefined)?.html,
+    undefined,
+  );
   assert.deepEqual(result.state.resources, [
     { resourceId: uploadedResource.resourceId },
   ]);
   assert.ok(
-    result.state.body?.html?.includes(
+    result.state.body?.markdown?.includes(
       `binny://resource/${uploadedResource.resourceId}`,
     ),
   );
@@ -716,6 +734,15 @@ void test("When Core reports resource is missing or disk file unavailable, adapt
   assert.equal(sourceDownloadCount, 1);
   assert.equal(uploadCount, 1);
   assert.equal(result.complete, true);
+  assert.equal(
+    (result.state.body as { html?: string } | undefined)?.html,
+    undefined,
+  );
+  assert.ok(
+    result.state.body?.markdown?.includes(
+      `binny://resource/${freshlyUploadedResource.resourceId}`,
+    ),
+  );
   assert.deepEqual(result.state.resources, [
     { resourceId: freshlyUploadedResource.resourceId },
   ]);
@@ -817,6 +844,15 @@ void test("Cross-origin external media downloads via request.get and uploads to 
   assert.equal(requestGetCount, 1);
   assert.equal(uploadCount, 1);
   assert.equal(result.complete, true);
+  assert.equal(
+    (result.state.body as { html?: string } | undefined)?.html,
+    undefined,
+  );
+  assert.ok(
+    result.state.body?.markdown?.includes(
+      `binny://resource/${uploadedResource.resourceId}`,
+    ),
+  );
   assert.deepEqual(result.state.resources, [
     { resourceId: uploadedResource.resourceId },
   ]);
