@@ -951,7 +951,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   assert.equal(resolveResult.items[0]?.state.capture.completeness, "complete");
   assert.equal(
     resolveResult.items[0]?.resourceMetadata[0]?.resourceId,
-    first.resourceId,
+    replacement.resourceId,
   );
   assert.equal(
     resolveResult.mediaByUrl[mediaTestUrl]?.resourceId,
