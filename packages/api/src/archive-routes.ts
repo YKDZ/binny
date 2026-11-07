@@ -5,6 +5,8 @@ import {
   archiveItemReadSchema,
   archiveItemDeletionResultSchema,
   archiveResourceMetadataSchema,
+  archiveResourceResolveInputSchema,
+  archiveResourceResolveResultSchema,
   archiveItemReadQuerySchema,
   archiveRelationPageSchema,
   archiveRelationReadQuerySchema,
@@ -80,6 +82,58 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
       }
       return c.json(result.value, 201);
     })
+    .post(
+      "/resources/resolve",
+      zValidator("json", archiveResourceResolveInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.resolveArchiveResources(
+          c.req.valid("json"),
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/archives/resources/resolve",
+      zValidator("json", archiveResourceResolveInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.resolveArchiveResources(
+          c.req.valid("json"),
+        );
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 404:
+              return c.json({ error: result.error }, 404);
+            case 409:
+              return c.json({ error: result.error }, 409);
+            case 503:
+              return c.json({ error: result.error }, 503);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
     .get(
       "/resources/:resourceId",
       zValidator(
@@ -452,6 +506,8 @@ export const archiveApiSchemas: {
   readonly revision: Record<string, unknown>;
   readonly revisionDiff: Record<string, unknown>;
   readonly resource: Record<string, unknown>;
+  readonly resourceResolveInput: Record<string, unknown>;
+  readonly resourceResolveResult: Record<string, unknown>;
   readonly deletionResult: Record<string, unknown>;
   readonly timeline: Record<string, unknown>;
   readonly relationPage: Record<string, unknown>;
@@ -473,6 +529,14 @@ export const archiveApiSchemas: {
   revision: toArchiveJsonSchema(archiveRevisionReadSchema, "output"),
   revisionDiff: toArchiveJsonSchema(archiveRevisionDiffSchema, "output"),
   resource: toArchiveJsonSchema(archiveResourceMetadataSchema, "output"),
+  resourceResolveInput: toArchiveJsonSchema(
+    archiveResourceResolveInputSchema,
+    "input",
+  ),
+  resourceResolveResult: toArchiveJsonSchema(
+    archiveResourceResolveResultSchema,
+    "output",
+  ),
   deletionResult: toArchiveJsonSchema(
     archiveItemDeletionResultSchema,
     "output",

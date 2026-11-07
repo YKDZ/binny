@@ -147,6 +147,9 @@ void test("RSS/Atom 正文、静态补采和部分成果由正式动作提交", 
       },
     },
     resources: {
+      async resolve() {
+        return { resources: [], items: [], mediaByUrl: {} };
+      },
       async upload(body, mediaType) {
         const bytes = await new Response(body).arrayBuffer();
         const resource = {

@@ -24,6 +24,12 @@ import { z } from "zod";
 
 import { ChallengeRecovery } from "#/challenge-recovery";
 
+import {
+  hashContent,
+  isDiscourseImmutableMediaUrl,
+  isOpUnchanged,
+} from "./media-reuse.ts";
+
 const challengeRecoverySchema = z.strictObject({
   rounds: z.int().nonnegative(),
   elapsedMs: z.int().nonnegative(),
@@ -495,6 +501,7 @@ const discoursePostSchema = z.looseObject({
   name: z.string().nullable().optional(),
   created_at: z.string().optional(),
   updated_at: z.string().optional(),
+  version: z.number().int().optional(),
   reply_to_post_number: discourseReplyPostNumberSchema,
   reply_count: z.int().nonnegative().optional(),
 });
@@ -924,6 +931,35 @@ const checkBasis =
 const postBatchSize = 100;
 const pageRecovery = new WeakMap<Page, ChallengeRecovery>();
 const pageSourceAccess = new WeakMap<Page, PageSourceAccess>();
+
+export function bindPageSourceAccessForTest(
+  page: Page,
+  origin = "https://linux.do",
+): void {
+  pageSourceAccess.set(page, {
+    client: {
+      withAdmission: async (_request: unknown, op: () => Promise<unknown>) =>
+        await op(),
+      observeResponse: async () => ({
+        observedAtEpochMs: Date.now(),
+        outcome: "cooled" as const,
+      }),
+      snapshot: () => emptySourceAccessReport(),
+    } as unknown as NonNullable<SourceAdapterContext["sourceAccess"]>,
+    signal: new AbortController().signal,
+    siteOrigin: origin,
+    events: {
+      total: 0,
+      get: 0,
+      nonGet: 0,
+      sameOriginGet: 0,
+      otherOriginGet: 0,
+      byResourceType: { document: 0, fetch: 0, xhr: 0, other: 0 },
+    },
+    rateLimitResponses: [],
+    publish: () => Promise.resolve(),
+  });
+}
 
 type PageRequestEvents = {
   total: number;
@@ -3497,7 +3533,7 @@ function postDiagnostics(
   return diagnostics;
 }
 
-async function archivePost(
+export async function archivePost(
   page: Page,
   request: APIRequestContext,
   context: SourceAdapterContext,
@@ -3508,16 +3544,102 @@ async function archivePost(
   diagnostics: ReturnType<typeof postDiagnostics>,
   mediaCache: Map<string, Promise<MediaDownload>>,
 ) {
-  const prepared = await prepareCookedBody(page, post.cooked ?? "");
-  const references = new Map<number, string>();
-  const resources: ArchiveResourceMetadata[] = [];
-  const missing: { path: string; reason: string }[] = [];
   const itemDiagnostics: {
     readonly code: string;
     readonly message: string;
     readonly details?: Record<string, unknown>;
     readonly suggestion?: string;
   }[] = post.post_number === 1 ? [...diagnostics] : [];
+
+  // Check whether unchanged OP context can be reused directly without re-downloading media
+  if (post.post_number === 1) {
+    try {
+      const opKey = sourceKey(siteNamespace, post.id);
+      const resolved = await context.resources.resolve({
+        binId: context.binId,
+        sourceKeys: [opKey],
+      });
+      const archivedOp = resolved.items.find(
+        (item) =>
+          item.sourceKey.namespace === opKey.namespace &&
+          item.sourceKey.key === opKey.key,
+      );
+      if (archivedOp && isOpUnchanged(topic, post, archivedOp, modifiedAt)) {
+        for (const meta of archivedOp.resourceMetadata) {
+          const mediaList = archivedOp.state.metadata?.media;
+          if (Array.isArray(mediaList)) {
+            for (const entry of mediaList) {
+              if (
+                typeof entry === "object" &&
+                entry !== null &&
+                typeof entry.url === "string" &&
+                entry.resourceId === meta.resourceId
+              ) {
+                mediaCache.set(
+                  entry.url,
+                  Promise.resolve({ ok: true, resource: meta }),
+                );
+              }
+            }
+          }
+        }
+
+        const state = {
+          sourceKey: archivedOp.sourceKey,
+          ...archivedOp.state,
+          ...(itemDiagnostics.length > 0
+            ? { diagnostics: itemDiagnostics }
+            : {}),
+        };
+        return { state, complete: true };
+      }
+    } catch {
+      // Fall back to normal processing on resolution failure.
+    }
+  }
+
+  const prepared = await prepareCookedBody(page, post.cooked ?? "");
+  const references = new Map<number, string>();
+  const resources: ArchiveResourceMetadata[] = [];
+  const missing: { path: string; reason: string }[] = [];
+  const recordedMedia: { url: string; resourceId: string }[] = [];
+
+  // Pre-resolve immutable Discourse media URLs that are not yet cached
+  const immutableCandidateUrls = [
+    ...new Set(
+      prepared.media
+        .map((candidate) => {
+          try {
+            return new URL(candidate.url, siteOrigin).href;
+          } catch {
+            return undefined;
+          }
+        })
+        .filter(
+          (url): url is string =>
+            url !== undefined &&
+            isDiscourseImmutableMediaUrl(url, siteOrigin) &&
+            !mediaCache.has(url),
+        ),
+    ),
+  ];
+
+  if (immutableCandidateUrls.length > 0) {
+    try {
+      const resolved = await context.resources.resolve({
+        binId: context.binId,
+        immutableMediaUrls: immutableCandidateUrls.map((url) => ({
+          namespace: siteNamespace,
+          url,
+        })),
+      });
+      for (const [url, meta] of Object.entries(resolved.mediaByUrl)) {
+        mediaCache.set(url, Promise.resolve({ ok: true, resource: meta }));
+      }
+    } catch {
+      // Fall back to normal download on resolution failure.
+    }
+  }
 
   const downloads = await Promise.all(
     prepared.media.map(async (candidate) => {
@@ -3539,14 +3661,18 @@ async function archivePost(
         );
         mediaCache.set(mediaUrl, pending);
       }
-      return { candidate, downloaded: await pending };
+      return { candidate, mediaUrl, downloaded: await pending };
     }),
   );
-  for (const { candidate, downloaded } of downloads) {
+  for (const { candidate, mediaUrl, downloaded } of downloads) {
     if (downloaded.ok) {
       const mediaPart = archivedMedia(downloaded.resource);
       references.set(candidate.index, mediaPart.reference);
       resources.push(downloaded.resource);
+      recordedMedia.push({
+        url: mediaUrl,
+        resourceId: downloaded.resource.resourceId,
+      });
     } else {
       // 缺失原因属于版本状态；具体响应差异只记在本次观察诊断中。
       missing.push({
@@ -3593,6 +3719,11 @@ async function archivePost(
         username: post.username ?? null,
         name: post.name ?? null,
       },
+      ...(post.version !== undefined ? { postVersion: post.version } : {}),
+      ...(post.cooked !== undefined && post.cooked !== null
+        ? { cookedHash: hashContent(post.cooked) }
+        : {}),
+      ...(recordedMedia.length > 0 ? { media: recordedMedia } : {}),
       ...(post.created_at === undefined ? {} : { createdAt: post.created_at }),
       ...(post.post_number === 1
         ? {

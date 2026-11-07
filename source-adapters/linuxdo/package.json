@@ -30,6 +30,7 @@
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "test": "node --conditions=source --test",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
     "test:acceptance": "node --conditions=source scripts/acceptance.ts"
   },

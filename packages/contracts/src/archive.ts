@@ -469,6 +469,65 @@ export type ArchiveResourceMetadata = z.infer<
   typeof archiveResourceMetadataSchema
 >;
 
+export const archiveResourceResolveInputSchema = z
+  .object({
+    binId: binIdSchema.optional(),
+    resourceIds: z.array(archiveIdentifierSchema).optional(),
+    sha256s: z.array(archiveSha256Schema).optional(),
+    sourceKeys: z.array(sourceKeySchema).optional(),
+    immutableMediaUrls: z
+      .array(
+        z
+          .object({
+            namespace: nonEmptyText.max(
+              256,
+              "信源命名空间不能超过 256 个字符。",
+            ),
+            url: postgresTextSchema
+              .min(1, "媒体地址不能为空。")
+              .max(4096, "媒体地址不能超过 4096 个字符。"),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict();
+
+export const archiveResourceResolveItemSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      sourceKey: sourceKeySchema,
+      state: archiveItemStateSchema,
+      resourceMetadata: z.array(archiveResourceMetadataSchema),
+    })
+    .strict(),
+);
+
+export const archiveResourceResolveResultSchema =
+  withArchiveJsonSchemaProjection(
+    z
+      .object({
+        resources: z.array(archiveResourceMetadataSchema),
+        items: z.array(archiveResourceResolveItemSchema),
+        mediaByUrl: z.record(postgresTextSchema, archiveResourceMetadataSchema),
+      })
+      .strict(),
+  );
+
+export type ArchiveItemSubmissionInput = ArchiveItemState;
+export type ArchiveResourceResolveInput = z.infer<
+  typeof archiveResourceResolveInputSchema
+>;
+export type ArchiveResourceResolveRequest = z.input<
+  typeof archiveResourceResolveInputSchema
+>;
+export type ArchiveResourceResolveItem = z.infer<
+  typeof archiveResourceResolveItemSchema
+>;
+export type ArchiveResourceResolveResult = z.infer<
+  typeof archiveResourceResolveResultSchema
+>;
+
 // PostgreSQL BIGINT 序号以十进制文本传输，避免超出安全整数范围时舍入。
 export const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
 export const archiveSnapshotSequenceSchema = z
@@ -2022,6 +2081,13 @@ export type ArchiveOperations = {
     body: ReadableStream<Uint8Array>,
     mediaType: string,
   ): Promise<ArchiveOperation<ArchiveResourceMetadata>>;
+  /**
+   * Verify and resolve reusable archived resources, unchanged item states, and immutable media.
+   * Only returns resources that are ready in DB and physically available on storage disk.
+   */
+  resolveArchiveResources(
+    input: ArchiveResourceResolveRequest,
+  ): Promise<ArchiveOperation<ArchiveResourceResolveResult>>;
   getArchiveResource(resourceId: string): Promise<
     ArchiveOperation<{
       readonly metadata: ArchiveResourceMetadata;

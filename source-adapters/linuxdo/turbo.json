@@ -39,6 +39,12 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
+    "test": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$"],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
     "test:acceptance": {
       "passThroughEnv": [
         "BINNY_DISCOVERY_PUBLISHED_HOST",

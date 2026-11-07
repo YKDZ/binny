@@ -34,11 +34,7 @@ import {
   binApiSchemas,
   manualRunApiSchemas,
 } from "../src/routes.ts";
-import {
-  runArchiveCapacityE2E,
-  type CapacityPhase,
-  type CapacityProfile,
-} from "./archive-capacity-e2e.ts";
+import { runArchiveCapacityE2E } from "./archive-capacity-e2e.ts";
 
 const require = createRequire(import.meta.url);
 const Ajv2020 =
@@ -904,6 +900,78 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
   );
 
+  const mediaTestUrl =
+    "https://example.test/uploads/default/original/2X/0123456789abcdef0123456789abcdef01234567.png";
+  await submitArchive(client, {
+    requestId: "e2e:archive:immutable-media-resolve",
+    binId: "binny-runs-one",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: "immutable-media-item" },
+        metadata: {
+          media: [{ url: mediaTestUrl, resourceId: first.resourceId }],
+        },
+        body: { text: "带不可变媒体引用的条目" },
+        resources: [{ resourceId: first.resourceId }],
+        capture: {
+          scope: { case: "immutable-media" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  const resolveResponse = await client.resources.resolve.$post({
+    json: {
+      binId: "binny-runs-one",
+      resourceIds: [first.resourceId, randomUUID()],
+      sha256s: [
+        first.sha256,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+      ],
+      sourceKeys: [
+        { namespace: "e2e", key: "resource-history" },
+        { namespace: "e2e", key: "resource-partial" },
+        { namespace: "e2e", key: "non-existent" },
+      ],
+      immutableMediaUrls: [
+        { namespace: "e2e", url: mediaTestUrl },
+        { namespace: "e2e", url: "https://example.test/not-archived.png" },
+      ],
+    },
+  });
+  assert.equal(resolveResponse.status, 200);
+  const resolveResult = await resolveResponse.json();
+  assert.equal(resolveResult.resources.length, 1);
+  assert.equal(resolveResult.resources[0]?.resourceId, first.resourceId);
+  assert.equal(resolveResult.resources[0]?.sha256, first.sha256);
+  assert.equal(resolveResult.items.length, 1);
+  assert.equal(resolveResult.items[0]?.sourceKey.key, "resource-history");
+  assert.equal(resolveResult.items[0]?.state.capture.completeness, "complete");
+  assert.equal(
+    resolveResult.items[0]?.resourceMetadata[0]?.resourceId,
+    first.resourceId,
+  );
+  assert.equal(
+    resolveResult.mediaByUrl[mediaTestUrl]?.resourceId,
+    first.resourceId,
+  );
+  assert.equal(
+    resolveResult.mediaByUrl["https://example.test/not-archived.png"],
+    undefined,
+  );
+
+  const aliasResolveResponse = await client.archives.resources.resolve.$post({
+    json: {
+      resourceIds: [first.resourceId],
+    },
+  });
+  assert.equal(aliasResolveResponse.status, 200);
+  const aliasResult = await aliasResolveResponse.json();
+  assert.equal(aliasResult.resources.length, 1);
+  assert.equal(aliasResult.resources[0]?.resourceId, first.resourceId);
+
   return {
     resourceId: first.resourceId,
     repairedResourceId: replacement.resourceId,
@@ -1751,9 +1819,9 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     timeline.events
       .map(({ archiveSeq, ordinal }) => [archiveSeq, ordinal] as const)
       .toSorted((left, right) =>
-        BigInt(left[0]!) === BigInt(right[0]!)
-          ? left[1]! - right[1]!
-          : BigInt(left[0]!) < BigInt(right[0]!)
+        BigInt(left[0]) === BigInt(right[0])
+          ? left[1] - right[1]
+          : BigInt(left[0]) < BigInt(right[0])
             ? -1
             : 1,
       ),
@@ -8196,8 +8264,8 @@ async function verifyHardDeleteEntryPoint(
   );
   assert.equal(retainedDeletionGap.length, 1);
   assert.equal(retainedDeletionGap[0]?.status, "deleted");
-  assert.equal("from" in retainedDeletionGap[0]!, false);
-  assert.equal("to" in retainedDeletionGap[0]!, false);
+  assert.equal("from" in retainedDeletionGap[0], false);
+  assert.equal("to" in retainedDeletionGap[0], false);
 
   const secondaryRelation = await readArchiveRelations(client, owner.itemId, {
     direction: "outgoing",
@@ -9014,6 +9082,16 @@ async function verifyArchivePersistence(
     );
   }
 
+  const orphanResolveResponse = await client.resources.resolve.$post({
+    json: {
+      binId: "binny-runs-one",
+      resourceIds: [archive.orphanResourceId],
+    },
+  });
+  assert.equal(orphanResolveResponse.status, 200);
+  const orphanResolveResult = await orphanResolveResponse.json();
+  assert.equal(orphanResolveResult.resources.length, 0);
+
   const sdkItem = await readArchiveItem(client, sdkResource.itemId);
   assert.equal(sdkItem.views[0]?.revisionId, sdkResource.revisionId);
   assert.deepEqual(sdkItem.views[0]?.state.resources, [
@@ -9183,11 +9261,7 @@ async function main(): Promise<void> {
     ) {
       throw new Error("容量验收阶段必须为 all、seed、verify 或 delete。");
     }
-    const report = await runArchiveCapacityE2E(
-      baseUrl,
-      profile as CapacityProfile,
-      phase as CapacityPhase,
-    );
+    const report = await runArchiveCapacityE2E(baseUrl, profile, phase);
     process.stdout.write(JSON.stringify(report));
     return;
   }
