@@ -33,6 +33,12 @@
       "cache": false,
       "tags": ["work:repair"]
     },
+    "test:unit": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "inputs": [],

@@ -1025,6 +1025,8 @@ export function createRuntimeConnectionStore(
           id: binConfigurations.id,
           persistentState: binConfigurations.persistentState,
           sourceAccessState: binConfigurations.sourceAccessState,
+          lastIssuedOwnerGeneration:
+            binConfigurations.lastIssuedOwnerGeneration,
         })
         .from(binConfigurations)
         .where(eq(binConfigurations.id, binId));
@@ -1046,12 +1048,18 @@ export function createRuntimeConnectionStore(
         .from(runtimeConnections)
         .where(eq(runtimeConnections.binId, binId));
 
-      if (
-        existing === undefined ||
-        existing.runtimeId !== checked.data.runtimeId ||
-        existing.ownerGeneration.toString() !== checked.data.ownerGeneration ||
-        existing.disconnected
-      ) {
+      const requestedGeneration = BigInt(checked.data.ownerGeneration);
+      const matchesActiveConnection =
+        existing !== undefined &&
+        !existing.disconnected &&
+        existing.runtimeId === checked.data.runtimeId &&
+        existing.ownerGeneration === requestedGeneration;
+      const isNewlyClaimedOwner =
+        checked.data.ownerGeneration === bin.lastIssuedOwnerGeneration &&
+        (existing === undefined ||
+          requestedGeneration > existing.ownerGeneration);
+
+      if (!matchesActiveConnection && !isNewlyClaimedOwner) {
         return failure(409, {
           code: "runtime_owner_mismatch",
           message: "运行器所有权代际或标识不匹配。",
@@ -1217,7 +1225,11 @@ export function createRuntimeConnectionStore(
 
       return await database.transaction(async (transaction) => {
         const [bin] = await transaction
-          .select({ id: binConfigurations.id })
+          .select({
+            id: binConfigurations.id,
+            lastIssuedOwnerGeneration:
+              binConfigurations.lastIssuedOwnerGeneration,
+          })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
           .for("update");
@@ -1240,13 +1252,18 @@ export function createRuntimeConnectionStore(
           .where(eq(runtimeConnections.binId, binId))
           .for("update");
 
-        if (
-          existing === undefined ||
-          existing.runtimeId !== checked.data.runtimeId ||
-          existing.ownerGeneration.toString() !==
-            checked.data.ownerGeneration ||
-          existing.disconnected
-        ) {
+        const requestedGeneration = BigInt(checked.data.ownerGeneration);
+        const matchesActiveConnection =
+          existing !== undefined &&
+          !existing.disconnected &&
+          existing.runtimeId === checked.data.runtimeId &&
+          existing.ownerGeneration === requestedGeneration;
+        const isNewlyClaimedOwner =
+          checked.data.ownerGeneration === bin.lastIssuedOwnerGeneration &&
+          (existing === undefined ||
+            requestedGeneration > existing.ownerGeneration);
+
+        if (!matchesActiveConnection && !isNewlyClaimedOwner) {
           return failure(409, {
             code: "runtime_owner_mismatch",
             message: "运行器所有权代际或标识不匹配。",
