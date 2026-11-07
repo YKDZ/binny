@@ -238,7 +238,8 @@ export async function resolveArchiveResources(
             const uniqueUrls = [...new Set(urls)];
             const conditions = uniqueUrls.map((url) => {
               const filter = JSON.stringify([{ url }]);
-              return sql`(${archiveRevisions.stateData}->'metadata'->'media' @> ${filter}::jsonb OR ${archiveRevisions.stateData}->'metadata'->'media' ? ${url} OR ${archiveRevisions.stateData}->'capture'->'media' @> ${filter}::jsonb)`;
+              const hrefFilter = JSON.stringify([{ href: url }]);
+              return sql`(${archiveRevisions.stateData}->'metadata'->'media' @> ${filter}::text::jsonb OR ${archiveRevisions.stateData}->'metadata'->'media' @> ${hrefFilter}::text::jsonb OR ${archiveRevisions.stateData}->'metadata'->'media' ? ${url} OR ${archiveRevisions.stateData}->'capture'->'media' @> ${filter}::text::jsonb OR ${archiveRevisions.stateData}->'capture'->'media' @> ${hrefFilter}::text::jsonb)`;
             });
 
             const matchingRevs = await transaction
