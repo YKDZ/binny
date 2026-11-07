@@ -8070,7 +8070,7 @@ async function runRssAcceptance(
   assert.equal(partialState.body?.html, undefined);
   assert.doesNotMatch(
     partialState.body?.markdown ?? "",
-    /binny:\/\/resource\//u,
+    /!\[RSS 封面\]\(binny:\/\/resource\//u,
   );
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-3"');
 
@@ -8093,7 +8093,10 @@ async function runRssAcceptance(
   assert.equal(rssV4.capture.completeness, "complete");
   assert.equal(rssV4.resources?.length, 2);
   assert.equal(rssV4.body?.html, undefined);
-  assert.match(rssV4.body?.markdown ?? "", /binny:\/\/resource\//u);
+  assert.match(
+    rssV4.body?.markdown ?? "",
+    /!\[RSS 封面\]\(binny:\/\/resource\//u,
+  );
   const recoveredResourceBytes = await Promise.all(
     (rssV4.resources ?? []).map(({ resourceId }) =>
       readRssResource(baseUrl, resourceId),
