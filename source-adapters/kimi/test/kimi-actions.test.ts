@@ -15,7 +15,13 @@ import {
   type SourceAdapterRunContext,
 } from "@binny/source-adapter-sdk";
 
-import type { KimiConfig } from "../src/changelog.ts";
+import {
+  configSchema,
+  DEFAULT_KIMI_CHANGELOG_SOURCES,
+  DEFAULT_KIMI_RESEARCH_SOURCES,
+  DEFAULT_KIMI_SOURCES,
+  type KimiConfig,
+} from "../src/index.ts";
 import sourceAdapter from "../src/index.ts";
 
 function createTestContext(
@@ -630,4 +636,717 @@ void test("Kimi platform changelogs source adapter actions and ongoing documents
       assert.equal(submissions.length, 0);
     },
   );
+});
+
+void test("Kimi regional research articles source adapter actions and lifecycle", async (t) => {
+  let cnZhVersion = 1;
+  const requestedPaths: string[] = [];
+  let detailK31Requests = 0;
+  let detailK32Requests = 0;
+
+  const server: Server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const path = url.pathname;
+    requestedPaths.push(path);
+
+    // CN Chinese Blog list
+    if (path === "/cn-zh/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      const extraCard =
+        cnZhVersion >= 2
+          ? `<div class="card">
+               <a href="/cn-zh/blog/kimi-k3-2" class="card-link" aria-label="Kimi K3.2">
+                 <span class="card-title">Kimi K3.2</span>
+                 <span class="card-date">2026-11-05</span>
+               </a>
+             </div>`
+          : "";
+      response.end(`<!doctype html>
+<html>
+<head><title>Kimi 研究</title></head>
+<body>
+  <main>
+    <div class="card">
+      <a href="/cn-zh/blog/kimi-k3-1-pro" class="card-link" aria-label="Kimi K3.1 Pro">
+        <span class="card-title">Kimi K3.1 Pro</span>
+        <span class="card-date">2026.10.25</span>
+      </a>
+    </div>
+    <div class="card">
+      <a href="https://github.com/MoonshotAI/Kimi-Dev" class="card-link">
+        <span class="card-title">Kimi-Dev</span>
+        <span class="card-date">2025-06-17</span>
+      </a>
+    </div>
+    <div class="card">
+      <a href="https://huggingface.co/moonshotai/Kimi-K2-Instruct-0905" class="card-link">
+        <span class="card-title">Kimi-K2-Instruct-0905</span>
+        <span class="card-date">2025-09-05</span>
+      </a>
+    </div>
+    <div class="card">
+      <a href="https://moonshotai.github.io/Kimi-Researcher/" class="card-link">
+        <span class="card-title">Kimi-Researcher</span>
+        <span class="card-date">2025-06-20</span>
+      </a>
+    </div>
+    ${extraCard}
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // CN English Blog list
+    if (path === "/cn-en/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head><title>Kimi Research</title></head>
+<body>
+  <main>
+    <div class="card">
+      <a href="/cn-en/blog/kimi-k3-1-pro" class="card-link" aria-label="Kimi K3.1 Pro">
+        <span class="card-title">Kimi K3.1 Pro</span>
+        <span class="card-date">2026-10-25</span>
+      </a>
+    </div>
+    <div class="card">
+      <a href="https://github.com/MoonshotAI/Kimi-Dev" class="card-link">
+        <span class="card-title">Kimi-Dev</span>
+        <span class="card-date">2025-06-17</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // International Blog list
+    if (path === "/int/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head><title>Moonshot AI Research</title></head>
+<body>
+  <main>
+    <div class="card">
+      <a href="/int/blog/kimi-k3-1-pro" class="card-link" aria-label="Kimi K3.1 Pro">
+        <span class="card-title">Kimi K3.1 Pro</span>
+        <span class="card-date">2026-10-25</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // CN Chinese article detail
+    if (path === "/cn-zh/blog/kimi-k3-1-pro") {
+      detailK31Requests++;
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head>
+  <title>Kimi K3.1 Pro | Kimi</title>
+  <link rel="canonical" href="https://www.kimi.ai/blog/kimi-k3-1-pro" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "Kimi K3.1 Pro 技术博客",
+    "dateModified": "2026-10-28"
+  }
+  </script>
+</head>
+<body>
+  <header>Global Header</header>
+  <nav class="lang-switch"><a href="/cn-en/blog">English</a></nav>
+  <main>
+    <div class="BlogV2MiniNav-module__miniNav">Mini Nav</div>
+    <h1>Kimi K3.1 Pro 技术博客</h1>
+    <p>Kimi K3.1 Pro 是我们最新的 3T 级开源权重模型，支持 100 万 token 上下文。</p>
+    <p>相关链接：<a href="https://github.com/ashemag/human-atlas">Human Atlas</a>、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017">DeepSeek 比较</a> 与 <a href="https://www.swe-marathon.org/">SWE Marathon 评测</a>。</p>
+  </main>
+  <footer>Global Footer</footer>
+</body>
+</html>`);
+      return;
+    }
+
+    // CN English article detail
+    if (path === "/cn-en/blog/kimi-k3-1-pro") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head>
+  <title>Kimi K3.1 Pro English | Kimi</title>
+  <link rel="canonical" href="https://www.kimi.ai/blog/kimi-k3-1-pro" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "Kimi K3.1 Pro Technical Blog",
+    "dateModified": "2026-10-28"
+  }
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Kimi K3.1 Pro Technical Blog</h1>
+    <p>English article on CN site with 1M token context.</p>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // International article detail
+    if (path === "/int/blog/kimi-k3-1-pro") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head>
+  <title>Moonshot AI Kimi K3.1 Pro | Moonshot AI</title>
+  <link rel="canonical" href="https://www.kimi.ai/blog/kimi-k3-1-pro" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "Moonshot AI Kimi K3.1 Pro",
+    "dateModified": "2026-10-28"
+  }
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Moonshot AI Kimi K3.1 Pro</h1>
+    <p>International article on kimi.ai with global availability.</p>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // Article 2 for sync tests
+    if (path === "/cn-zh/blog/kimi-k3-2") {
+      detailK32Requests++;
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html>
+<html>
+<head>
+  <title>Kimi K3.2 | Kimi</title>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": "Kimi K3.2 发布",
+    "dateModified": "2026-11-06"
+  }
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Kimi K3.2 发布</h1>
+    <p>进一步提升多模态与数学推理能力。</p>
+  </main>
+</body>
+</html>`);
+      return;
+    }
+
+    // Failure routes
+    if (path === "/fail/500/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(
+        `<!doctype html><html><body><main><div class="card"><a href="/fail/500/blog/kimi-500"><span class="card-title">Fail 500</span></a></div></main></body></html>`,
+      );
+      return;
+    }
+
+    if (path === "/fail/500/blog/kimi-500") {
+      response.writeHead(500, { "content-type": "text/plain" });
+      response.end("Internal Server Error");
+      return;
+    }
+
+    if (path === "/fail/spa/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(
+        `<!doctype html><html><body><main><div class="card"><a href="/fail/spa/blog/kimi-spa"><span class="card-title">Fail SPA</span></a></div></main></body></html>`,
+      );
+      return;
+    }
+
+    if (path === "/fail/spa/blog/kimi-spa") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(
+        `<!doctype html><html><head><title>SPA</title></head><body><div id="root"></div></body></html>`,
+      );
+      return;
+    }
+
+    if (path === "/fail/empty/blog") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      response.end(`<!doctype html><html><body><main></main></body></html>`);
+      return;
+    }
+
+    if (path === "/fail/404/blog") {
+      response.writeHead(404, { "content-type": "text/plain" });
+      response.end("Not Found");
+      return;
+    }
+
+    response.writeHead(404);
+    response.end();
+  });
+
+  server.listen(0);
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  t.after(() => {
+    server.close();
+  });
+
+  await t.test(
+    "default configuration includes both changelogs and research sources",
+    () => {
+      const parsed = configSchema.parse({});
+      assert.equal(parsed.sources.length, 6);
+      assert.equal(DEFAULT_KIMI_CHANGELOG_SOURCES.length, 3);
+      assert.equal(DEFAULT_KIMI_RESEARCH_SOURCES.length, 3);
+      assert.equal(DEFAULT_KIMI_SOURCES.length, 6);
+      const sourceIds = parsed.sources.map((s) => s.id);
+      assert.deepEqual(sourceIds, [
+        "cn-platform-changelog",
+        "int-platform-changelog",
+        "cn-hosted-agents-changelog",
+        "cn-research-zh",
+        "cn-research-en",
+        "int-research",
+      ]);
+    },
+  );
+
+  await t.test(
+    "check action validates research blog list and sample article",
+    async () => {
+      const checkConfig: KimiConfig = {
+        sources: [
+          {
+            id: "cn-research-zh",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/cn-zh/blog`,
+          },
+          {
+            id: "fail-404",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/fail/404/blog`,
+          },
+        ],
+      };
+      const { context } = createTestContext(checkConfig);
+      const result = await sourceAdapter.actions.check.execute(context, {
+        sourceIds: ["cn-research-zh"],
+      });
+      assert.equal(result.availability, "available");
+      assert.equal(result.problems.length, 0);
+
+      const failResult = await sourceAdapter.actions.check.execute(context, {
+        sourceIds: ["fail-404"],
+      });
+      assert.equal(failResult.availability, "unavailable");
+      assert.ok(
+        failResult.problems.some((p) => p.code === "kimi_research_unavailable"),
+      );
+    },
+  );
+
+  await t.test(
+    "independent sourceKeys and separate canonicalUrl without cross-domain identity merge",
+    async () => {
+      const multiRegionConfig: KimiConfig = {
+        sources: [
+          {
+            id: "cn-research-zh",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/cn-zh/blog`,
+          },
+          {
+            id: "cn-research-en",
+            kind: "research",
+            region: "cn",
+            language: "en",
+            url: `${origin}/cn-en/blog`,
+          },
+          {
+            id: "int-research",
+            kind: "research",
+            region: "international",
+            language: "en",
+            url: `${origin}/int/blog`,
+          },
+        ],
+      };
+      const { context, submissions } = createTestContext(multiRegionConfig);
+      const collectResult = await sourceAdapter.actions.collect.execute(
+        context,
+        {},
+      );
+      assert.equal(collectResult.completedScopes.length, 3);
+      assert.equal(submissions.length, 3);
+
+      const zhItem = submissions.find(
+        (s) => s.items[0]?.metadata?.["language"] === "zh-CN",
+      )?.items[0];
+      const cnEnItem = submissions.find(
+        (s) =>
+          s.items[0]?.metadata?.["region"] === "cn" &&
+          s.items[0]?.metadata?.["language"] === "en",
+      )?.items[0];
+      const intEnItem = submissions.find(
+        (s) => s.items[0]?.metadata?.["region"] === "international",
+      )?.items[0];
+
+      assert.ok(zhItem && cnEnItem && intEnItem);
+
+      // Distinct sourceKeys
+      assert.deepEqual(zhItem.sourceKey, {
+        namespace: "kimi:cn:zh-CN",
+        key: "research:kimi-k3-1-pro",
+      });
+      assert.deepEqual(cnEnItem.sourceKey, {
+        namespace: "kimi:cn:en",
+        key: "research:kimi-k3-1-pro",
+      });
+      assert.deepEqual(intEnItem.sourceKey, {
+        namespace: "kimi:international:en",
+        key: "research:kimi-k3-1-pro",
+      });
+
+      // sourceRefs retain actual fetched URLs, never overwritten by canonical
+      assert.equal(zhItem.sourceRef, `${origin}/cn-zh/blog/kimi-k3-1-pro`);
+      assert.equal(cnEnItem.sourceRef, `${origin}/cn-en/blog/kimi-k3-1-pro`);
+      assert.equal(intEnItem.sourceRef, `${origin}/int/blog/kimi-k3-1-pro`);
+
+      // Observed canonicalUrl preserved as fact in metadata
+      assert.equal(
+        zhItem.metadata?.["canonicalUrl"],
+        "https://www.kimi.ai/blog/kimi-k3-1-pro",
+      );
+      assert.equal(
+        cnEnItem.metadata?.["canonicalUrl"],
+        "https://www.kimi.ai/blog/kimi-k3-1-pro",
+      );
+      assert.equal(
+        intEnItem.metadata?.["canonicalUrl"],
+        "https://www.kimi.ai/blog/kimi-k3-1-pro",
+      );
+    },
+  );
+
+  await t.test(
+    "external project cards are not recursively fetched while in-site article reference links are preserved",
+    async () => {
+      requestedPaths.length = 0;
+      const testConfig: KimiConfig = {
+        sources: [
+          {
+            id: "cn-research-zh",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/cn-zh/blog`,
+          },
+        ],
+      };
+      const { context, submissions } = createTestContext(testConfig);
+      await sourceAdapter.actions.collect.execute(context, {});
+
+      // Exactly 1 in-site article submitted
+      assert.equal(submissions.length, 1);
+      const item = submissions[0]?.items[0];
+      assert.ok(item !== undefined);
+
+      // Server never received external requests to github or huggingface
+      assert.ok(
+        !requestedPaths.some(
+          (p) => p.includes("github.com") || p.includes("huggingface.co"),
+        ),
+      );
+
+      // No body.html in submission
+      assert.equal(
+        (item.body as Record<string, unknown> | undefined)?.["html"],
+        undefined,
+      );
+
+      // In-site article markdown preserves reference links to GitHub, HuggingFace, and benchmark papers
+      const markdown = item.body?.markdown ?? "";
+      assert.ok(markdown.includes("https://github.com/ashemag/human-atlas"));
+      assert.ok(
+        markdown.includes(
+          "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        ),
+      );
+      assert.ok(markdown.includes("https://www.swe-marathon.org/"));
+    },
+  );
+
+  await t.test(
+    "list card publication date and detail page dateModified are preserved separately at day precision",
+    async () => {
+      const testConfig: KimiConfig = {
+        sources: [
+          {
+            id: "cn-research-zh",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/cn-zh/blog`,
+          },
+        ],
+      };
+      const { context, submissions } = createTestContext(testConfig);
+      await sourceAdapter.actions.collect.execute(context, {});
+      const item = submissions[0]?.items[0];
+      assert.ok(item !== undefined);
+
+      // List card publication date normalized from 2026.10.25 to 2026-10-25
+      assert.equal(item.metadata?.["publishedDate"], "2026-10-25");
+      // Detail page JSON-LD dateModified preserved separately
+      assert.equal(item.metadata?.["modifiedDate"], "2026-10-28");
+      assert.equal(item.metadata?.["datePrecision"], "day");
+      assert.notEqual(
+        item.metadata?.["publishedDate"],
+        item.metadata?.["modifiedDate"],
+      );
+
+      // sourceModifiedAt is undefined when date precision is day-only
+      assert.equal(item.sourceModifiedAt, undefined);
+    },
+  );
+
+  await t.test(
+    "sync baseline, unchanged skip, subsequent new articles, and failure handling",
+    async () => {
+      let storedState: IncrementalSyncState | undefined;
+      const persistentState = {
+        async load() {
+          return storedState;
+        },
+        async save(state: unknown) {
+          storedState = state as IncrementalSyncState;
+        },
+      };
+
+      const syncConfig: KimiConfig = {
+        sources: [
+          {
+            id: "cn-research-zh",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/cn-zh/blog`,
+          },
+        ],
+      };
+
+      // 1. First sync establishes baseline: 0 detail page requests, 0 archive submissions
+      detailK31Requests = 0;
+      detailK32Requests = 0;
+      const { context: context1, submissions: submissions1 } =
+        createTestContext(syncConfig, { persistentState });
+      const syncOutput1 = await sourceAdapter.actions.sync.execute(
+        context1,
+        {},
+      );
+      assert.deepEqual(syncOutput1.initializedScopes, ["cn-research-zh"]);
+      assert.deepEqual(syncOutput1.completedScopes, ["cn-research-zh"]);
+      assert.equal(
+        submissions1.length,
+        0,
+        "first sync baseline must not commit articles",
+      );
+      assert.equal(
+        detailK31Requests,
+        0,
+        "first sync baseline must not fetch detail pages",
+      );
+
+      const entry =
+        storedState?.scopes["cn-research-zh"]?.entries["kimi-k3-1-pro"];
+      assert.ok(entry !== undefined);
+      assert.equal(entry.archivedCompleteness, "baseline");
+      assert.equal(entry.publishedAt, "2026-10-25");
+
+      // 2. Subsequent sync without changes: 0 detail page requests, 0 archive submissions
+      const { context: context2, submissions: submissions2 } =
+        createTestContext(syncConfig, { persistentState });
+      const syncOutput2 = await sourceAdapter.actions.sync.execute(
+        context2,
+        {},
+      );
+      assert.deepEqual(syncOutput2.completedScopes, ["cn-research-zh"]);
+      assert.equal(
+        submissions2.length,
+        0,
+        "unchanged sync must not commit articles",
+      );
+      assert.equal(
+        detailK31Requests,
+        0,
+        "unchanged sync must not fetch detail pages",
+      );
+
+      // 3. Subsequent sync with new article added to list: only new article detail fetched and committed
+      cnZhVersion = 2; // enables kimi-k3-2
+      const { context: context3, submissions: submissions3 } =
+        createTestContext(syncConfig, { persistentState });
+      const syncOutput3 = await sourceAdapter.actions.sync.execute(
+        context3,
+        {},
+      );
+      assert.deepEqual(syncOutput3.completedScopes, ["cn-research-zh"]);
+      assert.equal(
+        submissions3.length,
+        1,
+        "only the newly added article is committed",
+      );
+      assert.equal(
+        submissions3[0]?.items[0]?.sourceKey.key,
+        "research:kimi-k3-2",
+      );
+      assert.equal(
+        detailK31Requests,
+        0,
+        "existing article detail page must not be fetched",
+      );
+      assert.equal(
+        detailK32Requests,
+        1,
+        "new article detail page must be fetched exactly once",
+      );
+
+      const entry2 =
+        storedState?.scopes["cn-research-zh"]?.entries["kimi-k3-2"];
+      assert.ok(entry2 !== undefined);
+      assert.equal(entry2.archivedCompleteness, "complete");
+
+      // 4. Failure handling when detail page returns 500 or SPA shell
+      const failConfig: KimiConfig = {
+        sources: [
+          {
+            id: "fail-500",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/fail/500/blog`,
+          },
+        ],
+      };
+      const { context: failContext, submissions: failSubmissions } =
+        createTestContext(failConfig, { persistentState });
+      await assert.rejects(
+        async () => sourceAdapter.actions.collect.execute(failContext, {}),
+        (error) => {
+          assert.ok(isSourceAdapterActionError(error));
+          assert.equal(error.failure.code, "kimi_collection_incomplete");
+          return true;
+        },
+      );
+      assert.equal(
+        failSubmissions.length,
+        0,
+        "failure must not produce partial archive submissions",
+      );
+      assert.equal(
+        storedState?.scopes["fail-500"],
+        undefined,
+        "failure must not advance scope state",
+      );
+
+      const failSpaConfig: KimiConfig = {
+        sources: [
+          {
+            id: "fail-spa",
+            kind: "research",
+            region: "cn",
+            language: "zh-CN",
+            url: `${origin}/fail/spa/blog`,
+          },
+        ],
+      };
+      const { context: failSpaContext, submissions: failSpaSubmissions } =
+        createTestContext(failSpaConfig, { persistentState });
+      await assert.rejects(
+        async () => sourceAdapter.actions.collect.execute(failSpaContext, {}),
+        (error) => {
+          assert.ok(isSourceAdapterActionError(error));
+          assert.equal(error.failure.code, "kimi_collection_incomplete");
+          return true;
+        },
+      );
+      assert.equal(failSpaSubmissions.length, 0);
+      assert.equal(storedState?.scopes["fail-spa"], undefined);
+    },
+  );
+
+  await t.test("collect with itemUrls and maxItems filter", async () => {
+    const filterConfig: KimiConfig = {
+      sources: [
+        {
+          id: "cn-research-zh",
+          kind: "research",
+          region: "cn",
+          language: "zh-CN",
+          url: `${origin}/cn-zh/blog`,
+        },
+      ],
+    };
+    const { context, submissions } = createTestContext(filterConfig);
+    await sourceAdapter.actions.collect.execute(context, {
+      itemUrls: [`${origin}/cn-zh/blog/kimi-k3-1-pro`],
+      maxItems: 1,
+    });
+    assert.equal(submissions.length, 1);
+    assert.equal(
+      submissions[0]?.items[0]?.sourceKey.key,
+      "research:kimi-k3-1-pro",
+    );
+  });
 });
