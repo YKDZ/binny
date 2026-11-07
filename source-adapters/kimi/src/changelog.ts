@@ -70,11 +70,43 @@ export const DEFAULT_KIMI_CHANGELOG_SOURCES: readonly KimiSourceDefinition[] = [
   },
 ];
 
+export const DEFAULT_KIMI_RESEARCH_SOURCES: readonly KimiSourceDefinition[] = [
+  {
+    id: "cn-research-zh",
+    kind: "research",
+    region: "cn",
+    language: "zh-CN",
+    url: "https://www.kimi.com/blog",
+    title: "Kimi 研究博客（中文）",
+  },
+  {
+    id: "cn-research-en",
+    kind: "research",
+    region: "cn",
+    language: "en",
+    url: "https://www.kimi.com/en/blog",
+    title: "Kimi Research Blog (CN English)",
+  },
+  {
+    id: "int-research",
+    kind: "research",
+    region: "international",
+    language: "en",
+    url: "https://www.kimi.ai/blog",
+    title: "Moonshot AI Research Blog",
+  },
+];
+
+export const DEFAULT_KIMI_SOURCES: readonly KimiSourceDefinition[] = [
+  ...DEFAULT_KIMI_CHANGELOG_SOURCES,
+  ...DEFAULT_KIMI_RESEARCH_SOURCES,
+];
+
 export const configSchema = z
   .object({
     sources: z
       .array(kimiSourceDefinitionSchema)
-      .default(() => [...DEFAULT_KIMI_CHANGELOG_SOURCES]),
+      .default(() => [...DEFAULT_KIMI_SOURCES]),
   })
   .strict()
   .superRefine((config, context) => {
@@ -96,6 +128,8 @@ export type KimiConfig = z.infer<typeof configSchema>;
 export const actionParamsSchema = z
   .object({
     sourceIds: z.array(z.string().min(1)).max(64).optional(),
+    itemUrls: z.array(z.string().url()).optional(),
+    maxItems: z.number().int().positive().optional(),
   })
   .strict()
   .superRefine((params, context) => {
@@ -179,7 +213,7 @@ export function buildChangelogSourceKey(source: KimiSourceDefinition): {
   };
 }
 
-const MONTH_NAMES: Record<string, string> = {
+export const MONTH_NAMES: Record<string, string> = {
   january: "01",
   february: "02",
   march: "03",
@@ -466,8 +500,35 @@ export function cleanAndValidateChangelog(
   return { cleanResult, dates, metadata };
 }
 
+/** Checks a single Kimi changelog source and records any problems. */
+export async function checkChangelogSource(
+  source: KimiSourceDefinition,
+  context: SourceAdapterContext<KimiConfig>,
+  problems: z.infer<typeof checkOutputSchema>["problems"],
+): Promise<void> {
+  try {
+    const { rawText, contentType } = await fetchChangelog(
+      source,
+      context.signal,
+    );
+    cleanAndValidateChangelog(source, rawText, contentType);
+  } catch (error) {
+    problems.push({
+      code: "kimi_changelog_unavailable",
+      message:
+        error instanceof Error
+          ? error.message
+          : `信源「${source.id}」可用性检查失败。`,
+      impact: `Kimi 更新日志「${source.id}」当前不可达或内容无效。`,
+      path: ["sources", source.id],
+      suggestion: "检查信源 URL 是否可访问以及源端格式是否正常。",
+      requiresHuman: false,
+    });
+  }
+}
+
 /** Executes check action on Kimi changelog sources. */
-export async function executeKimiCheck(
+export async function executeChangelogCheck(
   context: SourceAdapterContext<KimiConfig>,
   params: ActionParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
@@ -491,25 +552,7 @@ export async function executeKimiCheck(
     if (source.kind !== "changelog") {
       continue;
     }
-    try {
-      const { rawText, contentType } = await fetchChangelog(
-        source,
-        context.signal,
-      );
-      cleanAndValidateChangelog(source, rawText, contentType);
-    } catch (error) {
-      problems.push({
-        code: "kimi_changelog_unavailable",
-        message:
-          error instanceof Error
-            ? error.message
-            : `信源「${source.id}」可用性检查失败。`,
-        impact: `Kimi 更新日志「${source.id}」当前不可达或内容无效。`,
-        path: ["sources", source.id],
-        suggestion: "检查信源 URL 是否可访问以及源端格式是否正常。",
-        requiresHuman: false,
-      });
-    }
+    await checkChangelogSource(source, context, problems);
   }
 
   const availability =
@@ -529,9 +572,71 @@ export async function executeKimiCheck(
     problems,
   };
 }
+export const executeKimiCheck = executeChangelogCheck;
+
+/** Collects a single Kimi changelog source immediately. */
+export async function collectChangelogSource(
+  source: KimiSourceDefinition,
+  context: SourceAdapterContext<KimiConfig>,
+  state: IncrementalSyncState | undefined,
+  completedScopes: string[],
+  problems: ManualRunFailure[],
+): Promise<void> {
+  try {
+    const { rawText, contentType } = await fetchChangelog(
+      source,
+      context.signal,
+    );
+    const { cleanResult, metadata } = cleanAndValidateChangelog(
+      source,
+      rawText,
+      contentType,
+    );
+
+    await submitCleanedArticle(context, {
+      sourceKey: buildChangelogSourceKey(source),
+      sourceRef: source.url,
+      title: source.title ?? "Kimi Changelog",
+      sourceModifiedAt: undefined,
+      metadata,
+      properties:
+        source.title !== undefined ? { title: source.title } : undefined,
+      cleanResult,
+      captureScope: {
+        sourceId: source.id,
+        region: source.region,
+        kind: source.kind,
+        url: source.url,
+      },
+    });
+
+    const contentHash = computeOngoingDocumentHash(
+      cleanResult.markdown,
+      cleanResult.text,
+    );
+
+    if (state !== undefined) {
+      upsertIncrementalScopeOngoingDocument(state, source.id, source.id, {
+        contentHash,
+        updatedAt: context.referenceTime,
+      });
+    }
+
+    completedScopes.push(source.id);
+  } catch (error) {
+    problems.push({
+      code: "kimi_collection_incomplete",
+      message: `信源「${source.id}」采集失败：${error instanceof Error ? error.message : String(error)}`,
+      impact: `信源「${source.id}」本次未能完成归档。`,
+      path: ["sources", source.id],
+      suggestion: "检查信源网络可达性与正文格式后重新采集。",
+      requiresHuman: false,
+    });
+  }
+}
 
 /** Executes collect action: immediately archives whole-page changelog and updates ongoing document hash. */
-export async function executeKimiCollect(
+export async function executeChangelogCollect(
   context: SourceAdapterContext<KimiConfig>,
   params: ActionParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
@@ -563,57 +668,13 @@ export async function executeKimiCollect(
     if (source.kind !== "changelog") {
       continue;
     }
-    try {
-      const { rawText, contentType } = await fetchChangelog(
-        source,
-        context.signal,
-      );
-      const { cleanResult, metadata } = cleanAndValidateChangelog(
-        source,
-        rawText,
-        contentType,
-      );
-
-      await submitCleanedArticle(context, {
-        sourceKey: buildChangelogSourceKey(source),
-        sourceRef: source.url,
-        title: source.title ?? "Kimi Changelog",
-        sourceModifiedAt: undefined,
-        metadata,
-        properties:
-          source.title !== undefined ? { title: source.title } : undefined,
-        cleanResult,
-        captureScope: {
-          sourceId: source.id,
-          region: source.region,
-          kind: source.kind,
-          url: source.url,
-        },
-      });
-
-      const contentHash = computeOngoingDocumentHash(
-        cleanResult.markdown,
-        cleanResult.text,
-      );
-
-      if (state !== undefined) {
-        upsertIncrementalScopeOngoingDocument(state, source.id, source.id, {
-          contentHash,
-          updatedAt: context.referenceTime,
-        });
-      }
-
-      completedScopes.push(source.id);
-    } catch (error) {
-      problems.push({
-        code: "kimi_collection_incomplete",
-        message: `信源「${source.id}」采集失败：${error instanceof Error ? error.message : String(error)}`,
-        impact: `信源「${source.id}」本次未能完成归档。`,
-        path: ["sources", source.id],
-        suggestion: "检查信源网络可达性与正文格式后重新采集。",
-        requiresHuman: false,
-      });
-    }
+    await collectChangelogSource(
+      source,
+      context,
+      state,
+      completedScopes,
+      problems,
+    );
   }
 
   if (state !== undefined && context.persistentState !== undefined) {
@@ -629,9 +690,102 @@ export async function executeKimiCollect(
 
   return { completedScopes };
 }
+export const executeKimiCollect = executeChangelogCollect;
 
-/** Executes sync action: establishes baseline on first run without archiving, or submits whole-page revisions on content changes. */
-export async function executeKimiSync(
+/** Synchronizes a single Kimi changelog source. */
+export async function syncChangelogSource(
+  source: KimiSourceDefinition,
+  context: SourceAdapterContext<KimiConfig>,
+  state: IncrementalSyncState,
+  initializedScopes: string[],
+  completedScopes: string[],
+  problems: ManualRunFailure[],
+): Promise<void> {
+  try {
+    const isInitialized = isIncrementalScopeInitialized(
+      state,
+      source.id,
+      source.url,
+    );
+
+    const { rawText, contentType } = await fetchChangelog(
+      source,
+      context.signal,
+    );
+    const { cleanResult, metadata } = cleanAndValidateChangelog(
+      source,
+      rawText,
+      contentType,
+    );
+
+    const contentHash = computeOngoingDocumentHash(
+      cleanResult.markdown,
+      cleanResult.text,
+    );
+
+    if (!isInitialized) {
+      // First sync establishes baseline state WITHOUT submitting to context.archive.submit
+      initializeIncrementalScope(state, source.id, {
+        scopeUrl: source.url,
+        initializedAt: context.referenceTime,
+        ongoingDocuments: {
+          [source.id]: {
+            contentHash,
+            updatedAt: context.referenceTime,
+          },
+        },
+      });
+      initializedScopes.push(source.id);
+      completedScopes.push(source.id);
+    } else {
+      const previousDoc = getIncrementalScopeOngoingDocument(
+        state,
+        source.id,
+        source.id,
+      );
+      const changed = hasOngoingDocumentChanged(previousDoc, contentHash);
+
+      if (changed) {
+        await submitCleanedArticle(context, {
+          sourceKey: buildChangelogSourceKey(source),
+          sourceRef: source.url,
+          title: source.title ?? "Kimi Changelog",
+          sourceModifiedAt: undefined,
+          metadata,
+          properties:
+            source.title !== undefined ? { title: source.title } : undefined,
+          cleanResult,
+          captureScope: {
+            sourceId: source.id,
+            region: source.region,
+            kind: source.kind,
+            url: source.url,
+          },
+        });
+        upsertIncrementalScopeOngoingDocument(state, source.id, source.id, {
+          contentHash,
+          updatedAt: context.referenceTime,
+        });
+      }
+      updateIncrementalScopeValidators(state, source.id, {
+        scopeUrl: source.url,
+      });
+      completedScopes.push(source.id);
+    }
+  } catch (error) {
+    problems.push({
+      code: "kimi_sync_incomplete",
+      message: `信源「${source.id}」同步失败：${error instanceof Error ? error.message : String(error)}`,
+      impact: `信源「${source.id}」本次未能完成增量同步，该范围未推进状态。`,
+      path: ["sources", source.id],
+      suggestion: "检查信源网络可达性与正文格式后重新同步。",
+      requiresHuman: false,
+    });
+  }
+}
+
+/** Executes sync action on Kimi changelog sources. */
+export async function executeChangelogSync(
   context: SourceAdapterContext<KimiConfig>,
   params: ActionParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
@@ -657,87 +811,14 @@ export async function executeKimiSync(
     if (source.kind !== "changelog") {
       continue;
     }
-    try {
-      const isInitialized = isIncrementalScopeInitialized(
-        state,
-        source.id,
-        source.url,
-      );
-
-      const { rawText, contentType } = await fetchChangelog(
-        source,
-        context.signal,
-      );
-      const { cleanResult, metadata } = cleanAndValidateChangelog(
-        source,
-        rawText,
-        contentType,
-      );
-
-      const contentHash = computeOngoingDocumentHash(
-        cleanResult.markdown,
-        cleanResult.text,
-      );
-
-      if (!isInitialized) {
-        // First sync establishes baseline state WITHOUT submitting to context.archive.submit
-        initializeIncrementalScope(state, source.id, {
-          scopeUrl: source.url,
-          initializedAt: context.referenceTime,
-          ongoingDocuments: {
-            [source.id]: {
-              contentHash,
-              updatedAt: context.referenceTime,
-            },
-          },
-        });
-        initializedScopes.push(source.id);
-        completedScopes.push(source.id);
-      } else {
-        const previousDoc = getIncrementalScopeOngoingDocument(
-          state,
-          source.id,
-          source.id,
-        );
-        const changed = hasOngoingDocumentChanged(previousDoc, contentHash);
-
-        if (changed) {
-          await submitCleanedArticle(context, {
-            sourceKey: buildChangelogSourceKey(source),
-            sourceRef: source.url,
-            title: source.title ?? "Kimi Changelog",
-            sourceModifiedAt: undefined,
-            metadata,
-            properties:
-              source.title !== undefined ? { title: source.title } : undefined,
-            cleanResult,
-            captureScope: {
-              sourceId: source.id,
-              region: source.region,
-              kind: source.kind,
-              url: source.url,
-            },
-          });
-          upsertIncrementalScopeOngoingDocument(state, source.id, source.id, {
-            contentHash,
-            updatedAt: context.referenceTime,
-          });
-        }
-        updateIncrementalScopeValidators(state, source.id, {
-          scopeUrl: source.url,
-        });
-        completedScopes.push(source.id);
-      }
-    } catch (error) {
-      problems.push({
-        code: "kimi_sync_incomplete",
-        message: `信源「${source.id}」同步失败：${error instanceof Error ? error.message : String(error)}`,
-        impact: `信源「${source.id}」本次未能完成增量同步，该范围未推进状态。`,
-        path: ["sources", source.id],
-        suggestion: "检查信源网络可达性与正文格式后重新同步。",
-        requiresHuman: false,
-      });
-    }
+    await syncChangelogSource(
+      source,
+      context,
+      state,
+      initializedScopes,
+      completedScopes,
+      problems,
+    );
   }
 
   // Save state for any successfully processed scopes
@@ -755,3 +836,4 @@ export async function executeKimiSync(
     ...(initializedScopes.length > 0 ? { initializedScopes } : {}),
   };
 }
+export const executeKimiSync = executeChangelogSync;
