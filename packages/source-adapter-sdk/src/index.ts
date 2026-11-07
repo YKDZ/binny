@@ -32,6 +32,28 @@ export type {
 } from "./content-cleaner.ts";
 
 export {
+  createEmptyIncrementalSyncState,
+  hasIncrementalEntryChanged,
+  incrementalEntryRecordSchema,
+  incrementalOngoingDocumentRecordSchema,
+  incrementalScopeStateSchema,
+  incrementalSyncStateSchema,
+  initializeIncrementalScope,
+  isIncrementalScopeInitialized,
+  loadIncrementalSyncState,
+  saveIncrementalSyncState,
+  updateIncrementalScopeValidators,
+  upsertIncrementalScopeEntry,
+  upsertIncrementalScopeOngoingDocument,
+} from "./incremental-sync.ts";
+export type {
+  IncrementalEntryRecord,
+  IncrementalOngoingDocumentRecord,
+  IncrementalScopeState,
+  IncrementalSyncState,
+} from "./incremental-sync.ts";
+
+export {
   createSourceAccessBudget,
   SourceAccessBudgetExceededError,
 } from "./source-access-budget.ts";

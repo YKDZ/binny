@@ -402,7 +402,7 @@ export function isSummarySubstantialFullText(
   cleanedText: string,
 ): boolean {
   if (
-    /<(?:p|article|section|h[1-6]|ul|ol|pre|blockquote|table|figure|img|details)\b/iu.test(
+    /<(?:\/?(?:p|article|section|h[1-6]|ul|ol|li|pre|code|blockquote|table|figure|img|details|a|em|strong))\b/iu.test(
       rawSummary,
     )
   ) {
