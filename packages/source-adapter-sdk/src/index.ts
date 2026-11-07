@@ -9,6 +9,8 @@ import {
   type ArchiveError,
   type ArchiveResourceMetadata,
   type ArchiveResourceReference,
+  type ArchiveResourceResolveRequest,
+  type ArchiveResourceResolveResult,
   type ArchiveSubmissionInput,
   type ManualRunFailure,
 } from "@binny/contracts";
@@ -77,9 +79,17 @@ export type {
   SourceAdapterManifest,
   JsonSchema,
 } from "@binny/contracts";
-export type { ArchiveCommit, ArchiveResourceMetadata } from "@binny/contracts";
+export type {
+  ArchiveCommit,
+  ArchiveItemSubmissionInput,
+  ArchiveResourceMetadata,
+  ArchiveResourceResolveInput,
+  ArchiveResourceResolveItem,
+  ArchiveResourceResolveRequest,
+  ArchiveResourceResolveResult,
+} from "@binny/contracts";
 
-type SourceAdapterApiClient = ReturnType<typeof createApiClient>;
+export type SourceAdapterApiClient = ReturnType<typeof createApiClient>;
 
 export type ArchiveResourceUpload =
   | { readonly ok: true; readonly resource: ArchiveResourceMetadata }
@@ -115,6 +125,27 @@ export async function uploadArchiveResource(
   }
   const result = await response.json();
   return { ok: false, error: result.error };
+}
+
+/** 向核心校验并解析已归档的资源元信息、未变化条目状态及不可变媒体。 */
+export async function resolveArchiveResources(
+  client: SourceAdapterApiClient,
+  input: ArchiveResourceResolveRequest,
+): Promise<ArchiveResourceResolveResult> {
+  const response = await client.resources.resolve.$post({
+    json: input,
+  });
+  if (response.status === 200) {
+    return await response.json();
+  }
+  const result = await response.json();
+  throw new SourceAdapterActionError({
+    code: result.error.code,
+    message: result.error.message,
+    impact: "本次归档资源校验未完成。",
+    ...(result.error.path === undefined ? {} : { path: result.error.path }),
+    requiresHuman: false,
+  });
 }
 
 export type ArchiveMediaPart = {
@@ -195,6 +226,9 @@ type SourceAdapterContextBase<TConfig> = {
   };
   readonly resources: {
     upload(body: BodyInit, mediaType: string): Promise<ArchiveResourceUpload>;
+    resolve(
+      input: ArchiveResourceResolveRequest,
+    ): Promise<ArchiveResourceResolveResult>;
   };
 };
 
@@ -406,6 +440,12 @@ export function createSourceAdapterContext<
     resources: {
       upload(body, mediaType) {
         return uploadArchiveResource(client, body, mediaType);
+      },
+      resolve(input) {
+        return resolveArchiveResources(client, {
+          binId: input.binId ?? context.binId,
+          ...input,
+        });
       },
     },
   } as SourceAdapterContext<TConfig, TReport>;

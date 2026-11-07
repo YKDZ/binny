@@ -210,6 +210,9 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       },
     },
     resources: {
+      async resolve() {
+        return { resources: [], items: [], mediaByUrl: {} };
+      },
       async upload(body, mediaType) {
         const bytes = await new Response(body).arrayBuffer();
         const resource = {

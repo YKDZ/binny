@@ -48,6 +48,7 @@ import {
   withArchiveWriteLock,
 } from "./archive-lock.ts";
 import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
+import { resolveArchiveResources as resolveArchiveResourcesOperation } from "./archive-resource-resolve.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
 import { lockManualRunForArchiveWrite } from "./manual-run-fencing.ts";
@@ -902,6 +903,10 @@ export function createArchiveStore(
         console.error("硬删除后的归档资源回收失败：", error);
       }
       return { ok: true, value: deletion.value };
+    },
+
+    resolveArchiveResources(input) {
+      return resolveArchiveResourcesOperation(database, resourceStorage, input);
     },
 
     ...searchOperations,
