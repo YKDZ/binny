@@ -21,14 +21,34 @@ import {
   INTERNATIONAL_BLOG_SCOPE_ID,
   syncInternationalBlog,
 } from "./international-blog.ts";
+import {
+  checkCnChangelogs,
+  checkInternationalChangelogs,
+  CN_CHANGELOGS_SCOPE_ID,
+  collectCnChangelogs,
+  collectInternationalChangelogs,
+  DEFAULT_INTERNATIONAL_CHANGELOG_URL,
+  INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+  syncCnChangelogs,
+  syncInternationalChangelogs,
+} from "./regional-changelogs.ts";
 
 export { CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID, DEFAULT_CN_DOCS_INDEX_URL };
 export { DEFAULT_INTERNATIONAL_BLOG_URL, INTERNATIONAL_BLOG_SCOPE_ID };
+export {
+  CN_CHANGELOGS_SCOPE_ID,
+  DEFAULT_INTERNATIONAL_CHANGELOG_URL,
+  INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+};
 
 export const configSchema = z
   .object({
     blogListUrl: z.string().url().default(DEFAULT_INTERNATIONAL_BLOG_URL),
     cnDocsIndexUrl: z.string().url().default(DEFAULT_CN_DOCS_INDEX_URL),
+    intChangelogIndexUrl: z
+      .string()
+      .url()
+      .default(DEFAULT_INTERNATIONAL_CHANGELOG_URL),
   })
   .strict();
 
@@ -107,14 +127,39 @@ export function determineActiveScopes(
   const isCustomCn =
     config.cnDocsIndexUrl !== undefined &&
     config.cnDocsIndexUrl !== DEFAULT_CN_DOCS_INDEX_URL;
+  const isCustomIntChangelog =
+    config.intChangelogIndexUrl !== undefined &&
+    config.intChangelogIndexUrl !== DEFAULT_INTERNATIONAL_CHANGELOG_URL;
 
-  if (isCustomBlog && !isCustomCn) {
+  if (isCustomBlog && !isCustomCn && !isCustomIntChangelog) {
     return [INTERNATIONAL_BLOG_SCOPE_ID];
   }
-  if (isCustomCn && !isCustomBlog) {
+  if (isCustomIntChangelog && !isCustomBlog && !isCustomCn) {
+    return [INTERNATIONAL_CHANGELOGS_SCOPE_ID];
+  }
+  if (isCustomCn && !isCustomBlog && !isCustomIntChangelog) {
     return [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID];
   }
-  return [INTERNATIONAL_BLOG_SCOPE_ID, CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID];
+
+  // Default: if none are customized, all 4 scopes are active
+  if (!isCustomBlog && !isCustomCn && !isCustomIntChangelog) {
+    return [
+      INTERNATIONAL_BLOG_SCOPE_ID,
+      CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+      CN_CHANGELOGS_SCOPE_ID,
+      INTERNATIONAL_CHANGELOGS_SCOPE_ID,
+    ];
+  }
+
+  // Multiple customizations:
+  const scopes: string[] = [];
+  if (isCustomBlog) scopes.push(INTERNATIONAL_BLOG_SCOPE_ID);
+  if (isCustomCn) {
+    scopes.push(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID);
+    scopes.push(CN_CHANGELOGS_SCOPE_ID);
+  }
+  if (isCustomIntChangelog) scopes.push(INTERNATIONAL_CHANGELOGS_SCOPE_ID);
+  return scopes;
 }
 
 async function executeCheck(
@@ -129,6 +174,12 @@ async function executeCheck(
   }
   if (activeScopes.includes(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID)) {
     results.push(await checkCnAnnouncementsEvents(context));
+  }
+  if (activeScopes.includes(CN_CHANGELOGS_SCOPE_ID)) {
+    results.push(await checkCnChangelogs(context));
+  }
+  if (activeScopes.includes(INTERNATIONAL_CHANGELOGS_SCOPE_ID)) {
+    results.push(await checkInternationalChangelogs(context));
   }
 
   const allProblems = results.flatMap((r) => r.problems);
@@ -177,6 +228,30 @@ async function executeSync(
       actionErrors.push(error);
     }
   }
+  if (activeScopes.includes(CN_CHANGELOGS_SCOPE_ID)) {
+    try {
+      const res = await syncCnChangelogs(context);
+      completedScopes.push(...res.completedScopes);
+      if (res.initializedScopes) {
+        initializedScopes.push(...res.initializedScopes);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+  if (activeScopes.includes(INTERNATIONAL_CHANGELOGS_SCOPE_ID)) {
+    try {
+      const res = await syncInternationalChangelogs(context);
+      completedScopes.push(...res.completedScopes);
+      if (res.initializedScopes) {
+        initializedScopes.push(...res.initializedScopes);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
 
   if (actionErrors.length > 0) {
     throw actionErrors[0];
@@ -208,6 +283,24 @@ async function executeCollect(
   if (activeScopes.includes(CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID)) {
     try {
       const res = await collectCnAnnouncementsEvents(context, params);
+      completedScopes.push(...res.completedScopes);
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+  if (activeScopes.includes(CN_CHANGELOGS_SCOPE_ID)) {
+    try {
+      const res = await collectCnChangelogs(context, params);
+      completedScopes.push(...res.completedScopes);
+    } catch (error) {
+      if (context.signal.aborted) throw error;
+      actionErrors.push(error);
+    }
+  }
+  if (activeScopes.includes(INTERNATIONAL_CHANGELOGS_SCOPE_ID)) {
+    try {
+      const res = await collectInternationalChangelogs(context, params);
       completedScopes.push(...res.completedScopes);
     } catch (error) {
       if (context.signal.aborted) throw error;
