@@ -1088,14 +1088,19 @@ export function createRuntimeConnectionStore(
 
       for (const row of previousSyncRuns) {
         let origin: string | undefined;
-        if (
-          typeof row.configSnapshot === "object" &&
-          row.configSnapshot !== null &&
-          "siteUrl" in row.configSnapshot &&
-          typeof row.configSnapshot.siteUrl === "string"
-        ) {
+        const rawOrigin =
+          typeof row.configSnapshot === "object" && row.configSnapshot !== null
+            ? "origin" in row.configSnapshot &&
+              typeof row.configSnapshot.origin === "string"
+              ? row.configSnapshot.origin
+              : "siteUrl" in row.configSnapshot &&
+                  typeof row.configSnapshot.siteUrl === "string"
+                ? row.configSnapshot.siteUrl
+                : undefined
+            : undefined;
+        if (rawOrigin !== undefined) {
           try {
-            origin = new URL(row.configSnapshot.siteUrl).origin;
+            origin = new URL(rawOrigin).origin;
           } catch {
             origin = undefined;
           }
@@ -1283,20 +1288,6 @@ export function createRuntimeConnectionStore(
           .update(binConfigurations)
           .set(updates)
           .where(eq(binConfigurations.id, binId));
-
-        if (
-          typeof checked.data.sourceAccess === "object" &&
-          checked.data.sourceAccess !== null &&
-          "snapshot" in checked.data.sourceAccess &&
-          checked.data.sourceAccess.snapshot !== undefined
-        ) {
-          await transaction
-            .update(runtimeConnections)
-            .set({
-              sourceStateSnapshot: checked.data.sourceAccess.snapshot,
-            })
-            .where(eq(runtimeConnections.binId, binId));
-        }
 
         return { ok: true, value: { ok: true as const } };
       });

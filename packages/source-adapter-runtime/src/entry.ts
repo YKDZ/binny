@@ -890,13 +890,14 @@ function startActionWorker(
       }
       void sourceAccessCoordinator
         .observeResponse(ownerId, request, declarations, response)
-        .then((observation) =>
-          sendWorkerMessage(worker, {
+        .then(async (observation) => {
+          await sendHeartbeatNow(false, false).catch(() => undefined);
+          return sendWorkerMessage(worker, {
             type: "source-access-response-recorded",
             requestId: record.requestId,
             observation,
-          }),
-        )
+          });
+        })
         .catch((error: unknown) => {
           if (isSourceAccessUnavailableError(error)) {
             sourceAccessUnavailable = true;

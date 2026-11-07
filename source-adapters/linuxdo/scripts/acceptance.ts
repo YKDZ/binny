@@ -1813,11 +1813,16 @@ async function verifySourceStateFreshness(
   const ownerGenerationResult = await compose([
     "exec",
     "--no-TTY",
-    "runtime-linuxdo",
-    "node",
-    "--input-type=module",
-    "-e",
-    'import { readFileSync } from "node:fs"; process.stdout.write(readFileSync("/var/lib/binny/runtime/owner.generation", "utf8").trim());',
+    "postgres",
+    "psql",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-t",
+    "-A",
+    "-c",
+    "SELECT owner_generation FROM runtime_connections WHERE bin_id = 'binny-discovery-topic';",
   ]);
   const ownerGeneration = ownerGenerationResult.stdout.trim();
   assert.match(ownerGeneration, /^[1-9][0-9]*$/u);

@@ -16,8 +16,7 @@ export async function openPersistentSourceAccessCoordinator(
   options: PersistentSourceAccessOptions,
 ): Promise<SourceAccessCoordinator> {
   const { apiUrl, binId, runtimeId, ownerGeneration } = options;
-  let coordinator: SourceAccessCoordinator;
-  coordinator = await createSourceAccessCoordinator({
+  return await createSourceAccessCoordinator({
     store: {
       async load(): Promise<unknown> {
         const url = new URL(
@@ -48,11 +47,10 @@ export async function openPersistentSourceAccessCoordinator(
           `/bins/${encodeURIComponent(binId)}/runtime/state`,
           apiUrl,
         );
-        const snapshot = coordinator?.snapshot();
         const payload: Record<string, unknown> = {
           runtimeId,
           ownerGeneration,
-          sourceAccess: snapshot === undefined ? state : { ...state, snapshot },
+          sourceAccess: state,
         };
         const putResponse = await fetch(putUrl, {
           method: "PUT",
@@ -73,5 +71,4 @@ export async function openPersistentSourceAccessCoordinator(
       },
     },
   });
-  return coordinator;
 }
