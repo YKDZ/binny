@@ -3589,6 +3589,11 @@ export async function archivePost(
     readonly suggestion?: string;
   }[] = post.post_number === 1 ? [...diagnostics] : [];
 
+  const cleaned = cleanContent(post.cooked ?? "", {
+    format: "html",
+    baseUrl: siteOrigin.href,
+  });
+
   // Check whether unchanged OP context can be reused directly without re-downloading media
   if (post.post_number === 1) {
     try {
@@ -3603,52 +3608,98 @@ export async function archivePost(
           item.sourceKey.key === opKey.key,
       );
       if (archivedOp && isOpUnchanged(topic, post, archivedOp, modifiedAt)) {
-        for (const meta of archivedOp.resourceMetadata) {
-          const mediaList = archivedOp.state.metadata?.media;
-          if (Array.isArray(mediaList)) {
-            for (const entry of mediaList) {
-              if (
-                typeof entry === "object" &&
-                entry !== null &&
-                typeof entry.url === "string" &&
-                entry.resourceId === meta.resourceId
-              ) {
+        const resourceMetadataById = new Map<string, ArchiveResourceMetadata>(
+          archivedOp.resourceMetadata.map((meta) => [meta.resourceId, meta]),
+        );
+        const archivedMedia = Array.isArray(archivedOp.state.metadata?.media)
+          ? archivedOp.state.metadata.media
+          : undefined;
+
+        const immutableMappedResourceIds = new Set<string>();
+        if (archivedMedia) {
+          for (const entry of archivedMedia) {
+            if (
+              typeof entry === "object" &&
+              entry !== null &&
+              "url" in entry &&
+              typeof entry.url === "string" &&
+              "resourceId" in entry &&
+              typeof entry.resourceId === "string" &&
+              isDiscourseImmutableMediaUrl(entry.url, siteOrigin)
+            ) {
+              const meta = resourceMetadataById.get(entry.resourceId);
+              if (meta) {
                 mediaCache.set(
                   entry.url,
                   Promise.resolve({ ok: true, resource: meta }),
                 );
+                try {
+                  const normalizedUrl = new URL(entry.url, siteOrigin).href;
+                  if (normalizedUrl !== entry.url) {
+                    mediaCache.set(
+                      normalizedUrl,
+                      Promise.resolve({ ok: true, resource: meta }),
+                    );
+                  }
+                } catch {
+                  // Fall through
+                }
               }
+              immutableMappedResourceIds.add(entry.resourceId);
             }
           }
         }
 
-        const state = {
-          sourceKey: archivedOp.sourceKey,
-          ...archivedOp.state,
-          ...(archivedOp.state.body
-            ? {
-                body: {
-                  markdown: archivedOp.state.body.markdown,
-                  text: archivedOp.state.body.text,
-                  searchText: archivedOp.state.body.searchText,
-                },
-              }
-            : {}),
-          ...(itemDiagnostics.length > 0
-            ? { diagnostics: itemDiagnostics }
-            : {}),
-        };
-        return { state, complete: true };
+        const allCleanedMediaImmutable = cleaned.media.every((candidate) =>
+          isDiscourseImmutableMediaUrl(candidate.url, siteOrigin),
+        );
+        const allArchivedMediaImmutable =
+          archivedMedia === undefined ||
+          archivedMedia.every(
+            (entry) =>
+              typeof entry === "object" &&
+              entry !== null &&
+              "url" in entry &&
+              typeof entry.url === "string" &&
+              isDiscourseImmutableMediaUrl(entry.url, siteOrigin),
+          );
+        const stateResources = archivedOp.state.resources ?? [];
+        const allResourcesValidAndImmutable = stateResources.every(
+          (res) =>
+            typeof res.resourceId === "string" &&
+            resourceMetadataById.has(res.resourceId) &&
+            immutableMappedResourceIds.has(res.resourceId),
+        );
+
+        const allMediaImmutable =
+          allCleanedMediaImmutable &&
+          allArchivedMediaImmutable &&
+          allResourcesValidAndImmutable;
+
+        if (allMediaImmutable) {
+          const state = {
+            sourceKey: archivedOp.sourceKey,
+            ...archivedOp.state,
+            ...(archivedOp.state.body
+              ? {
+                  body: {
+                    markdown: archivedOp.state.body.markdown,
+                    text: archivedOp.state.body.text,
+                    searchText: archivedOp.state.body.searchText,
+                  },
+                }
+              : {}),
+            ...(itemDiagnostics.length > 0
+              ? { diagnostics: itemDiagnostics }
+              : {}),
+          };
+          return { state, complete: true };
+        }
       }
     } catch {
       // Fall back to normal processing on resolution failure.
     }
   }
-
-  const cleaned = cleanContent(post.cooked ?? "", {
-    format: "html",
-    baseUrl: siteOrigin.href,
-  });
 
   let imageNumber = 0;
   let attachmentNumber = 0;

@@ -390,6 +390,206 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
   assert.ok(mediaCache.has(immutableUrl1));
 });
 
+void test("Unchanged OP post with mutable media URL does not skip source download while immutable media is reused", async () => {
+  const verifiedImmutableResource: ArchiveResourceMetadata = {
+    resourceId: "11111111-1111-1111-1111-111111111111",
+    sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    mediaType: "image/png",
+    size: 2048,
+  };
+  const uploadedMutableResource: ArchiveResourceMetadata = {
+    resourceId: "22222222-2222-2222-2222-222222222222",
+    sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    mediaType: "image/png",
+    size: 4096,
+  };
+
+  const oldMutableResourceId = "00000000-0000-0000-0000-000000000000";
+  const opCooked = `<p>主帖正文：<img src="${immutableUrl1}"><img src="${mutableUrl}"></p>`;
+
+  const archivedOp: ArchiveResourceResolveItem = {
+    sourceKey: { namespace: "linuxdo", key: "post:2002" },
+    state: {
+      sourceRef: "https://linux.do/t/test/200/1",
+      sourceModifiedAt: "2026-10-28T00:00:00.000Z",
+      metadata: {
+        topicId: 200,
+        postId: 2002,
+        postNumber: 1,
+        postVersion: 1,
+        cookedHash: hashContent(opCooked),
+        media: [
+          {
+            url: immutableUrl1,
+            resourceId: verifiedImmutableResource.resourceId,
+          },
+          { url: mutableUrl, resourceId: oldMutableResourceId },
+        ],
+        topic: {
+          title: "测试主题",
+          slug: "test",
+          categoryId: 1,
+          tags: ["test"],
+        },
+      },
+      body: {
+        markdown: `旧主帖正文：![不可变](binny://resource/${verifiedImmutableResource.resourceId})![可变](binny://resource/${oldMutableResourceId})`,
+        text: "旧主帖正文",
+        searchText: "测试主题\n旧主帖正文",
+      },
+      resources: [
+        { resourceId: verifiedImmutableResource.resourceId },
+        { resourceId: oldMutableResourceId },
+      ],
+      capture: {
+        scope: { topicId: 200, postId: 2002, postNumber: 1 },
+        completeness: "complete",
+        missing: [],
+      },
+    },
+    resourceMetadata: [
+      verifiedImmutableResource,
+      {
+        resourceId: oldMutableResourceId,
+        sha256:
+          "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        mediaType: "image/png",
+        size: 1024,
+      },
+    ],
+  };
+
+  const topic = {
+    id: 200,
+    title: "测试主题",
+    slug: "test",
+    category_id: 1,
+    tags: ["test"],
+    post_stream: { posts: [] },
+  };
+
+  const post = {
+    id: 2002,
+    post_number: 1,
+    cooked: opCooked,
+    updated_at: "2026-10-28T00:00:00.000Z",
+    version: 1,
+    reply_to_post_number: null,
+  };
+
+  // Verify that the OP is strictly unchanged according to isOpUnchanged.
+  assert.equal(isOpUnchanged(topic, post, archivedOp), true);
+
+  let resolveCount = 0;
+  let uploadCount = 0;
+  let sourceDownloadCount = 0;
+
+  const mockContext = {
+    binId: "binny-test-bin",
+    identityId: "test-identity",
+    runId: "test-run",
+    referenceTime: "2026-10-28T00:00:00.000Z",
+    sourceAdapterVersion: "1.0.0",
+    config: { origin: "https://linux.do" },
+    signal: new AbortController().signal,
+    resources: {
+      async resolve(
+        input: ArchiveResourceResolveRequest,
+      ): Promise<ArchiveResourceResolveResult> {
+        resolveCount += 1;
+        assert.equal(input.sourceKeys?.[0]?.key, "post:2002");
+        return {
+          resources: [],
+          items: [archivedOp],
+          mediaByUrl: {},
+        };
+      },
+      async upload(_body: BodyInit, mediaType: string) {
+        uploadCount += 1;
+        assert.equal(mediaType, "image/png");
+        return { ok: true as const, resource: uploadedMutableResource };
+      },
+    },
+    archive: {
+      async submit() {
+        throw new Error("未调用");
+      },
+    },
+  } as unknown as SourceAdapterContext;
+
+  const mockPage = createMockPage(
+    {
+      html: `<p>旧主帖正文：<img data-binny-media-index="0" src="${immutableUrl1}"><img data-binny-media-index="1" src="${mutableUrl}"></p>`,
+      text: "旧主帖正文",
+      media: [
+        {
+          index: 0,
+          kind: "image",
+          url: immutableUrl1,
+          path: "body.images[0]",
+        },
+        {
+          index: 1,
+          kind: "image",
+          url: mutableUrl,
+          path: "body.images[1]",
+        },
+      ],
+    },
+    {
+      onFetch(href) {
+        sourceDownloadCount += 1;
+        // Only mutable URL should trigger source download; immutable URL is reused from mediaCache
+        assert.equal(href, mutableUrl);
+      },
+    },
+  );
+
+  const mockRequest = {
+    async get() {
+      sourceDownloadCount += 1;
+      throw new Error("不应向未配置的 request 发送请求");
+    },
+  } as unknown as APIRequestContext;
+
+  const mediaCache = new Map();
+
+  const result = await archivePost(
+    mockPage.page,
+    mockRequest,
+    mockContext,
+    siteOrigin,
+    siteNamespace,
+    topic,
+    post,
+    [],
+    mediaCache,
+  );
+
+  assert.equal(resolveCount, 1);
+  assert.equal(sourceDownloadCount, 1);
+  assert.equal(uploadCount, 1);
+  assert.equal(result.complete, true);
+  assert.equal(result.state.sourceKey.key, "post:2002");
+  // Immutable media was reused from cache
+  assert.ok(mediaCache.has(immutableUrl1));
+  // Mutable media was freshly uploaded and both resources are present
+  assert.deepEqual(result.state.resources, [
+    { resourceId: verifiedImmutableResource.resourceId },
+    { resourceId: uploadedMutableResource.resourceId },
+  ]);
+  assert.ok(
+    result.state.body?.markdown?.includes(
+      `binny://resource/${verifiedImmutableResource.resourceId}`,
+    ),
+  );
+  assert.ok(
+    result.state.body?.markdown?.includes(
+      `binny://resource/${uploadedMutableResource.resourceId}`,
+    ),
+  );
+});
+
 void test("Immutable 40-hex SHA-1 Discourse upload URLs reuse Core-verified ArchiveResourceMetadata without re-downloading", async () => {
   const verifiedResource: ArchiveResourceMetadata = {
     resourceId: "22222222-2222-2222-2222-222222222222",
