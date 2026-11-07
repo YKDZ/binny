@@ -20,6 +20,9 @@ import {
   manualRunTriggerInputSchema,
   runtimeDisconnectInputSchema,
   runtimeHeartbeatInputSchema,
+  runtimeOwnershipClaimInputSchema,
+  runtimeStateQuerySchema,
+  runtimeStateUpdateInputSchema,
   type ArchiveOperations,
   type BinConfiguration,
   type BinConfigurationOperations,
@@ -650,6 +653,69 @@ function makeApp(operations: ApiOperations, productVersion: string) {
         return c.json(result.value, 200);
       },
     )
+    .post(
+      "/bins/:binId/runtime/ownership",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", runtimeOwnershipClaimInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runtime.claimOwnership(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .get(
+      "/bins/:binId/runtime/state",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("query", runtimeStateQuerySchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runtime.getState(
+          c.req.valid("param").binId,
+          c.req.valid("query"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
+    .put(
+      "/bins/:binId/runtime/state",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      zValidator("json", runtimeStateUpdateInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.runtime.putState(
+          c.req.valid("param").binId,
+          c.req.valid("json"),
+        );
+        if (!result.ok) return c.json({ error: result.error }, result.status);
+        return c.json(result.value, 200);
+      },
+    )
     .route("/", createArchiveRoutes(operations.archives));
 }
 
@@ -660,6 +726,8 @@ export const binApiSchemas = {
   update: toInputJsonSchema(binUpdateInputSchema),
   runtimeHeartbeat: toInputJsonSchema(runtimeHeartbeatInputSchema),
   runtimeDisconnect: toInputJsonSchema(runtimeDisconnectInputSchema),
+  runtimeOwnership: toInputJsonSchema(runtimeOwnershipClaimInputSchema),
+  runtimeStateUpdate: toInputJsonSchema(runtimeStateUpdateInputSchema),
   output: toPostgresJsonSchema(binConfigurationSchema, "output"),
   error: toPostgresJsonSchema(binErrorSchema, "output"),
 };

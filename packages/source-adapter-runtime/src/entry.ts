@@ -1,15 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  open,
-  readFile,
-  readdir,
-  realpath,
-  rename,
-  unlink,
-  type FileHandle,
-} from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
@@ -69,9 +59,6 @@ const heartbeatInterval = Number(
   process.env.BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS ??
     String(runtimeHeartbeatIntervalMs),
 );
-const ownerLockPath =
-  process.env.BINNY_RUNTIME_OWNER_LOCK_PATH ??
-  "/var/lib/binny/runtime/owner.lock";
 const workerEntry =
   process.env.BINNY_RUNTIME_WORKER_ENTRY ??
   fileURLToPath(
@@ -105,6 +92,7 @@ const runtimeBinId = binId;
 if (apiUrl === undefined) {
   throw new Error("缺少 BINNY_API_URL，运行器无法连接 Binny 核心。");
 }
+const runtimeApiUrl = apiUrl;
 
 try {
   new URL(apiUrl);
@@ -118,33 +106,6 @@ if (!Number.isInteger(runtimePort) || runtimePort < 1 || runtimePort > 65_535) {
 
 if (!Number.isInteger(heartbeatInterval) || heartbeatInterval < 250) {
   throw new Error("BINNY_RUNTIME_HEARTBEAT_INTERVAL_MS 必须大于等于 250。");
-}
-
-async function findOwnerLockDescriptor(): Promise<{
-  readonly descriptor: number;
-  readonly path: string;
-}> {
-  let expectedPath: string;
-  try {
-    expectedPath = await realpath(ownerLockPath);
-  } catch {
-    throw new Error(
-      `运行器没有持有 owner lock：请用 flock 锁定 ${ownerLockPath} 后启动。`,
-    );
-  }
-  for (const entry of await readdir("/proc/self/fd")) {
-    const descriptor = Number(entry);
-    if (!Number.isInteger(descriptor)) continue;
-    try {
-      if ((await realpath(`/proc/self/fd/${entry}`)) === expectedPath)
-        return { descriptor, path: expectedPath };
-    } catch {
-      // fd 列表可能在遍历时关闭临时描述符。
-    }
-  }
-  throw new Error(
-    `运行器没有持有 owner lock：请用 flock 锁定 ${ownerLockPath} 后启动。`,
-  );
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {
@@ -163,73 +124,12 @@ function isSourceAccessUnavailableError(error: unknown): boolean {
   );
 }
 
-async function advanceOwnerGeneration(
-  ownerLockRealPath: string,
-): Promise<string> {
-  const directoryPath = dirname(ownerLockRealPath);
-  const generationPath = join(directoryPath, "owner.generation");
-  let current = 0n;
-  try {
-    const saved = await readFile(generationPath, "utf8");
-    const match = /^(0|[1-9][0-9]*)\n$/u.exec(saved);
-    if (match === null)
-      throw new Error("运行器所有权代际文件格式无效，拒绝重新编号。");
-    current = BigInt(match[1]!);
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT"))
-      throw new Error("无法读取运行器所有权代际，不能启动控制器。", {
-        cause: error,
-      });
-  }
-
-  const next = current + 1n;
-  if (next > 9_223_372_036_854_775_807n)
-    throw new Error("运行器所有权代际已用尽，不能启动控制器。");
-
-  const temporaryPath = join(
-    directoryPath,
-    `.owner-generation-${process.pid}-${randomUUID()}.tmp`,
-  );
-  let temporaryFile: FileHandle | undefined;
-  try {
-    temporaryFile = await open(temporaryPath, "wx", 0o600);
-    await temporaryFile.writeFile(`${next.toString()}\n`, "utf8");
-    await temporaryFile.sync();
-    await temporaryFile.close();
-    temporaryFile = undefined;
-    await rename(temporaryPath, generationPath);
-    const directory = await open(directoryPath, "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-    return next.toString();
-  } catch (error) {
-    if (temporaryFile !== undefined)
-      await temporaryFile.close().catch(() => {});
-    await unlink(temporaryPath).catch(() => {});
-    throw new Error("无法持久发布运行器所有权代际，不能发送首个心跳。", {
-      cause: error,
-    });
-  }
-}
-
-const ownerLock = await findOwnerLockDescriptor();
-const ownerLockDescriptor = ownerLock.descriptor;
-const ownerGeneration = await advanceOwnerGeneration(ownerLock.path);
 let sourceAccessCoordinator: SourceAccessCoordinator | undefined;
 let sourceAccessUnavailable = false;
-try {
-  sourceAccessCoordinator = await openPersistentSourceAccessCoordinator(
-    join(dirname(ownerLock.path), "source-access.json"),
-  );
-} catch (error) {
-  sourceAccessUnavailable = true;
-  process.stderr.write(
-    `来源准入持久状态不可用，相关来源访问已停止：${error instanceof Error ? error.message : String(error)}\n`,
-  );
-}
+let persistentSourceAdapterState: PersistentSourceAdapterState | undefined;
+let persistentSourceAdapterStateUnavailable = false;
+let ownerGeneration: string | undefined = undefined;
+
 const importedSourceAdapter = (await import(
   pathToFileURL(sourceAdapterPath).href
 )) as {
@@ -245,19 +145,82 @@ if (sourceAdapter === undefined)
 
 const activeSourceAdapter: SourceAdapterDefinition = sourceAdapter;
 const manifest = sourceAdapterManifest(activeSourceAdapter);
-let persistentSourceAdapterState: PersistentSourceAdapterState | undefined;
-let persistentSourceAdapterStateUnavailable = false;
-try {
-  persistentSourceAdapterState = await openPersistentSourceAdapterState(
-    join(dirname(ownerLock.path), `${manifest.id}.state.json`),
-    activeSourceAdapter.stateSchema,
-  );
-} catch (error) {
-  persistentSourceAdapterStateUnavailable = true;
-  process.stderr.write(
-    `信源适配器持久状态不可用，相关同步已停止：${error instanceof Error ? error.message : String(error)}\n`,
-  );
+
+async function claimOwnership(): Promise<string | undefined> {
+  try {
+    const response = await fetch(
+      `${runtimeApiUrl}/bins/${encodeURIComponent(runtimeBinId)}/runtime/ownership`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeId,
+          runtimeControlUrl,
+          sourceAdapter: manifest,
+        }),
+        signal: AbortSignal.timeout(3_000),
+      },
+    );
+    if (response.status === 409) {
+      const data = await response.json().catch(() => ({}));
+      process.stderr.write(`所有权冲突，退出：${JSON.stringify(data)}\n`);
+      process.exit(1);
+    }
+    if (!response.ok) {
+      process.stderr.write(
+        `申领所有权失败（HTTP ${response.status}），稍后重试\n`,
+      );
+      return undefined;
+    }
+    const data = (await response.json()) as { ownerGeneration: string };
+    return data.ownerGeneration;
+  } catch (error) {
+    process.stderr.write(
+      `申领所有权网络错误，稍后重试：${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return undefined;
+  }
 }
+
+async function ensureStateCoordinators(generation: string): Promise<void> {
+  if (sourceAccessCoordinator === undefined && !sourceAccessUnavailable) {
+    try {
+      sourceAccessCoordinator = await openPersistentSourceAccessCoordinator({
+        apiUrl: runtimeApiUrl,
+        binId: runtimeBinId,
+        runtimeId,
+        ownerGeneration: generation,
+      });
+    } catch (error) {
+      sourceAccessUnavailable = true;
+      process.stderr.write(
+        `来源准入持久状态不可用，相关来源访问已停止：${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+  if (
+    persistentSourceAdapterState === undefined &&
+    !persistentSourceAdapterStateUnavailable
+  ) {
+    try {
+      persistentSourceAdapterState = await openPersistentSourceAdapterState(
+        {
+          apiUrl: runtimeApiUrl,
+          binId: runtimeBinId,
+          runtimeId,
+          ownerGeneration: generation,
+        },
+        activeSourceAdapter.stateSchema,
+      );
+    } catch (error) {
+      persistentSourceAdapterStateUnavailable = true;
+      process.stderr.write(
+        `信源适配器持久状态不可用，相关同步已停止：${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+}
+
 let browserPower: BrowserPower = {
   status: environmentKind === "browser" ? "stopped" : "unavailable",
 };
@@ -279,10 +242,10 @@ const browserLifecycle =
         apiUrl,
         binId: runtimeBinId,
         runtimeId,
-        ownerGeneration,
+        ownerGeneration: () => ownerGeneration ?? "0",
         profileDirectory:
           process.env.BINNY_BROWSER_PROFILE_DIRECTORY ??
-          "/var/lib/binny/runtime/browser-profile",
+          "/var/lib/binny/browser-profile",
         async onPowerChange(power, reservationId, event) {
           browserPower = power;
           refreshBrowserIdle();
@@ -331,6 +294,7 @@ let lastStatus: string | undefined;
 async function sendBrowserPowerEventNow(
   event: (typeof pendingBrowserPowerEvents)[number],
 ): Promise<BrowserPowerChangeResult> {
+  if (ownerGeneration === undefined) return "unavailable";
   try {
     const environment = runtimeEnvironment();
     const response = await client.bins[":binId"].runtime.heartbeat.$post({
@@ -677,8 +641,14 @@ function startActionWorker(
 ): ActionWorker {
   const child = spawn(process.execPath, [workerEntry], {
     detached: true,
-    env: process.env,
-    stdio: ["ignore", "inherit", "inherit", "ipc", ownerLockDescriptor],
+    env: {
+      ...process.env,
+      BINNY_RUNTIME_ID: runtimeId,
+      ...(ownerGeneration === undefined
+        ? {}
+        : { BINNY_RUNTIME_OWNER_GENERATION: ownerGeneration }),
+    },
+    stdio: ["ignore", "inherit", "inherit", "ipc"],
   });
   const pid = child.pid;
   if (pid === undefined) throw new Error("无法启动隔离的信源适配器执行进程。");
@@ -765,10 +735,16 @@ function startActionWorker(
         .catch(async (error: unknown) => {
           persistentSourceAdapterStateUnavailable = true;
           await sendHeartbeatNow(false, false);
+          const isOwnerMismatch =
+            hasErrorCode(error, "runtime_owner_mismatch") ||
+            (error instanceof Error &&
+              error.message === "runtime_owner_mismatch");
           await sendWorkerMessage(worker, {
             type: "adapter-state-rejected",
             requestId: record.requestId,
-            code: "source_adapter_state_unavailable",
+            code: isOwnerMismatch
+              ? "runtime_owner_mismatch"
+              : "source_adapter_state_unavailable",
             message:
               error instanceof Error
                 ? error.message
@@ -779,11 +755,12 @@ function startActionWorker(
     }
     if (message.type === "source-access-acquire") {
       const record = message as Record<string, unknown>;
+      const coordinator = sourceAccessCoordinator;
       if (
         declarations === undefined ||
         persistentSourceAdapterStateUnavailable ||
         sourceAccessUnavailable ||
-        sourceAccessCoordinator === undefined ||
+        coordinator === undefined ||
         typeof record.requestId !== "string" ||
         accessRequests.has(record.requestId)
       ) {
@@ -792,12 +769,12 @@ function startActionWorker(
           requestId: record.requestId,
           ...(persistentSourceAdapterStateUnavailable ||
           sourceAccessUnavailable ||
-          sourceAccessCoordinator === undefined
+          coordinator === undefined
             ? { code: "source_access_state_unavailable" }
             : {}),
           message: persistentSourceAdapterStateUnavailable
             ? "信源适配器持久状态不可用，相关来源访问已停止。"
-            : sourceAccessUnavailable || sourceAccessCoordinator === undefined
+            : sourceAccessUnavailable || coordinator === undefined
               ? "来源访问状态不可用，相关来源访问已停止。"
               : "本次运行没有可用的来源准入声明。",
         });
@@ -814,14 +791,14 @@ function startActionWorker(
       }
       const pending = new AbortController();
       accessRequests.set(record.requestId, pending);
-      void sourceAccessCoordinator
+      void coordinator
         .acquire(ownerId, request, declarations, pending.signal)
         .then(async (lease) => {
           if (
             pending.signal.aborted ||
             accessRequests.get(record.requestId as string) !== pending
           ) {
-            await sourceAccessCoordinator.release(ownerId, lease.leaseId);
+            await coordinator.release(ownerId, lease.leaseId);
             return;
           }
           accessRequests.delete(record.requestId as string);
@@ -832,7 +809,7 @@ function startActionWorker(
               ...lease,
             });
           } catch (error) {
-            await sourceAccessCoordinator.release(ownerId, lease.leaseId);
+            await coordinator.release(ownerId, lease.leaseId);
             throw error;
           }
         })
@@ -854,7 +831,9 @@ function startActionWorker(
               ? { code: "source_access_state_unavailable" }
               : errorCode === "source_access_deadline_exceeded"
                 ? { code: "source_access_deadline_exceeded" }
-                : {}),
+                : errorCode === "runtime_owner_mismatch"
+                  ? { code: "runtime_owner_mismatch" }
+                  : {}),
             message:
               error instanceof Error ? error.message : "来源准入请求失败。",
           }).catch(() => undefined);
@@ -1281,6 +1260,7 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
     await sendWorkerMessage(worker, {
       type: "execute",
       runtimeId,
+      ownerGeneration: ownerGeneration!,
       run: {
         runId: run.runId,
         binId: run.binId,
@@ -1550,6 +1530,21 @@ async function heartbeat(
   pollRuns = true,
 ): Promise<void> {
   if (stopping !== undefined && !allowStopping) return;
+  if (ownerGeneration === undefined) {
+    const generation = await claimOwnership();
+    if (generation === undefined) {
+      if (stopping === undefined) {
+        heartbeatTimer = setTimeout(() => {
+          heartbeatTimer = undefined;
+          startHeartbeat();
+        }, heartbeatInterval);
+      }
+      return;
+    }
+    ownerGeneration = generation;
+  }
+  await ensureStateCoordinators(ownerGeneration);
+
   const stoppedRunId = pendingStoppedRunId;
   const humanSessionEvent = pendingHumanSessionEvent;
   let heartbeatAccepted = false;

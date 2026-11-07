@@ -64,18 +64,6 @@ services:
       BINNY_BIN_ID: ${BINNY_RSS_BIN_ID:-rss}
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_PORT: 8080
-      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
-    volumes:
-      - type: bind
-        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/runtime/rss
-        target: /var/lib/binny/runtime
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/source-adapters/rss
-        target: /var/lib/binny/source-adapter-state
-        bind:
-          create_host_path: false
     stop_grace_period: 30s
     restart: unless-stopped
 
@@ -93,8 +81,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - type: bind
-        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/runtime/linuxdo
-        target: /var/lib/binny/runtime
+        source: ${BINNY_APPDATA_DIRECTORY:?请设置应用数据目录}/browser-profiles/linuxdo
+        target: /var/lib/binny/browser-profile
         bind:
           create_host_path: false
     stop_grace_period: 30s

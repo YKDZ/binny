@@ -13,7 +13,7 @@ type BrowserOptions = {
   readonly apiUrl: string;
   readonly binId: string;
   readonly runtimeId: string;
-  readonly ownerGeneration: string;
+  readonly ownerGeneration: string | (() => string);
   readonly profileDirectory: string;
   readonly display?: string;
   readonly onPowerChange: (
@@ -336,7 +336,9 @@ export class BrowserLifecycle {
     tunnelEndpoint.searchParams.set("runtimeId", this.options.runtimeId);
     tunnelEndpoint.searchParams.set(
       "ownerGeneration",
-      this.options.ownerGeneration,
+      typeof this.options.ownerGeneration === "function"
+        ? this.options.ownerGeneration()
+        : this.options.ownerGeneration,
     );
     tunnelEndpoint.searchParams.set("token", tunnelToken);
     const tunnel = new WebSocket(tunnelEndpoint, {

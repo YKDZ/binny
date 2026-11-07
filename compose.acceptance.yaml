@@ -141,8 +141,6 @@ services:
       BINNY_BIN_ID: binny-runtime-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-    volumes:
-      - runtime-one-owner:/var/lib/binny/runtime
     ports:
       - "${BINNY_RUNTIME_ONE_PORT:-14141}:8080"
     restart: unless-stopped
@@ -159,8 +157,6 @@ services:
       BINNY_BIN_ID: binny-runtime-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-    volumes:
-      - runtime-two-owner:/var/lib/binny/runtime
     ports:
       - "${BINNY_RUNTIME_TWO_PORT:-14142}:8080"
     restart: unless-stopped
@@ -185,8 +181,6 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
-    volumes:
-      - runtime-fifteen-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -211,8 +205,6 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
-    volumes:
-      - runtime-fifteen-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -235,10 +227,6 @@ services:
       BINNY_BIN_ID: binny-rss-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
-    volumes:
-      - rss-one-source-adapter-state:/var/lib/binny/source-adapter-state
-      - rss-one-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     develop:
@@ -263,10 +251,6 @@ services:
       BINNY_BIN_ID: binny-rss-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
-      BINNY_SOURCE_ADAPTER_STATE_DIRECTORY: /var/lib/binny/source-adapter-state
-    volumes:
-      - rss-two-source-adapter-state:/var/lib/binny/source-adapter-state
-      - rss-two-owner:/var/lib/binny/runtime
     extra_hosts:
       - "host.docker.internal:host-gateway"
     develop:
@@ -293,7 +277,7 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
-      - browser-one-owner:/var/lib/binny/runtime
+      - browser-one-owner:/var/lib/binny/browser-profile
     develop:
       watch: *binny-runtime-watch
     restart: unless-stopped
@@ -318,7 +302,7 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
-      - browser-two-owner:/var/lib/binny/runtime
+      - browser-two-owner:/var/lib/binny/browser-profile
     develop:
       watch: *binny-runtime-watch
     restart: unless-stopped
@@ -337,7 +321,7 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
-      - browser-one-owner:/var/lib/binny/runtime
+      - browser-one-owner:/var/lib/binny/browser-profile
     restart: "no"
 
   runtime-linuxdo:
@@ -360,7 +344,7 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
-      - linuxdo-runtime-owner:/var/lib/binny/runtime
+      - linuxdo-runtime-owner:/var/lib/binny/browser-profile
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -379,7 +363,7 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
-      - linuxdo-runtime-two-owner:/var/lib/binny/runtime
+      - linuxdo-runtime-two-owner:/var/lib/binny/browser-profile
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -399,14 +383,6 @@ volumes:
   postgres-data:
   bins:
   resource-data:
-  runtime-one-owner:
-  runtime-two-owner:
-  runtime-fifteen-one-owner:
-  runtime-fifteen-two-owner:
-  rss-one-owner:
-  rss-one-source-adapter-state:
-  rss-two-owner:
-  rss-two-source-adapter-state:
   browser-one-owner:
   browser-two-owner:
   linuxdo-runtime-owner:

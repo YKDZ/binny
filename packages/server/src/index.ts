@@ -188,6 +188,9 @@ export async function createServerRuntime(options: {
   const runtimeOperations: RuntimeConnectionOperations = {
     getExecution: (binId) => runtime.getExecution(binId),
     disconnect: (binId, input) => runtime.disconnect(binId, input),
+    claimOwnership: (binId, input) => runtime.claimOwnership(binId, input),
+    getState: (binId, query) => runtime.getState(binId, query),
+    putState: (binId, input) => runtime.putState(binId, input),
     heartbeat: async (binId, input) => {
       const result = await runtime.heartbeat(binId, input);
       if (result.ok && result.value.humanSession?.action === "close") {

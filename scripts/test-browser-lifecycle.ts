@@ -20,6 +20,14 @@ type ProcessResult = {
   readonly stderr: string;
 };
 
+type BrowserService = "browser-one" | "browser-two";
+
+type ContainerProcess = {
+  readonly pid: string;
+  readonly state: string;
+  readonly command: string;
+};
+
 type BrowserImageUpdate = {
   readonly baselineManifest: Record<string, unknown>;
   readonly candidateManifest: Record<string, unknown>;
@@ -633,7 +641,7 @@ async function browserRuntimeContainerInfo(
   assert.ok(container !== undefined, `${service} 容器没有检查结果。`);
   const ownerVolume = container?.Mounts?.find(
     ({ Destination, Type }) =>
-      Destination === "/var/lib/binny/runtime" && Type === "volume",
+      Destination === "/var/lib/binny/browser-profile" && Type === "volume",
   )?.Name;
   assert.ok(ownerVolume, `${service} 没有挂载持久运行目录。`);
   return {
@@ -1059,21 +1067,27 @@ async function browserContainerMemoryBytes(service: string): Promise<number> {
   return samples.toSorted((left, right) => left - right)[1]!;
 }
 
-async function waitForBrowserProcessesStopped(service: string): Promise<void> {
+async function waitForBrowserProcessesStopped(
+  service: BrowserService = "browser-one",
+): Promise<void> {
   const deadline = Date.now() + 30_000;
-  let lastProcesses = "";
   while (Date.now() < deadline) {
-    const result = await browserProcesses(service);
-    lastProcesses = result.stdout;
     if (
-      !result.stdout
-        .split("\n")
-        .some((line) => /(?:chrom(?:e|ium)|x11vnc|Xvfb)/iu.test(line))
-    )
+      (await activeBrowserMainProcessCount(service)) === 0 &&
+      (await zombieBrowserProcesses(service)).length === 0
+    ) {
       return;
+    }
     await delay(150);
   }
-  throw new Error(`${service} 的浏览器与显示进程仍未退出：\n${lastProcesses}`);
+  const zombies = await zombieBrowserProcesses(service);
+  const activeCount = await activeBrowserMainProcessCount(service);
+  throw new Error(
+    `${service} 的浏览器与显示进程仍未退出：${JSON.stringify({
+      activeCount,
+      zombies,
+    })}`,
+  );
 }
 
 async function triggerRun(
@@ -1401,6 +1415,7 @@ async function enterLoginThroughCanvas(
     await page.screenshot({ path: afterScreenshotPath });
     throw new Error(
       `外层浏览器输入后没有打开受控登录页：${JSON.stringify({ beforeInputState, afterInputState, loginPageViews: (await sourceMetrics()).loginPageViews.length })}；输入前画面：${beforeScreenshotPath}；输入后画面：${afterScreenshotPath}；${String(error)}`,
+      { cause: error },
     );
   }
   await page.keyboard.type("binny-browser-user", { delay: 10 });
@@ -1461,44 +1476,49 @@ async function browserPortBindings(
   return container?.HostConfig?.PortBindings ?? {};
 }
 
-async function browserProcesses(service: string): Promise<ProcessResult> {
+async function browserProcesses(
+  service: BrowserService = "browser-one",
+): Promise<readonly ContainerProcess[]> {
   const containers = await compose(["ps", "--all", "--quiet", service]);
   const containerId = containers.stdout.trim();
   assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
-  const result = await run("docker", ["top", containerId, "-eo", "pid,args"]);
+  const result = await run("docker", [
+    "top",
+    containerId,
+    "-eo",
+    "pid,ppid,stat,comm,args",
+  ]);
   assert.equal(result.code, 0, result.stderr);
-  return result;
+  return result.stdout.split("\n").flatMap((line) => {
+    const columns = /^(\s*\d+)\s+\d+\s+(\S+)\s+\S+(?:\s+(.*))?$/u.exec(line);
+    if (columns === null) return [];
+    const pid = columns[1]!.trim();
+    const state = columns[2]!;
+    const args = columns[3] ?? "";
+    return [
+      {
+        pid,
+        state,
+        command: `${pid} ${args}`,
+      },
+    ];
+  });
 }
 
-async function activeBrowserMainProcessCount(): Promise<number> {
+async function zombieBrowserProcesses(
+  service: BrowserService = "browser-one",
+): Promise<readonly ContainerProcess[]> {
+  const processes = await browserProcesses(service);
+  return processes.filter(({ state }) => /^[Zz]/u.test(state));
+}
+
+async function activeBrowserMainProcessCount(
+  service?: BrowserService,
+): Promise<number> {
+  const targetServices: readonly BrowserService[] =
+    service !== undefined ? [service] : ["browser-one", "browser-two"];
   const processes = await Promise.all(
-    ["browser-one", "browser-two"].map(async (service) => {
-      const containers = await compose(["ps", "--all", "--quiet", service]);
-      const containerId = containers.stdout.trim();
-      assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
-      const result = await run("docker", [
-        "top",
-        containerId,
-        "-eo",
-        "pid,ppid,stat,comm,args",
-      ]);
-      assert.equal(result.code, 0, result.stderr);
-      return result.stdout.split("\n").flatMap((line) => {
-        const columns = /^(\s*\d+)\s+\d+\s+(\S+)\s+\S+(?:\s+(.*))?$/u.exec(
-          line,
-        );
-        if (columns === null) return [];
-        const pid = columns[1]!.trim();
-        const state = columns[2]!;
-        const args = columns[3] ?? "";
-        return [
-          {
-            state,
-            command: `${pid} ${args}`,
-          },
-        ];
-      });
-    }),
+    targetServices.map((entry) => browserProcesses(entry)),
   );
   return processes.reduce(
     (count, result) =>
@@ -1539,21 +1559,24 @@ async function ensureProcessObserver(): Promise<void> {
   processObserverStarted = true;
 }
 
-async function browserMainProcess(service: string): Promise<HostProcess> {
+async function browserMainProcess(
+  service: BrowserService = "browser-one",
+): Promise<HostProcess> {
   await ensureProcessObserver();
-  const result = await browserProcesses(service);
-  const lines = result.stdout
-    .split("\n")
-    .filter(
-      (candidate) =>
-        /(?:chrom(?:e|ium))/iu.test(candidate) &&
-        !candidate.includes("--type=") &&
-        !candidate.includes("chrome_crashpad_handler"),
-    );
-  assert.equal(lines.length, 1, `${service} 应恰有一个 Chromium 主进程。`);
-  const line = lines[0]!;
-  const pid = Number(/^\s*(\d+)\s/u.exec(line)?.[1]);
-  assert.ok(Number.isInteger(pid) && pid > 0, `无效的 Chromium PID：${line}`);
+  const processes = await browserProcesses(service);
+  const candidates = processes.filter(
+    (candidate) =>
+      /(?:chrom(?:e|ium))/iu.test(candidate.command) &&
+      !candidate.command.includes("--type=") &&
+      !candidate.command.includes("chrome_crashpad_handler"),
+  );
+  assert.equal(candidates.length, 1, `${service} 应恰有一个 Chromium 主进程。`);
+  const candidate = candidates[0]!;
+  const pid = Number(candidate.pid);
+  assert.ok(
+    Number.isInteger(pid) && pid > 0,
+    `无效的 Chromium PID：${candidate.command}`,
+  );
   const startTime = await daemonProcessIdentity(pid);
   assert.ok(
     startTime !== undefined,
@@ -1564,10 +1587,12 @@ async function browserMainProcess(service: string): Promise<HostProcess> {
 
 async function assertVncLoopbackOnly(): Promise<void> {
   const processes = await browserProcesses("browser-one");
-  const vncCommand = processes.stdout
-    .split("\n")
-    .find((line) => /\bx11vnc\b/u.test(line));
-  assert.ok(vncCommand !== undefined && vncCommand.includes("-localhost"));
+  const vncCommand = processes.find((process) =>
+    /\bx11vnc\b/u.test(process.command),
+  );
+  assert.ok(
+    vncCommand !== undefined && vncCommand.command.includes("-localhost"),
+  );
 
   const listeners = await compose([
     "exec",
@@ -1591,10 +1616,12 @@ async function assertVncLoopbackOnly(): Promise<void> {
   assert.equal(outsideContainer.code, 0, outsideContainer.stderr);
 }
 
-async function assertVncStopped(service: string): Promise<void> {
+async function assertVncStopped(
+  service: BrowserService = "browser-one",
+): Promise<void> {
   const processes = await browserProcesses(service);
   assert.equal(
-    processes.stdout.split("\n").some((line) => /\bx11vnc\b/u.test(line)),
+    processes.some((process) => /\bx11vnc\b/u.test(process.command)),
     false,
     `人工会话关闭后 ${service} 仍有 x11vnc 进程。`,
   );
@@ -1609,7 +1636,9 @@ async function assertVncStopped(service: string): Promise<void> {
   assert.equal(listeners.code, 0, listeners.stderr);
 }
 
-async function waitForVncStopped(service: string): Promise<void> {
+async function waitForVncStopped(
+  service: BrowserService = "browser-one",
+): Promise<void> {
   const deadline = Date.now() + 30_000;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -1626,33 +1655,33 @@ async function waitForVncStopped(service: string): Promise<void> {
   );
 }
 
-async function browserHostProcesses(service: string): Promise<HostProcess[]> {
+async function browserHostProcesses(
+  service: BrowserService = "browser-one",
+): Promise<HostProcess[]> {
   await ensureProcessObserver();
-  const result = await browserProcesses(service);
-  const processes: HostProcess[] = [];
-  for (const line of result.stdout.split("\n").slice(1)) {
-    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
-    if (match === null || !/(?:chrom(?:e|ium)|x11vnc|Xvfb)/iu.test(match[2]!))
-      continue;
-    const pid = Number(match[1]);
+  const processes = await browserProcesses(service);
+  const hostProcesses: HostProcess[] = [];
+  for (const process of processes) {
+    if (!/(?:chrom(?:e|ium)|x11vnc|Xvfb)/iu.test(process.command)) continue;
+    const pid = Number(process.pid);
     const startTime = await daemonProcessIdentity(pid);
     assert.ok(
       startTime !== undefined,
       `无法在 Docker daemon 的 PID namespace 读取进程 ${String(pid)} 身份。`,
     );
-    processes.push({ pid, startTime });
+    hostProcesses.push({ pid, startTime });
   }
   assert.ok(
-    processes.some(({ pid }) => pid > 0),
+    hostProcesses.some(({ pid }) => pid > 0),
     `没有枚举到 ${service} 的浏览器进程。`,
   );
   assert.ok(
-    result.stdout.includes("x11vnc") &&
-      result.stdout.includes("Xvfb") &&
-      /chrom(?:e|ium)/iu.test(result.stdout),
-    `容器进程列表没有同时包含 Chromium、Xvfb 和 x11vnc：\n${result.stdout}`,
+    processes.some((process) => process.command.includes("x11vnc")) &&
+      processes.some((process) => process.command.includes("Xvfb")) &&
+      processes.some((process) => /chrom(?:e|ium)/iu.test(process.command)),
+    `容器进程列表没有同时包含 Chromium、Xvfb 和 x11vnc：\n${JSON.stringify(processes)}`,
   );
-  return processes;
+  return hostProcesses;
 }
 
 async function daemonProcessIdentity(pid: number): Promise<string | undefined> {
@@ -1917,10 +1946,14 @@ async function main(): Promise<void> {
   );
   const concurrentRunDeadline = Date.now() + 90_000;
   let concurrentWinner:
-    | { readonly binId: string; readonly service: string }
+    | { readonly binId: string; readonly service: BrowserService }
     | undefined;
   let concurrentLoser:
-    | { readonly binId: string; readonly service: string; readonly run: Run }
+    | {
+        readonly binId: string;
+        readonly service: BrowserService;
+        readonly run: Run;
+      }
     | undefined;
   let concurrentRunStates: readonly [Run, Run] | undefined;
   while (Date.now() < concurrentRunDeadline) {
@@ -1949,7 +1982,7 @@ async function main(): Promise<void> {
       concurrentLoser = {
         binId: loserIndex === 0 ? "binny-browser-one" : "binny-browser-two",
         service: loserIndex === 0 ? "browser-one" : "browser-two",
-        run: current[loserIndex]!,
+        run: current[loserIndex],
       };
       break;
     }
@@ -2154,6 +2187,7 @@ async function main(): Promise<void> {
   assert.ok(readyLogin.readyAt !== undefined);
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
 
   const persistedCheck = await triggerRun("binny-browser-one", "check");
   const persistedCheckResult = await waitForRun(
@@ -2182,6 +2216,7 @@ async function main(): Promise<void> {
   assert.deepEqual(await browserMainProcess("browser-one"), checkWakeProcess);
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
 
   const archivedBeforeImageUpdate =
     await browserFixtureRunIds("binny-browser-one");
@@ -2296,6 +2331,7 @@ async function main(): Promise<void> {
   );
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   process.stdout.write(
     `浏览器镜像更新实测：${JSON.stringify({
       binId: updatedBrowserBin.id,
@@ -2353,6 +2389,7 @@ async function main(): Promise<void> {
   await updateBin("binny-browser-one", 4);
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   const browserFixtureRunsBeforeSchedule =
     await browserFixtureRunIds("binny-browser-one");
   const scheduleGateId = randomUUID();
@@ -2680,7 +2717,10 @@ async function main(): Promise<void> {
   const contenderName = `${projectName}-browser-one-contender-1`;
   const contenderDeadline = Date.now() + 15_000;
   let contenderState = "running";
-  while (Date.now() < contenderDeadline && contenderState === "running") {
+  while (
+    Date.now() < contenderDeadline &&
+    contenderState.startsWith("running")
+  ) {
     const inspected = await run("docker", [
       "inspect",
       "--format",
@@ -2753,6 +2793,7 @@ async function main(): Promise<void> {
   await updateBin("binny-browser-one", 0);
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   await updateBin("binny-browser-one", 30);
   await waitForBrowserPower("binny-browser-two", "ready");
   const browserCapacitySamples: number[] = [
@@ -2862,6 +2903,7 @@ async function main(): Promise<void> {
   await updateBin("binny-browser-one", 0);
   await waitForBrowserPower("binny-browser-one", "stopped");
   await waitForBrowserProcessesStopped("browser-one");
+  assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   browserCapacitySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserCapacitySamples.at(-1), 0);
   assert.ok(Math.max(...browserCapacitySamples) <= 1);
@@ -2892,6 +2934,7 @@ try {
   } catch (error) {
     throw new Error(
       `${error instanceof Error ? (error.stack ?? error.message) : String(error)}${composeStarted ? await diagnostics() : ""}`,
+      { cause: error },
     );
   }
 } finally {

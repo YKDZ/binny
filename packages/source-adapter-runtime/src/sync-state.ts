@@ -1,55 +1,70 @@
-import { randomUUID } from "node:crypto";
-import {
-  mkdir,
-  open,
-  readFile,
-  rename,
-  unlink,
-  type FileHandle,
-} from "node:fs/promises";
-import { dirname, join } from "node:path";
-
 import { jsonObjectSchema, type JsonObject } from "@binny/contracts";
 import type { ZodType } from "zod";
 
-/** 每个运行器 owner volume 上唯一的一份信源适配器状态。 */
+/** 每个运行器 owner 上唯一的一份信源适配器状态。 */
 export type PersistentSourceAdapterState = {
   snapshot(): JsonObject | undefined;
   replace(value: unknown): Promise<void>;
 };
 
 export class PersistentSourceAdapterStateError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly code?: string | undefined;
+  constructor(
+    message: string,
+    options?: ErrorOptions & { readonly code?: string | undefined },
+  ) {
     super(message, options);
     this.name = "PersistentSourceAdapterStateError";
+    this.code =
+      options?.code ??
+      (message === "runtime_owner_mismatch"
+        ? "runtime_owner_mismatch"
+        : undefined);
   }
 }
 
+export type PersistentSourceAdapterStateOptions = {
+  readonly apiUrl: string;
+  readonly binId: string;
+  readonly runtimeId: string;
+  readonly ownerGeneration: string;
+};
+
 export async function openPersistentSourceAdapterState(
-  statePath: string,
+  options: PersistentSourceAdapterStateOptions,
   stateSchema?: ZodType,
 ): Promise<PersistentSourceAdapterState> {
+  const { apiUrl, binId, runtimeId, ownerGeneration } = options;
   let state: JsonObject | undefined;
-  try {
-    const encoded = await readFile(statePath, "utf8");
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(encoded) as unknown;
-    } catch (error) {
-      throw new PersistentSourceAdapterStateError(
-        "信源适配器持久状态不是有效 JSON。",
-        { cause: error },
-      );
-    }
-    state = parsePersistentState(decoded, stateSchema);
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) {
-      if (error instanceof PersistentSourceAdapterStateError) throw error;
-      throw new PersistentSourceAdapterStateError(
-        "无法读取信源适配器持久状态。",
-        { cause: error },
-      );
-    }
+
+  const url = new URL(
+    `/bins/${encodeURIComponent(binId)}/runtime/state`,
+    apiUrl,
+  );
+  url.searchParams.set("runtimeId", runtimeId);
+  url.searchParams.set("ownerGeneration", ownerGeneration);
+
+  const response = await fetch(url, {
+    method: "GET",
+    signal: AbortSignal.timeout(5_000),
+  });
+
+  if (response.status === 409) {
+    throw new PersistentSourceAdapterStateError("runtime_owner_mismatch", {
+      code: "runtime_owner_mismatch",
+    });
+  }
+  if (!response.ok) {
+    throw new PersistentSourceAdapterStateError(
+      `无法从核心读取信源适配器持久状态（HTTP ${response.status}）。`,
+    );
+  }
+
+  const data = (await response.json()) as {
+    persistentState?: unknown;
+  };
+  if (data.persistentState !== undefined && data.persistentState !== null) {
+    state = parsePersistentState(data.persistentState, stateSchema);
   }
 
   return {
@@ -58,7 +73,30 @@ export async function openPersistentSourceAdapterState(
     },
     async replace(value) {
       const checked = parsePersistentState(value, stateSchema);
-      await writeStateAtomically(statePath, checked);
+      const putUrl = new URL(
+        `/bins/${encodeURIComponent(binId)}/runtime/state`,
+        apiUrl,
+      );
+      const putResponse = await fetch(putUrl, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeId,
+          ownerGeneration,
+          persistentState: checked,
+        }),
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (putResponse.status === 409) {
+        throw new PersistentSourceAdapterStateError("runtime_owner_mismatch", {
+          code: "runtime_owner_mismatch",
+        });
+      }
+      if (!putResponse.ok) {
+        throw new PersistentSourceAdapterStateError(
+          `无法向核心保存信源适配器持久状态（HTTP ${putResponse.status}）。`,
+        );
+      }
       state = checked;
     },
   };
@@ -83,47 +121,4 @@ function parsePersistentState(
       { cause: checked.error },
     );
   return checked.data;
-}
-
-async function writeStateAtomically(
-  statePath: string,
-  state: JsonObject,
-): Promise<void> {
-  const directoryPath = dirname(statePath);
-  await mkdir(directoryPath, { recursive: true, mode: 0o700 });
-  const temporaryPath = join(
-    directoryPath,
-    `.adapter-state-${process.pid}-${randomUUID()}.tmp`,
-  );
-  let file: FileHandle | undefined;
-  try {
-    file = await open(temporaryPath, "wx", 0o600);
-    await file.writeFile(`${JSON.stringify(state)}\n`, "utf8");
-    await file.sync();
-    await file.close();
-    file = undefined;
-    await rename(temporaryPath, statePath);
-    const directory = await open(directoryPath, "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } catch (error) {
-    if (file !== undefined) await file.close().catch(() => undefined);
-    await unlink(temporaryPath).catch(() => undefined);
-    throw new PersistentSourceAdapterStateError(
-      "无法持久保存信源适配器状态。",
-      { cause: error },
-    );
-  }
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === code
-  );
 }

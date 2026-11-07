@@ -552,6 +552,7 @@ export const binErrorSchema = z.object({
       "runtime_configuration_incompatible",
       "runtime_environment_incompatible",
       "runtime_owner_mismatch",
+      "runtime_owner_active",
       "runtime_configuration_validation_unavailable",
       "configuration_changed",
       "browser_capacity_active",
@@ -587,6 +588,51 @@ export type RuntimeActionParametersValidationResult = z.infer<
 export type RuntimeDisconnectInput = z.infer<
   typeof runtimeDisconnectInputSchema
 >;
+export const runtimeOwnershipClaimInputSchema = z.object({
+  runtimeId: postgresTextSchema.min(1, "运行器标识不能为空。"),
+  runtimeControlUrl: runtimeControlUrlSchema,
+  sourceAdapter: sourceAdapterManifestSchema,
+});
+export type RuntimeOwnershipClaimInput = z.infer<
+  typeof runtimeOwnershipClaimInputSchema
+>;
+
+export const runtimeOwnershipClaimResultSchema = z.object({
+  ownerGeneration: postgresTextSchema.min(1, "运行器所有权代际不能为空。"),
+});
+export type RuntimeOwnershipClaimResult = z.infer<
+  typeof runtimeOwnershipClaimResultSchema
+>;
+
+export const runtimeStateQuerySchema = z.object({
+  runtimeId: postgresTextSchema.min(1, "运行器标识不能为空。"),
+  ownerGeneration: postgresTextSchema.min(1, "运行器所有权代际不能为空。"),
+});
+export type RuntimeStateQuery = z.infer<typeof runtimeStateQuerySchema>;
+
+export const runtimeStateResultSchema = z.object({
+  persistentState: jsonObjectSchema.optional(),
+  sourceAccess: z.unknown().optional(),
+});
+export type RuntimeStateResult = z.infer<typeof runtimeStateResultSchema>;
+
+export const runtimeStateUpdateInputSchema = z.object({
+  runtimeId: postgresTextSchema.min(1, "运行器标识不能为空。"),
+  ownerGeneration: postgresTextSchema.min(1, "运行器所有权代际不能为空。"),
+  persistentState: jsonObjectSchema.optional(),
+  sourceAccess: z.unknown().optional(),
+});
+export type RuntimeStateUpdateInput = z.infer<
+  typeof runtimeStateUpdateInputSchema
+>;
+
+export const runtimeStateUpdateResultSchema = z.object({
+  ok: z.literal(true),
+});
+export type RuntimeStateUpdateResult = z.infer<
+  typeof runtimeStateUpdateResultSchema
+>;
+
 export type RuntimeExecution = z.infer<typeof runtimeExecutionSchema>;
 export type SourceStateSnapshot = z.infer<typeof sourceStateSnapshotSchema>;
 export type RuntimeSourceStateSnapshot = z.infer<
@@ -624,6 +670,18 @@ export type RuntimeConnectionOperations = {
     binId: string,
     input: RuntimeDisconnectInput,
   ): Promise<BinOperation<RuntimeExecution>>;
+  claimOwnership(
+    binId: string,
+    input: RuntimeOwnershipClaimInput,
+  ): Promise<BinOperation<RuntimeOwnershipClaimResult>>;
+  getState(
+    binId: string,
+    query: RuntimeStateQuery,
+  ): Promise<BinOperation<RuntimeStateResult>>;
+  putState(
+    binId: string,
+    input: RuntimeStateUpdateInput,
+  ): Promise<BinOperation<RuntimeStateUpdateResult>>;
 };
 
 export const runtimeHeartbeatResultSchema = runtimeExecutionSchema.and(

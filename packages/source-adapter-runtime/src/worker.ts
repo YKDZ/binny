@@ -82,6 +82,15 @@ function decodeMessage(value: unknown): unknown {
   }
 }
 
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === code
+  );
+}
+
 const sourceAccessTransport: SourceAccessTransport = {
   acquire(input: SourceAccessAcquireInput, signal: AbortSignal) {
     const requestId = randomUUID();
@@ -296,13 +305,15 @@ process.on("message", (value: unknown) => {
     const pending = pendingAdapterState.get(record.requestId);
     if (pending === undefined) return;
     pendingAdapterState.delete(record.requestId);
-    pending.reject(
-      new Error(
-        typeof record.message === "string"
-          ? record.message
-          : "信源适配器状态不可用。",
-      ),
+    const error = new Error(
+      typeof record.message === "string"
+        ? record.message
+        : "信源适配器状态不可用。",
     );
+    if (record.code === "runtime_owner_mismatch") {
+      (error as { code?: string }).code = "runtime_owner_mismatch";
+    }
+    pending.reject(error);
   }
 });
 
@@ -333,6 +344,7 @@ async function executeRun(
   run: ManualRunExecution,
   browser: SourceAdapterBrowserConnection | undefined,
   runtimeId: string,
+  _ownerGeneration: string,
 ): Promise<ManualRunCompletion> {
   const manifest = sourceAdapterManifest(activeSourceAdapter);
   const action = activeSourceAdapter.actions[run.action];
@@ -530,6 +542,12 @@ async function executeRun(
     }
     return { status: "completed", output: jsonOutput.data };
   } catch (error) {
+    if (
+      hasErrorCode(error, "runtime_owner_mismatch") ||
+      (error instanceof Error && error.message === "runtime_owner_mismatch")
+    ) {
+      throw error;
+    }
     const completedScopes =
       isSourceAdapterActionError(error) && Array.isArray(error.completedScopes)
         ? error.completedScopes.filter(
@@ -571,6 +589,7 @@ process.once("message", (value: unknown) => {
         ? (decoded as {
             readonly type?: unknown;
             readonly runtimeId?: unknown;
+            readonly ownerGeneration?: unknown;
             readonly run?: unknown;
             readonly browser?: unknown;
           })
@@ -579,7 +598,12 @@ process.once("message", (value: unknown) => {
     const runtimeId =
       typeof message?.runtimeId === "string" && message.runtimeId.length > 0
         ? message.runtimeId
-        : undefined;
+        : process.env.BINNY_RUNTIME_ID;
+    const ownerGeneration =
+      typeof message?.ownerGeneration === "string" &&
+      message.ownerGeneration.length > 0
+        ? message.ownerGeneration
+        : (process.env.BINNY_RUNTIME_OWNER_GENERATION ?? "0");
     const checkedBrowser =
       message?.browser === undefined
         ? undefined
@@ -610,6 +634,7 @@ process.once("message", (value: unknown) => {
         checked.data,
         checkedBrowser?.success === true ? checkedBrowser.data : undefined,
         runtimeId,
+        ownerGeneration,
       );
       await send({ type: "completion", completion });
     }

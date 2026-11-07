@@ -75,6 +75,11 @@ export const binConfigurations = pgTable(
       300,
     ),
     status: text("status", { enum: binConfigurationStatuses }).notNull(),
+    persistentState: jsonb("persistent_state"),
+    sourceAccessState: jsonb("source_access_state"),
+    lastIssuedOwnerGeneration: text("last_issued_owner_generation")
+      .notNull()
+      .default("0"),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
