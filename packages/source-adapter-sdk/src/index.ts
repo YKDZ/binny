@@ -45,8 +45,11 @@ export type {
 } from "./article-archive.ts";
 
 export {
+  computeOngoingDocumentHash,
   createEmptyIncrementalSyncState,
+  getIncrementalScopeOngoingDocument,
   hasIncrementalEntryChanged,
+  hasOngoingDocumentChanged,
   incrementalEntryRecordSchema,
   incrementalOngoingDocumentRecordSchema,
   incrementalScopeStateSchema,
@@ -54,6 +57,7 @@ export {
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  pruneInactiveOngoingDocuments,
   saveIncrementalSyncState,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -111,6 +115,7 @@ export {
 
 export type {
   JsonObject,
+  ManualRunFailure,
   SourceAdapterManifest,
   JsonSchema,
 } from "@binny/contracts";
@@ -122,6 +127,7 @@ export type {
   ArchiveResourceResolveItem,
   ArchiveResourceResolveRequest,
   ArchiveResourceResolveResult,
+  ArchiveSubmissionInput,
 } from "@binny/contracts";
 
 export type SourceAdapterApiClient = ReturnType<typeof createApiClient>;

@@ -4,21 +4,17 @@ import {
   defineSourceAdapterAction,
   incrementalSyncStateSchema,
 } from "@binny/source-adapter-sdk";
-import { z } from "zod";
 
-const configSchema = z.object({}).strict();
-const paramsSchema = z.object({}).strict();
-const checkOutputSchema = z
-  .object({
-    availability: z.enum(["available", "unavailable", "unknown"]),
-    scope: z.array(z.string()),
-    basis: z.string(),
-    problems: z.array(z.unknown()),
-  })
-  .strict();
-const collectOutputSchema = z
-  .object({ completedScopes: z.array(z.string()).readonly() })
-  .strict();
+import {
+  actionParamsSchema,
+  checkOutputSchema,
+  collectOutputSchema,
+  configSchema,
+  executeKimiCheck,
+  executeKimiCollect,
+  executeKimiSync,
+  syncOutputSchema,
+} from "./changelog.ts";
 
 export const sourceAdapter = defineSourceAdapter({
   id: "kimi",
@@ -31,22 +27,23 @@ export const sourceAdapter = defineSourceAdapter({
   stateSchema: incrementalSyncStateSchema,
   actions: {
     check: defineSourceAdapterAction(configSchema, {
-      description: "Check source availability.",
-      params: paramsSchema,
+      description: "检查 Kimi 信源可用性与正文格式。",
+      params: actionParamsSchema,
       output: checkOutputSchema,
-      execute: () =>
-        Promise.resolve({
-          availability: "available" as const,
-          scope: [],
-          basis: "init",
-          problems: [],
-        }),
+      execute: executeKimiCheck,
     }),
     collect: defineSourceAdapterAction(configSchema, {
-      description: "Collect source items.",
-      params: paramsSchema,
+      description: "即时采集并归档整页 Kimi 更新日志与关联媒体。",
+      params: actionParamsSchema,
       output: collectOutputSchema,
-      execute: () => Promise.resolve({ completedScopes: [] }),
+      execute: executeKimiCollect,
+    }),
+    sync: defineSourceAdapterAction(configSchema, {
+      description:
+        "增量同步 Kimi 更新日志；首次建立观察基线，后续正文变化保存整页版本。",
+      params: actionParamsSchema,
+      output: syncOutputSchema,
+      execute: executeKimiSync,
     }),
   },
 });
