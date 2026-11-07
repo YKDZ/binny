@@ -640,7 +640,8 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     assert.equal(partialItemSubmission?.capture.completeness, "partial");
     assert.ok(
       partialItemSubmission?.capture.missing.some(
-        ({ path }) => path === "media.0",
+        ({ path, reason }) =>
+          path === "media.0" && reason.includes("本次未能取得或归档"),
       ),
     );
 

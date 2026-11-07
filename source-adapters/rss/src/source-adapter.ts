@@ -309,7 +309,7 @@ async function submitEntry(
       if (context.signal.aborted) throw error;
       const reason =
         error instanceof FeedRequestError
-          ? error.message
+          ? `媒体「${candidate.url}」本次未能取得或归档：${error.message}`
           : `媒体「${candidate.url}」本次未能取得或归档。`;
       missing.push({ path: `media.${index}`, reason });
       failures.push(reason);
