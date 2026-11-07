@@ -38,6 +38,7 @@ RUN apt-get update \
     libxfixes3 \
     libxkbcommon0 \
     libxrandr2 \
+    tini \
     util-linux \
     x11vnc \
     xfonts-scalable \
@@ -84,18 +85,17 @@ FROM browser-base AS browser
 ARG BINNY_SOURCE_ADAPTER_ENTRY
 ENV NODE_ENV=production
 ENV BINNY_SOURCE_ADAPTER_ENTRY="/app/${BINNY_SOURCE_ADAPTER_ENTRY}"
-ENV BINNY_RUNTIME_OWNER_LOCK_PATH=/var/lib/binny/runtime/owner.lock
 ENV BINNY_RUNTIME_ENVIRONMENT=browser
 ENV BINNY_BROWSER_PROFILE_REUSE=true
-ENV BINNY_BROWSER_PROFILE_DIRECTORY=/var/lib/binny/runtime/browser-profile
+ENV BINNY_BROWSER_PROFILE_DIRECTORY=/var/lib/binny/browser-profile
 ENV DISPLAY=:99
 WORKDIR /app
 COPY --from=build --chown=node:node /deploy /app
-RUN command -v flock \
-  && command -v Xvfb \
+RUN command -v Xvfb \
   && command -v x11vnc \
-  && mkdir -p /var/lib/binny/runtime /var/lib/binny/source-adapter-state \
-  && chown -R node:node /var/lib/binny/runtime /var/lib/binny/source-adapter-state
+  && command -v tini \
+  && mkdir -p /var/lib/binny/browser-profile \
+  && chown -R node:node /var/lib/binny/browser-profile
 USER node
 EXPOSE 8080
-ENTRYPOINT ["flock", "--exclusive", "--nonblock", "--no-fork", "/var/lib/binny/runtime/owner.lock", "node", "/app/binny-runtime/dist/entry.js"]
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/binny-runtime/dist/entry.js"]
