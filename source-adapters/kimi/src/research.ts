@@ -115,7 +115,7 @@ export function parseDayDate(raw: string | undefined): string | undefined {
     return `${isoDayMatch[1]}-${isoDayMatch[2].padStart(2, "0")}-${isoDayMatch[3].padStart(2, "0")}`;
   }
 
-  // 3. YYYY年MM月DD日
+  // 3. YYYY-MM-DD (Chinese format)
   const cnDayMatch = trimmed.match(
     /(?:^|\D)(20\d\d)年(\d{1,2})月(\d{1,2})日?(?:$|\D)/u,
   );
@@ -220,11 +220,11 @@ export async function fetchResearchHtml(
     });
   } catch (error) {
     throw new Error(
-      `网络请求失败（${url}）：${error instanceof Error ? error.message : String(error)}`,
+      `Network request failed (${url}): ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   if (response.status !== 200) {
-    throw new Error(`请求「${url}」返回 HTTP ${response.status}。`);
+    throw new Error(`Request to "${url}" returned HTTP ${response.status}.`);
   }
   const contentType = response.headers.get("content-type");
   const text = await response.text();
@@ -239,7 +239,7 @@ export function parseResearchBlogList(
 ): DiscoveredResearchBlogList {
   if (isResearchHtmlSpaShellOrErrorPage(html)) {
     throw new Error(
-      `信源「${source.id}」返回了 HTML SPA 外壳或错误页，而非研究博客列表。`,
+      `Source "${source.id}" returned an HTML SPA shell or error page instead of a research blog list.`,
     );
   }
 
@@ -370,7 +370,9 @@ export function extractResearchArticle(
   fallbackTitle?: string,
 ): ExtractedResearchArticle {
   if (isResearchHtmlSpaShellOrErrorPage(html)) {
-    throw new Error(`文章「${articleUrl}」返回了 HTML SPA 外壳或错误页。`);
+    throw new Error(
+      `Article "${articleUrl}" returned an HTML SPA shell or error page.`,
+    );
   }
 
   const doc = parse5.parse(html);
@@ -485,7 +487,7 @@ export function extractResearchArticle(
   const container = mainContainers[0];
   if (!container || !isElement(container)) {
     throw new Error(
-      `信源文章「${articleUrl}」中未找到 <main> 或 <article> 正文容器。`,
+      `Could not find <main> or <article> content container in article "${articleUrl}".`,
     );
   }
 
@@ -539,7 +541,9 @@ export function extractResearchArticle(
     !cleanResult.hasSubstantialContent ||
     cleanResult.text.trim().length === 0
   ) {
-    throw new Error(`文章「${articleUrl}」正文内容为空或未包含实质性正文。`);
+    throw new Error(
+      `Article "${articleUrl}" content is empty or contains no substantial text.`,
+    );
   }
 
   return {
@@ -561,7 +565,9 @@ export async function checkResearchSource(
   try {
     const { rawText } = await fetchResearchHtml(source.url, context.signal);
     if (isResearchHtmlSpaShellOrErrorPage(rawText)) {
-      throw new Error(`信源「${source.id}」返回了 HTML SPA 外壳或错误页。`);
+      throw new Error(
+        `Source "${source.id}" returned an HTML SPA shell or error page.`,
+      );
     }
     listHtml = rawText;
   } catch (error) {
@@ -570,10 +576,11 @@ export async function checkResearchSource(
       message:
         error instanceof Error
           ? error.message
-          : `信源「${source.id}」列表页访问失败。`,
-      impact: `Kimi 研究信源「${source.id}」当前不可达或响应格式错误。`,
+          : `Failed to access list page for source "${source.id}".`,
+      impact: `Kimi research source "${source.id}" is currently unreachable or returned an invalid response.`,
       path: ["sources", source.id],
-      suggestion: "检查信源 URL 是否可访问以及网络连通性。",
+      suggestion:
+        "Check whether the source URL is reachable and verify network connectivity.",
       requiresHuman: false,
     });
     return;
@@ -588,10 +595,11 @@ export async function checkResearchSource(
       message:
         error instanceof Error
           ? error.message
-          : `信源「${source.id}」列表解析失败。`,
-      impact: `未能从「${source.id}」提取任何博客卡片。`,
+          : `Failed to parse blog list for source "${source.id}".`,
+      impact: `Failed to extract any blog cards from "${source.id}".`,
       path: ["sources", source.id],
-      suggestion: "检查 Kimi 研究博客列表页的 HTML 结构。",
+      suggestion:
+        "Check the HTML structure of the Kimi research blog list page.",
       requiresHuman: false,
     });
     return;
@@ -600,10 +608,11 @@ export async function checkResearchSource(
   if (blogList.inSiteArticles.length === 0) {
     problems.push({
       code: "kimi_research_unavailable",
-      message: `信源「${source.id}」列表页未发现任何站内研究文章。`,
-      impact: `信源「${source.id}」无可用文章。`,
+      message: `No in-site research articles discovered on source "${source.id}" list page.`,
+      impact: `Source "${source.id}" has no available articles.`,
       path: ["sources", source.id],
-      suggestion: "检查页面是否包含可识别的站内文章卡片。",
+      suggestion:
+        "Verify that the page contains recognizable in-site article cards.",
       requiresHuman: false,
     });
     return;
@@ -618,7 +627,7 @@ export async function checkResearchSource(
     );
     if (isResearchHtmlSpaShellOrErrorPage(articleHtml)) {
       throw new Error(
-        `文章「${sampleArticle.url}」返回了 HTML SPA 外壳或错误页。`,
+        `Article "${sampleArticle.url}" returned an HTML SPA shell or error page.`,
       );
     }
     const extracted = extractResearchArticle(
@@ -630,7 +639,9 @@ export async function checkResearchSource(
       !extracted.cleanResult.hasSubstantialContent ||
       extracted.cleanResult.text.trim().length === 0
     ) {
-      throw new Error(`文章「${sampleArticle.url}」正文为空或无实质性内容。`);
+      throw new Error(
+        `Article "${sampleArticle.url}" content is empty or contains no substantial text.`,
+      );
     }
   } catch (error) {
     problems.push({
@@ -638,10 +649,10 @@ export async function checkResearchSource(
       message:
         error instanceof Error
           ? error.message
-          : `信源「${source.id}」抽样文章解析失败。`,
-      impact: `文章「${sampleArticle.url}」无法提取有效正文。`,
+          : `Failed to parse sample article for source "${source.id}".`,
+      impact: `Could not extract valid content from article "${sampleArticle.url}".`,
       path: ["sources", source.id, sampleArticle.slug],
-      suggestion: "检查文章页面 HTML 结构与提取规则。",
+      suggestion: "Check the article page HTML structure and extraction rules.",
       requiresHuman: false,
     });
   }
@@ -666,16 +677,18 @@ export async function syncResearchSource(
   try {
     const { rawText } = await fetchResearchHtml(source.url, context.signal);
     if (isResearchHtmlSpaShellOrErrorPage(rawText)) {
-      throw new Error(`信源「${source.id}」返回了 HTML SPA 外壳或错误页。`);
+      throw new Error(
+        `Source "${source.id}" returned an HTML SPA shell or error page.`,
+      );
     }
     listHtml = rawText;
   } catch (error) {
     problems.push({
       code: "kimi_sync_incomplete",
-      message: `信源「${source.id}」同步失败：${error instanceof Error ? error.message : String(error)}`,
-      impact: `信源「${source.id}」列表页获取失败，未推进增量状态。`,
+      message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
+      impact: `Failed to fetch list page for source "${source.id}"; incremental state was not advanced.`,
       path: ["sources", source.id],
-      suggestion: "检查网络连通性后重试。",
+      suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
     });
     return;
@@ -731,7 +744,9 @@ export async function syncResearchSource(
         context.signal,
       );
       if (isResearchHtmlSpaShellOrErrorPage(articleHtml)) {
-        throw new Error(`文章「${item.url}」返回了 HTML SPA 外壳或错误页。`);
+        throw new Error(
+          `Article "${item.url}" returned an HTML SPA shell or error page.`,
+        );
       }
       const extracted = extractResearchArticle(
         articleHtml,
@@ -785,10 +800,11 @@ export async function syncResearchSource(
       hasArticleFailure = true;
       problems.push({
         code: "kimi_sync_incomplete",
-        message: `文章「${item.url}」同步采集失败：${error instanceof Error ? error.message : String(error)}`,
-        impact: `文章「${item.slug}」未能归档，状态未更新。`,
+        message: `Sync collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
+        impact: `Article "${item.slug}" failed to be archived; state was not updated.`,
         path: ["sources", source.id, item.slug],
-        suggestion: "检查文章页面是否可达且包含实质正文。",
+        suggestion:
+          "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
       });
     }
@@ -816,16 +832,18 @@ export async function collectResearchSource(
   try {
     const { rawText } = await fetchResearchHtml(source.url, context.signal);
     if (isResearchHtmlSpaShellOrErrorPage(rawText)) {
-      throw new Error(`信源「${source.id}」返回了 HTML SPA 外壳或错误页。`);
+      throw new Error(
+        `Source "${source.id}" returned an HTML SPA shell or error page.`,
+      );
     }
     listHtml = rawText;
   } catch (error) {
     problems.push({
       code: "kimi_collection_incomplete",
-      message: `信源「${source.id}」采集失败：${error instanceof Error ? error.message : String(error)}`,
-      impact: `信源「${source.id}」列表页获取失败。`,
+      message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
+      impact: `Failed to fetch list page for source "${source.id}".`,
       path: ["sources", source.id],
-      suggestion: "检查网络连通性后重试。",
+      suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
     });
     return;
@@ -852,7 +870,9 @@ export async function collectResearchSource(
         context.signal,
       );
       if (isResearchHtmlSpaShellOrErrorPage(articleHtml)) {
-        throw new Error(`文章「${item.url}」返回了 HTML SPA 外壳或错误页。`);
+        throw new Error(
+          `Article "${item.url}" returned an HTML SPA shell or error page.`,
+        );
       }
       const extracted = extractResearchArticle(
         articleHtml,
@@ -913,10 +933,11 @@ export async function collectResearchSource(
       hasArticleFailure = true;
       problems.push({
         code: "kimi_collection_incomplete",
-        message: `文章「${item.url}」采集失败：${error instanceof Error ? error.message : String(error)}`,
-        impact: `文章「${item.slug}」未能归档。`,
+        message: `Collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
+        impact: `Article "${item.slug}" failed to be archived.`,
         path: ["sources", source.id, item.slug],
-        suggestion: "检查文章页面是否可达且包含实质正文。",
+        suggestion:
+          "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
       });
     }

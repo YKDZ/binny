@@ -67,6 +67,146 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
 
+  runtime-openai:
+    image: ${BINNY_OPENAI_IMAGE:-binny/openai:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-openai:8080
+      BINNY_BIN_ID: ${BINNY_OPENAI_BIN_ID:-openai}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-anthropic:
+    image: ${BINNY_ANTHROPIC_IMAGE:-binny/anthropic:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-anthropic:8080
+      BINNY_BIN_ID: ${BINNY_ANTHROPIC_BIN_ID:-anthropic}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-google:
+    image: ${BINNY_GOOGLE_IMAGE:-binny/google:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-google:8080
+      BINNY_BIN_ID: ${BINNY_GOOGLE_BIN_ID:-google}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-qwen:
+    image: ${BINNY_QWEN_IMAGE:-binny/qwen:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-qwen:8080
+      BINNY_BIN_ID: ${BINNY_QWEN_BIN_ID:-qwen}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-kimi:
+    image: ${BINNY_KIMI_IMAGE:-binny/kimi:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-kimi:8080
+      BINNY_BIN_ID: ${BINNY_KIMI_BIN_ID:-kimi}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-qoder:
+    image: ${BINNY_QODER_IMAGE:-binny/qoder:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-qoder:8080
+      BINNY_BIN_ID: ${BINNY_QODER_BIN_ID:-qoder}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-deepseek:
+    image: ${BINNY_DEEPSEEK_IMAGE:-binny/deepseek:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-deepseek:8080
+      BINNY_BIN_ID: ${BINNY_DEEPSEEK_BIN_ID:-deepseek}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-minimax:
+    image: ${BINNY_MINIMAX_IMAGE:-binny/minimax:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-minimax:8080
+      BINNY_BIN_ID: ${BINNY_MINIMAX_BIN_ID:-minimax}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-mistral:
+    image: ${BINNY_MISTRAL_IMAGE:-binny/mistral:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-mistral:8080
+      BINNY_BIN_ID: ${BINNY_MISTRAL_BIN_ID:-mistral}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+  runtime-huggingface:
+    image: ${BINNY_HUGGINGFACE_IMAGE:-binny/huggingface:local}
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-huggingface:8080
+      BINNY_BIN_ID: ${BINNY_HUGGINGFACE_BIN_ID:-huggingface}
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_PORT: 8080
+    stop_grace_period: 30s
+    restart: unless-stopped
+
   runtime-linuxdo:
     image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
     depends_on:

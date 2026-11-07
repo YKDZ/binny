@@ -27,16 +27,16 @@ export const kimiSourceDefinitionSchema = z
   .object({
     id: z
       .string()
-      .min(1, "信源稳定标识不能为空。")
-      .max(128, "信源稳定标识不能超过 128 个字符。")
+      .min(1, "Source identifier must not be empty.")
+      .max(128, "Source identifier must not exceed 128 characters.")
       .regex(
         /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u,
-        "信源稳定标识只能包含字母、数字、点、下划线和连字符。",
+        "Source identifier may only contain alphanumeric characters, dots, underscores, and hyphens.",
       ),
     kind: z.enum(["changelog", "research"]).default("changelog"),
     region: kimiRegionSchema,
     language: z.string().min(1).max(32),
-    url: z.string().url("信源地址必须是有效 URL。"),
+    url: z.string().url("Source URL must be a valid URL."),
     title: z.string().min(1).max(512).optional(),
   })
   .strict();
@@ -116,7 +116,7 @@ export const configSchema = z
         context.addIssue({
           code: "custom",
           path: ["sources", index, "id"],
-          message: "同一配置不能重复使用信源稳定标识。",
+          message: "Duplicate source identifier in configuration.",
         });
       }
       seen.add(source.id);
@@ -139,7 +139,7 @@ export const actionParamsSchema = z
         context.addIssue({
           code: "custom",
           path: ["sourceIds", index],
-          message: "本次运行参数不能重复选择同一个信源。",
+          message: "Duplicate source identifier in action parameters.",
         });
       }
       seen.add(id);
@@ -270,7 +270,7 @@ export function extractChangelogDates(
       continue;
     }
 
-    // 1b: YYYY年MM月DD日
+    // 1b: YYYY-MM-DD (Chinese format)
     const cnDayMatch = heading.match(
       /(?:^|\D)(20\d\d)年(\d{1,2})月(\d{1,2})日?(?:$|\D)/u,
     );
@@ -297,7 +297,7 @@ export function extractChangelogDates(
     }
 
     // 2. Month precision checks
-    // 2a: YYYY年MM月
+    // 2a: YYYY-MM (Chinese format)
     const cnMonthMatch = heading.match(
       /(?:^|\D)(20\d\d)年(\d{1,2})月(?:$|\D)/u,
     );
@@ -446,11 +446,11 @@ export async function fetchChangelog(
     });
   } catch (error) {
     throw new Error(
-      `网络请求失败（${source.url}）：${error instanceof Error ? error.message : String(error)}`,
+      `Network request failed (${source.url}): ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   if (response.status !== 200) {
-    throw new Error(`信源「${source.id}」返回 HTTP ${response.status}。`);
+    throw new Error(`Source "${source.id}" returned HTTP ${response.status}.`);
   }
   const contentType = response.headers.get("content-type");
   const text = await response.text();
@@ -468,7 +468,7 @@ export function cleanAndValidateChangelog(
 } {
   if (isHtmlSpaShellOrErrorPage(rawText, contentType)) {
     throw new Error(
-      `信源「${source.id}」返回了 HTML SPA 外壳或错误页，而非 Markdown 更新日志。`,
+      `Source "${source.id}" returned an HTML SPA shell or error page instead of a Markdown changelog.`,
     );
   }
   const preprocessed = preprocessMarkdown(rawText);
@@ -480,7 +480,9 @@ export function cleanAndValidateChangelog(
     !cleanResult.hasSubstantialContent ||
     cleanResult.text.trim().length === 0
   ) {
-    throw new Error(`信源「${source.id}」正文内容为空或未包含实质性正文。`);
+    throw new Error(
+      `Source "${source.id}" content is empty or contains no substantial text.`,
+    );
   }
 
   const dates = extractChangelogDates(rawText);
@@ -518,10 +520,11 @@ export async function checkChangelogSource(
       message:
         error instanceof Error
           ? error.message
-          : `信源「${source.id}」可用性检查失败。`,
-      impact: `Kimi 更新日志「${source.id}」当前不可达或内容无效。`,
+          : `Availability check failed for source "${source.id}".`,
+      impact: `Kimi changelog "${source.id}" is currently unreachable or invalid.`,
       path: ["sources", source.id],
-      suggestion: "检查信源 URL 是否可访问以及源端格式是否正常。",
+      suggestion:
+        "Check whether the source URL is reachable and formatted properly.",
       requiresHuman: false,
     });
   }
@@ -539,10 +542,11 @@ export async function executeChangelogCheck(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行检查。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be checked.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -567,8 +571,8 @@ export async function executeChangelogCheck(
     scope,
     basis:
       problems.length === 0
-        ? `已成功验证 ${scope.length} 个 Kimi 平台更新日志信源可达性及正文内容。`
-        : `Kimi 平台更新日志可用性检查完成，发现 ${problems.length} 个问题。`,
+        ? `Successfully verified reachability and content for ${scope.length} Kimi platform changelog source(s).`
+        : `Kimi platform changelog availability check completed with ${problems.length} problem(s).`,
     problems,
   };
 }
@@ -626,10 +630,11 @@ export async function collectChangelogSource(
   } catch (error) {
     problems.push({
       code: "kimi_collection_incomplete",
-      message: `信源「${source.id}」采集失败：${error instanceof Error ? error.message : String(error)}`,
-      impact: `信源「${source.id}」本次未能完成归档。`,
+      message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
+      impact: `Source "${source.id}" failed to be archived.`,
       path: ["sources", source.id],
-      suggestion: "检查信源网络可达性与正文格式后重新采集。",
+      suggestion:
+        "Verify network accessibility and content formatting before retrying collection.",
       requiresHuman: false,
     });
   }
@@ -647,10 +652,11 @@ export async function executeChangelogCollect(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行采集。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be collected.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -775,10 +781,11 @@ export async function syncChangelogSource(
   } catch (error) {
     problems.push({
       code: "kimi_sync_incomplete",
-      message: `信源「${source.id}」同步失败：${error instanceof Error ? error.message : String(error)}`,
-      impact: `信源「${source.id}」本次未能完成增量同步，该范围未推进状态。`,
+      message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
+      impact: `Source "${source.id}" failed incremental sync; state was not advanced.`,
       path: ["sources", source.id],
-      suggestion: "检查信源网络可达性与正文格式后重新同步。",
+      suggestion:
+        "Verify network accessibility and content formatting before retrying sync.",
       requiresHuman: false,
     });
   }
@@ -797,10 +804,11 @@ export async function executeChangelogSync(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行同步。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be synchronized.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }

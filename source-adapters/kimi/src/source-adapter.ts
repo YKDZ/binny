@@ -42,10 +42,11 @@ export async function executeKimiCheck(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行检查。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be checked.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -71,8 +72,8 @@ export async function executeKimiCheck(
     scope,
     basis:
       problems.length === 0
-        ? `已成功验证 ${scope.length} 个 Kimi 信源可达性及正文内容。`
-        : `Kimi 信源可用性检查完成，发现 ${problems.length} 个问题。`,
+        ? `Successfully verified reachability and content for ${scope.length} Kimi source(s).`
+        : `Kimi source availability check completed with ${problems.length} problem(s).`,
     problems,
   };
 }
@@ -89,10 +90,11 @@ export async function executeKimiCollect(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行采集。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be collected.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -154,10 +156,11 @@ export async function executeKimiSync(
   for (const missingId of missing) {
     problems.push({
       code: "kimi_source_not_found",
-      message: `未找到配置的信源「${missingId}」。`,
-      impact: `信源「${missingId}」无法进行同步。`,
+      message: `Configured source "${missingId}" was not found.`,
+      impact: `Source "${missingId}" cannot be synchronized.`,
       path: ["sources", missingId],
-      suggestion: "检查运行参数中的 sourceIds 是否在配置中存在。",
+      suggestion:
+        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -213,20 +216,21 @@ export const sourceAdapter = defineSourceAdapter({
   stateSchema: incrementalSyncStateSchema,
   actions: {
     check: defineSourceAdapterAction(configSchema, {
-      description: "检查 Kimi 信源可用性与正文格式。",
+      description: "Check Kimi source availability and content format.",
       params: actionParamsSchema,
       output: checkOutputSchema,
       execute: executeKimiCheck,
     }),
     collect: defineSourceAdapterAction(configSchema, {
-      description: "即时采集并归档整页 Kimi 更新日志或研究文章与关联媒体。",
+      description:
+        "Collect and archive Kimi changelogs or research articles and associated media immediately.",
       params: actionParamsSchema,
       output: collectOutputSchema,
       execute: executeKimiCollect,
     }),
     sync: defineSourceAdapterAction(configSchema, {
       description:
-        "增量同步 Kimi 更新日志与研究文章；首次建立观察基线，后续变更保存版本。",
+        "Incrementally synchronize Kimi changelogs and research articles; establish baseline on first run and save revisions on subsequent changes.",
       params: actionParamsSchema,
       output: syncOutputSchema,
       execute: executeKimiSync,
