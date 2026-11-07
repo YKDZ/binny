@@ -215,6 +215,7 @@ const server = createServer((request, response) => {
         "/bad-identity",
         "/static-rss",
         "/real-static-rss",
+        "/summary-full",
       ].includes(pathname) ||
       pathname.startsWith("/story/") ||
       pathname.startsWith("/pages/")
@@ -269,6 +270,17 @@ const server = createServer((request, response) => {
         { etag },
         "application/rss+xml; charset=utf-8",
         `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item><item><guid isPermaLink="false">urn:binny:rss:rss-title-only</guid><title>RSS 仅标题資料🌿</title></item></channel></rss>`,
+      );
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/summary-full") {
+      sendFeed(
+        request,
+        response,
+        { etag: '"summary-1"' },
+        "application/rss+xml; charset=utf-8",
+        '<rss version="2.0"><channel><title>受控摘要信源</title><item><guid isPermaLink="false">urn:binny:summary:summary-article</guid><title>RSS 摘要全文文章</title><link>http://rss-e2e-source:8081/story/summary</link><description><![CDATA[<article><h1>摘要全文</h1><p>摘要正文版本 1。这段内容直接位于 description 字段中的 HTML 块级结构中。</p><p>信源适配器将具有 HTML 块级结构的多段摘要视为完整正文归档。</p><img src="/media/photo.png" alt="摘要文章插图" /></article>]]></description></item></channel></rss>',
       );
       return;
     }

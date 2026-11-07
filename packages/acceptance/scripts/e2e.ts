@@ -1182,7 +1182,7 @@ async function resourceFiles(): Promise<readonly string[]> {
   const files: unknown = JSON.parse(result.stdout);
   assert.ok(Array.isArray(files));
   assert.ok(files.every((file) => typeof file === "string"));
-  return files as string[];
+  return files;
 }
 
 async function waitFor<T>(
@@ -7123,8 +7123,7 @@ async function runRssAcceptance(
         id: "real-feed-parser",
         url: "https://github.com/rowanmanning/feed-parser/releases.atom",
       },
-      { id: "static-main", url: source.baseUrl + "/static-rss" },
-      { id: "real-bbc", url: source.baseUrl + "/real-static-rss" },
+      { id: "summary-main", url: source.baseUrl + "/summary-full" },
     ],
   };
   await Promise.all([
@@ -7157,7 +7156,7 @@ async function runRssAcceptance(
     "binny-rss-one",
     "collect",
     {
-      feedIds: ["rss-main", "atom-main", "temporary", "static-main"],
+      feedIds: ["rss-main", "atom-main", "temporary", "summary-main"],
     },
   );
   const initialRequests = await source.requests();
@@ -7187,9 +7186,11 @@ async function runRssAcceptance(
   assert.ok(initialRssView !== undefined);
   const rssV1 = rssArchiveView(rssItemV1, "binny-rss-one");
   assert.equal(rssV1.capture.completeness, "complete");
-  assert.match(rssV1.body?.html ?? "", /RSS 正文版本 1/u);
-  assert.doesNotMatch(rssV1.body?.html ?? "", /RSS 摘要版本 1/u);
-  assert.match(rssV1.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.equal(rssV1.body?.html, undefined);
+  assert.match(rssV1.body?.markdown ?? "", /RSS 正文版本 1/u);
+  assert.doesNotMatch(rssV1.body?.markdown ?? "", /RSS 摘要版本 1/u);
+  assert.match(rssV1.body?.markdown ?? "", /binny:\/\/resource\//u);
+  assert.match(rssV1.body?.text ?? "", /RSS 正文版本 1/u);
   assert.equal(rssV1.resources?.length, 2);
   const rssTitleSearch = await searchRssArchive(
     baseUrl,
@@ -7377,380 +7378,58 @@ async function runRssAcceptance(
     ),
   );
 
-  const staticArticleV1 = await readRssArchive(
+  const summaryItem = await readRssArchive(
     baseUrl,
     "binny-rss-one",
-    "公开静态正文版本 1",
+    "摘要正文版本 1",
   );
-  assert.equal(staticArticleV1.sourceKey.namespace, "rss:static-main");
+  assert.equal(summaryItem.sourceKey.namespace, "rss:summary-main");
   assert.equal(
-    staticArticleV1.sourceKey.key,
-    "id:urn:binny:static:static-article",
+    summaryItem.sourceKey.key,
+    "id:urn:binny:summary:summary-article",
   );
-  const staticArticleStateV1 = rssArchiveView(staticArticleV1, "binny-rss-one");
-  assert.equal(staticArticleStateV1.capture.completeness, "complete");
-  assert.equal(staticArticleStateV1.capture.scope.bodySource, "static-html");
-  assert.equal(
-    staticArticleStateV1.capture.scope.bodyUrl,
-    source.baseUrl + "/story/static",
-  );
-  assert.equal(
-    staticArticleStateV1.capture.scope.bodyFinalUrl,
-    source.baseUrl + "/pages/2026/article.html",
-  );
-  assert.equal(staticArticleStateV1.metadata?.item?.bodySource, "static-html");
-  assert.equal(
-    staticArticleStateV1.metadata?.item?.bodyFinalUrl,
-    source.baseUrl + "/pages/2026/article.html",
-  );
-  assert.match(staticArticleStateV1.body?.html ?? "", /公开静态正文版本 1/u);
-  assert.doesNotMatch(staticArticleStateV1.body?.html ?? "", /导航文字/u);
-  assert.doesNotMatch(staticArticleStateV1.body?.html ?? "", /侧栏广告/u);
-  assert.match(staticArticleStateV1.body?.html ?? "", /binny:\/\/resource\//u);
-  assert.match(
-    staticArticleStateV1.body?.markdown ?? "",
-    /binny:\/\/resource\//u,
-  );
-  assert.equal(staticArticleStateV1.resources?.length, 1);
+  const summaryFullState = rssArchiveView(summaryItem, "binny-rss-one");
+  assert.equal(summaryFullState.capture.completeness, "complete");
+  assert.equal(summaryFullState.capture.scope.bodySource, "summary");
+  assert.equal(summaryFullState.body?.html, undefined);
+  assert.match(summaryFullState.body?.markdown ?? "", /摘要正文版本 1/u);
+  assert.match(summaryFullState.body?.text ?? "", /摘要正文版本 1/u);
+  assert.match(summaryFullState.body?.markdown ?? "", /binny:\/\/resource\//u);
+  assert.equal(summaryFullState.resources?.length, 1);
   assert.deepEqual(
     await readRssResource(
       baseUrl,
-      staticArticleStateV1.resources?.[0]?.resourceId ?? "",
+      summaryFullState.resources?.[0]?.resourceId ?? "",
     ),
     sourceMediaBytes.photoBytes,
   );
 
-  const realBbcUrl =
-    "https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&at_campaign=rss";
-  const realBbcRun = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    {
-      feedIds: ["real-bbc"],
-    },
-  );
-  assert.equal(realBbcRun.status, "completed", JSON.stringify(realBbcRun));
-  const realBbcArticle = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "650 passengers",
-  );
-  assert.equal(realBbcArticle.sourceKey.namespace, "rss:real-bbc");
-  assert.equal(
-    realBbcArticle.sourceKey.key,
-    "id:urn:binny:static:real-static-bbc",
-  );
-  const realBbcState = rssArchiveView(realBbcArticle, "binny-rss-one");
-  assert.equal(realBbcState.capture.completeness, "complete");
-  assert.equal(realBbcState.capture.scope.bodySource, "static-html");
-  assert.equal(realBbcState.capture.scope.bodyUrl, realBbcUrl);
-  assert.match(realBbcState.body?.text ?? "", /650 passengers/u);
-  process.stdout.write(
-    "真实静态站点兼容性结果：" +
-      JSON.stringify({
-        url: realBbcUrl,
-        environment:
-          "Compose runtime-rss 正式轻量镜像、真实 PostgreSQL 与资源目录、正式 CLI",
-        action: "collect",
-        scope: ["real-bbc"],
-        runStatus: realBbcRun.status,
-        completeness: realBbcState.capture.completeness,
-        bodySource: realBbcState.capture.scope.bodySource,
-        finalUrl: realBbcState.capture.scope.bodyFinalUrl,
-        checkedAt: realBbcRun.finishedAt ?? new Date().toISOString(),
-      }) +
-      "\n",
-  );
-
-  const staticSecondBinRun = await triggerRssAction(
+  const summarySecondBinRun = await triggerRssAction(
     baseUrl,
     "binny-rss-two",
     "collect",
-    { feedIds: ["static-main"] },
+    { feedIds: ["summary-main"] },
   );
-  assert.equal(staticSecondBinRun.status, "failed");
-  const staticArticleSecondBin = await readRssArchive(
+  assert.equal(summarySecondBinRun.status, "completed");
+  const summaryArticleSecondBin = await readRssArchive(
     baseUrl,
     "binny-rss-two",
-    "公开静态正文版本 1",
+    "摘要正文版本 1",
   );
-  assert.equal(staticArticleSecondBin.itemId, staticArticleV1.itemId);
-  assert.deepEqual(staticArticleSecondBin.sourceKey, staticArticleV1.sourceKey);
+  assert.equal(summaryArticleSecondBin.itemId, summaryItem.itemId);
+  assert.deepEqual(summaryArticleSecondBin.sourceKey, summaryItem.sourceKey);
 
-  const staticArchiveBeforeCheck = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "公开静态正文版本 1",
-  );
-  const staticPageRequestsBeforeCheck = (await source.requests()).filter(
-    ({ path }) => path.startsWith("/story/") || path.startsWith("/pages/"),
-  ).length;
-  const staticMediaRequestsBeforeCheck = (await source.requests()).filter(
-    ({ path }) => path.startsWith("/media/"),
-  ).length;
-  const staticCheck = await triggerRssAction(
+  const summaryCheck = await triggerRssAction(
     baseUrl,
     "binny-rss-one",
     "check",
     {
-      feedIds: ["static-main"],
+      feedIds: ["summary-main"],
     },
   );
-  assert.equal(staticCheck.status, "completed");
-  assert.equal(staticCheck.result?.output?.availability, "unavailable");
-  assert.deepEqual(staticCheck.result?.output?.scope, ["static-main"]);
-  assert.ok(
-    staticCheck.result?.output?.problems?.some(
-      ({ code, suggestion }) =>
-        code === "rss_static_article_unavailable" &&
-        suggestion?.includes("可公开访问的静态正文来源") === true,
-    ),
-  );
-  const staticPageRequestsAfterCheck = (await source.requests()).filter(
-    ({ path }) => path.startsWith("/story/") || path.startsWith("/pages/"),
-  ).length;
-  const staticMediaRequestsAfterCheck = (await source.requests()).filter(
-    ({ path }) => path.startsWith("/media/"),
-  ).length;
-  assert.equal(staticPageRequestsAfterCheck, staticPageRequestsBeforeCheck + 5);
-  assert.equal(staticMediaRequestsAfterCheck, staticMediaRequestsBeforeCheck);
-  assert.deepEqual(
-    await readRssArchive(baseUrl, "binny-rss-one", "公开静态正文版本 1"),
-    staticArchiveBeforeCheck,
-  );
-
-  const staticRequests = await source.requests();
-  const staticArticleRequest = [...staticRequests]
-    .reverse()
-    .find(({ path }) => path === "/pages/2026/article.html");
-  assert.ok(staticArticleRequest !== undefined);
-  assert.equal(staticArticleRequest.ifNoneMatch, undefined);
-  assert.equal(staticArticleRequest.ifModifiedSince, undefined);
-
-  const javascriptSummary = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "JavaScript 页面摘要",
-  );
-  const javascriptState = rssArchiveView(javascriptSummary, "binny-rss-one");
-  assert.equal(javascriptState.capture.completeness, "partial");
-  assert.ok(
-    javascriptState.capture.missing.some(
-      ({ path, reason }) =>
-        path === "body.fullText" && reason.includes("脚本渲染"),
-    ),
-  );
-
-  const loginSummary = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "登录页面摘要",
-  );
-  const loginState = rssArchiveView(loginSummary, "binny-rss-one");
-  assert.equal(loginState.capture.completeness, "partial");
-  assert.ok(
-    loginState.capture.missing.some(({ path }) => path === "body.fullText"),
-  );
-  assert.ok(
-    loginState.capture.missing.some(({ reason }) =>
-      reason.includes("需要登录"),
-    ),
-  );
-
-  const recoverySummary = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "恢复页面摘要",
-  );
-  const recoveryState = rssArchiveView(recoverySummary, "binny-rss-one");
-  assert.equal(recoveryState.capture.completeness, "partial");
-  assert.ok(
-    recoveryState.capture.missing.some(({ path }) => path === "body.fullText"),
-  );
-  const recoveryPartialRevision = recoverySummary.revisions[0];
-  assert.ok(recoveryPartialRevision !== undefined);
-  const archivedRecoveryPartialRevision = cliData<unknown>(
-    await cli(baseUrl, [
-      "archive",
-      "revision",
-      recoveryPartialRevision.revisionId,
-    ]),
-    "found",
-  );
-
-  const recoveryRequestsBeforeRetry = (await source.requests()).filter(
-    ({ path }) => path === "/story/recovery",
-  ).length;
-  await source.setRecoveryPageAvailable(true);
-  const recoveredPageRun = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    { feedIds: ["static-main"] },
-  );
-  assert.equal(recoveredPageRun.status, "failed");
-  assert.ok(
-    recoveredPageRun.result?.error?.suggestion?.includes(
-      "可公开访问的静态正文来源",
-    ),
-  );
-  assert.equal(
-    (await source.requests()).filter(({ path }) => path === "/story/recovery")
-      .length,
-    recoveryRequestsBeforeRetry + 1,
-  );
-  const recoveredArticle = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "恢复后静态正文",
-  );
-  assert.equal(recoveredArticle.itemId, recoverySummary.itemId);
-  assert.equal(recoveredArticle.revisions.length, 2);
-  assert.equal(
-    rssArchiveView(recoveredArticle, "binny-rss-one").capture.completeness,
-    "complete",
-  );
-  assert.equal(
-    rssArchiveView(recoveredArticle, "binny-rss-one").metadata?.item
-      ?.bodySource,
-    "static-html",
-  );
-  assert.match(
-    rssArchiveView(recoveredArticle, "binny-rss-one").body?.text ?? "",
-    /恢复后静态正文/u,
-  );
-  assert.doesNotMatch(
-    rssArchiveView(recoveredArticle, "binny-rss-one").body?.text ?? "",
-    /恢复页面摘要/u,
-  );
-  assert.deepEqual(
-    cliData<unknown>(
-      await cli(baseUrl, [
-        "archive",
-        "revision",
-        recoveryPartialRevision.revisionId,
-      ]),
-      "found",
-    ),
-    archivedRecoveryPartialRevision,
-  );
-
-  const staticArticleV2ExpectedRequests = (await source.requests()).filter(
-    ({ path }) => path === "/pages/2026/article.html",
-  ).length;
-  await source.setStaticArticleVersion(2);
-  const staticArticleV2Run = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    { feedIds: ["static-main"] },
-  );
-  assert.equal(staticArticleV2Run.status, "failed");
-  const staticArticleV2Requests = (await source.requests()).filter(
-    ({ path }) => path === "/pages/2026/article.html",
-  );
-  assert.equal(
-    staticArticleV2Requests.length,
-    staticArticleV2ExpectedRequests + 1,
-  );
-  assert.equal(staticArticleV2Requests.at(-1)?.ifNoneMatch, undefined);
-  const staticArticleV2 = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "公开静态正文版本 2",
-  );
-  assert.equal(staticArticleV2.itemId, staticArticleV1.itemId);
-  assert.equal(staticArticleV2.revisions.length, 2);
-  const stableStaticArticleV2 = staticArticleV2;
-  const repeatedStaticRun = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    { feedIds: ["static-main"] },
-  );
-  assert.equal(repeatedStaticRun.status, "failed");
-  assert.deepEqual(
-    await readRssArchive(baseUrl, "binny-rss-one", "公开静态正文版本 2"),
-    stableStaticArticleV2,
-  );
-
-  await source.setStaticPhotoAvailable(false);
-  await source.setStaticArticleVersion(3);
-  const partialStaticMediaRun = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    { feedIds: ["static-main"] },
-  );
-  assert.equal(partialStaticMediaRun.status, "failed");
-  const staticArticleV3Partial = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "公开静态正文版本 3",
-  );
-  assert.equal(staticArticleV3Partial.itemId, staticArticleV1.itemId);
-  const staticArticleV3PartialState = rssArchiveView(
-    staticArticleV3Partial,
-    "binny-rss-one",
-  );
-  assert.equal(staticArticleV3PartialState.capture.completeness, "partial");
-  assert.equal(staticArticleV3PartialState.resources?.length ?? 0, 0);
-  assert.doesNotMatch(
-    staticArticleV3PartialState.body?.html ?? "",
-    /binny:\/\/resource\//u,
-  );
-  assert.ok(
-    staticArticleV3PartialState.capture.missing.some(({ path }) =>
-      path.startsWith("media."),
-    ),
-  );
-  const staticArticleV3PartialRevision =
-    staticArticleV3Partial.revisions.at(-1);
-  assert.ok(staticArticleV3PartialRevision !== undefined);
-  const archivedStaticArticleV3PartialRevision = cliData<unknown>(
-    await cli(baseUrl, [
-      "archive",
-      "revision",
-      staticArticleV3PartialRevision.revisionId,
-    ]),
-    "found",
-  );
-
-  await source.setStaticPhotoAvailable(true);
-  const recoveredStaticMediaRun = await triggerRssAction(
-    baseUrl,
-    "binny-rss-one",
-    "collect",
-    { feedIds: ["static-main"] },
-  );
-  assert.equal(recoveredStaticMediaRun.status, "failed");
-  const staticArticleV3 = await readRssArchive(
-    baseUrl,
-    "binny-rss-one",
-    "公开静态正文版本 3",
-  );
-  assert.equal(staticArticleV3.itemId, staticArticleV1.itemId);
-  assert.equal(staticArticleV3.revisions.length, 4);
-  assert.deepEqual(
-    cliData<unknown>(
-      await cli(baseUrl, [
-        "archive",
-        "revision",
-        staticArticleV3PartialRevision.revisionId,
-      ]),
-      "found",
-    ),
-    archivedStaticArticleV3PartialRevision,
-  );
-  assert.equal(
-    rssArchiveView(staticArticleV3, "binny-rss-one").capture.completeness,
-    "complete",
-  );
-  assert.equal(
-    rssArchiveView(staticArticleV3, "binny-rss-one").resources?.length,
-    1,
-  );
+  assert.equal(summaryCheck.status, "completed");
+  assert.equal(summaryCheck.result?.output?.availability, "available");
+  assert.deepEqual(summaryCheck.result?.output?.scope, ["summary-main"]);
 
   const atomItemV1 = await readRssArchive(
     baseUrl,
@@ -7764,7 +7443,9 @@ async function runRssAcceptance(
   );
   const atomV1 = rssArchiveView(atomItemV1, "binny-rss-one");
   assert.equal(atomV1.capture.completeness, "complete");
-  assert.match(atomV1.body?.html ?? "", /Atom 全文版本 1/u);
+  assert.equal(atomV1.body?.html, undefined);
+  assert.match(atomV1.body?.markdown ?? "", /Atom 全文版本 1/u);
+  assert.match(atomV1.body?.text ?? "", /Atom 全文版本 1/u);
   assert.equal(atomV1.resources?.length, 1);
   assert.deepEqual(
     await readRssResource(baseUrl, atomV1.resources?.[0]?.resourceId ?? ""),
@@ -7819,7 +7500,7 @@ async function runRssAcceptance(
     assert.equal(state.capture.completeness, "complete");
     assert.equal(state.body?.text, "代码 <widget> 与 A & B");
     assert.equal(state.body?.searchText, `${title}\n代码 <widget> 与 A & B`);
-    assert.equal(state.body?.html, "代码 &lt;widget&gt; 与 A &amp; B");
+    assert.equal(state.body?.html, undefined);
     assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.ok(
       typeof state.metadata?.item === "object" && state.metadata.item !== null,
@@ -7837,7 +7518,7 @@ async function runRssAcceptance(
     rssLiteralState.body?.searchText ?? "",
     /代码 <widget> 与 A & B/u,
   );
-  assert.match(rssLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssLiteralState.body?.html, undefined);
   assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
   assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
   const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
@@ -7854,7 +7535,7 @@ async function runRssAcceptance(
     rssEscapedLiteralState.body?.searchText,
     "RSS XML 转义 HTML 测试文章\n代码 <widget> 与 A & B",
   );
-  assert.match(rssEscapedLiteralState.body?.html ?? "", /&lt;widget&gt;/u);
+  assert.equal(rssEscapedLiteralState.body?.html, undefined);
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
   assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
   for (const [key, bodyType] of [
@@ -7867,7 +7548,7 @@ async function runRssAcceptance(
     assert.equal(state.capture.completeness, "complete");
     assert.match(state.body?.text ?? "", /代码 <widget> 与 A & B/u);
     assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
-    assert.match(state.body?.html ?? "", /&lt;widget&gt;/u);
+    assert.equal(state.body?.html, undefined);
     assert.match(state.body?.markdown ?? "", /&lt;widget&gt;/u);
     assert.equal(state.metadata?.item?.bodyType, bodyType);
   }
@@ -7902,10 +7583,7 @@ async function runRssAcceptance(
     atomEntityTextState.body?.searchText,
     "Atom 纯文本中的实体字面值\nA &lt;widget&gt; &amp; B",
   );
-  assert.equal(
-    atomEntityTextState.body?.html,
-    "A &amp;lt;widget&amp;gt; &amp;amp; B",
-  );
+  assert.equal(atomEntityTextState.body?.html, undefined);
   assert.equal(
     atomEntityTextState.body?.markdown,
     "A &amp;lt;widget&amp;gt; &amp;amp; B",
@@ -8354,7 +8032,11 @@ async function runRssAcceptance(
     ),
   );
   assert.equal(partialState.resources?.length, 1);
-  assert.doesNotMatch(partialState.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.equal(partialState.body?.html, undefined);
+  assert.doesNotMatch(
+    partialState.body?.markdown ?? "",
+    /binny:\/\/resource\//u,
+  );
   assert.equal((await latestRequest("/rss"))?.ifNoneMatch, '"rss-3"');
 
   await source.setPhotoAvailable(true);
@@ -8375,7 +8057,8 @@ async function runRssAcceptance(
   const rssV4 = rssArchiveView(rssItemV4, "binny-rss-one");
   assert.equal(rssV4.capture.completeness, "complete");
   assert.equal(rssV4.resources?.length, 2);
-  assert.match(rssV4.body?.html ?? "", /binny:\/\/resource\//u);
+  assert.equal(rssV4.body?.html, undefined);
+  assert.match(rssV4.body?.markdown ?? "", /binny:\/\/resource\//u);
   const recoveredResourceBytes = await Promise.all(
     (rssV4.resources ?? []).map(({ resourceId }) =>
       readRssResource(baseUrl, resourceId),

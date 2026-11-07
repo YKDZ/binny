@@ -18,7 +18,6 @@ const feedStateSchema = z
     feedUrl: z.url(),
     etag: z.string().optional(),
     lastModified: z.string().optional(),
-    refreshStaticPages: z.boolean().default(false),
     entries: z.array(feedEntryStateSchema),
   })
   .strict();
@@ -30,7 +29,6 @@ export function createFeedState(feedUrl: string): FeedState {
   return {
     version: 1,
     feedUrl,
-    refreshStaticPages: false,
     entries: [],
   };
 }
