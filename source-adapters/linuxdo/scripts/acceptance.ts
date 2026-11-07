@@ -1705,7 +1705,7 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
       "node",
       "--input-type=module",
       "-e",
-      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if (command.includes("worker.ts") && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
+      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if ((command.includes("worker.js") || command.includes("worker.ts")) && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
     ]);
     const workerPid = Number(childProcesses.stdout.trim());
     assert.ok(Number.isSafeInteger(workerPid) && workerPid > 1);
@@ -4572,7 +4572,7 @@ async function verifySyncWorkerInterruption(
       "node",
       "--input-type=module",
       "-e",
-      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if (command.includes("worker.ts") && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
+      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if ((command.includes("worker.js") || command.includes("worker.ts")) && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
     ]);
     const workerPid = Number(childProcesses.stdout.trim());
     assert.ok(Number.isSafeInteger(workerPid) && workerPid > 1);
