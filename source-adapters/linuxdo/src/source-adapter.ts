@@ -40,6 +40,7 @@ const challengeRecoverySchema = z.strictObject({
 type ChallengeRecoverySummary = z.output<typeof challengeRecoverySchema>;
 
 const topicIdSchema = z.int().positive();
+const postIdSchema = z.int().positive();
 const targetIdSchema = z
   .string()
   .min(1, "目标标识不能为空。")
@@ -377,6 +378,11 @@ const syncProgressEntrySchema = syncScopeIdentitySchema.extend({
   position: z.iso
     .datetime()
     .describe("本轮已分配的接续位置；不代表此前内容完整覆盖。"),
+  confirmedPostIdLowerBound: postIdSchema
+    .optional()
+    .describe(
+      "该范围最近一次完整发现确认的帖子 ID 下界；仅在同一真实采集范围内作为分页停止依据。",
+    ),
   lastRunId: z.string().min(1).describe("最近一次分配该位置的运行 ID。"),
 });
 const syncPersistentStateSchema = z
@@ -474,7 +480,6 @@ const topicListResponseSchema = z.looseObject({
 const discoursePostFeedSchema = z.looseObject({
   latest_posts: z.array(z.unknown()),
 });
-const postIdSchema = z.int().positive();
 const discourseReplyPostNumberSchema = z
   .union([
     postIdSchema,
@@ -561,6 +566,8 @@ type SyncScopePlan = {
   readonly mode: "initialized" | "continued" | "truncated" | "no-forward-range";
   readonly position: string;
   readonly previousPosition?: string;
+  readonly confirmedPostIdLowerBound?: number;
+  readonly previousConfirmedPostIdLowerBound?: number;
   readonly range?: { readonly from: string; readonly to: string };
   readonly skippedBefore?: string;
 };
@@ -2488,6 +2495,12 @@ function syncScopePlans(
         mode: "no-forward-range",
         position: previous.position,
         previousPosition: previous.position,
+        ...(previous.confirmedPostIdLowerBound !== undefined
+          ? {
+              previousConfirmedPostIdLowerBound:
+                previous.confirmedPostIdLowerBound,
+            }
+          : {}),
       };
     }
     const cutoff = upperBoundMs - 60 * 60 * 1_000;
@@ -2498,6 +2511,13 @@ function syncScopePlans(
         identity,
         mode: "no-forward-range",
         position: previous.position,
+        previousPosition: previous.position,
+        ...(previous.confirmedPostIdLowerBound !== undefined
+          ? {
+              previousConfirmedPostIdLowerBound:
+                previous.confirmedPostIdLowerBound,
+            }
+          : {}),
       };
     }
     return {
@@ -2506,6 +2526,12 @@ function syncScopePlans(
       mode: previousPosition < cutoff ? "truncated" : "continued",
       position: upperBound,
       previousPosition: previous.position,
+      ...(previous.confirmedPostIdLowerBound !== undefined
+        ? {
+            previousConfirmedPostIdLowerBound:
+              previous.confirmedPostIdLowerBound,
+          }
+        : {}),
       range,
       ...(previousPosition < cutoff
         ? { skippedBefore: previous.position }
@@ -2523,6 +2549,11 @@ function assignSyncPosition(
     ...plan.identity,
     position: plan.position,
     lastRunId: runId,
+    ...(plan.confirmedPostIdLowerBound !== undefined
+      ? { confirmedPostIdLowerBound: plan.confirmedPostIdLowerBound }
+      : plan.previousConfirmedPostIdLowerBound !== undefined
+        ? { confirmedPostIdLowerBound: plan.previousConfirmedPostIdLowerBound }
+        : {}),
   });
   const key = syncScopeKey(plan.identity);
   const index = state.scopes.findIndex((entry) => syncScopeKey(entry) === key);
@@ -2530,6 +2561,38 @@ function assignSyncPosition(
   if (index < 0) scopes.push(nextEntry);
   else scopes[index] = nextEntry;
   return syncPersistentStateSchema.parse({ ...state, scopes });
+}
+
+function computeSyncScopeCandidateLowerBound(
+  posts: readonly DiscoursePost[],
+  endExclusiveMs: number,
+): number | undefined {
+  let minDeferredPostId = Infinity;
+  for (const post of posts) {
+    const createdAt =
+      post.created_at === undefined ? Number.NaN : Date.parse(post.created_at);
+    if (!Number.isFinite(createdAt) || createdAt >= endExclusiveMs) {
+      if (post.id < minDeferredPostId) {
+        minDeferredPostId = post.id;
+      }
+    }
+  }
+
+  let candidateLowerBound: number | undefined;
+  for (const post of posts) {
+    const createdAt =
+      post.created_at === undefined ? Number.NaN : Date.parse(post.created_at);
+    if (
+      Number.isFinite(createdAt) &&
+      createdAt < endExclusiveMs &&
+      post.id < minDeferredPostId
+    ) {
+      if (candidateLowerBound === undefined || post.id > candidateLowerBound) {
+        candidateLowerBound = post.id;
+      }
+    }
+  }
+  return candidateLowerBound;
 }
 
 function syncStateJson(state: SyncPersistentState): JsonObject {
@@ -3022,7 +3085,9 @@ type PostRangeScan = {
   readonly issue?: PostRangeScanIssue;
 };
 type PostRangeReadCache = {
-  scan?: Promise<PostRangeScan>;
+  firstPage?: readonly DiscoursePost[];
+  readonly downwardPages: Map<number, readonly DiscoursePost[]>;
+  headPages?: readonly (readonly DiscoursePost[])[];
   readonly topics: Map<number, Promise<TopicAccess>>;
 };
 
@@ -3128,6 +3193,8 @@ async function scanPostCreatedRange(
   siteOrigin: URL,
   signal: AbortSignal,
   maxPages: number,
+  readCache?: PostRangeReadCache,
+  confirmedPostIdLowerBound?: number,
 ): Promise<PostRangeScan> {
   const postsById = new Map<number, DiscoursePost>();
   let pagesRead = 0;
@@ -3177,7 +3244,18 @@ async function scanPostCreatedRange(
     }
   };
 
-  const firstPage = await readPage(undefined);
+  let firstPage: readonly DiscoursePost[] | undefined;
+  if (readCache?.firstPage !== undefined) {
+    pagesRead += 1;
+    validPageCount += 1;
+    firstPage = readCache.firstPage;
+  } else {
+    firstPage = await readPage(undefined);
+    if (firstPage !== undefined && readCache !== undefined) {
+      readCache.firstPage = firstPage;
+    }
+  }
+
   if (firstPage === undefined) {
     return {
       posts: [],
@@ -3198,13 +3276,33 @@ async function scanPostCreatedRange(
         discovery: "partial",
       };
       stopScanning = true;
+    } else if (
+      confirmedPostIdLowerBound !== undefined &&
+      firstPage.some((post) => post.id <= confirmedPostIdLowerBound)
+    ) {
+      historyExhausted = true;
     } else {
       cursor = firstPage.at(-1)?.id;
     }
   }
 
-  while (!historyExhausted && !stopScanning && pagesRead < maxPages - 1) {
-    const nextPage = await readPage(cursor);
+  while (
+    !historyExhausted &&
+    !stopScanning &&
+    pagesRead < maxPages - 1 &&
+    cursor !== undefined
+  ) {
+    let nextPage: readonly DiscoursePost[] | undefined;
+    if (readCache?.downwardPages.has(cursor)) {
+      pagesRead += 1;
+      validPageCount += 1;
+      nextPage = readCache.downwardPages.get(cursor);
+    } else {
+      nextPage = await readPage(cursor);
+      if (nextPage !== undefined && readCache !== undefined) {
+        readCache.downwardPages.set(cursor, nextPage);
+      }
+    }
     if (nextPage === undefined) break;
     if (nextPage.length === 0) {
       historyExhausted = true;
@@ -3220,35 +3318,62 @@ async function scanPostCreatedRange(
       stopScanning = true;
       break;
     }
+    if (
+      confirmedPostIdLowerBound !== undefined &&
+      nextPage.some((post) => post.id <= confirmedPostIdLowerBound)
+    ) {
+      historyExhausted = true;
+      break;
+    }
     cursor = nextPage.at(-1)?.id;
   }
 
   let headVerified = false;
   if (!stopScanning && pagesRead < maxPages) {
     const baseline = initialMaxId ?? 0;
-    let headCursor: number | undefined;
-    while (pagesRead < maxPages) {
-      const headPage = await readPage(headCursor);
-      if (headPage === undefined) break;
-      if (headPage.length === 0) {
-        headVerified = true;
-        break;
+    if (readCache?.headPages !== undefined) {
+      for (const headPage of readCache.headPages) {
+        pagesRead += 1;
+        validPageCount += 1;
+        keepPosts(headPage);
+        if (
+          headPage.length === 0 ||
+          headPage.some(({ id }) => id <= baseline)
+        ) {
+          headVerified = true;
+          break;
+        }
       }
-      keepPosts(headPage);
-      if (!isPostFeedProgress(headPage, headCursor)) {
-        issue ??= {
-          reasonCode: "post_range_cursor_not_advancing",
-          message: "Linux.do 帖子流复查首页时 ID 没有严格递减。",
-          discovery: "partial",
-        };
-        stopScanning = true;
-        break;
+    } else {
+      const fetchedHeadPages: (readonly DiscoursePost[])[] = [];
+      let headCursor: number | undefined;
+      while (pagesRead < maxPages) {
+        const headPage = await readPage(headCursor);
+        if (headPage === undefined) break;
+        fetchedHeadPages.push(headPage);
+        if (headPage.length === 0) {
+          headVerified = true;
+          break;
+        }
+        keepPosts(headPage);
+        if (!isPostFeedProgress(headPage, headCursor)) {
+          issue ??= {
+            reasonCode: "post_range_cursor_not_advancing",
+            message: "Linux.do 帖子流复查首页时 ID 没有严格递减。",
+            discovery: "partial",
+          };
+          stopScanning = true;
+          break;
+        }
+        if (headPage.some(({ id }) => id <= baseline)) {
+          headVerified = true;
+          break;
+        }
+        headCursor = headPage.at(-1)?.id;
       }
-      if (headPage.some(({ id }) => id <= baseline)) {
-        headVerified = true;
-        break;
+      if (headVerified && readCache !== undefined) {
+        readCache.headPages = fetchedHeadPages;
       }
-      headCursor = headPage.at(-1)?.id;
     }
   }
 
@@ -4358,10 +4483,12 @@ async function collectPostCreatedRange(
   selectionOverride?: PostRangeTargetSelection,
   seenPostIds?: Set<number>,
   readCache?: PostRangeReadCache,
+  confirmedPostIdLowerBound?: number,
 ): Promise<
   Omit<z.output<typeof collectOutputSchema>, "challengeRecovery"> & {
     readonly observedPosts: number;
     readonly topicsExamined: number;
+    readonly scan: PostRangeScan;
   }
 > {
   const range = {
@@ -4395,17 +4522,14 @@ async function collectPostCreatedRange(
   const selection =
     selectionOverride ??
     (await resolvePostRangeTargets(page, site, params, context.signal));
-  let scanPromise = readCache?.scan;
-  if (scanPromise === undefined) {
-    scanPromise = scanPostCreatedRange(
-      page,
-      site.origin,
-      context.signal,
-      params.postCreatedRange.maxPages,
-    );
-    if (readCache !== undefined) readCache.scan = scanPromise;
-  }
-  const scan = await scanPromise;
+  const scan = await scanPostCreatedRange(
+    page,
+    site.origin,
+    context.signal,
+    params.postCreatedRange.maxPages,
+    readCache,
+    confirmedPostIdLowerBound,
+  );
   if (scan.issue !== undefined) {
     incompleteScopes.push({
       scope: rangeScope,
@@ -4527,6 +4651,7 @@ async function collectPostCreatedRange(
     incompleteScopes,
     observedPosts,
     topicsExamined,
+    scan,
   };
 }
 
@@ -4919,7 +5044,10 @@ async function sync(
   const incompleteScopes: CollectionIncompleteScope[] = [];
   const completedScopes: string[] = [];
   const seenPostIds = new Set<number>();
-  const postRangeReadCache: PostRangeReadCache = { topics: new Map() };
+  const postRangeReadCache: PostRangeReadCache = {
+    downwardPages: new Map(),
+    topics: new Map(),
+  };
   let observedPosts = 0;
   let topicsExamined = 0;
   let state: SyncPersistentState | undefined;
@@ -5154,6 +5282,7 @@ async function sync(
             selected,
             seenPostIds,
             postRangeReadCache,
+            plan.previousConfirmedPostIdLowerBound,
           );
           observedPosts += result.observedPosts;
           topicsExamined += result.topicsExamined;
@@ -5170,6 +5299,37 @@ async function sync(
             );
           }
           const scopeIncomplete = addedIncomplete.length > 0;
+          if (!scopeIncomplete && result.scan.complete) {
+            const candidate = computeSyncScopeCandidateLowerBound(
+              result.scan.posts,
+              Date.parse(plan.range!.to),
+            );
+            const nextLowerBound = Math.max(
+              plan.previousConfirmedPostIdLowerBound ?? 0,
+              candidate ?? 0,
+            );
+            if (nextLowerBound > 0) {
+              const key = syncScopeKey(plan.identity);
+              const index = state!.scopes.findIndex(
+                (entry) => syncScopeKey(entry) === key,
+              );
+              if (index >= 0) {
+                const updatedScopes = [...state!.scopes];
+                updatedScopes[index] = syncProgressEntrySchema.parse({
+                  ...updatedScopes[index],
+                  confirmedPostIdLowerBound: nextLowerBound,
+                });
+                state = syncPersistentStateSchema.parse({
+                  ...state,
+                  scopes: updatedScopes,
+                });
+                await saveSyncPersistentState(context, state);
+                (
+                  plan as { confirmedPostIdLowerBound?: number }
+                ).confirmedPostIdLowerBound = nextLowerBound;
+              }
+            }
+          }
           const scopeStatus = !scopeIncomplete
             ? "completed"
             : scopeDiscovery === "failed"
@@ -5295,3 +5455,15 @@ export const sourceAdapter = defineSourceAdapter({
     }),
   },
 });
+
+export {
+  scanPostCreatedRange,
+  computeSyncScopeCandidateLowerBound,
+  syncScopePlans,
+  assignSyncPosition,
+  type PostRangeReadCache,
+  type PostRangeScan,
+  type DiscoursePost,
+  type SyncScopePlan,
+  type SyncPersistentState,
+};

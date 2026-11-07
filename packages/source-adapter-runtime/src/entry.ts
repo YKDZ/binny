@@ -703,16 +703,38 @@ function startActionWorker(
         return;
       }
       if (message.type === "adapter-state-load") {
-        const state = persistentSourceAdapterState.snapshot();
-        void sendWorkerMessage(worker, {
-          type: "adapter-state-loaded",
-          requestId: record.requestId,
-          ...(state === undefined ? {} : { state }),
-        }).catch((error: unknown) => {
-          process.stderr.write(
-            `无法返回信源适配器持久状态：${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        });
+        void persistentSourceAdapterState
+          .load()
+          .then(async (state) => {
+            await sendWorkerMessage(worker, {
+              type: "adapter-state-loaded",
+              requestId: record.requestId,
+              ...(state === undefined ? {} : { state }),
+            });
+          })
+          .catch(async (error: unknown) => {
+            persistentSourceAdapterStateUnavailable = true;
+            await sendHeartbeatNow(false, false);
+            const isOwnerMismatch =
+              hasErrorCode(error, "runtime_owner_mismatch") ||
+              (error instanceof Error &&
+                error.message === "runtime_owner_mismatch");
+            await sendWorkerMessage(worker, {
+              type: "adapter-state-rejected",
+              requestId: record.requestId,
+              code: isOwnerMismatch
+                ? "runtime_owner_mismatch"
+                : "source_adapter_state_unavailable",
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "信源适配器持久状态不可用，相关同步已停止。",
+            }).catch((sendError: unknown) => {
+              process.stderr.write(
+                `无法拒绝信源适配器状态请求：${sendError instanceof Error ? sendError.message : String(sendError)}\n`,
+              );
+            });
+          });
         return;
       }
       if (!Object.hasOwn(record, "state")) {

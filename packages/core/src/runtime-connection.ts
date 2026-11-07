@@ -26,6 +26,7 @@ import {
 } from "@binny/contracts";
 import {
   binConfigurations,
+  manualRuns,
   runtimeConnections,
   type Database,
   type Transaction,
@@ -1057,11 +1058,147 @@ export function createRuntimeConnectionStore(
         });
       }
 
+      let persistentState =
+        (bin.persistentState as JsonObject | null) ?? undefined;
+
+      const previousSyncRuns = await database
+        .select({
+          identityId: manualRuns.identityId,
+          configSnapshot: manualRuns.configSnapshot,
+          report: manualRuns.report,
+          output: manualRuns.output,
+        })
+        .from(manualRuns)
+        .where(and(eq(manualRuns.binId, binId), eq(manualRuns.action, "sync")));
+
+      const initializedScopes: Array<{
+        binId: string;
+        identityId: string;
+        origin: string;
+        scope: { kind: string; id: number };
+      }> = [];
+
+      for (const row of previousSyncRuns) {
+        let origin: string | undefined;
+        if (
+          typeof row.configSnapshot === "object" &&
+          row.configSnapshot !== null &&
+          "siteUrl" in row.configSnapshot &&
+          typeof row.configSnapshot.siteUrl === "string"
+        ) {
+          try {
+            origin = new URL(row.configSnapshot.siteUrl).origin;
+          } catch {
+            origin = undefined;
+          }
+        }
+        if (origin === undefined) continue;
+
+        const checkItems = [
+          ...(typeof row.report === "object" &&
+          row.report !== null &&
+          "scopes" in row.report &&
+          Array.isArray(row.report.scopes)
+            ? row.report.scopes
+            : []),
+          ...(typeof row.output === "object" &&
+          row.output !== null &&
+          "scopes" in row.output &&
+          Array.isArray(row.output.scopes)
+            ? row.output.scopes
+            : []),
+        ];
+
+        for (const item of checkItems) {
+          if (
+            typeof item === "object" &&
+            item !== null &&
+            "scope" in item &&
+            typeof item.scope === "object" &&
+            item.scope !== null &&
+            "kind" in item.scope &&
+            typeof item.scope.kind === "string" &&
+            "id" in item.scope &&
+            typeof item.scope.id === "number"
+          ) {
+            const status = "status" in item ? item.status : undefined;
+            const mode = "mode" in item ? item.mode : undefined;
+            if (
+              status === "initialized" ||
+              status === "advanced" ||
+              status === "completed" ||
+              status === "partial" ||
+              mode === "continued" ||
+              mode === "truncated" ||
+              mode === "no-forward-range"
+            ) {
+              const scopeRef = {
+                kind: item.scope.kind,
+                id: item.scope.id,
+              };
+              const alreadyFound = initializedScopes.some(
+                (existing) =>
+                  existing.identityId === row.identityId &&
+                  existing.origin === origin &&
+                  existing.scope.kind === scopeRef.kind &&
+                  existing.scope.id === scopeRef.id,
+              );
+              if (!alreadyFound) {
+                initializedScopes.push({
+                  binId,
+                  identityId: row.identityId,
+                  origin,
+                  scope: scopeRef,
+                });
+              }
+            }
+          }
+        }
+      }
+
+      if (initializedScopes.length > 0) {
+        if (bin.persistentState === null || bin.persistentState === undefined) {
+          persistentState = {
+            status: "unavailable",
+            reason: "persistent_state_missing",
+          };
+        } else if (
+          typeof bin.persistentState === "object" &&
+          bin.persistentState !== null &&
+          "scopes" in bin.persistentState &&
+          Array.isArray(bin.persistentState.scopes)
+        ) {
+          const stateScopes = bin.persistentState.scopes as unknown[];
+          const missingAny = initializedScopes.some((init) => {
+            return !stateScopes.some((entry) => {
+              if (typeof entry !== "object" || entry === null) return false;
+              const rec = entry as Record<string, unknown>;
+              if (
+                rec.binId !== init.binId ||
+                rec.identityId !== init.identityId ||
+                rec.origin !== init.origin
+              ) {
+                return false;
+              }
+              if (typeof rec.scope !== "object" || rec.scope === null)
+                return false;
+              const s = rec.scope as Record<string, unknown>;
+              return s.kind === init.scope.kind && s.id === init.scope.id;
+            });
+          });
+          if (missingAny) {
+            persistentState = {
+              status: "unavailable",
+              reason: "persistent_state_missing",
+            };
+          }
+        }
+      }
+
       return {
         ok: true,
         value: {
-          persistentState:
-            (bin.persistentState as JsonObject | null) ?? undefined,
+          persistentState,
           sourceAccess: bin.sourceAccessState ?? undefined,
         },
       };

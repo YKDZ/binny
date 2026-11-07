@@ -1705,7 +1705,7 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
       "node",
       "--input-type=module",
       "-e",
-      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const parent = /^PPid:\\s+(\\d+)/mu.exec(readFileSync(proc + "/status", "utf8"))?.[1]; const command = readFileSync(proc + "/cmdline").toString(); if (parent === "1" && command.includes("worker")) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
+      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if (command.includes("worker.ts") && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
     ]);
     const workerPid = Number(childProcesses.stdout.trim());
     assert.ok(Number.isSafeInteger(workerPid) && workerPid > 1);
@@ -2069,11 +2069,14 @@ async function verifyCorruptSourceStateVisibility(): Promise<void> {
   await compose([
     "exec",
     "--no-TTY",
-    "runtime-linuxdo",
-    "node",
-    "--input-type=module",
-    "-e",
-    'import { writeFileSync } from "node:fs"; writeFileSync("/var/lib/binny/runtime/source-access.json", "{");',
+    "postgres",
+    "psql",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    "UPDATE bin_configurations SET source_access_state = '\"corrupt\"'::jsonb WHERE id = 'binny-discovery-topic';",
   ]);
   await compose(["restart", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
@@ -2131,6 +2134,22 @@ async function verifyCorruptSourceStateVisibility(): Promise<void> {
     false,
   );
   assert.equal((await sourceState()).events.length, 0);
+
+  await compose([
+    "exec",
+    "--no-TTY",
+    "postgres",
+    "psql",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    "UPDATE bin_configurations SET source_access_state = NULL WHERE id = 'binny-discovery-topic';",
+  ]);
+  await compose(["restart", "runtime-linuxdo"]);
+  await waitForRuntimeHealth();
+  await waitForRuntime();
 }
 
 async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
@@ -4548,7 +4567,7 @@ async function verifySyncWorkerInterruption(
       "node",
       "--input-type=module",
       "-e",
-      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const parent = /^PPid:\\s+(\\d+)/mu.exec(readFileSync(proc + "/status", "utf8"))?.[1]; const command = readFileSync(proc + "/cmdline").toString(); if (parent === "1" && command.includes("worker")) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
+      'import { readdirSync, readFileSync } from "node:fs"; for (const entry of readdirSync("/proc")) { if (!/^\\d+$/u.test(entry)) continue; try { const proc = "/proc/" + entry; const command = readFileSync(proc + "/cmdline").toString(); if (command.includes("worker.ts") && Number(entry) !== process.pid) { process.stdout.write(entry); process.exit(0); } } catch {} } process.exit(1);',
     ]);
     const workerPid = Number(childProcesses.stdout.trim());
     assert.ok(Number.isSafeInteger(workerPid) && workerPid > 1);
@@ -5415,6 +5434,7 @@ async function verifyBoundedSync(): Promise<void> {
         readonly scope?: { readonly kind: string; readonly id: number };
         readonly position?: string;
         readonly lastRunId?: string;
+        readonly confirmedPostIdLowerBound?: number;
       }[];
     };
     assert.deepEqual(
@@ -5435,6 +5455,14 @@ async function verifyBoundedSync(): Promise<void> {
           lastRunId: firstIncrement.runId,
         },
       ],
+    );
+    assert.ok(
+      persistedSyncState.scopes?.every(
+        ({ confirmedPostIdLowerBound }) =>
+          typeof confirmedPostIdLowerBound === "number" &&
+          confirmedPostIdLowerBound > 0,
+      ),
+      "首轮完整扫描后各范围应记录 confirmedPostIdLowerBound。",
     );
     await ensureAuthenticatedLinuxdoUser();
 
@@ -5462,6 +5490,14 @@ async function verifyBoundedSync(): Promise<void> {
     assert.equal(
       (await searchArchiveItem("sync 第二轮发现的旧主题新回复")).sourceKey.key,
       "post:240011",
+    );
+    const resumedEvents = (await sourceState()).events;
+    const resumedPostListEvents = resumedEvents.filter(
+      ({ action }) => action === "post-list",
+    );
+    assert.ok(
+      resumedPostListEvents.length < params.maxPages,
+      `增量 sync 扫描到已确认下界即停止，实际请求了 ${String(resumedPostListEvents.length)} 页帖子流，少于 maxPages ${String(params.maxPages)}。`,
     );
 
     const workerRecovery =
@@ -5735,39 +5771,100 @@ async function verifyBoundedSync(): Promise<void> {
 }
 
 async function verifyCorruptSyncStateVisibility(): Promise<void> {
+  // 1. Missing previously initialized scope / wiped persistent_state = NULL in PostgreSQL
   await clearSourceEvents();
-  const corruption = await compose([
+  await compose([
     "exec",
     "--no-TTY",
-    "runtime-linuxdo",
-    "node",
-    "--input-type=module",
-    "-e",
-    'import { writeFileSync } from "node:fs"; writeFileSync("/var/lib/binny/runtime/binny.source-adapter-linuxdo.state.json", "{");',
+    "postgres",
+    "psql",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    "UPDATE bin_configurations SET persistent_state = NULL WHERE id = 'binny-discovery-topic';",
   ]);
-  assert.equal(corruption.code, 0, corruption.stderr);
   await compose(["restart", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
   await waitForRuntime();
 
-  const bin = cliData<{
+  const binMissing = cliData<{
     readonly execution: PublicBinRuntime;
   }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  assert.equal(bin.execution.sourceStateSnapshot.freshness, "current");
-  assert.deepEqual(bin.execution.sourceStateSnapshot.sync, {
+  assert.equal(binMissing.execution.sourceStateSnapshot.freshness, "current");
+  assert.deepEqual(binMissing.execution.sourceStateSnapshot.sync, {
     status: "unavailable",
     reason: "persistent_state_unavailable",
   });
 
-  const failedSync = await trigger("sync", {
+  const failedSyncMissing = await trigger("sync", {
     targets: linuxdoTargets("category"),
     maxPages: 20,
     maxRequests: 100,
     maxElapsedMs: 120_000,
   });
-  assert.equal(failedSync.status, "failed", JSON.stringify(failedSync));
   assert.equal(
-    failedSync.result?.error?.code,
+    failedSyncMissing.status,
+    "failed",
+    JSON.stringify(failedSyncMissing),
+  );
+  assert.equal(
+    failedSyncMissing.result?.error?.code,
+    "source_adapter_state_unavailable",
+  );
+  assert.equal(
+    (await sourceState()).events.some(
+      ({ action }) => action === "site-home" || action === "post-list",
+    ),
+    false,
+    "已初始化范围持久状态丢失时不应访问 Linux.do 来源或静默重建基线。",
+  );
+  assert.equal(
+    JSON.stringify(failedSyncMissing).includes("source-adapter-state"),
+    false,
+  );
+
+  // 2. Corrupted persistent_state = '{"corrupt":true}'::jsonb in PostgreSQL
+  await clearSourceEvents();
+  await compose([
+    "exec",
+    "--no-TTY",
+    "postgres",
+    "psql",
+    "-U",
+    "binny",
+    "-d",
+    "binny",
+    "-c",
+    "UPDATE bin_configurations SET persistent_state = '{\"corrupt\":true}'::jsonb WHERE id = 'binny-discovery-topic';",
+  ]);
+  await compose(["restart", "runtime-linuxdo"]);
+  await waitForRuntimeHealth();
+  await waitForRuntime();
+
+  const binCorrupt = cliData<{
+    readonly execution: PublicBinRuntime;
+  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
+  assert.equal(binCorrupt.execution.sourceStateSnapshot.freshness, "current");
+  assert.deepEqual(binCorrupt.execution.sourceStateSnapshot.sync, {
+    status: "unavailable",
+    reason: "persistent_state_unavailable",
+  });
+
+  const failedSyncCorrupt = await trigger("sync", {
+    targets: linuxdoTargets("category"),
+    maxPages: 20,
+    maxRequests: 100,
+    maxElapsedMs: 120_000,
+  });
+  assert.equal(
+    failedSyncCorrupt.status,
+    "failed",
+    JSON.stringify(failedSyncCorrupt),
+  );
+  assert.equal(
+    failedSyncCorrupt.result?.error?.code,
     "source_adapter_state_unavailable",
   );
   assert.equal(
@@ -5778,7 +5875,7 @@ async function verifyCorruptSyncStateVisibility(): Promise<void> {
     "持久接续状态损坏时不应访问 Linux.do 来源。",
   );
   assert.equal(
-    JSON.stringify(failedSync).includes("source-adapter-state"),
+    JSON.stringify(failedSyncCorrupt).includes("source-adapter-state"),
     false,
   );
 }
@@ -7450,7 +7547,6 @@ async function main(): Promise<void> {
         "postgres-data",
         "bins",
         "resource-data",
-        "linuxdo-runtime-owner",
         "discovery-test-clock",
       ]) {
         await run("docker", ["volume", "rm", `${projectName}_${volume}`]).catch(
