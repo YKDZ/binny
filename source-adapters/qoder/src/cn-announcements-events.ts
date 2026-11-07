@@ -491,6 +491,12 @@ export async function collectCnAnnouncementsEvents(
 
   if (params.articleUrls && params.articleUrls.length > 0) {
     for (const url of params.articleUrls) {
+      if (
+        /changelog\.qoder\.cn/iu.test(url) ||
+        /changelog\.qoder\.com/iu.test(url)
+      ) {
+        continue;
+      }
       const docKey = extractDocKey(url);
       if (docKey.length > 0) {
         targetDocs.push({

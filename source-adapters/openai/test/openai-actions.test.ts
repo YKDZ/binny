@@ -558,6 +558,128 @@ await test("OpenAI News rejects 403, Cloudflare challenge, redirect to index, an
   }
 });
 
+await test("OpenAI News allows valid HTTP 200 article page with passive challenge beacon", async () => {
+  const submissions: SourceAdapterArchiveSubmission[] = [];
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+
+    if (url.pathname === "/news/rss.xml") {
+      res.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>OpenAI News</title>
+    <link>${origin}/news</link>
+    <item>
+      <guid>urn:openai:beacon-article</guid>
+      <title>Article With Passive Beacon</title>
+      <link>${origin}/index/article-with-beacon/</link>
+      <pubDate>Wed, 23 Oct 2026 12:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>`);
+      return;
+    }
+
+    if (url.pathname === "/index/article-with-beacon/") {
+      res.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+      });
+      res.end(`<!DOCTYPE html>
+<html>
+<head>
+  <title>Article With Passive Beacon | OpenAI</title>
+  <link rel="canonical" href="${origin}/index/article-with-beacon/" />
+  <meta property="og:title" content="Article With Passive Beacon" />
+  <meta property="article:published_time" content="2026-10-23T12:00:00.000Z" />
+</head>
+<body>
+  <article data-toc-content>
+    <h1>Article With Passive Beacon</h1>
+    <p>This is a full article containing valid body content alongside a passive script.</p>
+  </article>
+  <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
+</body>
+</html>`);
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const config: OpenAIConfig = {
+      news: {
+        enabled: true,
+        rssUrl: `${origin}/news/rss.xml`,
+        userAgent: "Binny Test UA",
+      },
+      developersBlog: {
+        enabled: false,
+        listUrl: `${origin}/blog`,
+        preferMarkdown: true,
+      },
+    };
+
+    const context = createSourceAdapterContext(config, {
+      archiveSubmit: async (input) => {
+        submissions.push(input);
+        return {
+          commitId: randomUUID(),
+          archiveSeq: "1",
+          binId: "openai-test-bin",
+          runId: randomUUID(),
+          sourceAdapterVersion: sourceAdapter.version,
+          observedAt: "2026-11-04T00:00:00.000Z",
+          recordedAt: "2026-11-04T00:00:00.000Z",
+          items: input.items.map((item) => ({
+            itemId: randomUUID(),
+            revisionId: randomUUID(),
+            sourceKey: item.sourceKey,
+          })),
+          relations: [],
+        };
+      },
+    });
+
+    const checkAction = sourceAdapter.actions.check;
+    assert.ok(checkAction);
+    const checkResult = await checkAction.execute(context, {
+      scopes: ["news"],
+    });
+    assert.equal(checkResult.availability, "available");
+    assert.equal(
+      checkResult.problems.some(
+        (p) => p.code === "openai_news_challenge_or_forbidden",
+      ),
+      false,
+    );
+
+    const collectAction = sourceAdapter.actions.collect;
+    assert.ok(collectAction);
+    const collectResult = await collectAction.execute(context, {
+      scopes: ["news"],
+    });
+    assert.deepEqual(collectResult.completedScopes, ["news"]);
+    assert.equal(submissions.length, 1);
+    assert.equal(
+      submissions[0]!.items[0]!.sourceKey.key,
+      "/index/article-with-beacon/",
+    );
+  } finally {
+    server.close();
+  }
+});
+
 await test("OpenAI Developers Blog list discovery, .md and HTML extraction, day-precision date preservation", async () => {
   const submissions: SourceAdapterArchiveSubmission[] = [];
   const uploadedResources: ArchiveResourceMetadata[] = [];

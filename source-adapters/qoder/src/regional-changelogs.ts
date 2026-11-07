@@ -34,6 +34,7 @@ import type {
 
 export const CN_CHANGELOGS_SCOPE_ID = "cn-changelogs";
 export const INTERNATIONAL_CHANGELOGS_SCOPE_ID = "int-changelogs";
+export const DEFAULT_CN_CHANGELOG_URL = "https://changelog.qoder.cn/llms.txt";
 export const DEFAULT_INTERNATIONAL_CHANGELOG_URL =
   "https://changelog.qoder.com/llms.txt";
 
@@ -365,7 +366,20 @@ export async function discoverCnChangelogDocs(
   fetchFn?: (url: string) => Promise<string>,
 ): Promise<DiscoveredChangelogDoc[]> {
   const lines = llmsText.split(/\r?\n/u);
-  let inChangelogSection = false;
+
+  let hasNonEmptyH2 = false;
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      const heading = line.replace(/^#+\s*/u, "").trim();
+      if (heading.length > 0) {
+        hasNonEmptyH2 = true;
+        break;
+      }
+    }
+  }
+
+  let inChangelogSection = !hasNonEmptyH2;
+  let currentSection = inChangelogSection ? "更新日志" : "";
   const directDocs: DiscoveredChangelogDoc[] = [];
   const navigationUrls: string[] = [];
   const seenKeys = new Set<string>();
@@ -374,9 +388,13 @@ export async function discoverCnChangelogDocs(
     if (line.startsWith("#")) {
       const heading = line.replace(/^#+\s*/u, "").trim();
       if (line.startsWith("## ")) {
-        inChangelogSection = isChangelogSectionHeading(heading);
-      } else {
+        if (heading.length > 0) {
+          inChangelogSection = isChangelogSectionHeading(heading);
+          currentSection = inChangelogSection ? heading : "";
+        }
+      } else if (hasNonEmptyH2) {
         inChangelogSection = false;
+        currentSection = "";
       }
       continue;
     }
@@ -407,7 +425,7 @@ export async function discoverCnChangelogDocs(
         docKey,
         canonicalUrl: buildCanonicalDocUrl(docKey, baseUrl),
         fetchUrl,
-        section: "更新日志",
+        section: currentSection || "更新日志",
         ...(description && description.length > 0 ? { description } : {}),
       });
     }
@@ -432,7 +450,7 @@ export async function discoverCnChangelogDocs(
               docKey: cardDocKey,
               canonicalUrl: buildCanonicalDocUrl(cardDocKey, baseUrl),
               fetchUrl: buildFetchMdUrl(card.href, baseUrl),
-              section: "更新日志",
+              section: currentSection || "更新日志",
             });
           }
         }
@@ -441,6 +459,23 @@ export async function discoverCnChangelogDocs(
           `Failed to fetch navigation overview page ${navUrl}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    }
+  }
+
+  if (directDocs.length === 0 && navigationUrls.length === 0 && fetchFn) {
+    let isDocsHost = false;
+    try {
+      isDocsHost = new URL(baseUrl).hostname === "docs.qoder.cn";
+    } catch {
+      isDocsHost = false;
+    }
+    if (isDocsHost) {
+      const cnChangelogText = await fetchFn(DEFAULT_CN_CHANGELOG_URL);
+      return await discoverCnChangelogDocs(
+        cnChangelogText,
+        DEFAULT_CN_CHANGELOG_URL,
+        fetchFn,
+      );
     }
   }
 
@@ -460,12 +495,16 @@ export async function discoverInternationalChangelogDocs(
   let hasSections = false;
   for (const line of lines) {
     if (line.startsWith("## ")) {
-      hasSections = true;
-      break;
+      const heading = line.replace(/^#+\s*/u, "").trim();
+      if (heading.length > 0) {
+        hasSections = true;
+        break;
+      }
     }
   }
 
   let inChangelogSection = !hasSections;
+  let currentSection = inChangelogSection ? "Changelog" : "";
   const directDocs: DiscoveredChangelogDoc[] = [];
   const navigationUrls: string[] = [];
   const seenKeys = new Set<string>();
@@ -474,9 +513,16 @@ export async function discoverInternationalChangelogDocs(
     if (line.startsWith("#")) {
       const heading = line.replace(/^#+\s*/u, "").trim();
       if (line.startsWith("## ")) {
-        inChangelogSection = isChangelogSectionHeading(heading);
+        if (heading.length > 0) {
+          inChangelogSection = isChangelogSectionHeading(heading);
+          currentSection = inChangelogSection ? heading : "";
+        }
       } else if (!hasSections && line.startsWith("# ")) {
         inChangelogSection = true;
+        currentSection = "Changelog";
+      } else if (hasSections) {
+        inChangelogSection = false;
+        currentSection = "";
       }
       continue;
     }
@@ -507,7 +553,7 @@ export async function discoverInternationalChangelogDocs(
         docKey,
         canonicalUrl: buildCanonicalDocUrl(docKey, baseUrl),
         fetchUrl,
-        section: "Changelog",
+        section: currentSection || "Changelog",
         ...(description && description.length > 0 ? { description } : {}),
       });
     }
@@ -531,7 +577,7 @@ export async function discoverInternationalChangelogDocs(
               docKey: cardDocKey,
               canonicalUrl: buildCanonicalDocUrl(cardDocKey, baseUrl),
               fetchUrl: buildFetchMdUrl(card.href, baseUrl),
-              section: "Changelog",
+              section: currentSection || "Changelog",
             });
           }
         }
@@ -989,7 +1035,7 @@ async function collectRegionalChangelogs(
       if (isCn && /changelog\.qoder\.com/iu.test(url)) {
         continue;
       }
-      if (!isCn && /docs\.qoder\.cn/iu.test(url)) {
+      if (!isCn && /(?:docs|changelog)\.qoder\.cn/iu.test(url)) {
         continue;
       }
 
@@ -1008,11 +1054,16 @@ async function collectRegionalChangelogs(
             [],
           );
         }
+        const itemBaseUrl =
+          isCn && /changelog\.qoder\.cn/iu.test(url)
+            ? DEFAULT_CN_CHANGELOG_URL
+            : indexUrl;
+
         targetDocs.push({
           title: docKey,
           docKey,
-          canonicalUrl: buildCanonicalDocUrl(docKey, indexUrl),
-          fetchUrl: buildFetchMdUrl(url, indexUrl),
+          canonicalUrl: buildCanonicalDocUrl(docKey, itemBaseUrl),
+          fetchUrl: buildFetchMdUrl(url, itemBaseUrl),
           section: isCn ? "更新日志" : "Changelog",
         });
       }

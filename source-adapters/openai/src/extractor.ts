@@ -123,7 +123,7 @@ export function detectOpenAiAccessFailure(
   }
 
   const cfMitigated = response.headers.get("cf-mitigated");
-  if (cfMitigated === "challenge") {
+  if (cfMitigated?.toLowerCase() === "challenge") {
     return {
       failed: true,
       code: "openai_news_challenge_or_forbidden",
@@ -134,7 +134,10 @@ export function detectOpenAiAccessFailure(
 
   const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
   const title = titleMatch && titleMatch[1] ? titleMatch[1].trim() : "";
-  if (title.toLowerCase().includes("just a moment...")) {
+  if (
+    title.toLowerCase().includes("just a moment...") ||
+    html.includes("Just a moment...")
+  ) {
     return {
       failed: true,
       code: "openai_news_challenge_or_forbidden",
@@ -144,10 +147,12 @@ export function detectOpenAiAccessFailure(
   }
 
   if (
-    html.includes("/cdn-cgi/challenge-platform/") ||
     html.includes("_cf_chl_opt") ||
     html.includes("challenges.cloudflare.com") ||
-    html.includes("cf-chl-widget")
+    html.includes("cf-chl-widget") ||
+    (html.includes("/cdn-cgi/challenge-platform/") &&
+      !html.includes("<article") &&
+      !html.includes("data-toc-content"))
   ) {
     return {
       failed: true,

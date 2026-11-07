@@ -18,6 +18,7 @@ import {
   buildCanonicalDocUrl,
   buildFetchMdUrl,
   CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+  DEFAULT_CN_DOCS_INDEX_URL,
   discoverCnAnnouncementDocs,
   extractDocKey,
   extractEffectiveDate,
@@ -31,6 +32,7 @@ import {
 } from "../src/international-blog.ts";
 import {
   CN_CHANGELOGS_SCOPE_ID,
+  DEFAULT_CN_CHANGELOG_URL,
   DEFAULT_INTERNATIONAL_CHANGELOG_URL,
   discoverCnChangelogDocs,
   discoverInternationalChangelogDocs,
@@ -1317,6 +1319,63 @@ void describe("Qoder Scope Resolution and Regional Changelogs Unit Tests", () =>
     assert.equal(docs[1]?.docKey, "content/changelog-cli");
     assert.equal(docs[1]?.title, "CLI Tool");
   });
+
+  void test("discoverCnChangelogDocs falls back to DEFAULT_CN_CHANGELOG_URL and handles bare ## line", async () => {
+    assert.equal(
+      DEFAULT_CN_CHANGELOG_URL,
+      "https://changelog.qoder.cn/llms.txt",
+    );
+
+    const docsLlmsTxt = `
+# Qoder CN Docs
+
+## 产品公告
+- [Fast 模式上线](/product-overview/fast-mode-announcement.md)
+`;
+    const changelogLlmsTxt = `
+# Qoder CN 更新日志
+
+- [Qoder CLI](/cli/changelog.md): CLI 更新日志
+## 
+- [Qoder Mobile](/mobile/changelog.md): 移动端更新日志
+`;
+
+    const requestedUrls: string[] = [];
+    const fetchMock = async (url: string) => {
+      requestedUrls.push(url);
+      if (url === DEFAULT_CN_CHANGELOG_URL) {
+        return changelogLlmsTxt;
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    };
+
+    const docs = await discoverCnChangelogDocs(
+      docsLlmsTxt,
+      DEFAULT_CN_DOCS_INDEX_URL,
+      fetchMock,
+    );
+
+    assert.deepEqual(requestedUrls, [DEFAULT_CN_CHANGELOG_URL]);
+    assert.equal(docs.length, 2);
+    assert.equal(docs[0]?.docKey, "cli/changelog");
+    assert.equal(
+      docs[0]?.canonicalUrl,
+      "https://changelog.qoder.cn/cli/changelog",
+    );
+    assert.equal(
+      docs[0]?.fetchUrl,
+      "https://changelog.qoder.cn/cli/changelog.md",
+    );
+    assert.equal(docs[1]?.docKey, "mobile/changelog");
+    assert.equal(
+      docs[1]?.canonicalUrl,
+      "https://changelog.qoder.cn/mobile/changelog",
+    );
+    assert.equal(
+      docs[1]?.fetchUrl,
+      "https://changelog.qoder.cn/mobile/changelog.md",
+    );
+  });
 });
 
 void describe("Qoder CN Product Changelogs Action Flow", () => {
@@ -1713,6 +1772,190 @@ ${updatesMd}
       );
     } finally {
       server.close();
+    }
+  });
+
+  void test("check, sync, and collect fall back to changelog.qoder.cn when docs.qoder.cn has no changelog section", async () => {
+    let commitSeq = 0;
+    const requestedUrls: string[] = [];
+    const submissions: SourceAdapterArchiveSubmission[] = [];
+    let storedState: IncrementalSyncState | undefined;
+
+    const mockDocsLlms = `# Qoder CN 文档\n\n## 快速入门\n- [快速开始](/quickstart.md)`;
+    const mockChangelogLlms = `# Qoder CN 更新日志\n\n- [Qoder CLI](/cli/changelog.md): CLI 更新日志\n## \n- [Qoder Mobile](/mobile/changelog.md): Mobile 更新日志`;
+    const mockCliMd = `---
+title: Qoder CLI
+---
+<Update label="2026-11-05" description="CLI 1.1.82">
+CLI 更新说明
+</Update>`;
+    const mockMobileMd = `---
+title: Qoder Mobile
+---
+<Update label="2026-11-04" description="Mobile 1.0.12">
+Mobile 更新说明
+</Update>`;
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, _init) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      requestedUrls.push(url);
+
+      if (url === DEFAULT_CN_DOCS_INDEX_URL) {
+        return new Response(mockDocsLlms, {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      if (url === DEFAULT_CN_CHANGELOG_URL) {
+        return new Response(mockChangelogLlms, {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      if (url === "https://changelog.qoder.cn/cli/changelog.md") {
+        return new Response(mockCliMd, {
+          status: 200,
+          headers: { "content-type": "text/markdown; charset=utf-8" },
+        });
+      }
+      if (url === "https://changelog.qoder.cn/mobile/changelog.md") {
+        return new Response(mockMobileMd, {
+          status: 200,
+          headers: { "content-type": "text/markdown; charset=utf-8" },
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    };
+
+    try {
+      const runId = randomUUID();
+      const context: SourceAdapterContext<QoderConfig> = {
+        binId: "qoder-test-bin",
+        identityId: "qoder-test-identity",
+        runId,
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: configSchema.parse({}),
+        signal: new AbortController().signal,
+        persistentState: {
+          async load() {
+            return storedState as Record<string, unknown> | undefined;
+          },
+          async save(state) {
+            storedState = state as IncrementalSyncState;
+          },
+        },
+        archive: {
+          async submit(input) {
+            submissions.push(input);
+            commitSeq += 1;
+            return {
+              commitId: randomUUID(),
+              archiveSeq: String(commitSeq),
+              binId: "qoder-test-bin",
+              runId,
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T12:00:00.000Z",
+              recordedAt: "2026-11-07T12:00:00.000Z",
+              items: input.items.map((item) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: item.sourceKey,
+              })),
+              relations: [],
+            } satisfies ArchiveCommit;
+          },
+        },
+        resources: {
+          async resolve() {
+            return { resources: [], items: [], mediaByUrl: {} };
+          },
+          async upload() {
+            return {
+              ok: true,
+              resource: {
+                resourceId: randomUUID(),
+                sha256: "0".repeat(64),
+                mediaType: "image/png",
+                size: 10,
+              },
+            } as const;
+          },
+        },
+      };
+
+      // 1. Check Action falls back to changelog.qoder.cn and succeeds
+      const checkResult = await sourceAdapter.actions.check.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(checkResult.availability, "available");
+      assert.deepEqual(checkResult.scope, [CN_CHANGELOGS_SCOPE_ID]);
+      assert.equal(checkResult.problems.length, 0);
+      assert.ok(requestedUrls.includes(DEFAULT_CN_CHANGELOG_URL));
+
+      // 2. Initial Sync establishes baseline for both changelogs discovered via fallback
+      submissions.length = 0;
+      const initialSync = await sourceAdapter.actions.sync.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(initialSync, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+        initializedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 0);
+      assert.ok(storedState !== undefined);
+      const scopeState = storedState.scopes[CN_CHANGELOGS_SCOPE_ID];
+      assert.ok(scopeState !== undefined);
+      assert.ok(scopeState.ongoingDocuments !== undefined);
+      assert.ok(scopeState.ongoingDocuments["cli/changelog"] !== undefined);
+      assert.ok(scopeState.ongoingDocuments["mobile/changelog"] !== undefined);
+
+      // 3. Collect Action without explicit URLs collects all items via fallback
+      submissions.length = 0;
+      const collectAll = await sourceAdapter.actions.collect.execute(context, {
+        scopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.deepEqual(collectAll, {
+        completedScopes: [CN_CHANGELOGS_SCOPE_ID],
+      });
+      assert.equal(submissions.length, 2);
+      assert.equal(submissions[0]!.items[0]!.sourceKey.key, "cli/changelog");
+      assert.equal(
+        submissions[0]!.items[0]!.sourceRef,
+        "https://changelog.qoder.cn/cli/changelog",
+      );
+      assert.equal(submissions[1]!.items[0]!.sourceKey.key, "mobile/changelog");
+      assert.equal(
+        submissions[1]!.items[0]!.sourceRef,
+        "https://changelog.qoder.cn/mobile/changelog",
+      );
+
+      // 4. Collect Action with explicit changelog.qoder.cn URL resolves against DEFAULT_CN_CHANGELOG_URL
+      // and when scopes is omitted, cn-announcements-events filters out changelog.qoder.cn URLs
+      submissions.length = 0;
+      const explicitCollect = await sourceAdapter.actions.collect.execute(
+        context,
+        {
+          articleUrls: ["https://changelog.qoder.cn/cli/changelog"],
+        },
+      );
+      assert.ok(
+        explicitCollect.completedScopes.includes(CN_CHANGELOGS_SCOPE_ID),
+      );
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0]!.items[0]!.sourceKey.key, "cli/changelog");
+      assert.equal(
+        submissions[0]!.items[0]!.sourceRef,
+        "https://changelog.qoder.cn/cli/changelog",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });
