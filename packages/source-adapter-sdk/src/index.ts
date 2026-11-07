@@ -17,6 +17,19 @@ import { z } from "zod";
 import type { SourceAccessClient } from "./source-access.ts";
 
 export {
+  cleanContent,
+  isAcceptableMediaResponse,
+  validateMediaResponse,
+} from "./content-cleaner.ts";
+export type {
+  CleanContentMediaCandidate,
+  CleanContentMediaKind,
+  CleanContentOptions,
+  CleanContentResult,
+  ContentInputFormat,
+} from "./content-cleaner.ts";
+
+export {
   createSourceAccessBudget,
   SourceAccessBudgetExceededError,
 } from "./source-access-budget.ts";
@@ -230,11 +243,11 @@ export function defineSourceAdapterAction<
     readonly params: TParams;
     readonly output: TOutput;
     execute(
-      context: SourceAdapterContext<z.output<TConfig>, never>,
+      context: SourceAdapterContext<z.output<TConfig>>,
       params: z.output<TParams>,
     ): Promise<z.input<TOutput>>;
   },
-): SourceAdapterAction<TConfig, TParams, TOutput, never>;
+): SourceAdapterAction<TConfig, TParams, TOutput>;
 export function defineSourceAdapterAction<
   TConfig extends z.ZodType,
   TParams extends z.ZodType,

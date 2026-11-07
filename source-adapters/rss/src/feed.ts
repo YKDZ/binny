@@ -1,7 +1,12 @@
-import { Readability } from "@mozilla/readability";
+import { Buffer } from "node:buffer";
+
+import {
+  cleanContent,
+  validateMediaResponse,
+  type CleanContentMediaCandidate,
+  type CleanContentResult,
+} from "@binny/source-adapter-sdk";
 import { parseFeed } from "@rowanmanning/feed-parser";
-import { JSDOM } from "jsdom";
-import { parseFragment, serialize, type DefaultTreeAdapterMap } from "parse5";
 
 type FeedParserJson = ReturnType<ReturnType<typeof parseFeed>["toJSON"]>;
 type FeedParserItem = ReturnType<typeof parseFeed>["items"][number];
@@ -11,6 +16,7 @@ export type ParsedFeedItem = FeedParserJson["items"][number] & {
   readonly contentType?: string;
   readonly descriptionType?: string;
 };
+
 export type ParsedFeed = Omit<FeedParserJson, "items"> & {
   readonly items: ParsedFeedItem[];
 };
@@ -19,6 +25,7 @@ export interface FeedDefinition {
   readonly id: string;
   readonly url: string;
   readonly title?: string | undefined;
+  readonly bodyField?: "auto" | "content" | "summary" | undefined;
 }
 
 export interface FeedValidators {
@@ -47,51 +54,8 @@ export class FeedRequestError extends Error {
   }
 }
 
-export type InlineMediaReference = {
-  readonly kind: "media";
-  readonly url: string;
-  readonly alt: string;
-  readonly display: "image" | "link";
-};
-
-export type BodyPart = string | InlineMediaReference;
-
-export interface MediaCandidate {
-  readonly url: string;
-  readonly mediaType?: string | undefined;
-  readonly title?: string | undefined;
-}
-
-export interface PreparedBody {
-  readonly html: string;
-  readonly text: string;
-  readonly type: string;
-  readonly source: "content" | "summary" | "static-html";
-  readonly parts: readonly BodyPart[];
-  readonly media: readonly MediaCandidate[];
-  readonly invalidMedia: readonly string[];
-  rewriteHtml(references: ReadonlyMap<string, string>): string;
-}
-
-export type StaticArticleResult =
-  | {
-      readonly status: "extracted";
-      readonly requestedUrl: string;
-      readonly finalUrl: string;
-      readonly title: string | null;
-      readonly html: string;
-    }
-  | {
-      readonly status: "unavailable";
-      readonly requestedUrl: string;
-      readonly reason: string;
-      readonly suggestion: string;
-    };
-
 const maximumFeedBytes = 10 * 1024 * 1024;
-const maximumStaticPageBytes = 8 * 1024 * 1024;
 const maximumMediaBytes = 32 * 1024 * 1024;
-const minimumStaticArticleTextLength = 100;
 const fetchTimeoutMs = 20_000;
 const feedAccept =
   "application/atom+xml, application/rss+xml, application/xml, text/xml, application/*+xml;q=0.9, */*;q=0.8";
@@ -177,14 +141,12 @@ function htmlText(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
-function isHtmlTextConstruct(type: string | undefined): boolean {
-  return (
-    type === undefined ||
-    type === "html" ||
-    type === "xhtml" ||
-    type === "text/html" ||
-    type === "application/xhtml+xml"
-  );
+function isAtomTextConstruct(type: string | undefined): boolean {
+  return type === "text" || type === "text/plain";
+}
+
+function isAtomXhtmlConstruct(type: string | undefined): boolean {
+  return type === "xhtml" || type === "application/xhtml+xml";
 }
 
 function responseValidators(response: Response): FeedValidators {
@@ -252,143 +214,6 @@ async function readLimitedText(
   }
 }
 
-function staticArticleUnavailable(
-  requestedUrl: string,
-  reason: string,
-): StaticArticleResult {
-  return {
-    status: "unavailable",
-    requestedUrl,
-    reason:
-      `${reason} 页面可能需要登录、脚本渲染或特殊交互，` +
-      "本次保留 feed 摘要并将其标记为 partial。",
-    suggestion:
-      "检查页面是否无需登录即可直接读取正文；需要脚本或特殊交互时，请提供可公开访问的静态正文来源。",
-  };
-}
-
-export async function fetchStaticArticle(
-  requestedUrl: string,
-  signal: AbortSignal,
-): Promise<StaticArticleResult> {
-  const normalizedUrl = httpUrl(requestedUrl, requestedUrl);
-  if (normalizedUrl === undefined) {
-    return staticArticleUnavailable(
-      requestedUrl,
-      "条目链接不是可读取的 HTTP/HTTPS 页面。",
-    );
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(normalizedUrl, {
-      method: "GET",
-      headers: {
-        accept: "text/html, application/xhtml+xml;q=0.9",
-        "user-agent": "Binny RSS sourceAdapter/1.0",
-      },
-      signal: requestSignal(signal),
-    });
-  } catch (error) {
-    if (signal.aborted) throw error;
-    return staticArticleUnavailable(
-      normalizedUrl,
-      "公开文章页面本次无法访问。",
-    );
-  }
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    return staticArticleUnavailable(
-      normalizedUrl,
-      `公开文章页面返回 HTTP ${response.status}。`,
-    );
-  }
-
-  const contentType = response.headers
-    .get("content-type")
-    ?.split(";", 1)[0]
-    ?.trim()
-    .toLowerCase();
-  if (contentType !== "text/html" && contentType !== "application/xhtml+xml") {
-    await response.body?.cancel();
-    return staticArticleUnavailable(
-      normalizedUrl,
-      "公开文章页面没有返回 HTML 正文。",
-    );
-  }
-
-  let source: string;
-  try {
-    source = await readLimitedText(
-      response,
-      maximumStaticPageBytes,
-      "静态文章页面",
-    );
-  } catch (error) {
-    if (signal.aborted) throw error;
-    const reason =
-      error instanceof Error ? error.message : "公开文章页面本次无法读取。";
-    return staticArticleUnavailable(normalizedUrl, reason);
-  }
-
-  const finalUrl = httpUrl(response.url, normalizedUrl);
-  if (finalUrl === undefined) {
-    return staticArticleUnavailable(
-      normalizedUrl,
-      "公开文章页面跳转到了不可读取的地址。",
-    );
-  }
-
-  let page: JSDOM;
-  try {
-    page = new JSDOM(source, { url: finalUrl });
-  } catch {
-    return staticArticleUnavailable(
-      normalizedUrl,
-      "公开文章页面无法解析为静态正文。",
-    );
-  }
-  try {
-    const document = page.window.document;
-    const hasPasswordInput =
-      document.querySelector('input[type="password"]') !== null;
-    // 逐段预筛选会漏掉短段落组成的完整文章，改用解析后的总正文长度判断。
-    const article = new Readability(document, {
-      charThreshold: minimumStaticArticleTextLength,
-    }).parse();
-    const text = article?.textContent?.trim();
-    if (
-      article === null ||
-      article.content === null ||
-      article.content === undefined ||
-      text === undefined ||
-      text.length < minimumStaticArticleTextLength
-    ) {
-      return staticArticleUnavailable(
-        normalizedUrl,
-        hasPasswordInput
-          ? "公开文章页面提示需要登录，且没有足够正文可供提取。"
-          : "页面没有足够的静态文章正文可供提取。",
-      );
-    }
-    return {
-      status: "extracted",
-      requestedUrl: normalizedUrl,
-      finalUrl,
-      title: article.title?.trim() || null,
-      html: article.content,
-    };
-  } catch {
-    return staticArticleUnavailable(
-      normalizedUrl,
-      "公开文章页面的正文提取未能完成。",
-    );
-  } finally {
-    page.window.close();
-  }
-}
-
 export async function requestFeed(
   url: string,
   validators: FeedValidators,
@@ -450,10 +275,24 @@ export async function requestFeed(
 }
 
 export async function fetchMedia(
-  url: string,
-  fallbackMediaType: string | undefined,
-  signal: AbortSignal,
+  candidateOrUrl: CleanContentMediaCandidate | string,
+  fallbackOrSignal?: string | AbortSignal,
+  maybeSignal?: AbortSignal,
 ): Promise<{ readonly body: Blob; readonly mediaType: string }> {
+  const isCandidateObject = typeof candidateOrUrl !== "string";
+  const url = isCandidateObject ? candidateOrUrl.url : candidateOrUrl;
+  const fallbackMediaType = isCandidateObject
+    ? candidateOrUrl.mediaType
+    : typeof fallbackOrSignal === "string"
+      ? fallbackOrSignal
+      : undefined;
+  const signal =
+    fallbackOrSignal instanceof AbortSignal
+      ? fallbackOrSignal
+      : maybeSignal instanceof AbortSignal
+        ? maybeSignal
+        : new AbortController().signal;
+
   let response: Response;
   try {
     response = await fetch(url, {
@@ -509,36 +348,41 @@ export async function fetchMedia(
       ? headerMediaType
       : (fallbackMediaType ?? "application/octet-stream");
   const bytes = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+
+  const candidate: CleanContentMediaCandidate = isCandidateObject
+    ? candidateOrUrl
+    : {
+        url,
+        kind: "attachment",
+        mediaType: fallbackMediaType,
+      };
+
+  let bodyText: string | undefined;
+  if (
+    mediaType === "text/html" ||
+    mediaType === "application/xhtml+xml" ||
+    mediaType === "application/json" ||
+    mediaType.endsWith("+json")
+  ) {
+    try {
+      bodyText = bytes.toString("utf8");
+    } catch {
+      // Body is not text
+    }
+  }
+
+  const validation = validateMediaResponse(candidate, mediaType, bodyText);
+  if (!validation.ok) {
+    throw new FeedRequestError(
+      validation.reason ?? `媒体「${url}」返回了不受支持的内容类型。`,
+      response.status,
+    );
+  }
+
   return {
     body: new Blob([bytes], { type: mediaType }),
     mediaType,
   };
-}
-
-function isElement(
-  node: DefaultTreeAdapterMap["childNode"],
-): node is DefaultTreeAdapterMap["element"] {
-  return "tagName" in node;
-}
-
-function getAttribute(
-  element: DefaultTreeAdapterMap["element"],
-  name: string,
-): string | undefined {
-  return element.attrs.find((attribute) => attribute.name === name)?.value;
-}
-
-function updateAttribute(
-  element: DefaultTreeAdapterMap["element"],
-  name: string,
-  value: string,
-): void {
-  const attribute = element.attrs.find((current) => current.name === name);
-  if (attribute === undefined) {
-    element.attrs.push({ name, value });
-  } else {
-    attribute.value = value;
-  }
 }
 
 function httpUrl(value: string, baseUrl: string): string | undefined {
@@ -553,254 +397,221 @@ function httpUrl(value: string, baseUrl: string): string | undefined {
   }
 }
 
-function parseSrcset(value: string): { url: string; descriptor: string }[] {
-  const candidates: { url: string; descriptor: string }[] = [];
-  let position = 0;
-  while (position < value.length) {
-    while (position < value.length && /[\s,]/u.test(value[position] ?? "")) {
-      position += 1;
-    }
-    if (position >= value.length) break;
-
-    const start = position;
-    const isDataUrl =
-      value.slice(position, position + 5).toLowerCase() === "data:";
-    while (
-      position < value.length &&
-      !/\s/u.test(value[position] ?? "") &&
-      (isDataUrl || value[position] !== ",")
-    ) {
-      position += 1;
-    }
-    let url = value.slice(start, position);
-    const endedWithComma = url.endsWith(",");
-    if (endedWithComma) url = url.slice(0, -1);
-    if (url.length === 0) continue;
-
-    while (position < value.length && /\s/u.test(value[position] ?? "")) {
-      position += 1;
-    }
-    const descriptorStart = position;
-    if (!endedWithComma) {
-      while (position < value.length && value[position] !== ",") {
-        position += 1;
-      }
-    }
-    const descriptor = value.slice(descriptorStart, position).trim();
-    candidates.push({ url, descriptor });
-    if (value[position] === ",") position += 1;
+export function isSummarySubstantialFullText(
+  rawSummary: string,
+  cleanedText: string,
+): boolean {
+  if (
+    /<(?:p|article|section|h[1-6]|ul|ol|pre|blockquote|table|figure|img|details)\b/iu.test(
+      rawSummary,
+    )
+  ) {
+    return true;
   }
-  return candidates;
+  if (/\n\s*\n/u.test(cleanedText)) {
+    return true;
+  }
+  if (cleanedText.length >= 120) {
+    return true;
+  }
+  return false;
 }
 
-function addMediaCandidate(
-  media: Map<string, MediaCandidate>,
-  invalidMedia: string[],
-  rawUrl: string,
-  baseUrl: string,
-  mediaType?: string | null,
-  title?: string | null,
-): string | undefined {
-  if (rawUrl.startsWith("data:")) return undefined;
-  const url = httpUrl(rawUrl, baseUrl);
-  if (url === undefined) {
-    invalidMedia.push(rawUrl);
-    return undefined;
-  }
-  const previous = media.get(url);
-  media.set(url, {
-    url,
-    ...(mediaType === null || mediaType === undefined
-      ? previous?.mediaType === undefined
-        ? {}
-        : { mediaType: previous.mediaType }
-      : { mediaType }),
-    ...(title === null || title === undefined
-      ? previous?.title === undefined
-        ? {}
-        : { title: previous.title }
-      : { title }),
-  });
-  return url;
+export interface PreparedFeedItem {
+  readonly bodySource: "content" | "summary" | "none";
+  readonly bodyType: string;
+  readonly cleanResult: CleanContentResult;
+  readonly isComplete: boolean;
+  readonly missingReason?: string | undefined;
 }
 
-export function prepareBody(
+export function prepareFeedItem(
+  feed: FeedDefinition,
   item: ParsedFeedItem,
   baseUrl: string,
-  source: "feed" | "static-html" = "feed",
-): PreparedBody {
-  const hasContent = (item.content?.trim().length ?? 0) > 0;
-  const bodyText = hasContent ? (item.content ?? "") : (item.description ?? "");
-  const type =
-    source === "static-html"
-      ? "html"
-      : hasContent
-        ? item.contentType
-        : item.descriptionType;
-  const html = isHtmlTextConstruct(type) ? bodyText : htmlText(bodyText);
-  const bodySource =
-    source === "static-html"
-      ? "static-html"
-      : hasContent
-        ? "content"
-        : "summary";
+): PreparedFeedItem {
+  const mode = feed.bodyField ?? "auto";
 
-  const fragment = parseFragment(html);
-  const parts: BodyPart[] = [];
-  const textParts: string[] = [];
-  const media = new Map<string, MediaCandidate>();
-  const invalidMedia: string[] = [];
-  const inlineReferences: {
-    element: DefaultTreeAdapterMap["element"];
-    attribute: string;
-    url: string;
-  }[] = [];
-
-  function appendInline(
-    element: DefaultTreeAdapterMap["element"],
-    attribute: string | undefined,
-    rawUrl: string,
-    display: "image" | "link",
-    alt: string,
-  ): void {
-    const url = addMediaCandidate(media, invalidMedia, rawUrl, baseUrl);
-    if (url === undefined) {
-      if (!rawUrl.startsWith("data:")) {
-        parts.push({ kind: "media", url: rawUrl, alt, display });
-      }
-      return;
-    }
-    if (attribute !== undefined)
-      inlineReferences.push({ element, attribute, url });
-    parts.push({ kind: "media", url, alt, display });
-  }
-
-  function walk(node: DefaultTreeAdapterMap["childNode"]): void {
-    if (!isElement(node)) {
-      if (node.nodeName === "#text") {
-        parts.push(node.value);
-        textParts.push(node.value);
-      }
-      return;
-    }
-
-    const tag = node.tagName;
-    if (tag === "script" || tag === "style" || tag === "noscript") return;
-    if (
-      ["p", "div", "section", "article", "blockquote", "pre", "li"].includes(
-        tag,
-      )
-    ) {
-      parts.push("\n\n");
-      textParts.push(" ");
-    }
-    const alt = getAttribute(node, "alt") ?? getAttribute(node, "title") ?? "";
-    if (tag === "img") {
-      const sourceUrl = getAttribute(node, "src");
-      if (sourceUrl !== undefined)
-        appendInline(node, "src", sourceUrl, "image", alt);
-      const sourceSet = getAttribute(node, "srcset");
-      if (sourceSet !== undefined) {
-        for (const candidate of parseSrcset(sourceSet)) {
-          appendInline(node, undefined, candidate.url, "image", alt);
-        }
-      }
-      if (alt.length > 0) textParts.push(alt);
-    } else if (["audio", "source", "track", "video"].includes(tag)) {
-      const sourceUrl = getAttribute(node, "src");
-      if (sourceUrl !== undefined)
-        appendInline(node, "src", sourceUrl, "link", alt);
-      const poster = getAttribute(node, "poster");
-      if (poster !== undefined)
-        appendInline(node, "poster", poster, "image", alt);
-    } else if (tag === "object") {
-      const sourceUrl = getAttribute(node, "data");
-      if (sourceUrl !== undefined)
-        appendInline(node, "data", sourceUrl, "link", alt);
-    } else if (tag === "a" && getAttribute(node, "download") !== undefined) {
-      const sourceUrl = getAttribute(node, "href");
-      if (sourceUrl !== undefined)
-        appendInline(node, "href", sourceUrl, "link", alt);
-    }
-
-    for (const child of node.childNodes) walk(child);
-    if (
-      ["p", "div", "section", "article", "blockquote", "pre", "li"].includes(
-        tag,
-      )
-    ) {
-      parts.push("\n\n");
-      textParts.push(" ");
+  const extraMedia: CleanContentMediaCandidate[] = [];
+  for (const media of item.media) {
+    if (media.url) {
+      extraMedia.push({
+        url: media.url,
+        kind: "attachment",
+        mediaType: media.mimeType ?? undefined,
+        title: media.title ?? undefined,
+      });
     }
   }
-
-  for (const child of fragment.childNodes) walk(child);
-
-  for (const mediaItem of item.media) {
-    addMediaCandidate(
-      media,
-      invalidMedia,
-      mediaItem.url,
-      baseUrl,
-      mediaItem.mimeType,
-      mediaItem.title,
-    );
-  }
-  if (item.image !== null) {
-    addMediaCandidate(
-      media,
-      invalidMedia,
-      item.image.url,
-      baseUrl,
-      null,
-      item.image.title,
-    );
+  if (item.image?.url) {
+    extraMedia.push({
+      url: item.image.url,
+      kind: "attachment",
+      title: item.image.title ?? undefined,
+    });
   }
 
-  const text = textParts.join("").replace(/\s+/gu, " ").trim();
+  const hasContent =
+    item.content !== null &&
+    item.content !== undefined &&
+    item.content.trim().length > 0;
+  const hasDescription =
+    item.description !== null &&
+    item.description !== undefined &&
+    item.description.trim().length > 0;
+
+  if (mode === "summary") {
+    if (!hasDescription && !hasContent) {
+      const emptyResult = cleanContent("", {
+        baseUrl,
+        format: "text",
+        extraMedia,
+      });
+      return {
+        bodySource: "none",
+        bodyType: "text",
+        cleanResult: emptyResult,
+        isComplete: false,
+        missingReason: "feed 条目没有可读取的正文或摘要。",
+      };
+    }
+    const raw = hasDescription ? item.description! : item.content!;
+    const type = hasDescription
+      ? (item.descriptionType ?? "html")
+      : (item.contentType ?? "html");
+    const format = isAtomTextConstruct(type)
+      ? "text"
+      : isAtomXhtmlConstruct(type)
+        ? "xhtml"
+        : "html";
+    const cleaned = cleanContent(raw, { baseUrl, format, extraMedia });
+    const isEmpty =
+      cleaned.text.trim().length === 0 && cleaned.media.length === 0;
+    if (isEmpty) {
+      return {
+        bodySource: "summary",
+        bodyType: type,
+        cleanResult: cleaned,
+        isComplete: false,
+        missingReason: "feed 条目没有可读取的正文或摘要。",
+      };
+    }
+    return {
+      bodySource: "summary",
+      bodyType: type,
+      cleanResult: cleaned,
+      isComplete: true,
+    };
+  }
+
+  if (mode === "content") {
+    if (!hasContent) {
+      const emptyResult = cleanContent("", {
+        baseUrl,
+        format: "text",
+        extraMedia,
+      });
+      return {
+        bodySource: "none",
+        bodyType: "text",
+        cleanResult: emptyResult,
+        isComplete: false,
+        missingReason:
+          "feed 配置要求使用 content 字段，但该条目未提供 content 正文。",
+      };
+    }
+    const raw = item.content!;
+    const type = item.contentType ?? "html";
+    const format = isAtomTextConstruct(type)
+      ? "text"
+      : isAtomXhtmlConstruct(type)
+        ? "xhtml"
+        : "html";
+    const cleaned = cleanContent(raw, { baseUrl, format, extraMedia });
+    const isEmpty =
+      cleaned.text.trim().length === 0 && cleaned.media.length === 0;
+    if (isEmpty) {
+      return {
+        bodySource: "content",
+        bodyType: type,
+        cleanResult: cleaned,
+        isComplete: false,
+        missingReason: "feed 条目没有可读取的正文或摘要。",
+      };
+    }
+    return {
+      bodySource: "content",
+      bodyType: type,
+      cleanResult: cleaned,
+      isComplete: true,
+    };
+  }
+
+  // mode === "auto"
+  if (hasContent) {
+    const raw = item.content!;
+    const type = item.contentType ?? "html";
+    const format = isAtomTextConstruct(type)
+      ? "text"
+      : isAtomXhtmlConstruct(type)
+        ? "xhtml"
+        : "html";
+    const cleaned = cleanContent(raw, { baseUrl, format, extraMedia });
+    const isEmpty =
+      cleaned.text.trim().length === 0 && cleaned.media.length === 0;
+    if (!isEmpty) {
+      return {
+        bodySource: "content",
+        bodyType: type,
+        cleanResult: cleaned,
+        isComplete: true,
+      };
+    }
+  }
+
+  if (hasDescription) {
+    const raw = item.description!;
+    const type = item.descriptionType ?? "html";
+    const format = isAtomTextConstruct(type)
+      ? "text"
+      : isAtomXhtmlConstruct(type)
+        ? "xhtml"
+        : "html";
+    const cleaned = cleanContent(raw, { baseUrl, format, extraMedia });
+    const isEmpty =
+      cleaned.text.trim().length === 0 && cleaned.media.length === 0;
+    if (isEmpty) {
+      return {
+        bodySource: "summary",
+        bodyType: type,
+        cleanResult: cleaned,
+        isComplete: false,
+        missingReason: "feed 条目没有可读取的正文或摘要。",
+      };
+    }
+    const substantial = isSummarySubstantialFullText(raw, cleaned.text);
+    return {
+      bodySource: "summary",
+      bodyType: type,
+      cleanResult: cleaned,
+      isComplete: substantial,
+      missingReason: substantial
+        ? undefined
+        : "feed 只提供 description/summary；本次仅归档摘要，不能声称已取得全文。",
+    };
+  }
+
+  const emptyResult = cleanContent("", {
+    baseUrl,
+    format: "text",
+    extraMedia,
+  });
   return {
-    html,
-    text,
-    type: type ?? "html",
-    source: bodySource,
-    parts,
-    media: [...media.values()],
-    invalidMedia,
-    rewriteHtml(references) {
-      for (const reference of inlineReferences) {
-        const archivedReference = references.get(reference.url);
-        if (archivedReference !== undefined) {
-          updateAttribute(
-            reference.element,
-            reference.attribute,
-            archivedReference,
-          );
-        }
-      }
-      for (const child of fragment.childNodes) {
-        const stack: DefaultTreeAdapterMap["childNode"][] = [child];
-        while (stack.length > 0) {
-          const current = stack.pop();
-          if (current === undefined || !isElement(current)) continue;
-          const sourceSet = getAttribute(current, "srcset");
-          if (sourceSet !== undefined) {
-            const rewritten = parseSrcset(sourceSet).map(
-              ({ url, descriptor }) => {
-                const normalizedUrl = httpUrl(url, baseUrl);
-                const archivedReference =
-                  normalizedUrl === undefined
-                    ? undefined
-                    : references.get(normalizedUrl);
-                return `${archivedReference ?? url}${descriptor.length === 0 ? "" : ` ${descriptor}`}`;
-              },
-            );
-            updateAttribute(current, "srcset", rewritten.join(", "));
-          }
-          stack.push(...current.childNodes);
-        }
-      }
-      return serialize(fragment);
-    },
+    bodySource: "none",
+    bodyType: "text",
+    cleanResult: emptyResult,
+    isComplete: false,
+    missingReason: "feed 条目没有可读取的正文或摘要。",
   };
 }
 

@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  archiveBodyWithResources,
   archiveResourceManifest,
-  archivedMedia,
   sourceAdapterActionError,
   defineSourceAdapter,
   defineSourceAdapterAction,
@@ -14,17 +12,15 @@ import * as z from "zod";
 
 import {
   FeedRequestError,
-  fetchStaticArticle,
   fetchMedia,
   normalizeMediaUrl,
-  prepareBody,
+  prepareFeedItem,
   requestFeed,
   stableEntryIdentity,
   type FeedDefinition,
   type FeedRequestResult,
-  type MediaCandidate,
   type ParsedFeedItem,
-  type StaticArticleResult,
+  type PreparedFeedItem,
 } from "./feed.ts";
 import {
   hasPendingMedia,
@@ -64,6 +60,10 @@ const feedDefinitionSchema = z
     ),
     url: feedUrlSchema,
     title: z.string().min(1).max(512).optional(),
+    bodyField: z
+      .enum(["auto", "content", "summary"])
+      .default("auto")
+      .optional(),
   })
   .strict();
 
@@ -186,72 +186,12 @@ function sourceRef(feed: FeedDefinition, item: ParsedFeedItem): string {
   return feed.url;
 }
 
-function staticArticleUrl(
-  item: ParsedFeedItem,
-  feed: FeedDefinition,
-): string | undefined {
-  return item.url === null ? undefined : normalizeMediaUrl(item.url, feed.url);
-}
-
-function shouldFetchStaticArticle(
-  item: ParsedFeedItem,
-  feed: FeedDefinition,
-): boolean {
-  return (
-    (item.content?.trim().length ?? 0) === 0 &&
-    staticArticleUrl(item, feed) !== undefined
-  );
-}
-
-async function prepareEntryBody(
-  item: ParsedFeedItem,
-  feed: FeedDefinition,
-  signal: AbortSignal,
-): Promise<{
-  readonly item: ParsedFeedItem;
-  readonly body: ReturnType<typeof prepareBody>;
-  readonly page: StaticArticleResult | undefined;
-}> {
-  if (!shouldFetchStaticArticle(item, feed)) {
-    return {
-      item,
-      body: prepareBody(item, sourceRef(feed, item)),
-      page: undefined,
-    };
-  }
-
-  const pageUrl = staticArticleUrl(item, feed);
-  if (pageUrl === undefined) {
-    return {
-      item,
-      body: prepareBody(item, sourceRef(feed, item)),
-      page: undefined,
-    };
-  }
-  const page = await fetchStaticArticle(pageUrl, signal);
-  if (page.status === "unavailable") {
-    return {
-      item,
-      body: prepareBody(item, sourceRef(feed, item)),
-      page,
-    };
-  }
-
-  const hydratedItem = { ...item, content: page.html, contentType: "html" };
-  return {
-    item: hydratedItem,
-    body: prepareBody(hydratedItem, page.finalUrl, "static-html"),
-    page,
-  };
-}
-
 function contentFingerprint(
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
-  body: ReturnType<typeof prepareBody>,
   key: string,
-  page: StaticArticleResult | undefined,
+  prepared: PreparedFeedItem,
 ): string {
   const snapshot = JSON.stringify({
     key,
@@ -274,31 +214,14 @@ function contentFingerprint(
       image: item.image,
       media: item.media,
     },
-    body:
-      body === undefined
-        ? null
-        : {
-            source: body.source,
-            type: body.type,
-            html: body.html,
-            media: body.media,
-            invalidMedia: body.invalidMedia,
-          },
-    page:
-      page === undefined
-        ? null
-        : page.status === "extracted"
-          ? {
-              status: page.status,
-              requestedUrl: page.requestedUrl,
-              finalUrl: page.finalUrl,
-              title: page.title,
-            }
-          : {
-              status: page.status,
-              requestedUrl: page.requestedUrl,
-              reason: page.reason,
-            },
+    body: {
+      source: prepared.bodySource,
+      type: prepared.bodyType,
+      markdown: prepared.cleanResult.markdown,
+      text: prepared.cleanResult.text,
+      media: prepared.cleanResult.media,
+      invalidMedia: prepared.cleanResult.invalidMedia,
+    },
   });
   return createHash("sha256").update(snapshot).digest("hex");
 }
@@ -307,9 +230,7 @@ function entryMetadata(
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
-  body: ReturnType<typeof prepareBody>,
-  media: readonly MediaCandidate[],
-  page: StaticArticleResult | undefined,
+  prepared: PreparedFeedItem,
 ): Record<string, unknown> {
   return {
     feed: {
@@ -328,77 +249,18 @@ function entryMetadata(
       title: item.title,
       published: item.published,
       updated: item.updated,
-      bodyType: body.type,
-      bodySource: body.source,
-      ...(page === undefined ? {} : { bodyUrl: page.requestedUrl }),
-      ...(page?.status === "extracted"
-        ? { bodyFinalUrl: page.finalUrl, bodyTitle: page.title }
-        : {}),
+      bodyType: prepared.bodyType,
+      bodySource: prepared.bodySource,
       authors: item.authors,
       categories: item.categories,
       image: item.image,
     },
-    media: media.map(({ url, mediaType, title }) => ({
+    media: prepared.cleanResult.media.map(({ url, mediaType, title }) => ({
       url,
       mediaType: mediaType ?? null,
       title: title ?? null,
     })),
   };
-}
-
-function markdownText(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll("]", "\\]");
-}
-
-function markdownPlainText(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-function markdownParts(
-  body: ReturnType<typeof prepareBody>,
-  uploaded: ReadonlyMap<string, ArchiveResourceMetadata>,
-  candidates: readonly MediaCandidate[],
-): (string | ReturnType<typeof archivedMedia>)[] {
-  const parts: (string | ReturnType<typeof archivedMedia>)[] = [];
-  const inlineUrls = new Set<string>();
-  if (body !== undefined) {
-    for (const part of body.parts) {
-      if (typeof part === "string") {
-        parts.push(markdownPlainText(part));
-        continue;
-      }
-      inlineUrls.add(part.url);
-      const resource = uploaded.get(part.url);
-      const alt = markdownText(part.alt || "媒体");
-      if (part.display === "image") {
-        parts.push(`![${alt}](`);
-        parts.push(resource === undefined ? part.url : archivedMedia(resource));
-        parts.push(")");
-      } else {
-        parts.push(`[${alt}](`);
-        parts.push(resource === undefined ? part.url : archivedMedia(resource));
-        parts.push(")");
-      }
-    }
-  }
-
-  const attachments = candidates.filter(({ url }) => !inlineUrls.has(url));
-  if (attachments.length > 0) {
-    parts.push("\n\n附件：");
-    for (const [index, candidate] of attachments.entries()) {
-      if (index > 0) parts.push("；");
-      const resource = uploaded.get(candidate.url);
-      parts.push(markdownText(candidate.title ?? `媒体 ${index + 1}`), " (");
-      parts.push(
-        resource === undefined ? candidate.url : archivedMedia(resource),
-      );
-      parts.push(")");
-    }
-  }
-  return parts;
 }
 
 async function submitEntry(
@@ -407,113 +269,80 @@ async function submitEntry(
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
   key: string,
-  body: ReturnType<typeof prepareBody>,
-  page: StaticArticleResult | undefined,
+  prepared: PreparedFeedItem,
 ): Promise<{
   readonly pendingMedia: boolean;
   readonly problems: readonly string[];
 }> {
-  const media = new Map<string, MediaCandidate>();
-  for (const candidate of body?.media ?? [])
-    media.set(candidate.url, candidate);
-  const invalidUrls = body?.invalidMedia ?? [];
   const uploaded = new Map<string, ArchiveResourceMetadata>();
   const missing: { path: string; reason: string }[] = [];
   const failures: string[] = [];
 
-  if (page?.status === "unavailable") {
-    missing.push({ path: "body.fullText", reason: page.reason });
-  } else if (
-    body === undefined ||
-    body.html.trim().length === 0 ||
-    body.source === "summary"
-  ) {
-    missing.push({
-      path: "body.fullText",
-      reason:
-        body === undefined || body.html.trim().length === 0
-          ? "feed 条目没有正文或摘要字段。"
-          : "feed 只提供 description/summary；本次仅归档摘要，不能声称已取得全文。",
-    });
+  if (!prepared.isComplete && prepared.missingReason !== undefined) {
+    missing.push({ path: "body.fullText", reason: prepared.missingReason });
+    failures.push(prepared.missingReason);
   }
-  for (const [index, rawUrl] of invalidUrls.entries()) {
+
+  for (const [index, rawUrl] of prepared.cleanResult.invalidMedia.entries()) {
     const reason = `媒体地址不是可访问的 HTTP/HTTPS URL：${rawUrl}`;
     missing.push({ path: `media.invalid.${index}`, reason });
     failures.push(reason);
   }
 
-  for (const [index, candidate] of [...media.values()].entries()) {
+  let hasMediaFailures = false;
+  for (const [index, candidate] of prepared.cleanResult.media.entries()) {
     if (context.signal.aborted) throw context.signal.reason;
     try {
-      const response = await fetchMedia(
-        candidate.url,
-        candidate.mediaType,
-        context.signal,
-      );
+      const response = await fetchMedia(candidate, context.signal);
       const result = await context.resources.upload(
         response.body,
         response.mediaType,
       );
       if (!result.ok) {
         const reason = `媒体「${candidate.url}」未能写入归档：${result.error.message}`;
-        missing.push({
-          path: `media.${index}`,
-          reason,
-        });
+        missing.push({ path: `media.${index}`, reason });
         failures.push(reason);
+        hasMediaFailures = true;
         continue;
       }
       uploaded.set(candidate.url, result.resource);
     } catch (error) {
       if (context.signal.aborted) throw error;
-      const reason = `媒体「${candidate.url}」本次未能取得或归档。`;
+      const reason =
+        error instanceof FeedRequestError
+          ? error.message
+          : `媒体「${candidate.url}」本次未能取得或归档。`;
       missing.push({ path: `media.${index}`, reason });
       failures.push(reason);
+      hasMediaFailures = true;
     }
   }
 
-  const feedResourceReferences = new Map(
-    [...uploaded].map(([url, resource]) => [
-      url,
-      archivedMedia(resource).reference,
-    ]),
-  );
-  const bodyWithResources = archiveBodyWithResources(
-    markdownParts(body, uploaded, [...media.values()]),
-  );
+  const bodyWithResources = prepared.cleanResult.renderArchiveBody(uploaded);
   const resources = [...archiveResourceManifest([...uploaded.values()])];
   const sourceModifiedAt = item.updated ?? item.published ?? undefined;
-  const html = body?.rewriteHtml(feedResourceReferences);
-  const searchText = [item.title?.trim(), body?.text?.trim()]
+  const renderedMarkdown = bodyWithResources.markdown;
+  const cleanedText = prepared.cleanResult.text;
+  const searchText = [item.title?.trim(), cleanedText.trim()]
     .filter((value): value is string => value !== undefined && value.length > 0)
     .join("\n");
   const hasBodyRepresentation =
-    (html?.length ?? 0) > 0 ||
-    (body?.text.length ?? 0) > 0 ||
-    bodyWithResources.content.length > 0 ||
+    renderedMarkdown.length > 0 ||
+    cleanedText.length > 0 ||
     searchText.length > 0;
+
   const state = {
     sourceKey: { namespace: `rss:${feed.id}`, key },
     sourceRef: sourceRef(feed, item),
     ...(sourceModifiedAt === undefined ? {} : { sourceModifiedAt }),
-    metadata: entryMetadata(
-      feed,
-      parsedFeed,
-      item,
-      body,
-      [...media.values()],
-      page,
-    ),
+    metadata: entryMetadata(feed, parsedFeed, item, prepared),
     ...(hasBodyRepresentation
       ? {
           body: {
-            ...(html === undefined || html.length === 0 ? {} : { html }),
-            ...(body?.text === undefined || body.text.length === 0
+            ...(renderedMarkdown.length === 0
               ? {}
-              : { text: body.text }),
-            ...(bodyWithResources.content.length === 0
-              ? {}
-              : { markdown: bodyWithResources.content }),
+              : { markdown: renderedMarkdown }),
+            ...(cleanedText.length === 0 ? {} : { text: cleanedText }),
             ...(searchText.length === 0 ? {} : { searchText }),
           },
         }
@@ -524,11 +353,7 @@ async function submitEntry(
         feedId: feed.id,
         feedUrl: feed.url,
         entryIdentity: key,
-        bodySource: body?.source ?? "none",
-        ...(page === undefined ? {} : { bodyUrl: page.requestedUrl }),
-        ...(page?.status === "extracted"
-          ? { bodyFinalUrl: page.finalUrl }
-          : {}),
+        bodySource: prepared.bodySource,
         archivedMediaCount: uploaded.size,
       },
       completeness:
@@ -539,7 +364,7 @@ async function submitEntry(
 
   await context.archive.submit({ items: [state] });
   return {
-    pendingMedia: failures.length > 0,
+    pendingMedia: hasMediaFailures,
     problems: failures,
   };
 }
@@ -652,55 +477,45 @@ async function checkFeeds(
           );
         }
       }
-      const noBody = response.feed.items.filter(
-        (item) =>
-          (item.content?.trim().length ?? 0) === 0 &&
-          (item.description?.trim().length ?? 0) === 0,
-      ).length;
-      if (noBody > 0) {
+
+      let emptyBodyCount = 0;
+      let summaryOnlyCount = 0;
+
+      for (const entry of entries.entries) {
+        if (entry.duplicate) continue;
+        const baseUrl = sourceRef(feed, entry.item);
+        const prepared = prepareFeedItem(feed, entry.item, baseUrl);
+        if (
+          prepared.bodySource === "none" ||
+          (prepared.cleanResult.text.trim().length === 0 &&
+            prepared.cleanResult.media.length === 0)
+        ) {
+          emptyBodyCount += 1;
+        } else if (!prepared.isComplete && prepared.bodySource === "summary") {
+          summaryOnlyCount += 1;
+        }
+      }
+
+      if (emptyBodyCount > 0) {
         unavailable = true;
         problems.push(
           feedProblem(
             feed.id,
             "rss_entry_body_unavailable",
-            `${noBody} 个条目没有正文或摘要字段。`,
-            "检查 feed 是否提供条目正文或摘要。",
+            `${emptyBodyCount} 个条目没有正文或有效内容。`,
+            "检查 feed 是否提供条目正文或有效摘要。",
           ),
         );
       }
-      let summaryWithoutPage = 0;
-      for (const entry of entries.entries) {
-        if (entry.duplicate || (entry.item.content?.trim().length ?? 0) > 0) {
-          continue;
-        }
-        if (!shouldFetchStaticArticle(entry.item, feed)) {
-          if ((entry.item.description?.trim().length ?? 0) > 0) {
-            summaryWithoutPage += 1;
-          }
-          continue;
-        }
-        const pageUrl = staticArticleUrl(entry.item, feed);
-        if (pageUrl === undefined) continue;
-        const page = await fetchStaticArticle(pageUrl, context.signal);
-        if (page.status === "unavailable") {
-          unavailable = true;
-          problems.push(
-            feedProblem(
-              feed.id,
-              "rss_static_article_unavailable",
-              `条目「${entry.key ?? entry.item.title ?? "未命名"}」${page.reason}`,
-              page.suggestion,
-            ),
-          );
-        }
-      }
-      if (summaryWithoutPage > 0) {
+
+      if (summaryOnlyCount > 0) {
+        unavailable = true;
         problems.push(
           feedProblem(
             feed.id,
             "rss_feed_summary_only",
-            `${summaryWithoutPage} 个条目只提供摘要且没有可补采的公开文章链接。`,
-            "确认 feed 是否能直接提供完整正文，或为条目提供公开文章链接。",
+            `${summaryOnlyCount} 个条目只提供纯文本短摘要。`,
+            "确认 feed 是否能直接提供完整正文，或配置 feed 的 bodyField 为 summary。",
           ),
         );
       }
@@ -728,7 +543,7 @@ async function checkFeeds(
         : ("available" as const),
     scope: selected.feeds.map(({ id }) => id),
     basis:
-      "读取并解析所选 RSS/Atom feed，检查条目身份与正文范围；对仅提供摘要且带公开 HTTP/HTTPS 链接的条目请求页面并尝试静态正文提取。本次检查不下载媒体、不上传资源、不归档或写入增量状态。",
+      "读取并解析所选 RSS/Atom feed，检查条目身份与正文范围。本次检查不下载媒体、不上传资源、不归档或写入增量状态。",
     problems,
   };
 }
@@ -804,7 +619,7 @@ async function collectFeeds(
 
     const sameFeedUrl = state.feedUrl === feed.url;
     const validators =
-      sameFeedUrl && !hasPendingMedia(state) && !state.refreshStaticPages
+      sameFeedUrl && !hasPendingMedia(state)
         ? { etag: state.etag, lastModified: state.lastModified }
         : {};
     let response: FeedRequestResult;
@@ -845,10 +660,6 @@ async function collectFeeds(
           lastModified: undefined,
         };
     const entries = feedItemsWithIdentity(feed, response.feed.items);
-    const refreshStaticPages = entries.entries.some(({ item }) =>
-      shouldFetchStaticArticle(item, feed),
-    );
-    workingState = { ...workingState, refreshStaticPages };
     let feedFailed = false;
     for (const message of entries.problems) {
       feedFailed = true;
@@ -876,28 +687,27 @@ async function collectFeeds(
       if (entry.key === undefined) continue;
       if (entry.duplicate || duplicateSeen.has(entry.key)) continue;
       duplicateSeen.add(entry.key);
-      const prepared = await prepareEntryBody(entry.item, feed, context.signal);
+      const baseUrl = sourceRef(feed, entry.item);
+      const prepared = prepareFeedItem(feed, entry.item, baseUrl);
       const fingerprint = contentFingerprint(
         feed,
         response,
-        prepared.item,
-        prepared.body,
+        entry.item,
         entry.key,
-        prepared.page,
+        prepared,
       );
       const previous = previousEntries.get(entry.key);
       if (
         previous?.fingerprint === fingerprint &&
         !previous.pendingMedia &&
-        prepared.body.invalidMedia.length === 0
+        prepared.cleanResult.invalidMedia.length === 0
       ) {
-        if (prepared.page?.status === "unavailable") {
+        if (!prepared.isComplete && prepared.missingReason !== undefined) {
           feedFailed = true;
           problems.push({
             feedId: feed.id,
-            message: `条目「${entry.key}」${prepared.page.reason}`,
+            message: `条目「${entry.key}」${prepared.missingReason}`,
             path: ["feeds", feed.id, "items", entry.key],
-            suggestion: prepared.page.suggestion,
           });
         }
         continue;
@@ -908,10 +718,9 @@ async function collectFeeds(
           context,
           feed,
           response,
-          prepared.item,
+          entry.item,
           entry.key,
-          prepared.body,
-          prepared.page,
+          prepared,
         );
         const entryState: FeedEntryState = {
           identity: entry.key,
@@ -934,15 +743,6 @@ async function collectFeeds(
               path: ["feeds", feed.id, "items", entry.key],
             });
           }
-        }
-        if (prepared.page?.status === "unavailable") {
-          feedFailed = true;
-          problems.push({
-            feedId: feed.id,
-            message: `条目「${entry.key}」${prepared.page.reason}`,
-            path: ["feeds", feed.id, "items", entry.key],
-            suggestion: prepared.page.suggestion,
-          });
         }
       } catch (error) {
         if (context.signal.aborted) throw error;
