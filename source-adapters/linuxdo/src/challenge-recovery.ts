@@ -185,10 +185,11 @@ export class ChallengeRecovery {
       }
       this.failureMessage = "自动恢复的单轮时间预算已耗尽。";
       return result;
-    } catch {
+    } catch (error) {
       this.signal.throwIfAborted();
       this.failureMessage =
-        remaining() === 0
+        remaining() === 0 ||
+        (error instanceof DOMException && error.name === "TimeoutError")
           ? "自动恢复的单轮时间预算已耗尽。"
           : "自动恢复失败，页面操作未完成。";
       return result;

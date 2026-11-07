@@ -380,23 +380,48 @@ export async function loginLinuxdoUser(
     input.serverPort,
   );
   try {
-    await navigateThroughLinuxdoViewer(viewer, `${input.sourceOrigin}/login`);
-    await waitForSourceEvent(
-      input.sourceControlUrl,
-      "login-page",
-      eventCounts.loginPage + 1,
-    );
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type(input.username, { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.type(input.password, { delay: 5 });
-    await viewer.keyboard.press("Tab");
-    await viewer.keyboard.press("Enter");
-    await waitForSourceEvent(
-      input.sourceControlUrl,
-      "login-complete",
-      eventCounts.loginComplete + 1,
-    );
+    let loggedIn = false;
+    let priorLoginPage = eventCounts.loginPage;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) {
+        priorLoginPage = (
+          await readSourceState(input.sourceControlUrl)
+        ).events.filter(({ action }) => action === "login-page").length;
+      }
+      await navigateThroughLinuxdoViewer(viewer, `${input.sourceOrigin}/login`);
+      await waitForSourceEvent(
+        input.sourceControlUrl,
+        "login-page",
+        priorLoginPage + 1,
+      );
+      await delay(250);
+      await viewer.keyboard.press("Tab");
+      await viewer.keyboard.type(input.username, { delay: 5 });
+      await viewer.keyboard.press("Tab");
+      await viewer.keyboard.type(input.password, { delay: 5 });
+      await viewer.keyboard.press("Tab");
+      await viewer.keyboard.press("Enter");
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline) {
+        const state = await readSourceState(input.sourceControlUrl);
+        const loginCompleteCount = state.events.filter(
+          ({ action }) => action === "login-complete",
+        ).length;
+        if (loginCompleteCount >= eventCounts.loginComplete + 1) {
+          loggedIn = true;
+          break;
+        }
+        await delay(50);
+      }
+      if (loggedIn) break;
+    }
+    if (!loggedIn) {
+      await waitForSourceEvent(
+        input.sourceControlUrl,
+        "login-complete",
+        eventCounts.loginComplete + 1,
+      );
+    }
   } finally {
     await closeLinuxdoHumanSession(input.cli, input.binId, session.sessionId);
     const oldViewerUrl = viewer.url();
