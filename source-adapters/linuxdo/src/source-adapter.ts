@@ -3676,7 +3676,10 @@ export async function archivePost(
           allArchivedMediaImmutable &&
           allResourcesValidAndImmutable;
 
-        if (allMediaImmutable) {
+        if (
+          allMediaImmutable &&
+          typeof archivedOp.state.body?.markdown === "string"
+        ) {
           const state = {
             sourceKey: archivedOp.sourceKey,
             ...archivedOp.state,

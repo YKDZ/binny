@@ -40,6 +40,20 @@ void test("isDiscourseImmutableMediaUrl verifies Discourse 40-hex SHA-1 content 
       siteOrigin,
     ),
   );
+  assert.equal(
+    isDiscourseImmutableMediaUrl(
+      "https://cdn3.ldstatic.com/original/4X/9/0/3/903f6360af259fe24b6b91e24af4616676685a71.jpeg",
+      "https://linux.do",
+    ),
+    true,
+  );
+  assert.equal(
+    isDiscourseImmutableMediaUrl(
+      "https://cdn3.ldstatic.com/optimized/4X/e/6/a/e6a4acfa4b49585295f73b5aacb95988bd1228ad_2_690x388.png",
+      "https://linux.do",
+    ),
+    true,
+  );
 
   // Mutable and external paths must NOT be treated as immutable.
   assert.equal(isDiscourseImmutableMediaUrl(mutableUrl, siteOrigin), false);

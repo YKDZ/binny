@@ -7,7 +7,7 @@ import type { ArchiveResourceResolveItem } from "@binny/source-adapter-sdk";
  * Matches both original and optimized upload paths, with or without tree sharding.
  */
 export const DISCOURSE_IMMUTABLE_MEDIA_REGEX =
-  /\/uploads\/default\/(?:original|optimized)\/\d+X\/(?:[0-9a-f]\/)*[0-9a-f]{40}(?:_\d+_\d+x\d+)?\.[a-z0-9]+$/iu;
+  /(?:\/uploads\/default)?\/(?:original|optimized)\/\d+X\/(?:[0-9a-f]\/)*[0-9a-f]{40}(?:_\d+_\d+x\d+)?\.[a-z0-9]+$/iu;
 
 /**
  * Check whether a media URL has an immutable content-hashed Discourse identity.
