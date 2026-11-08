@@ -7855,7 +7855,7 @@ async function runRssAcceptance(
   );
   assert.equal(collectMissingBody.status, "failed");
   assert.equal(
-    collectMissingBody.result?.failure?.code,
+    collectMissingBody.result?.error?.code,
     "rss_collection_incomplete",
   );
   assert.deepEqual(
