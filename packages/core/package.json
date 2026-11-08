@@ -35,7 +35,7 @@
     "@binny/db": "workspace:*",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
-    "cron-parser": "5.10.2",
+    "cron-parser": "5.10.3",
     "drizzle-orm": "1.0.0-rc.5"
   },
   "devDependencies": {
