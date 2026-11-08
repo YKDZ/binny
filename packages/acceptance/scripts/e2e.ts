@@ -2662,7 +2662,8 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
         ({ command }) =>
           /(?:chrom(?:e|ium))/iu.test(command) &&
           !command.includes("--type=") &&
-          !command.includes("chrome_crashpad_handler"),
+          !command.includes("chrome_crashpad_handler") &&
+          !command.includes("<defunct>"),
       );
   };
   const closeHuman = async (
@@ -2737,7 +2738,11 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   assert.equal(secondRun.status, "completed");
   assert.equal(secondRun.result?.output?.availability, "unavailable");
   await waitForPower(secondBinId, "ready");
-  const disabledOwnerProcess = await browserProcesses();
+  const disabledOwnerProcess = await waitFor(
+    () => browserProcesses(),
+    (processes) => processes.length === 1,
+    `${secondBinId} 唯一主浏览器进程收敛`,
+  );
   assert.equal(disabledOwnerProcess.length, 1);
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
   assert.equal(

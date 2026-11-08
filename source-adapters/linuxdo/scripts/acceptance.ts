@@ -1900,7 +1900,11 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
     "-c",
     "UPDATE runtime_connections SET source_state_snapshot = NULL WHERE bin_id = 'binny-discovery-topic';",
   ]);
-  const legacy = await readBinRuntime("binny-discovery-topic");
+  const legacy = await waitFor(
+    async () => await readBinRuntime("binny-discovery-topic"),
+    (runtime) => runtime.status === "offline",
+    "运行器停止后的未知快照离线收敛",
+  );
   assert.equal(legacy.status, "offline");
   assert.equal(legacy.sourceStateSnapshot.freshness, "unknown");
   assert.deepEqual(legacy.sourceStateSnapshot.sourceAccess, {
