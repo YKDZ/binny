@@ -1568,9 +1568,6 @@ type RssControlSource = {
   readonly holdFeed: (pathname: string) => Promise<void>;
   readonly waitUntilFeedHeld: (pathname: string) => Promise<void>;
   readonly releaseFeed: () => Promise<void>;
-  readonly setStaticArticleVersion: (version: number) => Promise<void>;
-  readonly setStaticPhotoAvailable: (available: boolean) => Promise<void>;
-  readonly setRecoveryPageAvailable: (available: boolean) => Promise<void>;
 };
 
 async function createRssControlSource(port: number): Promise<RssControlSource> {
@@ -1662,15 +1659,6 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
         signal: AbortSignal.timeout(3_000),
       });
       assert.equal(response.status, 200);
-    },
-    async setStaticArticleVersion(version) {
-      await updateState({ staticArticleVersion: version });
-    },
-    async setStaticPhotoAvailable(available) {
-      await updateState({ staticPhotoAvailable: available });
-    },
-    async setRecoveryPageAvailable(available) {
-      await updateState({ recoveryPageAvailable: available });
     },
   };
 }
@@ -7159,6 +7147,7 @@ async function runRssAcceptance(
         url: "https://github.com/rowanmanning/feed-parser/releases.atom",
       },
       { id: "summary-main", url: source.baseUrl + "/summary-full" },
+      { id: "missing-body", url: source.baseUrl + "/missing-body" },
     ],
   };
   await Promise.all([
@@ -7287,12 +7276,13 @@ async function runRssAcceptance(
     namespace: "rss:rss-main",
     key: "id:urn:binny:rss:rss-title-only",
   });
-  assert.equal(titleOnlyState.body?.searchText, "RSS 仅标题資料🌿");
-  assert.equal(titleOnlyState.body?.text, undefined);
-  assert.equal(titleOnlyState.capture.completeness, "partial");
-  assert.ok(
-    titleOnlyState.capture.missing.some(({ path }) => path === "body.fullText"),
+  assert.equal(titleOnlyState.body?.text, "原生短文正文🌿");
+  assert.equal(
+    titleOnlyState.body?.searchText,
+    "RSS 仅标题資料🌿\n原生短文正文🌿",
   );
+  assert.equal(titleOnlyState.capture.completeness, "complete");
+  assert.deepEqual(titleOnlyState.capture.missing, []);
 
   const titleOnlyUnicodeSearch = cliData<{
     readonly results: readonly {
@@ -7406,12 +7396,9 @@ async function runRssAcceptance(
     "只有摘要版本 1",
   );
   const summaryState = rssArchiveView(rssSummary, "binny-rss-one");
-  assert.equal(summaryState.capture.completeness, "partial");
-  assert.ok(
-    summaryState.capture.missing.some(({ reason }) =>
-      reason.includes("不能声称已取得全文"),
-    ),
-  );
+  assert.equal(summaryState.capture.completeness, "complete");
+  assert.equal(summaryState.capture.scope.bodySource, "summary");
+  assert.equal(summaryState.body?.text, "只有摘要版本 1");
 
   const summaryItem = await readRssArchive(
     baseUrl,
@@ -7833,19 +7820,17 @@ async function runRssAcceptance(
     path.startsWith("/media/"),
   ).length;
   const checkRun = await triggerRssAction(baseUrl, "binny-rss-one", "check", {
-    feedIds: ["rss-main"],
+    feedIds: ["rss-main", "missing-body"],
   });
   assert.equal(checkRun.status, "completed");
   assert.equal(checkRun.result?.output?.availability, "unavailable");
-  assert.deepEqual(checkRun.result?.output?.scope, ["rss-main"]);
+  assert.deepEqual(checkRun.result?.output?.scope, [
+    "rss-main",
+    "missing-body",
+  ]);
   assert.ok(
     checkRun.result?.output?.problems?.some(
       ({ code }) => code === "rss_entry_body_unavailable",
-    ),
-  );
-  assert.ok(
-    checkRun.result?.output?.problems?.some(
-      ({ code }) => code === "rss_feed_summary_only",
     ),
   );
   assert.deepEqual(checkRun.result?.commits, []);
@@ -7858,6 +7843,24 @@ async function runRssAcceptance(
   assert.deepEqual(
     await readRssArchive(baseUrl, "binny-rss-one", "RSS 正文版本 2"),
     archiveBeforeCheck,
+  );
+
+  const collectMissingBody = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "collect",
+    {
+      feedIds: ["missing-body"],
+    },
+  );
+  assert.equal(collectMissingBody.status, "failed");
+  assert.equal(
+    collectMissingBody.result?.failure?.code,
+    "rss_collection_incomplete",
+  );
+  assert.deepEqual(
+    await searchRssArchive(baseUrl, "binny-rss-one", "RSS 缺失正文条目"),
+    [],
   );
 
   const startHeldCheck = async (): Promise<string> => {

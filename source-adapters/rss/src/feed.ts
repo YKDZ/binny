@@ -397,26 +397,6 @@ function httpUrl(value: string, baseUrl: string): string | undefined {
   }
 }
 
-export function isSummarySubstantialFullText(
-  rawSummary: string,
-  cleanedText: string,
-): boolean {
-  if (
-    /<(?:\/?(?:p|article|section|h[1-6]|ul|ol|li|pre|code|blockquote|table|figure|img|details|a|em|strong))\b/iu.test(
-      rawSummary,
-    )
-  ) {
-    return true;
-  }
-  if (/\n\s*\n/u.test(cleanedText)) {
-    return true;
-  }
-  if (cleanedText.length >= 120) {
-    return true;
-  }
-  return false;
-}
-
 export interface PreparedFeedItem {
   readonly bodySource: "content" | "summary" | "none";
   readonly bodyType: string;
@@ -589,15 +569,11 @@ export function prepareFeedItem(
         missingReason: "feed 条目没有可读取的正文或摘要。",
       };
     }
-    const substantial = isSummarySubstantialFullText(raw, cleaned.text);
     return {
       bodySource: "summary",
       bodyType: type,
       cleanResult: cleaned,
-      isComplete: substantial,
-      missingReason: substantial
-        ? undefined
-        : "feed 只提供 description/summary；本次仅归档摘要，不能声称已取得全文。",
+      isComplete: true,
     };
   }
 

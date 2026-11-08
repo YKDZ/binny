@@ -278,10 +278,6 @@ async function submitEntry(
   const missing: { path: string; reason: string }[] = [];
   const failures: string[] = [];
 
-  if (!prepared.isComplete && prepared.missingReason !== undefined) {
-    missing.push({ path: "body.fullText", reason: prepared.missingReason });
-  }
-
   for (const [index, rawUrl] of prepared.cleanResult.invalidMedia.entries()) {
     const reason = `媒体地址不是可访问的 HTTP/HTTPS URL：${rawUrl}`;
     missing.push({ path: `media.invalid.${index}`, reason });
@@ -478,20 +474,13 @@ async function checkFeeds(
       }
 
       let emptyBodyCount = 0;
-      let summaryOnlyCount = 0;
 
       for (const entry of entries.entries) {
         if (entry.duplicate) continue;
         const baseUrl = sourceRef(feed, entry.item);
         const prepared = prepareFeedItem(feed, entry.item, baseUrl);
-        if (
-          prepared.bodySource === "none" ||
-          (prepared.cleanResult.text.trim().length === 0 &&
-            prepared.cleanResult.media.length === 0)
-        ) {
+        if (!prepared.isComplete) {
           emptyBodyCount += 1;
-        } else if (!prepared.isComplete && prepared.bodySource === "summary") {
-          summaryOnlyCount += 1;
         }
       }
 
@@ -503,18 +492,6 @@ async function checkFeeds(
             "rss_entry_body_unavailable",
             `${emptyBodyCount} 个条目没有正文或有效内容。`,
             "检查 feed 是否提供条目正文或有效摘要。",
-          ),
-        );
-      }
-
-      if (summaryOnlyCount > 0) {
-        unavailable = true;
-        problems.push(
-          feedProblem(
-            feed.id,
-            "rss_feed_summary_only",
-            `${summaryOnlyCount} 个条目只提供纯文本短摘要。`,
-            "确认 feed 是否能直接提供完整正文，或配置 feed 的 bodyField 为 summary。",
           ),
         );
       }
@@ -666,6 +643,15 @@ async function collectFeeds(
       duplicateSeen.add(entry.key);
       const baseUrl = sourceRef(feed, entry.item);
       const prepared = prepareFeedItem(feed, entry.item, baseUrl);
+      if (!prepared.isComplete) {
+        feedFailed = true;
+        problems.push({
+          feedId: feed.id,
+          message: `条目「${entry.key}」${prepared.missingReason ?? "缺少可读取的正文内容。"}`,
+          path: ["feeds", feed.id, "items", entry.key],
+        });
+        continue;
+      }
       const fingerprint = contentFingerprint(
         feed,
         response,
@@ -819,7 +805,6 @@ async function syncFeeds(
       }
 
       let emptyBodyCount = 0;
-      let summaryOnlyCount = 0;
       const baselineEntries: Record<string, IncrementalEntryRecord> = {};
       const duplicateSeen = new Set<string>();
 
@@ -834,14 +819,8 @@ async function syncFeeds(
         duplicateSeen.add(entry.key);
         const baseUrl = sourceRef(feed, entry.item);
         const prepared = prepareFeedItem(feed, entry.item, baseUrl);
-        if (
-          prepared.bodySource === "none" ||
-          (prepared.cleanResult.text.trim().length === 0 &&
-            prepared.cleanResult.media.length === 0)
-        ) {
+        if (!prepared.isComplete) {
           emptyBodyCount += 1;
-        } else if (!prepared.isComplete && prepared.bodySource === "summary") {
-          summaryOnlyCount += 1;
         }
 
         const fingerprint = contentFingerprint(
@@ -868,17 +847,6 @@ async function syncFeeds(
           message: `${emptyBodyCount} 个条目没有正文或有效内容。`,
           path: ["feeds", feed.id],
           suggestion: "检查 feed 是否提供条目正文或有效摘要。",
-        });
-      }
-
-      if (summaryOnlyCount > 0) {
-        feedFailed = true;
-        problems.push({
-          feedId: feed.id,
-          message: `${summaryOnlyCount} 个条目只提供纯文本短摘要。`,
-          path: ["feeds", feed.id],
-          suggestion:
-            "确认 feed 是否能直接提供完整正文，或配置 feed 的 bodyField 为 summary。",
         });
       }
 
@@ -956,6 +924,15 @@ async function syncFeeds(
       duplicateSeen.add(entry.key);
       const baseUrl = sourceRef(feed, entry.item);
       const prepared = prepareFeedItem(feed, entry.item, baseUrl);
+      if (!prepared.isComplete) {
+        feedFailed = true;
+        problems.push({
+          feedId: feed.id,
+          message: `条目「${entry.key}」${prepared.missingReason ?? "缺少可读取的正文内容。"}`,
+          path: ["feeds", feed.id, "items", entry.key],
+        });
+        continue;
+      }
       const fingerprint = contentFingerprint(
         feed,
         response,

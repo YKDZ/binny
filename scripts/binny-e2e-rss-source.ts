@@ -17,9 +17,6 @@ let atomVersion = 1;
 let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
 let photoAvailable = true;
-let staticArticleVersion = 1;
-let staticPhotoAvailable = true;
-let recoveryPageAvailable = false;
 let holdFeedPath: string | undefined;
 let heldFeedPath: string | undefined;
 let releaseFeedResponse: (() => void) | undefined;
@@ -100,25 +97,6 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
-  if (
-    "staticArticleVersion" in updates &&
-    (!Number.isSafeInteger(updates.staticArticleVersion) ||
-      Number(updates.staticArticleVersion) < 1)
-  ) {
-    return false;
-  }
-  if (
-    "staticPhotoAvailable" in updates &&
-    typeof updates.staticPhotoAvailable !== "boolean"
-  ) {
-    return false;
-  }
-  if (
-    "recoveryPageAvailable" in updates &&
-    typeof updates.recoveryPageAvailable !== "boolean"
-  ) {
-    return false;
-  }
   if (updates.rssVersion !== undefined) rssVersion = Number(updates.rssVersion);
   if (updates.atomVersion !== undefined)
     atomVersion = Number(updates.atomVersion);
@@ -130,15 +108,6 @@ function updateState(value: unknown): boolean {
   }
   if (typeof updates.photoAvailable === "boolean") {
     photoAvailable = updates.photoAvailable;
-  }
-  if (updates.staticArticleVersion !== undefined) {
-    staticArticleVersion = Number(updates.staticArticleVersion);
-  }
-  if (typeof updates.staticPhotoAvailable === "boolean") {
-    staticPhotoAvailable = updates.staticPhotoAvailable;
-  }
-  if (typeof updates.recoveryPageAvailable === "boolean") {
-    recoveryPageAvailable = updates.recoveryPageAvailable;
   }
   if ("holdFeedPath" in updates) {
     holdFeedPath =
@@ -213,12 +182,9 @@ const server = createServer((request, response) => {
         "/atom",
         "/temporary",
         "/bad-identity",
-        "/static-rss",
-        "/real-static-rss",
+        "/missing-body",
         "/summary-full",
-      ].includes(pathname) ||
-      pathname.startsWith("/story/") ||
-      pathname.startsWith("/pages/")
+      ].includes(pathname)
     ) {
       const ifNoneMatch = request.headers["if-none-match"];
       const ifModifiedSince = request.headers["if-modified-since"];
@@ -269,7 +235,18 @@ const server = createServer((request, response) => {
         response,
         { etag },
         "application/rss+xml; charset=utf-8",
-        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item><item><guid isPermaLink="false">urn:binny:rss:rss-title-only</guid><title>RSS 仅标题資料🌿</title></item></channel></rss>`,
+        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item><item><guid isPermaLink="false">urn:binny:rss:rss-title-only</guid><title>RSS 仅标题資料🌿</title><description>原生短文正文🌿</description></item></channel></rss>`,
+      );
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/missing-body") {
+      sendFeed(
+        request,
+        response,
+        { etag: '"missing-body-1"' },
+        "application/rss+xml; charset=utf-8",
+        '<rss version="2.0"><channel><title>缺失正文受控信源</title><link>http://rss-e2e-source:8081/missing-body</link><item><guid isPermaLink="false">urn:binny:rss:missing-body</guid><title>RSS 缺失正文条目</title></item></channel></rss>',
       );
       return;
     }
@@ -281,28 +258,6 @@ const server = createServer((request, response) => {
         { etag: '"summary-1"' },
         "application/rss+xml; charset=utf-8",
         '<rss version="2.0"><channel><title>受控摘要信源</title><item><guid isPermaLink="false">urn:binny:summary:summary-article</guid><title>RSS 摘要全文文章</title><link>http://rss-e2e-source:8081/story/summary</link><description><![CDATA[<article><h1>摘要全文</h1><p>摘要正文版本 1。这段内容直接位于 description 字段中的 HTML 块级结构中。</p><p>信源适配器将具有 HTML 块级结构的多段摘要视为完整正文归档。</p><img src="/media/photo.png" alt="摘要文章插图" /></article>]]></description></item></channel></rss>',
-      );
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/static-rss") {
-      sendFeed(
-        request,
-        response,
-        { etag: '"static-rss-1"' },
-        "application/rss+xml; charset=utf-8",
-        '<rss version="2.0"><channel><title>受控静态正文信源</title><item><guid isPermaLink="false">urn:binny:static:static-article</guid><title>RSS 静态补采文章</title><link>http://rss-e2e-source:8081/story/static</link><description>静态页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:javascript-shell</guid><title>JavaScript 页面文章</title><link>http://rss-e2e-source:8081/story/javascript</link><description>JavaScript 页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:login-page</guid><title>需要登录的文章</title><link>http://rss-e2e-source:8081/story/login</link><description>登录页面摘要</description></item><item><guid isPermaLink="false">urn:binny:static:recovery-page</guid><title>暂时无法访问的文章</title><link>http://rss-e2e-source:8081/story/recovery</link><description>恢复页面摘要</description></item></channel></rss>',
-      );
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/real-static-rss") {
-      sendFeed(
-        request,
-        response,
-        { etag: '"real-static-rss-1"' },
-        "application/rss+xml; charset=utf-8",
-        '<rss version="2.0"><channel><title>真实静态站点兼容信源</title><item><guid isPermaLink="false">urn:binny:static:real-static-bbc</guid><title>BBC 真实静态正文兼容验证</title><link>https://www.bbc.co.uk/news/articles/cwj342k62exyo?at_medium=RSS&amp;at_campaign=rss</link><description>由受控 RSS 摘要指向真实 BBC 公开文章页面。</description></item></channel></rss>',
       );
       return;
     }
@@ -352,51 +307,6 @@ const server = createServer((request, response) => {
       return;
     }
 
-    if (request.method === "GET" && pathname === "/story/static") {
-      response.writeHead(302, { location: "/pages/2026/article.html" });
-      response.end();
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/pages/2026/article.html") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(
-        `<!doctype html><html><head><title>受控公开文章</title></head><body><header><nav>导航文字不得归档</nav></header><main><article><h1>受控公开文章</h1><p>公开静态正文版本 ${String(staticArticleVersion)}。这段内容来自 RSS 条目链接所指向的普通公开文章页面，服务端直接返回完整 HTML，无需登录、脚本执行或特殊交互。</p><p>文章正文保留其有价值的段落、层级和图片。归档应使用这段静态页面正文，而不是订阅源中的短摘要。</p><p>页面更新独立于 feed 摘要版本；重新采集时应该再次取得页面，并只在正文或资料确实变化时生成新的归档版本。</p><img src="../../media/static-photo.png" alt="静态文章插图" /></article></main><aside>侧栏广告不得归档<form><label>侧栏账号<input name="side-account" /></label><label>侧栏密码<input type="password" /></label></form></aside></body></html>`,
-      );
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/story/javascript") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(
-        '<!doctype html><html><head><title>JavaScript 页面</title></head><body><main id="app"><p>正在加载文章，请启用 JavaScript。</p></main><script>document.querySelector("#app").innerHTML="<article><p>需要执行脚本才能取得的正文内容</p></article>";</script></body></html>',
-      );
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/story/login") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(
-        '<!doctype html><html><head><title>登录</title></head><body><main><h1>需要登录</h1><form><label>账号<input name="account" /></label><label>密码<input type="password" /></label><button>继续</button></form></main></body></html>',
-      );
-      return;
-    }
-
-    if (request.method === "GET" && pathname === "/story/recovery") {
-      if (!recoveryPageAvailable) {
-        response.writeHead(503, {
-          "content-type": "text/plain; charset=utf-8",
-        });
-        response.end("受控文章页面暂时不可用");
-        return;
-      }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(
-        "<!doctype html><html><head><title>恢复后的公开文章</title></head><body><main><article><h1>恢复后的公开文章</h1><p>恢复后静态正文。页面在首次采集时不可访问，后续可由公开 HTTP 页面取得。</p><p>这个文章正文足够长，可以验证正式正文提取只使用公开静态 HTML，而不沿用 feed 摘要或旧版本字段。</p><p>实际采集在页面恢复后应创建新版本，并保留 feed 条目相同的稳定身份。</p></article></main></body></html>",
-      );
-      return;
-    }
-
     if (request.method === "GET" && pathname.startsWith("/media/")) {
       const ifNoneMatch = request.headers["if-none-match"];
       const ifModifiedSince = request.headers["if-modified-since"];
@@ -413,18 +323,6 @@ const server = createServer((request, response) => {
         return;
       }
       if (pathname === "/media/photo.png" || pathname === "/media/atom.png") {
-        response.writeHead(200, { "content-type": "image/png" });
-        response.end(photoBytes);
-        return;
-      }
-      if (pathname === "/media/static-photo.png") {
-        if (!staticPhotoAvailable) {
-          response.writeHead(503, {
-            "content-type": "text/plain; charset=utf-8",
-          });
-          response.end("受控静态文章图片暂时不可用");
-          return;
-        }
         response.writeHead(200, { "content-type": "image/png" });
         response.end(photoBytes);
         return;

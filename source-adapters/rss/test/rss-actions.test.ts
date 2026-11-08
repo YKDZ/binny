@@ -154,9 +154,14 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       ];
       if (syncFeedVersion >= 3) {
         const item2Content =
-          syncFeedVersion === 4 ? "新增条目 2 更新版" : "新增条目 2 原版";
+          syncFeedVersion >= 4 ? "新增条目 2 更新版" : "新增条目 2 原版";
         items.push(
           `<item><guid>urn:binny:sync:item-2</guid><title>Sync 新增条目 2</title><link>${origin}/sync/2</link><content:encoded><![CDATA[<p>${item2Content}</p>]]></content:encoded></item>`,
+        );
+      }
+      if (syncFeedVersion >= 5) {
+        items.push(
+          `<item><guid>urn:binny:sync:item-3</guid><title>Sync 无正文条目 3</title><link>${origin}/sync/3</link></item>`,
         );
       }
       response.end(
@@ -271,6 +276,11 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         { id: "short-summary", url: `${origin}/short-summary-feed` },
         { id: "empty-shell", url: `${origin}/empty-shell-feed` },
         { id: "no-body", url: `${origin}/no-body-feed` },
+        {
+          id: "content-missing",
+          url: `${origin}/short-summary-feed`,
+          bodyField: "content",
+        },
         { id: "simon-atom", url: `${origin}/simon-atom` },
         { id: "sync-test", url: `${origin}/sync-feed` },
         { id: "sync-media", url: `${origin}/sync-media-fail-feed` },
@@ -437,16 +447,20 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       errorMediaItem.capture.missing.some(({ path }) => path === "media.0"),
     );
 
-    // 4. Short summary only: check reports rss_feed_summary_only, collect completes with partial item
+    // 4. Short summary: check reports available, initial sync initializes baseline, collect archives complete item
     const shortSummaryCheck = await check.execute(context, {
       feedIds: ["short-summary"],
     });
-    assert.equal(shortSummaryCheck.availability, "unavailable");
-    assert.ok(
-      shortSummaryCheck.problems.some(
-        (p) => p.code === "rss_feed_summary_only",
-      ),
-    );
+    assert.equal(shortSummaryCheck.availability, "available");
+    assert.equal(shortSummaryCheck.problems.length, 0);
+
+    const shortSummarySync = await sync.execute(context, {
+      feedIds: ["short-summary"],
+    });
+    assert.deepEqual(shortSummarySync, {
+      completedScopes: ["feed:short-summary"],
+      initializedScopes: ["feed:short-summary"],
+    });
 
     const shortSummaryCollect = await collect.execute(context, {
       feedIds: ["short-summary"],
@@ -456,14 +470,12 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     });
     const shortSummaryItem = submissions[7]?.items[0];
     assert.ok(shortSummaryItem);
-    assert.equal(shortSummaryItem.capture.completeness, "partial");
-    assert.ok(
-      shortSummaryItem.capture.missing.some(
-        ({ path }) => path === "body.fullText",
-      ),
-    );
+    assert.equal(shortSummaryItem.capture.completeness, "complete");
+    assert.deepEqual(shortSummaryItem.capture.missing, []);
+    assert.equal(shortSummaryItem.capture.scope.bodySource, "summary");
+    assert.equal(shortSummaryItem.body?.text, "只有摘要版本 1");
 
-    // 5. Empty shell HTML: check reports rss_entry_body_unavailable, collect completes with partial item
+    // 5. Empty shell HTML: check reports rss_entry_body_unavailable, initial sync fails, collect fails without archiving partial item
     const emptyShellCheck = await check.execute(context, {
       feedIds: ["empty-shell"],
     });
@@ -474,41 +486,93 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       ),
     );
 
-    const emptyShellCollect = await collect.execute(context, {
-      feedIds: ["empty-shell"],
-    });
-    assert.deepEqual(emptyShellCollect, {
-      completedScopes: ["feed:empty-shell"],
-    });
-    const emptyShellItem = submissions[8]?.items[0];
-    assert.ok(emptyShellItem);
-    assert.equal(emptyShellItem.capture.completeness, "partial");
-    assert.ok(
-      emptyShellItem.capture.missing.some(
-        ({ path }) => path === "body.fullText",
-      ),
+    let emptyShellSyncErr: unknown;
+    try {
+      await sync.execute(context, { feedIds: ["empty-shell"] });
+    } catch (error) {
+      emptyShellSyncErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(emptyShellSyncErr));
+    assert.equal(emptyShellSyncErr.failure.code, "rss_collection_incomplete");
+
+    const beforeEmptyShellSubmissions = submissions.length;
+    let emptyShellCollectErr: unknown;
+    try {
+      await collect.execute(context, { feedIds: ["empty-shell"] });
+    } catch (error) {
+      emptyShellCollectErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(emptyShellCollectErr));
+    assert.equal(
+      emptyShellCollectErr.failure.code,
+      "rss_collection_incomplete",
+    );
+    assert.equal(
+      submissions.length,
+      beforeEmptyShellSubmissions,
+      "Empty body entry is rejected and must not be archived as a partial item.",
     );
 
-    // 6. Missing body: check reports rss_entry_body_unavailable, collect completes with partial item
+    // 6. Missing body & content-missing: check reports rss_entry_body_unavailable, initial sync fails, collect fails without archiving partial item
     const noBodyCheck = await check.execute(context, {
-      feedIds: ["no-body"],
+      feedIds: ["no-body", "content-missing"],
     });
     assert.equal(noBodyCheck.availability, "unavailable");
     assert.ok(
       noBodyCheck.problems.some((p) => p.code === "rss_entry_body_unavailable"),
     );
 
-    const noBodyCollect = await collect.execute(context, {
-      feedIds: ["no-body"],
-    });
-    assert.deepEqual(noBodyCollect, {
-      completedScopes: ["feed:no-body"],
-    });
-    const noBodyItem = submissions[9]?.items[0];
-    assert.ok(noBodyItem);
-    assert.equal(noBodyItem.capture.completeness, "partial");
-    assert.ok(
-      noBodyItem.capture.missing.some(({ path }) => path === "body.fullText"),
+    let noBodySyncErr: unknown;
+    try {
+      await sync.execute(context, { feedIds: ["no-body"] });
+    } catch (error) {
+      noBodySyncErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(noBodySyncErr));
+    assert.equal(noBodySyncErr.failure.code, "rss_collection_incomplete");
+
+    let contentMissingSyncErr: unknown;
+    try {
+      await sync.execute(context, { feedIds: ["content-missing"] });
+    } catch (error) {
+      contentMissingSyncErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(contentMissingSyncErr));
+    assert.equal(
+      contentMissingSyncErr.failure.code,
+      "rss_collection_incomplete",
+    );
+
+    const beforeNoBodySubmissions = submissions.length;
+    let noBodyCollectErr: unknown;
+    try {
+      await collect.execute(context, { feedIds: ["no-body"] });
+    } catch (error) {
+      noBodyCollectErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(noBodyCollectErr));
+    assert.equal(noBodyCollectErr.failure.code, "rss_collection_incomplete");
+    assert.equal(
+      submissions.length,
+      beforeNoBodySubmissions,
+      "Missing body entry is rejected and must not be archived as a partial item.",
+    );
+
+    let contentMissingCollectErr: unknown;
+    try {
+      await collect.execute(context, { feedIds: ["content-missing"] });
+    } catch (error) {
+      contentMissingCollectErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(contentMissingCollectErr));
+    assert.equal(
+      contentMissingCollectErr.failure.code,
+      "rss_collection_incomplete",
+    );
+    assert.equal(
+      submissions.length,
+      beforeNoBodySubmissions,
+      "Feed requiring content when content is absent is rejected and must not be archived.",
     );
 
     // 7. Simon Willison Atom feed: short blogmarks and long summary articles recognized as complete full text
@@ -522,9 +586,9 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       feedIds: ["simon-atom"],
     });
     assert.deepEqual(simonCollect, { completedScopes: ["feed:simon-atom"] });
-    assert.equal(submissions.length, 12);
+    assert.equal(submissions.length, 10);
 
-    const simonNote = submissions[10]?.items[0];
+    const simonNote = submissions[8]?.items[0];
     assert.ok(simonNote);
     assert.equal(simonNote.sourceKey.namespace, "rss:simon-atom");
     assert.equal(
@@ -537,7 +601,7 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     assert.ok(simonNote.body?.markdown?.includes("https://example.com/tool"));
     assert.ok(simonNote.body?.markdown?.includes("pip install tool"));
 
-    const simonArticle = submissions[11]?.items[0];
+    const simonArticle = submissions[9]?.items[0];
     assert.ok(simonArticle);
     assert.equal(simonArticle.sourceKey.namespace, "rss:simon-atom");
     assert.equal(
@@ -611,6 +675,23 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     const modifiedSyncItem = submissions[beforeSyncSubmissions + 1]?.items[0];
     assert.equal(modifiedSyncItem?.sourceKey.key, "id:urn:binny:sync:item-2");
     assert.ok(modifiedSyncItem?.body?.markdown?.includes("新增条目 2 更新版"));
+
+    // Subsequent sync fails when feed contains entry missing body and does not archive partial item
+    syncFeedVersion = 5;
+    const beforeSubsequentSyncFailSubmissions = submissions.length;
+    let subsequentSyncErr: unknown;
+    try {
+      await sync.execute(context, { feedIds: ["sync-test"] });
+    } catch (error) {
+      subsequentSyncErr = error;
+    }
+    assert.ok(isSourceAdapterActionError(subsequentSyncErr));
+    assert.equal(subsequentSyncErr.failure.code, "rss_collection_incomplete");
+    assert.equal(
+      submissions.length,
+      beforeSubsequentSyncFailSubmissions,
+      "Subsequent sync on entry missing body fails without submitting partial item.",
+    );
 
     // 9. Media failure during sync & explicit collect recovery
     const syncMediaInit = await sync.execute(context, {

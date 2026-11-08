@@ -1106,13 +1106,6 @@ export function createRuntimeConnectionStore(
                 }
               }
             }
-            if (Array.isArray(outRecord.completedScopes)) {
-              for (const scopeId of outRecord.completedScopes) {
-                if (typeof scopeId === "string" && scopeId.length > 0) {
-                  initializedStringScopes.add(scopeId);
-                }
-              }
-            }
           }
         }
 
@@ -1242,34 +1235,26 @@ export function createRuntimeConnectionStore(
 
           if (
             initializedStringScopes.size > 0 &&
-            persistentState?.status !== "unavailable"
+            persistentState?.status !== "unavailable" &&
+            "scopes" in stateRecord &&
+            typeof stateRecord.scopes === "object" &&
+            stateRecord.scopes !== null &&
+            !Array.isArray(stateRecord.scopes)
           ) {
-            const scopesVal = stateRecord.scopes;
-            if (
-              typeof scopesVal !== "object" ||
-              scopesVal === null ||
-              Array.isArray(scopesVal)
-            ) {
+            const scopesObj = stateRecord.scopes as Record<string, unknown>;
+            let missingAny = false;
+            for (const scopeId of initializedStringScopes) {
+              const stripped = scopeId.replace(/^feed:/u, "");
+              if (!(scopeId in scopesObj) && !(stripped in scopesObj)) {
+                missingAny = true;
+                break;
+              }
+            }
+            if (missingAny) {
               persistentState = {
                 status: "unavailable",
                 reason: "persistent_state_missing",
               };
-            } else {
-              const scopesObj = scopesVal as Record<string, unknown>;
-              let missingAny = false;
-              for (const scopeId of initializedStringScopes) {
-                const stripped = scopeId.replace(/^feed:/u, "");
-                if (!(scopeId in scopesObj) && !(stripped in scopesObj)) {
-                  missingAny = true;
-                  break;
-                }
-              }
-              if (missingAny) {
-                persistentState = {
-                  status: "unavailable",
-                  reason: "persistent_state_missing",
-                };
-              }
             }
           }
         }
