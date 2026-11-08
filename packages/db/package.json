@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "drizzle-orm": "1.0.0-rc.5",
-    "postgres": "^3.4.9"
+    "postgres": "^4.0.0"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
