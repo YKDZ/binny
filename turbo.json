@@ -39,7 +39,7 @@
     "//#test:binny:e2e": {
       "dependsOn": [
         "@binny/api#build",
-        "@binny/binny#build",
+        "@ykdz/binny#build",
         "@binny/source-adapter-sdk#build",
         "@binny/source-adapter-rss#build",
         "@binny/acceptance#typecheck"
@@ -68,8 +68,8 @@
         "packages/api/src/**",
         "packages/api/scripts/**",
         "packages/api/test-consumer/**",
-        "packages/binny/package.json",
-        "packages/binny/src/**",
+        "apps/cli/package.json",
+        "apps/cli/src/**",
         "packages/source-adapter-sdk/scripts/**",
         "packages/source-adapter-sdk/src/**",
         "packages/source-adapter-runtime/Dockerfile.lightweight",
@@ -133,7 +133,7 @@
         "scripts/binny-image-update-context.ts",
         "scripts/test-browser-lifecycle.ts",
         "packages/api/src/**",
-        "packages/binny/src/**",
+        "apps/cli/src/**",
         "packages/source-adapter-runtime/package.json",
         "packages/source-adapter-runtime/src/**",
         "packages/source-adapter-runtime/test/fixtures/browser-session-source-adapter.ts",
@@ -155,7 +155,7 @@
       "tags": ["quality:heavy"]
     },
     "//#test:runtime-connections": {
-      "dependsOn": ["@binny/binny#build"],
+      "dependsOn": ["@ykdz/binny#build"],
       "passThroughEnv": [
         "BINNY_RUNTIME_PUBLISHED_HOST",
         "BINNY_RUNTIME_SUBNET"
@@ -166,7 +166,7 @@
         "packages/source-adapter-runtime/Dockerfile.lightweight",
         "scripts/test-runtime-connections.ts",
         "packages/api/src/**",
-        "packages/binny/src/**",
+        "apps/cli/src/**",
         "packages/source-adapter-runtime/src/**",
         "packages/source-adapter-runtime/test/fixtures/**",
         "packages/contracts/src/**",

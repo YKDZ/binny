@@ -4,8 +4,8 @@ RUN corepack enable
 WORKDIR /workspace
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/cli/package.json apps/cli/turbo.json apps/cli/
 COPY packages/api/package.json packages/api/turbo.json packages/api/
-COPY packages/binny/package.json packages/binny/turbo.json packages/binny/
 COPY packages/contracts/package.json packages/contracts/turbo.json packages/contracts/
 COPY packages/core/package.json packages/core/turbo.json packages/core/
 COPY packages/db/package.json packages/db/turbo.json packages/db/
@@ -16,7 +16,7 @@ RUN pnpm install --frozen-lockfile
 
 COPY . .
 
-RUN pnpm exec turbo run build --filter=@binny/server --filter=@binny/binny
+RUN pnpm exec turbo run build --filter=@binny/server --filter=@ykdz/binny
 
 FROM build AS runtime
 

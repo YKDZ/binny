@@ -151,7 +151,7 @@ async function cli(args: readonly string[]): Promise<ProcessResult> {
     "--no-TTY",
     "server",
     "node",
-    "packages/binny/dist/cli.js",
+    "apps/cli/dist/cli.js",
     ...args,
   ]);
 }

@@ -137,7 +137,7 @@ export async function createIsolatedCliConsumer({
       mkdir(consumerDirectory, { recursive: true }),
     ]);
     const packageDirectories = {
-      "@binny/binny": path.join(artifactRoot, "packages/binny"),
+      "@ykdz/binny": path.join(artifactRoot, "apps/cli"),
       "@binny/api": path.join(artifactRoot, "packages/api"),
       "@binny/contracts": path.join(artifactRoot, "packages/contracts"),
     };
@@ -212,8 +212,16 @@ export async function createIsolatedCliConsumer({
         );
       }
       assert.equal(installedManifest.version, await packageVersion(directory));
-      if (name === "@binny/binny") {
+      if (name === "@ykdz/binny") {
         assert.deepEqual(installedManifest.bin, { binny: "./dist/cli.js" });
+        for (const dependencyName of Object.keys(
+          installedManifest.dependencies ?? {},
+        )) {
+          assert.ok(
+            !dependencyName.startsWith("@binny/"),
+            `${name} 打包后不应依赖私有工作区包 ${dependencyName}。`,
+          );
+        }
       }
     }
 
@@ -257,13 +265,17 @@ export async function createIsolatedCliConsumer({
     );
 
     const offlineEnvironment = consumerEnvironment("http://127.0.0.1:1");
+    const cliVersion = await packageVersion(packageDirectories["@ykdz/binny"]);
     const version = await runChecked(
       binary,
       ["--version"],
       consumerDirectory,
       offlineEnvironment,
     );
-    assert.match(version.stdout, /binny 0\.0\.0/u);
+    assert.match(
+      version.stdout,
+      new RegExp(`binny ${cliVersion.replaceAll(".", "\\.")}`, "u"),
+    );
     const help = await runChecked(
       binary,
       ["service", "info", "--help"],

@@ -32,7 +32,7 @@ try {
   // 根目录只准备正式构建输入；执行包只访问这份可丢弃制品。
   await copyImageBuildContext(repositoryRoot, context);
   await run(["install", "--offline", "--frozen-lockfile"], context);
-  await run(["--filter", "@binny/binny...", "build"], context);
+  await run(["--filter", "@ykdz/binny...", "build"], context);
   await run(
     [
       "--filter",

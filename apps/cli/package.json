@@ -1,7 +1,16 @@
 {
-  "name": "@binny/binny",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@ykdz/binny",
+  "version": "0.1.0",
+  "description": "Binny 归档、查询与垃圾桶管理命令行工具。",
+  "homepage": "https://github.com/YKDZ/binny",
+  "bugs": {
+    "url": "https://github.com/YKDZ/binny/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YKDZ/binny.git",
+    "directory": "apps/cli"
+  },
   "bin": {
     "binny": "./dist/cli.js"
   },
@@ -9,8 +18,11 @@
     "dist"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --noEmit --pretty false && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node24 --external:@ykdz/cli-contract --external:@ykdz/cli-contract/* --external:zod --outfile=dist/cli.js",
     "format:check": "oxfmt --list-different .",
     "format:write": "oxfmt --write .",
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
@@ -20,14 +32,15 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
   },
   "dependencies": {
-    "@binny/api": "workspace:*",
-    "@binny/contracts": "workspace:*",
     "@ykdz/cli-contract": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@binny/api": "workspace:*",
+    "@binny/contracts": "workspace:*",
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
+    "esbuild": "0.25.12",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",

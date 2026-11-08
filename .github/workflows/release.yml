@@ -37,6 +37,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: 检查源码
         run: pnpm run check && pnpm run check:heavy
+        env:
+          BINNY_E2E_CAPACITY_PROFILE: smoke
       - name: 按依赖顺序构建
         run: pnpm exec turbo run build
       - name: 打包未发布版本

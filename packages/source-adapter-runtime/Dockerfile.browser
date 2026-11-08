@@ -52,8 +52,8 @@ FROM browser-base AS build
 
 WORKDIR /workspace
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/cli/package.json apps/cli/
 COPY packages/api/package.json packages/api/
-COPY packages/binny/package.json packages/binny/
 COPY packages/source-adapter-runtime/package.json packages/source-adapter-runtime/
 COPY packages/source-adapter-sdk/package.json packages/source-adapter-sdk/
 COPY packages/contracts/package.json packages/contracts/

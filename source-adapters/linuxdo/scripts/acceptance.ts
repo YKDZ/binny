@@ -304,7 +304,7 @@ async function cli(
     "--no-TTY",
     "server",
     "node",
-    "packages/binny/dist/cli.js",
+    "apps/cli/dist/cli.js",
     ...args,
   ]);
 }

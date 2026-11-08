@@ -60,7 +60,7 @@
         "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser",
         "$TURBO_ROOT$/scripts/binny-e2e-test-clock.ts",
         "$TURBO_ROOT$/packages/api/src/**",
-        "$TURBO_ROOT$/packages/binny/src/**",
+        "$TURBO_ROOT$/apps/cli/src/**",
         "$TURBO_ROOT$/packages/source-adapter-runtime/package.json",
         "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
         "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
