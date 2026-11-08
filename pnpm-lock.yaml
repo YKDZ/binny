@@ -171,8 +171,8 @@ catalogs:
       specifier: ^24.13.3
       version: 24.19.2
     '@ykdz/cli-contract':
-      specifier: 0.3.0
-      version: 0.3.0
+      specifier: 0.4.0
+      version: 0.4.0
     oxfmt:
       specifier: ^0.71.0
       version: 0.71.0
@@ -228,7 +228,7 @@ importers:
     dependencies:
       '@ykdz/cli-contract':
         specifier: 'catalog:'
-        version: 0.3.0
+        version: 0.4.0
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -1662,8 +1662,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@ykdz/cli-contract@0.3.0':
-    resolution: {integrity: sha512-0SYE3OHjAmDpqS54yPOUgBqkF6ywJ5CNZ86BACGAWpMx9q5+m8au8xx2SyLoj956SjqrkzOtzUujQ2MvlThivQ==}
+  '@ykdz/cli-contract@0.4.0':
+    resolution: {integrity: sha512-MFc6ItP4b1KaNZfHA6hHarA64wZs3xYtInuIX8qa9rL0lksOFQVmDUBosB3QOo48RyCkra91clCE4lrbzDkMKg==}
     engines: {node: '>=24'}
 
   ajv-formats@3.0.1:
@@ -2499,7 +2499,7 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@ykdz/cli-contract@0.3.0':
+  '@ykdz/cli-contract@0.4.0':
     dependencies:
       '@standard-schema/spec': 1.1.0
       '@types/node': 24.19.2
