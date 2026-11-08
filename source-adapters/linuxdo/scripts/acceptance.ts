@@ -576,6 +576,7 @@ type RuntimeManifest = {
 async function runtimeManifest(
   service = "runtime-linuxdo",
 ): Promise<RuntimeManifest> {
+  await waitForRuntimeHealth(service);
   const result = await compose([
     "exec",
     "--no-TTY",
