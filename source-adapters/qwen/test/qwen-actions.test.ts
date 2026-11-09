@@ -11,8 +11,12 @@ import {
   type IncrementalSyncState,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
+import type { z } from "zod";
 
 import sourceAdapter, { type QwenConfig } from "../src/source-adapter.ts";
+
+type QwenExtensions = z.output<typeof sourceAdapter.extensionsSchema>;
+type QwenTestContext = SourceAdapterContext<QwenConfig, never, QwenExtensions>;
 
 function createSourceAdapterContext(options: {
   origin: string;
@@ -21,14 +25,12 @@ function createSourceAdapterContext(options: {
   signal?: AbortSignal;
   uploadedResources?: ArchiveResourceMetadata[];
 }): {
-  context: SourceAdapterContext<QwenConfig>;
-  submissions: Parameters<SourceAdapterContext["archive"]["submit"]>[0][];
+  context: QwenTestContext;
+  submissions: Parameters<QwenTestContext["archive"]["submit"]>[0][];
   getState: () => IncrementalSyncState | undefined;
 } {
   let storedState = options.initialState;
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+  const submissions: Parameters<QwenTestContext["archive"]["submit"]>[0][] = [];
   let commitCount = 0;
   const runId = randomUUID();
 
@@ -49,7 +51,7 @@ function createSourceAdapterContext(options: {
     ...options.config,
   };
 
-  const context: SourceAdapterContext<QwenConfig> = {
+  const context: QwenTestContext = {
     binId: "qwen-test-bin",
     identityId: "qwen-test-identity",
     runId,
@@ -261,17 +263,19 @@ void test("archives zh-CN and en-US articles with independent identities, source
     assert.ok(!zhItem.body.markdown.includes("首页导航"));
     assert.ok(zhItem.body?.text !== undefined);
 
-    assert.equal(zhItem.metadata?.region, "global");
-    assert.equal(zhItem.metadata?.language, "zh-CN");
+    assert.equal(zhItem.extensions.region, "global");
+    assert.equal(zhItem.extensions.language, "zh-CN");
     assert.equal(
-      zhItem.metadata?.canonicalUrl,
+      zhItem.extensions.canonicalUrl,
       "https://qwenlm.github.io/zh/blog/qwen3.8-livetranslate/",
     );
-    assert.equal(zhItem.metadata?.qwenArticleId, "uuid-zh-1");
-    assert.equal(zhItem.metadata?.publishedDate, "2026-09-18T17:30:00+08:00");
-    assert.equal(zhItem.metadata?.datePrecision, "second");
-    assert.equal(zhItem.sourceModifiedAt, "2026-09-18T09:30:00.000Z");
-    assert.equal(zhItem.metadata?.author, "Qwen Team");
+    assert.equal(zhItem.extensions.qwenArticleId, "uuid-zh-1");
+    assert.deepEqual(zhItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-09-18T17:30:00+08:00",
+    });
+    assert.equal(zhItem.sourceModifiedAt, null);
+    assert.equal(zhItem.extensions.author, "Qwen Team");
 
     // Verify en-US submission has independent identity and does not overwrite zh-CN
     const enSubmission = submissions[1];
@@ -288,17 +292,74 @@ void test("archives zh-CN and en-US articles with independent identities, source
     assert.equal(enItem.body?.html, undefined);
     assert.ok(enItem.body?.markdown !== undefined);
     assert.ok(enItem.body.markdown.includes("Model Architecture"));
-    assert.equal(enItem.metadata?.region, "global");
-    assert.equal(enItem.metadata?.language, "en-US");
+    assert.equal(enItem.extensions.region, "global");
+    assert.equal(enItem.extensions.language, "en-US");
     assert.equal(
-      enItem.metadata?.canonicalUrl,
+      enItem.extensions.canonicalUrl,
       "https://qwenlm.github.io/blog/qwen3.8-livetranslate/",
     );
-    assert.equal(enItem.metadata?.qwenArticleId, "uuid-en-1");
+    assert.equal(enItem.extensions.qwenArticleId, "uuid-en-1");
     // Date with day precision only
-    assert.equal(enItem.metadata?.publishedDate, "2026-09-18");
-    assert.equal(enItem.metadata?.datePrecision, "day");
-    assert.equal(enItem.sourceModifiedAt, undefined);
+    assert.deepEqual(enItem.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-09-18",
+    });
+    assert.equal(enItem.sourceModifiedAt, null);
+  } finally {
+    server.close();
+  }
+});
+
+void test("Qwen extensions reject undeclared or incorrectly typed source facts", () => {
+  const valid = {
+    language: "en-US",
+    region: "global",
+    qwenArticleId: "uuid-1",
+    tags: ["research"],
+  };
+  assert.equal(sourceAdapter.extensionsSchema.safeParse(valid).success, true);
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({ ...valid, author: 4 }).success,
+    false,
+  );
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({ ...valid, legacyDate: "2026" })
+      .success,
+    false,
+  );
+});
+
+void test("missing Qwen title and source date remain null public facts", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        articles: [
+          {
+            path: "article-without-public-facts",
+            content:
+              "<article><h2>Substantive article body</h2><p>Qwen source content without title or date metadata.</p></article>",
+          },
+        ],
+      }),
+    );
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+
+  try {
+    const { context, submissions } = createSourceAdapterContext({
+      origin: "http://127.0.0.1:" + String(address.port),
+      config: { languages: ["en-US"] },
+    });
+    await sourceAdapter.actions.collect.execute(context, {});
+    const item = submissions[0]?.items[0];
+    assert.ok(item);
+    assert.equal(item.title, null);
+    assert.equal(item.sourcePublishedAt, null);
+    assert.equal(item.sourceModifiedAt, null);
   } finally {
     server.close();
   }

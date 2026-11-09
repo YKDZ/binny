@@ -382,6 +382,86 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  runtime-document-deepseek:
+    image: ${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/document-deepseek:local}
+    profiles: [binny-documents]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-deepseek"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-document-deepseek:8080
+      BINNY_BIN_ID: binny-document-deepseek
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-document-qwen:
+    image: ${BINNY_DOCUMENT_QWEN_IMAGE:-binny/document-qwen:local}
+    profiles: [binny-documents]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-qwen"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-document-qwen:8080
+      BINNY_BIN_ID: binny-document-qwen
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-document-kimi:
+    image: ${BINNY_DOCUMENT_KIMI_IMAGE:-binny/document-kimi:local}
+    profiles: [binny-documents]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-kimi"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-document-kimi:8080
+      BINNY_BIN_ID: binny-document-kimi
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-document-minimax:
+    image: ${BINNY_DOCUMENT_MINIMAX_IMAGE:-binny/document-minimax:local}
+    profiles: [binny-documents]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-minimax"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-document-minimax:8080
+      BINNY_BIN_ID: binny-document-minimax
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
   browser-one:
     image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
     profiles: [binny-browser]

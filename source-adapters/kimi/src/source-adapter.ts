@@ -18,11 +18,13 @@ import {
   collectChangelogSource,
   collectOutputSchema,
   configSchema,
+  extensionsSchema,
   selectedSources,
   syncChangelogSource,
   syncOutputSchema,
   type ActionParams,
   type KimiConfig,
+  type KimiExtensions,
 } from "./changelog.ts";
 import {
   checkResearchSource,
@@ -32,7 +34,7 @@ import {
 
 /** Executes check action on both changelog and research sources. */
 export async function executeKimiCheck(
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   params: ActionParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -75,7 +77,7 @@ export async function executeKimiCheck(
 
 /** Executes collect action on both changelog and research sources. */
 export async function executeKimiCollect(
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   params: ActionParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -140,7 +142,7 @@ export async function executeKimiCollect(
 
 /** Executes sync action on both changelog and research sources. */
 export async function executeKimiSync(
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   params: ActionParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -208,22 +210,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Check Kimi source availability and content format.",
       params: actionParamsSchema,
       output: checkOutputSchema,
       execute: executeKimiCheck,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Collect and archive Kimi changelogs or research articles and associated media immediately.",
       params: actionParamsSchema,
       output: collectOutputSchema,
       execute: executeKimiCollect,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally synchronize Kimi changelogs and research articles; establish baseline on first run and save revisions on subsequent changes.",
       params: actionParamsSchema,

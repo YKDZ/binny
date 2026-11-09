@@ -688,6 +688,35 @@ async function checkPublicArchiveContract(): Promise<void> {
     },
   });
 
+  const timeWindowSearch = await client.archives.search.$post({
+    json: {
+      bins: ["rss-main"],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08",
+        until: "2026-11-09",
+        timeZone: "Asia/Shanghai",
+        review: "undetermined",
+      },
+    },
+  });
+  if (timeWindowSearch.status === 200) {
+    const page = await timeWindowSearch.json();
+    void page.timeSummary?.certainItems;
+    void page.timeSummary?.undeterminedItems;
+    const result = page.results[0];
+    if (result !== undefined) {
+      void result.timeStatus;
+      const timeMatch = result.matches[0]?.timeMatch;
+      if (timeMatch?.status === "undetermined") void timeMatch.reason;
+    }
+  } else if (
+    timeWindowSearch.status === 400 ||
+    timeWindowSearch.status === 422
+  ) {
+    void (await timeWindowSearch.json()).error.path;
+  }
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",

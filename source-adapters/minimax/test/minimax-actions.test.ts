@@ -21,6 +21,7 @@ import {
   configSchema,
   discoverArticleLinks,
   extractModelsReleaseDates,
+  parseDateString,
   preprocessModelsMarkdown,
   sourceAdapter,
   type MinimaxConfig,
@@ -107,7 +108,11 @@ function createTestContext(
       : {}),
   };
 
-  const context = createSourceAdapterContext(mockClient, runContext);
+  const context = createSourceAdapterContext(
+    mockClient,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
 
   return { context, submissions, uploadedResources };
 }
@@ -243,6 +248,31 @@ void test("Date extraction preserves day precision, month precision, and regiona
   assert.equal(monthDates.latestDate, "2026-08");
   assert.equal(monthDates.datePrecision, "month");
   assert.deepEqual(monthDates.observedDates, ["2026-08", "2026-04"]);
+
+  assert.deepEqual(parseDateString("2026-10-20T14:15:00+08:00"), {
+    date: "2026-10-20T14:15:00+08:00",
+    precision: "instant",
+  });
+  assert.equal(parseDateString("2026-13-01T14:15:00+08:00"), undefined);
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({
+      kind: "article",
+      region: "cn",
+      language: "zh-CN",
+      modelsReleaseDate: "2026-10-29",
+      modelsReleaseDatePrecision: "day",
+    }).success,
+    true,
+  );
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({
+      kind: "article",
+      region: "cn",
+      language: "zh-CN",
+      articleDate: "2026-10-29",
+    }).success,
+    false,
+  );
 });
 
 void test("Article link discovery filters out external links and old APIs", () => {
@@ -351,13 +381,15 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
 <html>
 <head>
   <title>MiniMax M3.1 Flash：重新定义 Agent 的性能与成本 - MiniMax</title>
+  <meta property="article:published_time" content="2026-10-20T14:15:00+08:00" />
+  <meta property="article:modified_time" content="2026-10-21T09:30:00-04:00" />
 </head>
 <body>
   <header class="site-header"><nav><a href="/">Home</a></nav></header>
   <article>
     <header>
       <h1>MiniMax M3.1 Flash：重新定义 Agent 的性能与成本</h1>
-      <time datetime="2026-10-29">2026-10-29</time>
+      <time datetime="2026-12-01">公开演示日期</time>
     </header>
     <div class="content">
       <p>今天，我们正式更新 MiniMax M3.1 Flash。</p>
@@ -625,16 +657,15 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
         namespace: "minimax:cn",
         key: "article:cn/news/minimax-m4",
       });
+      assert.equal(articleSubmission.items[0]?.title, "MiniMax M4 正式发布");
+      assert.equal(articleSubmission.items[0]?.sourcePublishedAt, null);
+      assert.equal(articleSubmission.items[0]?.sourceModifiedAt, null);
       assert.equal(
-        articleSubmission.items[0]?.properties?.["title"],
-        "MiniMax M4 正式发布",
-      );
-      assert.equal(
-        articleSubmission.items[0]?.metadata?.["articleDate"],
+        articleSubmission.items[0]?.extensions["modelsReleaseDate"],
         "2026-11-07",
       );
       assert.equal(
-        articleSubmission.items[0]?.metadata?.["releaseDate"],
+        articleSubmission.items[0]?.extensions["articleContentDate"],
         "2026-11-07",
       );
 
@@ -670,12 +701,19 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
       )?.items[0];
       assert.ok(cnModelsDoc);
       assert.equal(cnModelsDoc.sourceRef, `${origin}/cn/models.md`);
-      assert.equal(cnModelsDoc.sourceModifiedAt, undefined);
-      assert.equal(cnModelsDoc.metadata?.["documentKind"], "release-notes");
-      assert.equal(cnModelsDoc.metadata?.["region"], "cn");
-      assert.equal(cnModelsDoc.metadata?.["language"], "zh-CN");
-      assert.equal(cnModelsDoc.metadata?.["latestDate"], "2026-10-29");
-      assert.equal(cnModelsDoc.metadata?.["datePrecision"], "day");
+      assert.equal(cnModelsDoc.sourcePublishedAt, null);
+      assert.equal(cnModelsDoc.sourceModifiedAt, null);
+      assert.equal(cnModelsDoc.extensions["kind"], "release-notes");
+      assert.equal(cnModelsDoc.extensions["region"], "cn");
+      assert.equal(cnModelsDoc.extensions["language"], "zh-CN");
+      assert.equal(
+        cnModelsDoc.extensions["latestReleaseEntryDate"],
+        "2026-10-29",
+      );
+      assert.equal(
+        cnModelsDoc.extensions["latestReleaseEntryDatePrecision"],
+        "day",
+      );
       assert.ok(cnModelsDoc.body?.markdown);
       assert.ok(!cnModelsDoc.body.markdown.includes("Documentation Index"));
 
@@ -690,11 +728,19 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
         intlModelsDoc.sourceRef,
         `${origin}/international/models.md`,
       );
-      assert.equal(intlModelsDoc.metadata?.["documentKind"], "release-notes");
-      assert.equal(intlModelsDoc.metadata?.["region"], "international");
-      assert.equal(intlModelsDoc.metadata?.["language"], "en");
-      assert.equal(intlModelsDoc.metadata?.["latestDate"], "2026-10-28");
-      assert.equal(intlModelsDoc.metadata?.["datePrecision"], "day");
+      assert.equal(intlModelsDoc.sourcePublishedAt, null);
+      assert.equal(intlModelsDoc.sourceModifiedAt, null);
+      assert.equal(intlModelsDoc.extensions["kind"], "release-notes");
+      assert.equal(intlModelsDoc.extensions["region"], "international");
+      assert.equal(intlModelsDoc.extensions["language"], "en");
+      assert.equal(
+        intlModelsDoc.extensions["latestReleaseEntryDate"],
+        "2026-10-28",
+      );
+      assert.equal(
+        intlModelsDoc.extensions["latestReleaseEntryDatePrecision"],
+        "day",
+      );
 
       // Independent regional namespaces and keys
       assert.notEqual(
@@ -710,18 +756,23 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
       )?.items[0];
       assert.ok(cnArticle);
       assert.equal(
-        cnArticle.properties?.["title"],
+        cnArticle.title,
         "MiniMax M3.1 Flash：重新定义 Agent 的性能与成本",
       );
       assert.equal(cnArticle.sourceRef, `${origin}/cn/blog/minimax-m31f`);
-      assert.equal(cnArticle.sourceModifiedAt, undefined);
-      assert.equal(cnArticle.metadata?.["documentKind"], "article");
-      assert.equal(cnArticle.metadata?.["region"], "cn");
-      assert.equal(cnArticle.metadata?.["language"], "zh-CN");
-      assert.equal(cnArticle.metadata?.["releaseDate"], "2026-10-29");
-      assert.equal(cnArticle.metadata?.["releaseDatePrecision"], "day");
-      assert.equal(cnArticle.metadata?.["articleDate"], "2026-10-29");
-      assert.equal(cnArticle.metadata?.["articleDatePrecision"], "day");
+      assert.deepEqual(cnArticle.sourcePublishedAt, {
+        precision: "instant",
+        value: "2026-10-20T14:15:00+08:00",
+      });
+      assert.deepEqual(cnArticle.sourceModifiedAt, {
+        precision: "instant",
+        value: "2026-10-21T09:30:00-04:00",
+      });
+      assert.equal(cnArticle.extensions["kind"], "article");
+      assert.equal(cnArticle.extensions["region"], "cn");
+      assert.equal(cnArticle.extensions["language"], "zh-CN");
+      assert.equal(cnArticle.extensions["modelsReleaseDate"], "2026-10-29");
+      assert.equal(cnArticle.extensions["articleContentDate"], "2026-12-01");
 
       // Stripped share buttons, related posts, site header/footer
       assert.ok(cnArticle.body?.markdown);
@@ -746,13 +797,15 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
       )?.items[0];
       assert.ok(intlArticle);
       assert.equal(
-        intlArticle.properties?.["title"],
+        intlArticle.title,
         "MiniMax M3.1 Flash: Redefining Agent Performance",
       );
-      assert.equal(intlArticle.metadata?.["region"], "international");
-      assert.equal(intlArticle.metadata?.["language"], "en");
-      assert.equal(intlArticle.metadata?.["releaseDate"], "2026-10-28");
-      assert.equal(intlArticle.metadata?.["articleDate"], "2026-10-28");
+      assert.equal(intlArticle.sourcePublishedAt, null);
+      assert.equal(intlArticle.sourceModifiedAt, null);
+      assert.equal(intlArticle.extensions["region"], "international");
+      assert.equal(intlArticle.extensions["language"], "en");
+      assert.equal(intlArticle.extensions["modelsReleaseDate"], "2026-10-28");
+      assert.equal(intlArticle.extensions["articleContentDate"], "2026-10-28");
 
       // Verify parameter limits: maxItems
       const { context: maxCtx, submissions: maxSubmissions } =

@@ -6,12 +6,12 @@ import {
   hasOngoingDocumentChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeOngoingDocument,
   type CleanContentResult,
   type IncrementalSyncState,
-  type JsonObject,
   type ManualRunFailure,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -39,6 +39,40 @@ export const kimiSourceDefinitionSchema = z
   .strict();
 
 export type KimiSourceDefinition = z.infer<typeof kimiSourceDefinitionSchema>;
+
+export const extensionsSchema = z
+  .object({
+    kind: z
+      .enum(["changelog", "research"])
+      .describe("Kind of Kimi source content archived in this item."),
+    region: kimiRegionSchema.describe(
+      "Geographic region assigned to the Kimi source.",
+    ),
+    language: z.string().describe("Language used by the Kimi source content."),
+    latestChangelogDate: z
+      .string()
+      .optional()
+      .describe("Latest dated heading found inside the whole Kimi changelog."),
+    latestChangelogDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe("Known precision of the latest heading date in the changelog."),
+    observedChangelogDates: z
+      .array(z.string())
+      .optional()
+      .describe("Distinct dated headings found in the whole Kimi changelog."),
+    slug: z
+      .string()
+      .optional()
+      .describe("Kimi research article slug from its first-party blog URL."),
+    canonicalUrl: z
+      .string()
+      .optional()
+      .describe("Canonical URL linked from the Kimi research article page."),
+  })
+  .strict();
+
+export type KimiExtensions = z.output<typeof extensionsSchema>;
 
 export const DEFAULT_KIMI_CHANGELOG_SOURCES: readonly KimiSourceDefinition[] = [
   {
@@ -227,7 +261,7 @@ export const MONTH_NAMES: Record<string, string> = {
 
 export type ExtractedChangelogDates = {
   readonly latestDate?: string | undefined;
-  readonly datePrecision?: "month" | "day" | undefined;
+  readonly datePrecision?: "instant" | "day" | "month" | "year" | undefined;
   readonly observedDates: readonly string[];
 };
 
@@ -251,9 +285,29 @@ export function extractChangelogDates(
     }
   }
 
-  const observed: { date: string; precision: "month" | "day" }[] = [];
+  const observed: {
+    date: string;
+    precision: "instant" | "day" | "month" | "year";
+  }[] = [];
+  const addDate = (value: string): void => {
+    const sourceTime = sourceTimeFrom(value);
+    if (sourceTime !== null) {
+      observed.push({
+        date: sourceTime.value,
+        precision: sourceTime.precision,
+      });
+    }
+  };
 
   for (const heading of headingLines) {
+    const instantMatch = heading.match(
+      /(?:^|\D)(20\d\d-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))(?:$|\D)/u,
+    );
+    if (instantMatch?.[1]) {
+      addDate(instantMatch[1]);
+      continue;
+    }
+
     // 1. Day precision checks
     // 1a: YYYY-MM-DD
     const isoDayMatch = heading.match(
@@ -263,7 +317,7 @@ export function extractChangelogDates(
       const y = isoDayMatch[1];
       const m = isoDayMatch[2].padStart(2, "0");
       const d = isoDayMatch[3].padStart(2, "0");
-      observed.push({ date: `${y}-${m}-${d}`, precision: "day" });
+      addDate(`${y}-${m}-${d}`);
       continue;
     }
 
@@ -275,7 +329,7 @@ export function extractChangelogDates(
       const y = cnDayMatch[1];
       const m = cnDayMatch[2].padStart(2, "0");
       const d = cnDayMatch[3].padStart(2, "0");
-      observed.push({ date: `${y}-${m}-${d}`, precision: "day" });
+      addDate(`${y}-${m}-${d}`);
       continue;
     }
 
@@ -288,7 +342,7 @@ export function extractChangelogDates(
       const d = enDayMatch[2].padStart(2, "0");
       const y = enDayMatch[3];
       if (monthStr !== undefined) {
-        observed.push({ date: `${y}-${monthStr}-${d}`, precision: "day" });
+        addDate(`${y}-${monthStr}-${d}`);
         continue;
       }
     }
@@ -301,7 +355,7 @@ export function extractChangelogDates(
     if (cnMonthMatch?.[1] && cnMonthMatch[2]) {
       const y = cnMonthMatch[1];
       const m = cnMonthMatch[2].padStart(2, "0");
-      observed.push({ date: `${y}-${m}`, precision: "month" });
+      addDate(`${y}-${m}`);
       continue;
     }
 
@@ -313,7 +367,7 @@ export function extractChangelogDates(
       const monthStr = MONTH_NAMES[enMonthMatch[1].toLowerCase()];
       const y = enMonthMatch[2];
       if (monthStr !== undefined) {
-        observed.push({ date: `${y}-${monthStr}`, precision: "month" });
+        addDate(`${y}-${monthStr}`);
         continue;
       }
     }
@@ -325,9 +379,12 @@ export function extractChangelogDates(
     if (isoMonthMatch?.[1] && isoMonthMatch[2]) {
       const y = isoMonthMatch[1];
       const m = isoMonthMatch[2].padStart(2, "0");
-      observed.push({ date: `${y}-${m}`, precision: "month" });
+      addDate(`${y}-${m}`);
       continue;
     }
+
+    const isoYearMatch = heading.match(/(?:^|\D)(20\d\d)(?:$|\D)/u);
+    if (isoYearMatch?.[1]) addDate(isoYearMatch[1]);
   }
 
   if (observed.length === 0) {
@@ -343,10 +400,11 @@ export function extractChangelogDates(
     }
   }
 
-  const hasDay = observed.some((o) => o.precision === "day");
-  const datePrecision = hasDay ? "day" : "month";
   const sorted = [...uniqueDates].sort((a, b) => b.localeCompare(a));
   const latestDate = sorted[0];
+  const datePrecision = observed.find(
+    (item) => item.date === latestDate,
+  )?.precision;
 
   return {
     ...(latestDate !== undefined ? { latestDate } : {}),
@@ -461,7 +519,7 @@ export function cleanAndValidateChangelog(
 ): {
   readonly cleanResult: CleanContentResult;
   readonly dates: ExtractedChangelogDates;
-  readonly metadata: JsonObject;
+  readonly extensions: KimiExtensions;
 } {
   if (isHtmlSpaShellOrErrorPage(rawText, contentType)) {
     throw new Error(
@@ -483,26 +541,28 @@ export function cleanAndValidateChangelog(
   }
 
   const dates = extractChangelogDates(rawText);
-  const metadata: JsonObject = {
-    documentKind: "changelog",
+  const extensions: KimiExtensions = {
+    kind: "changelog",
     region: source.region,
     language: source.language,
-    ...(dates.latestDate !== undefined ? { latestDate: dates.latestDate } : {}),
+    ...(dates.latestDate !== undefined
+      ? { latestChangelogDate: dates.latestDate }
+      : {}),
     ...(dates.datePrecision !== undefined
-      ? { datePrecision: dates.datePrecision }
+      ? { latestChangelogDatePrecision: dates.datePrecision }
       : {}),
     ...(dates.observedDates.length > 0
-      ? { observedDates: [...dates.observedDates] }
+      ? { observedChangelogDates: [...dates.observedDates] }
       : {}),
   };
 
-  return { cleanResult, dates, metadata };
+  return { cleanResult, dates, extensions };
 }
 
 /** Checks a single Kimi changelog source and records any problems. */
 export async function checkChangelogSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   problems: z.infer<typeof checkOutputSchema>["problems"],
 ): Promise<void> {
   try {
@@ -530,7 +590,7 @@ export async function checkChangelogSource(
 /** Collects a single Kimi changelog source immediately. */
 export async function collectChangelogSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   state: IncrementalSyncState | undefined,
   completedScopes: string[],
   problems: ManualRunFailure[],
@@ -540,7 +600,7 @@ export async function collectChangelogSource(
       source,
       context.signal,
     );
-    const { cleanResult, metadata } = cleanAndValidateChangelog(
+    const { cleanResult, extensions } = cleanAndValidateChangelog(
       source,
       rawText,
       contentType,
@@ -549,11 +609,10 @@ export async function collectChangelogSource(
     await submitCleanedArticle(context, {
       sourceKey: buildChangelogSourceKey(source),
       sourceRef: source.url,
-      title: source.title ?? "Kimi Changelog",
-      sourceModifiedAt: undefined,
-      metadata,
-      properties:
-        source.title !== undefined ? { title: source.title } : undefined,
+      title: source.title ?? null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions,
       cleanResult,
       captureScope: {
         sourceId: source.id,
@@ -592,7 +651,7 @@ export async function collectChangelogSource(
 /** Synchronizes a single Kimi changelog source. */
 export async function syncChangelogSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   state: IncrementalSyncState,
   initializedScopes: string[],
   completedScopes: string[],
@@ -609,7 +668,7 @@ export async function syncChangelogSource(
       source,
       context.signal,
     );
-    const { cleanResult, metadata } = cleanAndValidateChangelog(
+    const { cleanResult, extensions } = cleanAndValidateChangelog(
       source,
       rawText,
       contentType,
@@ -646,11 +705,10 @@ export async function syncChangelogSource(
         await submitCleanedArticle(context, {
           sourceKey: buildChangelogSourceKey(source),
           sourceRef: source.url,
-          title: source.title ?? "Kimi Changelog",
-          sourceModifiedAt: undefined,
-          metadata,
-          properties:
-            source.title !== undefined ? { title: source.title } : undefined,
+          title: source.title ?? null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions,
           cleanResult,
           captureScope: {
             sourceId: source.id,
