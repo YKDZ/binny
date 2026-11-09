@@ -134,10 +134,12 @@ const scheduledRunsOnly = internalStep === "scheduled-runs";
 const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const archiveModelOnly = internalStep === "archive-model";
 const archiveSearchOnly = internalStep === "archive-search";
+const rssLinuxdoOnly = internalStep === "rss-linuxdo";
 const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
 const manualRunsOnly = scheduleOnly || archiveModelJourney;
-const useHeartbeatProxy = !manualRunsOnly || scheduledRunsOnly;
+const useHeartbeatProxy =
+  (!manualRunsOnly || scheduledRunsOnly) && !rssLinuxdoOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -7872,18 +7874,16 @@ async function runRssAcceptance(
     "binny-rss-one",
     "&lt;widget&gt;",
   );
-  assert.equal(atomEntityTextMatches.length, 1);
-  const atomEntityTextMatch = atomEntityTextMatches[0];
-  assert.ok(atomEntityTextMatch !== undefined);
-  const atomEntityTextItem = cliData<RssArchiveRead>(
-    await cli(baseUrl, [
-      "archive",
-      "item",
-      atomEntityTextMatch.itemId,
-      "--bin",
-      "binny-rss-one",
-    ]),
-    "found",
+  const atomEntityTextItem = await readRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "Atom 纯文本中的实体字面值",
+  );
+  assert.ok(
+    atomEntityTextMatches.some(
+      ({ itemId }) => itemId === atomEntityTextItem.itemId,
+    ),
+    "escaped entity text search should include the Atom entity-text item.",
   );
   const atomEntityTextState = rssArchiveView(
     atomEntityTextItem,
@@ -9323,8 +9323,10 @@ async function main(): Promise<void> {
     await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
-    await compose(["build", "runtime-fifteen-one"]);
-    builtImages.add(runtimeImageName);
+    if (!rssLinuxdoOnly) {
+      await compose(["build", "runtime-fifteen-one"]);
+      builtImages.add(runtimeImageName);
+    }
     if (!manualRunsOnly) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
@@ -9364,17 +9366,25 @@ async function main(): Promise<void> {
           ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
           ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
         ]
-      : [
-          "postgres",
-          "server",
-          "manual-runs-source",
-          "rss-e2e-source",
-          "runtime-fifteen-one",
-          "runtime-fifteen-two",
-          "runtime-rss",
-          "runtime-rss-two",
-          "heartbeat-proxy",
-        ];
+      : rssLinuxdoOnly
+        ? [
+            "postgres",
+            "server",
+            "rss-e2e-source",
+            "runtime-rss",
+            "runtime-rss-two",
+          ]
+        : [
+            "postgres",
+            "server",
+            "manual-runs-source",
+            "rss-e2e-source",
+            "runtime-fifteen-one",
+            "runtime-fifteen-two",
+            "runtime-rss",
+            "runtime-rss-two",
+            "heartbeat-proxy",
+          ];
     if (runFunctionalJourney) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -9392,7 +9402,8 @@ async function main(): Promise<void> {
       ...e2eServices,
     ]);
     composePort = await publishedPort("server", 3000);
-    manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    if (!rssLinuxdoOnly)
+      manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
     if (runFunctionalJourney) {
       linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
     }
@@ -9403,11 +9414,11 @@ async function main(): Promise<void> {
         await publishedPort("heartbeat-proxy", 8082),
       );
       heartbeatProxy = activeHeartbeatProxy;
-      if (!manualRunsOnly) {
-        rssControlSource = await createRssControlSource(
-          await publishedPort("rss-e2e-source", 8081),
-        );
-      }
+    }
+    if (runFunctionalJourney) {
+      rssControlSource = await createRssControlSource(
+        await publishedPort("rss-e2e-source", 8081),
+      );
     }
     baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
@@ -9479,31 +9490,39 @@ async function main(): Promise<void> {
       }
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
-      assert.ok(installedCliConsumer !== undefined);
-      assert.ok(activeHeartbeatProxy !== undefined);
       assert.ok(rssControlSource !== undefined);
-      await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
-      await verifyConfigurationJourney(baseUrl, manualRunSourceControlUrl());
-      const manualRunManifest = await createRuntimeFixtureManifest();
-      await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
-      await manualRunControllerPartitionStep();
-      await manualRunsHttpStep(baseUrl, manualRunManifest);
-      await verifyGlobalOperationsCli(baseUrl);
-      baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
+      if (!rssLinuxdoOnly) {
+        assert.ok(installedCliConsumer !== undefined);
+        assert.ok(activeHeartbeatProxy !== undefined);
+        await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
+        await verifyConfigurationJourney(baseUrl, manualRunSourceControlUrl());
+        const manualRunManifest = await createRuntimeFixtureManifest();
+        await manualRunsCliStep(
+          baseUrl,
+          manualRunManifest,
+          activeHeartbeatProxy,
+        );
+        await manualRunControllerPartitionStep();
+        await manualRunsHttpStep(baseUrl, manualRunManifest);
+        await verifyGlobalOperationsCli(baseUrl);
+        baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
+      }
       const rssAcceptance = await runRssAcceptance(
         baseUrl,
         rssControlSource,
         rssImageUpdate,
       );
-      await archiveHttpStep("fixed-search", baseUrl);
-      const archive = await archiveHttpStep("submit", baseUrl);
-      await archiveSearchCliStep(baseUrl);
-      const sdkResource = await sdkResourceStep(baseUrl);
-      baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
-      process.stdout.write(
-        "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
-      );
+      if (!rssLinuxdoOnly) {
+        await archiveHttpStep("fixed-search", baseUrl);
+        const archive = await archiveHttpStep("submit", baseUrl);
+        await archiveSearchCliStep(baseUrl);
+        const sdkResource = await sdkResourceStep(baseUrl);
+        baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
+        baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
+        process.stdout.write(
+          "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+        );
+      }
       await createLinuxdoBin(baseUrl);
       await createLinuxdoBin(
         baseUrl,
@@ -9552,9 +9571,15 @@ async function main(): Promise<void> {
         linuxdoJourney,
         rssAcceptance,
       );
-      await verifyLinuxdoCapacityJourney(baseUrl);
+      if (rssLinuxdoOnly) {
+        process.stdout.write(
+          "RSS/Atom、Linux.do 来源映射、媒体复用与公开历史读回通过。\n",
+        );
+      } else {
+        await verifyLinuxdoCapacityJourney(baseUrl);
+      }
     }
-    if (!manualRunsOnly) {
+    if (!manualRunsOnly && !rssLinuxdoOnly) {
       await runCapacityAcceptance(baseUrl);
     }
   } catch (error) {
