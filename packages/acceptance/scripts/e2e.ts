@@ -739,12 +739,53 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   );
   assert.ok(matchedItem !== undefined);
   assert.equal(matchedItem.sourceKey.namespace, "e2e");
-  assert.ok(
-    matchedItem.matches.some(
-      ({ binId: matchedBinId, revisionId }) =>
-        matchedBinId === binId && revisionId.length > 0,
-    ),
+  const selectedMatch = matchedItem.matches.find(
+    ({ binId: matchedBinId }) => matchedBinId === binId,
   );
+  assert.ok(selectedMatch !== undefined);
+  assert.ok(selectedMatch.revisionId.length > 0);
+  const selectedReference = {
+    itemId: matchedItem.itemId,
+    binId: selectedMatch.binId,
+    revisionId: selectedMatch.revisionId,
+    archiveSeq: selectedMatch.archiveSeq,
+  };
+  const selectedRead = cliData<{
+    readonly results: readonly {
+      readonly index: number;
+      readonly reference: typeof selectedReference;
+      readonly status: string;
+      readonly revision?: {
+        readonly state: { readonly body?: { readonly text?: string } };
+      };
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify([selectedReference]),
+    ]),
+    "read",
+  );
+  assert.equal(selectedRead.results.length, 1);
+  assert.equal(selectedRead.results[0]?.index, 0);
+  assert.deepEqual(selectedRead.results[0]?.reference, selectedReference);
+  assert.equal(selectedRead.results[0]?.status, "readable");
+  assert.equal(
+    selectedRead.results[0]?.revision?.state.body?.text,
+    "The literal release was updated.",
+  );
+  const selectedReadText = await cli(baseUrl, [
+    "archive",
+    "batch-read",
+    "--references",
+    JSON.stringify([selectedReference]),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(selectedReadText.code, 0, selectedReadText.stderr);
+  assert.match(selectedReadText.stdout, /The literal release was updated\./u);
 
   const firstPage = cliData<{
     readonly snapshot: { readonly asOf: string };
