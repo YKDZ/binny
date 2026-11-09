@@ -59,12 +59,16 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<void> {
   const response = await client.archives["batch-read"].$post({
     json: { references: [reference] },
   });
-  assert.equal(response.status, 200);
-  if (response.status !== 200) {
-    throw new Error("Batch archive read failed.");
+  const responseStatus: number = response.status;
+  const responseBody = await response.text();
+  if (responseStatus !== 200) {
+    throw new Error(
+      `Batch archive read failed with ${String(responseStatus)}: ${responseBody}`,
+    );
   }
-  const result = archiveBatchReadResponseSchema.parse(await response.json())
-    .results[0];
+  const result = archiveBatchReadResponseSchema.parse(
+    JSON.parse(responseBody) as unknown,
+  ).results[0];
   assert.ok(result !== undefined);
   assert.equal(result.status, "readable");
   if (result.status !== "readable") return;

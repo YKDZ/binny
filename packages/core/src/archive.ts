@@ -949,15 +949,5 @@ export function createArchiveStore(
     ...batchReadOperations,
 
     ...readOperations,
-    async readArchiveBatch() {
-      return {
-        ok: false,
-        status: 400,
-        error: {
-          code: "invalid_input",
-          message: "Batch read is not implemented.",
-        },
-      };
-    },
   };
 }
