@@ -288,88 +288,475 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
   };
 }
 
+type CliSchemaField = z.infer<typeof cliSchemaFieldSchema>;
+type CliSchemaControls = {
+  readonly help: {
+    readonly longOption: string;
+    readonly shortAlias?: string;
+  };
+  readonly version?: {
+    readonly longOption: string;
+    readonly shortAlias?: string;
+    readonly value: string;
+  };
+  readonly output: {
+    readonly defaultFormat: "structured" | "text";
+    readonly formats: readonly ("structured" | "text")[];
+    readonly selector?: string;
+    readonly compatibilityFlags?: Readonly<
+      Record<string, "structured" | "text">
+    >;
+  };
+};
+
+type CliSchemaNode = {
+  readonly kind: string;
+  readonly id: string;
+  readonly parent: string;
+  readonly name: string;
+  readonly aliases: readonly string[];
+  readonly description: string;
+  readonly helpSupplement?: readonly string[];
+  readonly fields?: readonly CliSchemaField[];
+  readonly usageConstraints?: readonly unknown[];
+  readonly usage: { readonly synopsis: string };
+};
+
 type CliSchemaSource = {
   readonly grammar: {
-    readonly root: { readonly id: string };
-    readonly nodes: readonly {
-      readonly kind: string;
+    readonly root: {
       readonly id: string;
-      readonly parent: string;
       readonly name: string;
-      readonly aliases: readonly string[];
-    }[];
-    readonly controls: unknown;
+      readonly kind: string;
+    };
+    readonly nodes: readonly CliSchemaNode[];
+    readonly controls: CliSchemaControls;
   };
   readonly manifest: {
-    readonly schemaVersion: string;
-    readonly root: string;
     readonly commands: Readonly<Record<string, unknown>>;
-    readonly controls: unknown;
-    readonly usageFailure: unknown;
+    readonly usageFailure: {
+      readonly exitCode: number;
+      readonly wire: unknown;
+    };
     readonly wire: Readonly<Record<string, unknown>>;
   };
 };
 
-type CliSchemaDocument = {
-  readonly grammar: CliSchemaSource["grammar"];
-  readonly manifest: CliSchemaSource["manifest"];
+type CliSchemaPart = z.infer<typeof cliSchemaPartSchema>;
+type CliSchemaDirectoryEntry = z.infer<typeof cliSchemaDirectoryEntrySchema>;
+type CliSchemaOutput = z.infer<typeof cliSchemaOutputContractSchema>;
+
+type CliSchemaCommandManifest = {
+  readonly input: { readonly inputSchema: unknown };
+  readonly success:
+    | { readonly kind: "completion" }
+    | {
+        readonly kind: "data";
+        readonly variants: Readonly<
+          Record<
+            string,
+            { readonly description: string; readonly exitCode: number }
+          >
+        >;
+      }
+    | {
+        readonly kind: "stream";
+        readonly records: Readonly<
+          Record<string, { readonly description: string }>
+        >;
+      };
+  readonly failures: Readonly<
+    Record<string, { readonly description: string; readonly exitCode: number }>
+  >;
 };
 
+type CliSchemaCommandWire = {
+  readonly completion?: unknown;
+  readonly data?: Readonly<Record<string, unknown>>;
+  readonly failure?: Readonly<Record<string, unknown>>;
+  readonly stream?: unknown;
+};
+
+type CliSchemaDocument = z.infer<typeof cliSchemaDocumentOutputSchema>;
+
+type CliSchemaLookup =
+  | { readonly ok: true; readonly document: CliSchemaDocument }
+  | {
+      readonly ok: false;
+      readonly reason: "unknownPath" | "invalidSelection";
+      readonly message: string;
+      readonly suggestion: string;
+    };
+
+function cliSchemaDirectoryEntries(
+  contract: CliSchemaSource,
+): readonly CliSchemaDirectoryEntry[] {
+  const nodesById = new Map(
+    contract.grammar.nodes.map((node) => [node.id, node] as const),
+  );
+  const pathFor = (id: string): string[] => {
+    const node = nodesById.get(id);
+    if (node === undefined) return [];
+    return [...pathFor(node.parent), node.name];
+  };
+
+  return contract.grammar.nodes.map((node) => ({
+    path: pathFor(node.id),
+    kind: node.kind === "command" ? "command" : "group",
+    description: node.description,
+    ...(node.aliases.length === 0 ? {} : { aliases: node.aliases }),
+  }));
+}
+
+function cliSchemaOutput(
+  command: CliSchemaCommandManifest,
+  wire: CliSchemaCommandWire,
+): CliSchemaOutput {
+  if (command.success.kind === "completion") {
+    if (wire.completion === undefined) {
+      throw new Error("CLI completion command has no compiled wire contract.");
+    }
+    return { kind: "completion", schema: wire.completion };
+  }
+  if (command.success.kind === "stream") {
+    if (wire.stream === undefined) {
+      throw new Error("CLI stream command has no compiled wire contract.");
+    }
+    return { kind: "stream", schema: wire.stream };
+  }
+
+  const variants = Object.fromEntries(
+    Object.entries(command.success.variants).map(([name, variant]) => {
+      const schema = wire.data?.[name];
+      if (schema === undefined) {
+        throw new Error(
+          `CLI command ${name} has no compiled success contract.`,
+        );
+      }
+      return [
+        name,
+        {
+          description: variant.description,
+          exitCode: variant.exitCode,
+          schema,
+        },
+      ];
+    }),
+  );
+  return { kind: "data", variants };
+}
+
+function cliSchemaUsageFailure(
+  usageFailure: { readonly exitCode: number; readonly wire: unknown },
+  commandId: string,
+): { readonly exitCode: number; readonly schema: unknown } {
+  if (!isRecord(usageFailure.wire) || !Array.isArray(usageFailure.wire.oneOf)) {
+    throw new Error("The CLI usage failure contract is invalid.");
+  }
+  const variants = usageFailure.wire.oneOf.filter((variant) => {
+    if (!isRecord(variant) || !isRecord(variant.properties)) return false;
+    const command = variant.properties.command;
+    return isRecord(command) && command.const === commandId;
+  });
+  if (variants.length !== 1) {
+    throw new Error(
+      `The CLI usage failure contract for ${commandId} is invalid.`,
+    );
+  }
+  return {
+    exitCode: usageFailure.exitCode,
+    schema: { ...usageFailure.wire, oneOf: variants },
+  };
+}
+
+/**
+ * Builds the offline `schema` command result from cli-contract's compiled declaration.
+ * `commandPath` contains the same command tokens accepted after `schema`; an omitted
+ * path returns a small directory, a group path returns its immediate children, and
+ * an executable path returns its summary unless a contract part is requested. A
+ * pathless `full` selection returns the complete declaration; a command-scoped `full`
+ * selection remains limited to that command. Each
+ * JSON Schema subtree is copied intact so its local `$defs` and `$ref` links remain
+ * resolvable. The errors part includes the selected command's usage failures and
+ * declared failure variants. Unknown paths and invalid part selections include a corrective hint.
+ * This lookup only reads the in-process CLI declaration; it never contacts the service
+ * or discovers deployment-specific adapter declarations.
+ */
 function cliSchemaDocument(
   contract: CliSchemaSource,
   commandPath: readonly string[],
-): CliSchemaDocument | undefined {
+  part?: CliSchemaPart,
+): CliSchemaLookup {
+  const directoryEntries = cliSchemaDirectoryEntries(contract);
+  const rootName = contract.grammar.root.name;
   if (commandPath.length === 0) {
-    return { grammar: contract.grammar, manifest: contract.manifest };
+    if (part === undefined) {
+      return {
+        ok: true,
+        document: {
+          kind: "directory",
+          root: rootName,
+          commands: directoryEntries,
+        },
+      };
+    }
+    if (part === "full") {
+      return {
+        ok: true,
+        document: {
+          kind: "contract",
+          root: rootName,
+          path: [],
+          part,
+          contract: {
+            grammar: contract.grammar,
+            manifest: contract.manifest,
+          },
+        },
+      };
+    }
+    return {
+      ok: false,
+      reason: "invalidSelection",
+      message:
+        "Select an executable command before requesting a contract part.",
+      suggestion: `Run ${rootName} schema to browse commands, then select one, for example: ${rootName} schema archive search --part input.`,
+    };
   }
 
   let parent = contract.grammar.root.id;
-  const ancestors: string[] = [];
-  let selectedNode: CliSchemaSource["grammar"]["nodes"][number] | undefined;
+  const resolvedNodes: CliSchemaNode[] = [];
+  let selectedNode: CliSchemaNode | undefined;
   for (const segment of commandPath) {
     selectedNode = contract.grammar.nodes.find(
       (node) =>
         node.parent === parent &&
         (node.name === segment || node.aliases.includes(segment)),
     );
-    if (selectedNode === undefined) return undefined;
-    ancestors.push(selectedNode.id);
+    if (selectedNode === undefined) {
+      const invalidSegment = commandPath[resolvedNodes.length] ?? segment;
+      const dotSegments = invalidSegment.split(".");
+      let correctedParent = parent;
+      let correctionIsValid = dotSegments.length > 1;
+      for (const dotSegment of dotSegments) {
+        const correctedNode = contract.grammar.nodes.find(
+          (node) =>
+            node.parent === correctedParent &&
+            (node.name === dotSegment || node.aliases.includes(dotSegment)),
+        );
+        if (correctedNode === undefined) {
+          correctionIsValid = false;
+          break;
+        }
+        correctedParent = correctedNode.id;
+      }
+      const suggestion = correctionIsValid
+        ? `Use separate command tokens: ${rootName} schema ${[...commandPath.slice(0, resolvedNodes.length), ...dotSegments, ...commandPath.slice(resolvedNodes.length + 1)].join(" ")}.`
+        : `Run ${rootName} schema to see valid command paths. Pass each command token as a separate argument.`;
+      return {
+        ok: false,
+        reason: "unknownPath",
+        message: `Command path "${commandPath.join(" ")}" does not exist.`,
+        suggestion,
+      };
+    }
+    resolvedNodes.push(selectedNode);
     parent = selectedNode.id;
   }
 
-  const includedIds = new Set(ancestors);
-  if (selectedNode?.kind !== "command") {
-    let addedDescendant = true;
-    while (addedDescendant) {
-      addedDescendant = false;
-      for (const node of contract.grammar.nodes) {
-        if (includedIds.has(node.parent) && !includedIds.has(node.id)) {
-          includedIds.add(node.id);
-          addedDescendant = true;
-        }
-      }
+  selectedNode = resolvedNodes[resolvedNodes.length - 1];
+  if (selectedNode === undefined) {
+    return {
+      ok: false,
+      reason: "unknownPath",
+      message: `Command path "${commandPath.join(" ")}" does not exist.`,
+      suggestion: `Run ${rootName} schema to see valid command paths.`,
+    };
+  }
+  const path = resolvedNodes.map(({ name }) => name);
+
+  if (selectedNode.kind !== "command") {
+    if (part !== undefined) {
+      return {
+        ok: false,
+        reason: "invalidSelection",
+        message: `Command group "${path.join(" ")}" has no contract parts.`,
+        suggestion: `Select an executable command in this group, for example: ${rootName} schema ${path.join(" ")} <command> --part input.`,
+      };
     }
+    return {
+      ok: true,
+      document: {
+        kind: "group",
+        root: rootName,
+        path,
+        description: selectedNode.description,
+        ...(selectedNode.helpSupplement === undefined
+          ? {}
+          : { helpSupplement: selectedNode.helpSupplement }),
+        usage: selectedNode.usage.synopsis,
+        commands: directoryEntries.filter(
+          (entry) =>
+            entry.path.length === path.length + 1 &&
+            path.every((segment, index) => entry.path[index] === segment),
+        ),
+      },
+    };
   }
 
+  const summary = {
+    root: rootName,
+    path,
+    description: selectedNode.description,
+    ...(selectedNode.helpSupplement === undefined
+      ? {}
+      : { helpSupplement: selectedNode.helpSupplement }),
+    usage: selectedNode.usage.synopsis,
+    fields: selectedNode.fields ?? [],
+    controls: contract.grammar.controls,
+    ...(selectedNode.usageConstraints === undefined ||
+    selectedNode.usageConstraints.length === 0
+      ? {}
+      : { usageConstraints: selectedNode.usageConstraints }),
+    parts: ["input", "output", "errors"] as const,
+    fullAvailable: true as const,
+  };
+  const commandSummary = { kind: "command" as const, ...summary };
+  if (part === undefined) {
+    return { ok: true, document: commandSummary };
+  }
+
+  const manifestCommand = contract.manifest.commands[
+    selectedNode.id
+  ] as CliSchemaCommandManifest;
+  const commandWire = contract.manifest.wire[
+    selectedNode.id
+  ] as CliSchemaCommandWire;
+  const input = { schema: manifestCommand.input.inputSchema };
+  const output = cliSchemaOutput(manifestCommand, commandWire);
+  const errors = {
+    usage: cliSchemaUsageFailure(
+      contract.manifest.usageFailure,
+      selectedNode.id,
+    ),
+    variants: Object.fromEntries(
+      Object.entries(manifestCommand.failures).map(([name, failure]) => {
+        const schema = commandWire.failure?.[name];
+        if (schema === undefined) {
+          throw new Error(`CLI failure ${name} has no compiled wire contract.`);
+        }
+        return [
+          name,
+          {
+            description: failure.description,
+            exitCode: failure.exitCode,
+            schema,
+          },
+        ];
+      }),
+    ),
+  };
+  const contractDocument =
+    part === "full"
+      ? { summary: commandSummary, input, output, errors }
+      : {
+          [part]:
+            part === "input" ? input : part === "output" ? output : errors,
+        };
   return {
-    grammar: {
-      ...contract.grammar,
-      nodes: contract.grammar.nodes.filter((node) => includedIds.has(node.id)),
-    },
-    manifest: {
-      ...contract.manifest,
-      commands: Object.fromEntries(
-        Object.entries(contract.manifest.commands).filter(([id]) =>
-          includedIds.has(id),
-        ),
-      ),
-      wire: Object.fromEntries(
-        Object.entries(contract.manifest.wire).filter(([id]) =>
-          includedIds.has(id),
-        ),
-      ),
+    ok: true,
+    document: {
+      kind: "contract",
+      root: rootName,
+      path,
+      part,
+      contract: contractDocument,
     },
   };
+}
+
+function cliSchemaCommandLine(root: string, path: readonly string[]): string {
+  return [root, ...path].join(" ");
+}
+
+function cliSchemaFieldText(
+  field: z.infer<typeof cliSchemaFieldSchema>,
+): string {
+  const spelling =
+    field.longOption ??
+    (field.kind === "positional" || field.kind === "variadicPositional"
+      ? `<${field.key}>`
+      : field.key);
+  const aliases = field.shortAlias === undefined ? "" : `, ${field.shortAlias}`;
+  const requirement = field.required ? "Required" : "Optional";
+  const defaultValue =
+    field.default === undefined
+      ? ""
+      : `; default ${JSON.stringify(field.default)}`;
+  const choices =
+    field.choices === undefined
+      ? ""
+      : `; allowed values ${field.choices.join(", ")}`;
+  return `  ${spelling}${aliases} (${requirement}) — ${field.description}${defaultValue}${choices}`;
+}
+
+function renderCliSchemaText(
+  document: CliSchemaDocument,
+): ReturnType<typeof text.lines> {
+  if (document.kind === "directory") {
+    return text.lines([
+      `Local CLI command catalog: ${document.root}`,
+      ...document.commands.map(
+        ({ path, kind, description }) =>
+          `  [${kind === "group" ? "Command group" : "Command"}] ${path.join(" ")} — ${description}`,
+      ),
+    ]);
+  }
+  if (document.kind === "group") {
+    return text.lines([
+      `Command group: ${cliSchemaCommandLine(document.root, document.path)}`,
+      `Description: ${document.description}`,
+      `Usage: ${document.usage}`,
+      "Commands:",
+      ...document.commands.map(
+        ({ path, kind, description }) =>
+          `  [${kind === "group" ? "Command group" : "Command"}] ${path.join(" ")} — ${description}`,
+      ),
+      ...(document.helpSupplement ?? []),
+    ]);
+  }
+  if (document.kind === "command") {
+    return text.lines([
+      `Command: ${cliSchemaCommandLine(document.root, document.path)}`,
+      `Description: ${document.description}`,
+      `Usage: ${document.usage}`,
+      "Parameters and options:",
+      ...document.fields.map(cliSchemaFieldText),
+      "Global controls:",
+      `  ${document.controls.help.longOption}${document.controls.help.shortAlias === undefined ? "" : `, ${document.controls.help.shortAlias}`} — show help`,
+      ...(document.controls.version === undefined
+        ? []
+        : [
+            `  ${document.controls.version.longOption}${document.controls.version.shortAlias === undefined ? "" : `, ${document.controls.version.shortAlias}`} — show version`,
+          ]),
+      ...(document.controls.output.selector === undefined
+        ? []
+        : [
+            `  ${document.controls.output.selector} <${document.controls.output.formats.join("|")}> — default ${document.controls.output.defaultFormat}`,
+          ]),
+      ...(document.usageConstraints ?? []).map(
+        (constraint) => `  Input constraint: ${JSON.stringify(constraint)}`,
+      ),
+      `Available contract parts: ${document.parts.join(", ")}; use --part full to read the complete contract.`,
+      ...(document.helpSupplement ?? []),
+    ]);
+  }
+  const prettyContract = JSON.stringify(document.contract, null, 2);
+  return text.lines([
+    `CLI contract: ${cliSchemaCommandLine(document.root, document.path)}`,
+    `Contract part: ${document.part}`,
+    ...prettyContract.split("\n"),
+  ]);
 }
 
 const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
@@ -437,13 +824,163 @@ const errorOutputSchema = z.union([
     })
     .strict(),
 ]);
-const cliSchemaDocumentOutputSchema = z
-  .object({ grammar: z.unknown(), manifest: z.unknown() })
+const cliSchemaPartSchema = z.enum(["input", "output", "errors", "full"]);
+const cliSchemaDirectoryEntrySchema = z
+  .object({
+    path: z.array(z.string()).readonly(),
+    kind: z.enum(["group", "command"]),
+    description: z.string(),
+    aliases: z.array(z.string()).readonly().optional(),
+  })
   .strict();
+const cliSchemaFieldSchema = z
+  .object({
+    kind: z.enum([
+      "flag",
+      "positional",
+      "repeatableOption",
+      "variadicPositional",
+      "valueOption",
+    ]),
+    key: z.string(),
+    description: z.string(),
+    required: z.boolean(),
+    default: z.unknown().optional(),
+    choices: z.array(z.string()).readonly().optional(),
+    longOption: z.string().optional(),
+    shortAlias: z.string().optional(),
+    negatedLongOption: z.string().optional(),
+  })
+  .strict();
+const cliSchemaControlsSchema = z
+  .object({
+    help: z
+      .object({
+        longOption: z.string(),
+        shortAlias: z.string().optional(),
+        headings: z.unknown().optional(),
+        wording: z.unknown().optional(),
+      })
+      .strict(),
+    version: z
+      .object({
+        longOption: z.string(),
+        shortAlias: z.string().optional(),
+        value: z.string(),
+        description: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    output: z
+      .object({
+        defaultFormat: z.enum(["structured", "text"]),
+        formats: z.array(z.enum(["structured", "text"])).readonly(),
+        selector: z.string().optional(),
+        compatibilityFlags: z
+          .record(z.string(), z.enum(["structured", "text"]))
+          .optional(),
+      })
+      .strict(),
+  })
+  .strict();
+const cliSchemaCommandSummarySchema = z
+  .object({
+    kind: z.literal("command"),
+    root: z.string(),
+    path: z.array(z.string()).readonly(),
+    description: z.string(),
+    helpSupplement: z.array(z.string()).readonly().optional(),
+    usage: z.string(),
+    fields: z.array(cliSchemaFieldSchema).readonly(),
+    controls: cliSchemaControlsSchema,
+    usageConstraints: z.array(z.unknown()).readonly().optional(),
+    parts: z.array(z.enum(["input", "output", "errors"])).readonly(),
+    fullAvailable: z.literal(true),
+  })
+  .strict();
+const cliSchemaOutputVariantSchema = z
+  .object({
+    description: z.string(),
+    exitCode: z.number(),
+    schema: z.unknown(),
+  })
+  .strict();
+const cliSchemaOutputContractSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("completion"), schema: z.unknown() }).strict(),
+  z
+    .object({
+      kind: z.literal("data"),
+      variants: z.record(z.string(), cliSchemaOutputVariantSchema),
+    })
+    .strict(),
+  z.object({ kind: z.literal("stream"), schema: z.unknown() }).strict(),
+]);
+const cliSchemaErrorsContractSchema = z
+  .object({
+    usage: z.object({ exitCode: z.number(), schema: z.unknown() }).strict(),
+    variants: z.record(z.string(), cliSchemaOutputVariantSchema),
+  })
+  .strict();
+/**
+ * Structured response for offline command discovery. The directory and summaries
+ * omit command data schemas; callers request input, output, or errors separately.
+ * Each selected JSON Schema is returned as a complete subtree, including its local
+ * definitions. A pathless `full` request returns the complete declaration; a
+ * command-scoped `full` request returns that command's summary and all three parts.
+ */
+const cliSchemaDocumentOutputSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("directory"),
+      root: z.string(),
+      commands: z.array(cliSchemaDirectoryEntrySchema).readonly(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("group"),
+      root: z.string(),
+      path: z.array(z.string()).readonly(),
+      description: z.string(),
+      helpSupplement: z.array(z.string()).readonly().optional(),
+      usage: z.string(),
+      commands: z.array(cliSchemaDirectoryEntrySchema).readonly(),
+    })
+    .strict(),
+  cliSchemaCommandSummarySchema,
+  z
+    .object({
+      kind: z.literal("contract"),
+      root: z.string(),
+      path: z.array(z.string()).readonly(),
+      part: cliSchemaPartSchema,
+      contract: z
+        .object({
+          grammar: z.unknown().optional(),
+          manifest: z.unknown().optional(),
+          summary: cliSchemaCommandSummarySchema.optional(),
+          input: z.object({ schema: z.unknown() }).strict().optional(),
+          output: cliSchemaOutputContractSchema.optional(),
+          errors: cliSchemaErrorsContractSchema.optional(),
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+/** Path errors preserve the exact command tokens and provide a runnable correction. */
 const cliSchemaPathFailureSchema = z
   .object({
     message: z.string(),
-    path: z.array(z.string()),
+    path: z.array(z.string()).readonly(),
+    suggestion: z.string(),
+  })
+  .strict();
+const cliSchemaSelectionFailureSchema = z
+  .object({
+    message: z.string(),
+    path: z.array(z.string()).readonly(),
+    part: cliSchemaPartSchema.optional(),
+    suggestion: z.string(),
   })
   .strict();
 type CliApiError = z.infer<typeof errorOutputSchema>;
@@ -530,7 +1067,13 @@ function createCliContract(identity: CliCommandIdentity) {
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
   let getCliSchemaDocument: (
     commandPath: readonly string[],
-  ) => CliSchemaDocument | undefined = () => undefined;
+    part?: CliSchemaPart,
+  ) => CliSchemaLookup = () => ({
+    ok: false,
+    reason: "unknownPath",
+    message: "The local CLI command contract is not ready.",
+    suggestion: "Try again later.",
+  });
   const failures = {
     apiError: {
       description: "请求未能完成",
@@ -611,45 +1154,82 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "cli",
         name: "schema",
-        description: "离线查看本地 CLI 命令契约。",
+        description: "Browse the local CLI command contract offline.",
         helpSupplement: text.lines([
-          "省略命令路径可列出完整目录；指定路径可查看对应语法、输入输出和错误契约。此命令不连接目标服务。",
+          "Examples:",
+          `  ${identity.commandName} schema`,
+          `  ${identity.commandName} schema archive search`,
+          `  ${identity.commandName} schema archive search --part input`,
+          `  ${identity.commandName} schema archive search --part full`,
+          `  ${identity.commandName} schema --part full`,
+          "Omit the path to list commands. Select a command to see its usage summary, or use --part input, output, or errors; --part full returns every part.",
+          `This is the local CLI contract. Discover service capabilities with ${identity.commandName} service info and deployed adapter actions with ${identity.commandName} bin actions <id>.`,
         ]),
         fields: {
           commandPath: {
             kind: "variadicPositional",
-            description: "可选命令路径，例如 bin get",
+            description: "Optional command path as separate CLI tokens",
+          },
+          part: {
+            kind: "valueOption",
+            longOption: "--part",
+            description:
+              "Read one contract part; full explicitly includes every part",
           },
         },
-        input: z.object({ commandPath: z.array(z.string()).default([]) }),
+        input: z.object({
+          commandPath: z.array(z.string()).default([]),
+          part: cliSchemaPartSchema.optional(),
+        }),
         success: {
           kind: "data",
           variants: {
             document: {
-              description: "CLI 原生命令语法和数据契约",
+              description:
+                "Local command directory, summary, or selected contract parts",
               exitCode: 0,
               schema: cliSchemaDocumentOutputSchema,
-              text: (document) => outputText("CLI 命令契约", document),
+              text: renderCliSchemaText,
             },
           },
         },
         failures: {
           unknownPath: {
-            description: "命令路径不存在",
+            description: "Command path does not exist",
             exitCode: 2,
             schema: cliSchemaPathFailureSchema,
-            text: ({ message }) => text.line("命令路径无效：" + message),
+            text: ({ message, suggestion }) =>
+              text.lines(["Invalid command path: " + message, suggestion]),
+          },
+          invalidSelection: {
+            description: "Contract part does not apply to the selected path",
+            exitCode: 2,
+            schema: cliSchemaSelectionFailureSchema,
+            text: ({ message, suggestion }) =>
+              text.lines([
+                "Invalid contract selection: " + message,
+                suggestion,
+              ]),
           },
         },
         async handler({ input, outcome }) {
-          const document = getCliSchemaDocument(input.commandPath);
-          if (document === undefined) {
+          const result = getCliSchemaDocument(input.commandPath, input.part);
+          if (!result.ok) {
+            if (result.reason === "invalidSelection") {
+              return outcome.failure.invalidSelection({
+                message: result.message,
+                path: input.commandPath,
+                ...(input.part === undefined ? {} : { part: input.part }),
+                suggestion: result.suggestion,
+              });
+            }
             return outcome.failure.unknownPath({
-              message: "不存在对应的本地 CLI 命令。",
+              message: result.message,
               path: input.commandPath,
+              suggestion: result.suggestion,
             });
           }
-          return outcome.data.document(document);
+          return outcome.data.document(result.document);
         },
       }),
       ...command("serviceInfo")({
@@ -2184,8 +2764,8 @@ function createCliContract(identity: CliCommandIdentity) {
       }),
     } as const),
   });
-  getCliSchemaDocument = (commandPath) =>
-    cliSchemaDocument(contract, commandPath);
+  getCliSchemaDocument = (commandPath, part) =>
+    cliSchemaDocument(contract, commandPath, part);
   return contract;
 }
 
