@@ -425,11 +425,11 @@ function pageQuery(
     input.timeWindow === undefined
       ? sql`'{}'::jsonb`
       : sql`jsonb_build_object(
-        'timeMatch', CASE classified.time_status
+        'timeMatch', CASE selected_views.time_status
           WHEN 'certain' THEN jsonb_build_object('status', 'certain')
           WHEN 'undetermined' THEN jsonb_build_object(
             'status', 'undetermined',
-            'reason', classified.time_reason
+            'reason', selected_views.time_reason
           )
           ELSE '{}'::jsonb
         END
