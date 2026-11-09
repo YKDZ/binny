@@ -4,16 +4,39 @@ async function checkPublicBinContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
   const binId = "rss-main";
 
+  const listed = await client.bins.$get();
+  if (listed.status === 200) {
+    const entries = (await listed.json()).bins;
+    const entry = entries[0];
+    if (entry !== undefined) {
+      void entry.id;
+      void entry.sourceAdapterId;
+      void entry.status;
+      void entry.execution.status;
+      // @ts-expect-error Bin summaries do not inline adapter schemas.
+      void entry.sourceAdapter;
+    }
+  }
+
   // @ts-expect-error bin 只能由运行器首次心跳自注册。
   void client.bins.$post({ json: { id: binId } });
 
   const lookup = await client.bins[":binId"].$get({ param: { binId } });
   if (lookup.status === 200) {
     const bin = await lookup.json();
-    void bin.sourceAdapter.actions.collect.output;
+    void bin.sourceAdapterId;
     void bin.execution.status;
+    void bin.sourceStateSnapshot.freshness;
+    if (bin.execution.status === "online") {
+      void bin.execution.environment.kind;
+      void bin.execution.environment.browser.power.status;
+    }
     // @ts-expect-error 执行器状态使用公开的判别联合。
     void bin.execution.isOnline;
+    // @ts-expect-error bin detail does not inline the adapter declaration.
+    void bin.sourceAdapter;
+    // @ts-expect-error Bin detail does not inline the source-state payload.
+    void bin.sourceStateSnapshot.sync;
     // @ts-expect-error bin 标识类型为字符串。
     const invalidBinId: number = bin.id;
     void invalidBinId;
@@ -30,13 +53,13 @@ async function checkPublicBinContract(): Promise<void> {
     const collectAction = actions.actions.collect;
     if (collectAction !== undefined) {
       const description: string = collectAction.description;
-      const report = collectAction.report;
       void description;
-      void report;
+      // @ts-expect-error The action list does not inline action schemas.
+      void collectAction.params;
     }
-    // @ts-expect-error 动作发现不返回配置中的环境声明。
+    // @ts-expect-error Action discovery does not return environment declarations.
     void actions.environment;
-    // @ts-expect-error 动作发现不返回实例执行状态。
+    // @ts-expect-error Action discovery does not return bin runtime status.
     void actions.execution;
   } else if (actionTable.status === 400 || actionTable.status === 404) {
     void (await actionTable.json()).error.code;
@@ -49,14 +72,36 @@ async function checkPublicBinContract(): Promise<void> {
   if (selectedAction.status === 200) {
     const selected = await selectedAction.json();
     const collectAction = selected.actions.collect;
-    if (collectAction !== undefined) {
+    if (
+      collectAction !== undefined &&
+      "params" in collectAction &&
+      "output" in collectAction
+    ) {
       void collectAction.params;
       void collectAction.output;
-      void collectAction.report;
+      if ("report" in collectAction) void collectAction.report;
     }
   } else if (selectedAction.status === 400 || selectedAction.status === 404) {
     void (await selectedAction.json()).error.code;
   }
+
+  const configSchema = await client.bins[":binId"]["config-schema"].$get({
+    param: { binId },
+  });
+  if (configSchema.status === 200) {
+    const declaration = await configSchema.json();
+    const adapterId: string = declaration.sourceAdapterId;
+    const schemaType = declaration.configSchema.type;
+    void adapterId;
+    void schemaType;
+  } else if (configSchema.status === 400 || configSchema.status === 404) {
+    void (await configSchema.json()).error.code;
+  }
+
+  void client.bins[":binId"]["config-schema"].$get({
+    // @ts-expect-error Config schema discovery requires the bin identifier.
+    param: {},
+  });
 
   void client.bins[":binId"].actions.$get({
     param: { binId },

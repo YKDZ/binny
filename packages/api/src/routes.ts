@@ -1,7 +1,10 @@
 import {
   binConfigurationSchema,
+  binConfigSchemaDiscoverySchema,
+  binDetailsSchema,
   binErrorSchema,
   binIdSchema,
+  binListSchema,
   binUpdateInputSchema,
   type HumanSessionOperations,
   manualRunClaimInputSchema,
@@ -28,6 +31,7 @@ import {
   type BinConfiguration,
   type BinConfigurationOperations,
   sourceAdapterActionDiscoverySchema,
+  sourceAdapterActionListSchema,
   sourceAdapterActionNameSchema,
   type ManualRunOperations,
   type ManualRunListOperations,
@@ -91,6 +95,53 @@ function makeApp(operations: ApiOperations, productVersion: string) {
     return { ...configuration, execution: result.value };
   }
 
+  function summarizeBin(configuration: BinConfiguration) {
+    return binDetailsSchema.parse({
+      id: configuration.id,
+      sourceAdapterId: configuration.sourceAdapter.id,
+      identityId: configuration.identityId,
+      config: configuration.config,
+      browserIdleTimeoutSeconds: configuration.browserIdleTimeoutSeconds,
+      status: configuration.status,
+      execution:
+        configuration.execution.status === "offline"
+          ? {
+              status: configuration.execution.status,
+              reason: configuration.execution.reason,
+              ...(configuration.execution.runtimeId === undefined
+                ? {}
+                : { runtimeId: configuration.execution.runtimeId }),
+              ...(configuration.execution.lastHeartbeatAt === undefined
+                ? {}
+                : {
+                    lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                  }),
+            }
+          : configuration.execution.status === "incompatible"
+            ? {
+                status: configuration.execution.status,
+                runtimeId: configuration.execution.runtimeId,
+                lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                error: { code: configuration.execution.error.code },
+              }
+            : {
+                status: configuration.execution.status,
+                runtimeId: configuration.execution.runtimeId,
+                lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                environment: configuration.execution.environment,
+              },
+      sourceStateSnapshot:
+        configuration.execution.sourceStateSnapshot.freshness === "unknown"
+          ? { freshness: "unknown" }
+          : {
+              freshness: configuration.execution.sourceStateSnapshot.freshness,
+              updatedAt: configuration.execution.sourceStateSnapshot.updatedAt,
+            },
+      createdAt: configuration.createdAt,
+      updatedAt: configuration.updatedAt,
+    });
+  }
+
   return new Hono()
     .onError((error, c) => {
       if (
@@ -117,7 +168,18 @@ function makeApp(operations: ApiOperations, productVersion: string) {
     .get("/meta/query", (c) => c.json(archiveQueryContract, 200))
     .get("/bins", async (c) => {
       const bins = await operations.bins.listBins();
-      return c.json({ bins: await Promise.all(bins.map(withExecution)) }, 200);
+      const listed = await Promise.all(
+        bins.map(async (bin) => {
+          const configuration = await withExecution(bin);
+          return {
+            id: configuration.id,
+            sourceAdapterId: configuration.sourceAdapter.id,
+            status: configuration.status,
+            execution: { status: configuration.execution.status },
+          };
+        }),
+      );
+      return c.json(binListSchema.parse({ bins: listed }), 200);
     })
     .get(
       "/bins/:binId",
@@ -129,7 +191,27 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       async (c) => {
         const result = await operations.bins.getBin(c.req.valid("param").binId);
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(await withExecution(result.value), 200);
+        return c.json(summarizeBin(await withExecution(result.value)), 200);
+      },
+    )
+    .get(
+      "/bins/:binId/config-schema",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.bins.getBin(c.req.valid("param").binId);
+        if (!result.ok) return c.json({ error: result.error }, 404);
+        return c.json(
+          binConfigSchemaDiscoverySchema.parse({
+            sourceAdapterId: result.value.sourceAdapter.id,
+            sourceAdapterVersion: result.value.sourceAdapter.version,
+            configSchema: result.value.sourceAdapter.configSchema,
+          }),
+          200,
+        );
       },
     )
     .get(
@@ -155,7 +237,14 @@ function makeApp(operations: ApiOperations, productVersion: string) {
         const actions = result.value.sourceAdapter.actions;
         if (action === undefined) {
           return c.json(
-            sourceAdapterActionDiscoverySchema.parse({ actions }),
+            sourceAdapterActionListSchema.parse({
+              actions: Object.fromEntries(
+                Object.entries(actions).map(([name, declaration]) => [
+                  name,
+                  { description: declaration.description },
+                ]),
+              ),
+            }),
             200,
           );
         }
@@ -559,7 +648,7 @@ function makeApp(operations: ApiOperations, productVersion: string) {
               return c.json({ error: result.error }, 409);
           }
         }
-        return c.json(await withExecution(result.value), 200);
+        return c.json(summarizeBin(await withExecution(result.value)), 200);
       },
     )
     .post(
@@ -575,7 +664,7 @@ function makeApp(operations: ApiOperations, productVersion: string) {
           "disabled",
         );
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(await withExecution(result.value), 200);
+        return c.json(summarizeBin(await withExecution(result.value)), 200);
       },
     )
     .post(
@@ -591,7 +680,7 @@ function makeApp(operations: ApiOperations, productVersion: string) {
           "active",
         );
         if (!result.ok) return c.json({ error: result.error }, 404);
-        return c.json(await withExecution(result.value), 200);
+        return c.json(summarizeBin(await withExecution(result.value)), 200);
       },
     )
     .delete(
