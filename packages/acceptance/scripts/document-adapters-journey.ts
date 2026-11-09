@@ -14,7 +14,7 @@ type DocumentSourceControl = {
   readonly setDocumentVersion: (version: 1 | 2) => Promise<void>;
 };
 
-type DocumentAdapterId = "deepseek" | "qwen" | "kimi" | "minimax";
+type DocumentAdapterId = "deepseek" | "qwen" | "kimi" | "minimax" | "qoder";
 
 type DocumentAdapterDefinition = {
   readonly adapterId: DocumentAdapterId;
@@ -175,6 +175,19 @@ const adapters: readonly DocumentAdapterDefinition[] = [
       ],
     }),
     params: { sourceIds: ["e2e-international"] },
+  },
+  {
+    adapterId: "qoder",
+    binId: "binny-document-qoder",
+    identityId: "binny-document-qoder-identity",
+    runtimeService: "runtime-document-qoder",
+    sourceAdapterId: "qoder",
+    config: (origin) => ({
+      blogListUrl: origin + "/blog",
+      cnDocsIndexUrl: origin + "/qoder/cn/llms.txt",
+      intChangelogIndexUrl: origin + "/qoder/international/llms.txt",
+    }),
+    params: {},
   },
 ];
 
@@ -358,6 +371,124 @@ function expectedStates(
           },
         },
       ];
+    case "qoder":
+      return [
+        {
+          namespace: "qoder:cn-docs",
+          key: "qoder/cn/events/model-launch",
+          title: () => "Qoder Model Launch 活动",
+          titleChanges: false,
+          publishedAt: () => null,
+          modifiedAt: () => null,
+          bodyMarker: "Qoder CN event body",
+          verifyExtensions(extensions, version) {
+            assert.equal(extensions.region, "cn");
+            assert.equal(extensions.language, "zh-CN");
+            assert.equal(extensions.category, "event");
+            assert.equal(extensions.section, "活动");
+            assert.equal(
+              extensions.effectiveDate,
+              version === 1
+                ? "2026年11月8日至2026年11月9日"
+                : "2026年11月9日至2026年11月10日",
+            );
+          },
+        },
+        {
+          namespace: "qoder:cn-docs",
+          key: "qoder/cn/announcements/feature-rollout",
+          title: () => "Qoder Feature Announcement",
+          titleChanges: false,
+          publishedAt: () => null,
+          modifiedAt: () => null,
+          bodyMarker: "Qoder CN announcement body",
+          verifyExtensions(extensions) {
+            assert.equal(extensions.region, "cn");
+            assert.equal(extensions.language, "zh-CN");
+            assert.equal(extensions.category, "announcement");
+            assert.equal(extensions.section, "公告");
+          },
+        },
+        {
+          namespace: "qoder:cn:changelog",
+          key: "qoder/cn/changelogs/cli",
+          title: () => "Qoder CN CLI 更新日志",
+          titleChanges: false,
+          publishedAt: () => null,
+          modifiedAt: () => null,
+          bodyMarker: "Qoder CN changelog body",
+          verifyExtensions(extensions, version) {
+            assert.equal(extensions.region, "cn");
+            assert.equal(extensions.language, "zh-CN");
+            assert.equal(extensions.category, "changelog");
+            assert.equal(
+              extensions.latestUpdateDate,
+              version === 1 ? "2026-11-08" : "2026-11-09",
+            );
+            assert.equal(extensions.latestUpdateDatePrecision, "day");
+            assert.equal(
+              extensions.latestVersion,
+              version === 1 ? "1.4.0" : "1.4.1",
+            );
+          },
+        },
+        {
+          namespace: "qoder:international:changelog",
+          key: "qoder/international/changelogs/product",
+          title: () => "Qoder International Release Notes",
+          titleChanges: false,
+          publishedAt: () => null,
+          modifiedAt: () => null,
+          bodyMarker: "Qoder international changelog body",
+          verifyExtensions(extensions, version) {
+            assert.equal(extensions.region, "international");
+            assert.equal(extensions.language, "en");
+            assert.equal(extensions.category, "changelog");
+            assert.equal(
+              extensions.latestUpdateDate,
+              version === 1 ? "2026-11-08" : "2026-11-09",
+            );
+            assert.equal(extensions.latestUpdateDatePrecision, "day");
+            assert.equal(
+              extensions.latestVersion,
+              version === 1 ? "2.8.0" : "2.8.1",
+            );
+          },
+        },
+        {
+          namespace: "qoder:int-blog",
+          key: "qoder-source-adapter-e2e",
+          title: (version) => "Qoder Blog Release " + String(version),
+          titleChanges: true,
+          publishedAt: () => ({
+            precision: "instant",
+            value: "2026-11-08T12:30:00+08:00",
+          }),
+          modifiedAt: (version) => ({
+            precision: "instant",
+            value:
+              version === 1
+                ? "2026-11-09T09:15:00-04:00"
+                : "2026-11-10T09:15:00-04:00",
+          }),
+          bodyMarker: "Qoder international blog article body",
+          verifyExtensions(extensions, version) {
+            assert.equal(extensions.region, "international");
+            assert.equal(extensions.language, "en");
+            assert.equal(extensions.category, "blog");
+            assert.equal(
+              extensions.canonicalUrl,
+              "http://rss-e2e-source:8081/blog/qoder-source-adapter-e2e",
+            );
+            assert.deepEqual(extensions.authors, ["Qoder Engineering"]);
+            assert.deepEqual(extensions.categories, ["Engineering", "Release"]);
+            assert.equal(
+              extensions.summary,
+              "Qoder blog summary version " + String(version) + ".",
+            );
+          },
+        },
+      ];
   }
   assert.fail("Unsupported document adapter: " + String(adapterId) + ".");
 }
@@ -482,6 +613,50 @@ async function readRevision(
   );
 }
 
+async function assertQoderRejectsUndeclaredExtension(
+  baseUrl: string,
+  sourceAdapterVersion: string,
+): Promise<void> {
+  const response = await fetch(baseUrl + "/archives", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "qoder-e2e-undeclared-extension",
+      binId: "binny-document-qoder",
+      sourceAdapterVersion,
+      relations: [],
+      items: [
+        {
+          sourceKey: { namespace: "qoder:e2e", key: "invalid-extension" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            region: "international",
+            language: "en",
+            undeclaredFact: "must be rejected by the registered Qoder schema",
+          },
+          body: { text: "Invalid extension probe." },
+          capture: {
+            scope: { action: "qoder-extension-validation" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    }),
+  });
+  assert.equal(response.status, 400);
+  const result = (await response.json()) as {
+    readonly error?: {
+      readonly code?: string;
+      readonly path?: readonly (string | number)[];
+    };
+  };
+  assert.equal(result.error?.code, "invalid_input");
+  assert.ok(result.error?.path?.includes("undeclaredFact"));
+}
+
 function assertState(
   state: ArchiveState,
   expected: ExpectedState,
@@ -537,8 +712,16 @@ export async function runDocumentAdaptersJourney(options: {
   ) => Promise<RegisteredBin>;
   readonly waitForRuntime: (baseUrl: string, binId: string) => Promise<void>;
   readonly waitForRuntimeHealth: (service: string) => Promise<void>;
+  readonly adapterIds?: readonly DocumentAdapterId[];
 }): Promise<void> {
-  for (const adapter of adapters) {
+  const selectedAdapters =
+    options.adapterIds === undefined
+      ? adapters
+      : adapters.filter((adapter) =>
+          options.adapterIds!.includes(adapter.adapterId),
+        );
+
+  for (const adapter of selectedAdapters) {
     await options.waitForRuntimeHealth(adapter.runtimeService);
     const registered = await options.fetchRegisteredBin(
       options.baseUrl,
@@ -569,7 +752,21 @@ export async function runDocumentAdaptersJourney(options: {
     await options.waitForRuntime(options.baseUrl, adapter.binId);
   }
 
-  for (const adapter of adapters) {
+  const qoder = selectedAdapters.find(
+    (adapter) => adapter.adapterId === "qoder",
+  );
+  if (qoder !== undefined) {
+    const registered = await options.fetchRegisteredBin(
+      options.baseUrl,
+      qoder.binId,
+    );
+    await assertQoderRejectsUndeclaredExtension(
+      options.baseUrl,
+      registered.sourceAdapterVersion,
+    );
+  }
+
+  for (const adapter of selectedAdapters) {
     const expected = expectedStates(adapter.adapterId);
     await options.source.setDocumentVersion(1);
 
@@ -742,16 +939,31 @@ export async function runDocumentAdaptersJourney(options: {
   const requestPaths = new Set(
     (await options.source.requests()).map(({ path }) => path),
   );
-  for (const path of [
-    "/deepseek/updates.md",
-    "/deepseek/news/news261108.md",
-    "/qwen/api/v2/article/retrieval",
-    "/kimi/changelog.md",
-    "/kimi/blog",
-    "/kimi/blog/research-update",
-    "/minimax/models.md",
-    "/minimax/news/minimax-m4",
-  ]) {
+  const requiredPaths: Readonly<Record<DocumentAdapterId, readonly string[]>> =
+    {
+      deepseek: ["/deepseek/updates.md", "/deepseek/news/news261108.md"],
+      qwen: ["/qwen/api/v2/article/retrieval"],
+      kimi: ["/kimi/changelog.md", "/kimi/blog", "/kimi/blog/research-update"],
+      minimax: ["/minimax/models.md", "/minimax/news/minimax-m4"],
+      qoder: [
+        "/qoder/cn/llms.txt",
+        "/qoder/cn/events/model-launch.md",
+        "/qoder/cn/announcements/feature-rollout.md",
+        "/qoder/cn/changelogs/cli.md",
+        "/qoder/international/llms.txt",
+        "/qoder/international/changelogs/product.md",
+        "/blog",
+        "/blog/qoder-source-adapter-e2e",
+      ],
+    };
+  for (const path of selectedAdapters.flatMap(
+    (adapter) => requiredPaths[adapter.adapterId],
+  )) {
     assert.ok(requestPaths.has(path), "Fixture did not serve " + path + ".");
   }
+  process.stdout.write(
+    "Document adapter SDK/runner/HTTP/PostgreSQL and installed CLI history acceptance passed: " +
+      selectedAdapters.map((adapter) => adapter.adapterId).join(", ") +
+      ".\n",
+  );
 }

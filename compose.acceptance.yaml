@@ -462,6 +462,26 @@ services:
       BINNY_RUNTIME_ENVIRONMENT: lightweight
     restart: unless-stopped
 
+  runtime-document-qoder:
+    image: ${BINNY_DOCUMENT_QODER_IMAGE:-binny/document-qoder:local}
+    profiles: [binny-documents]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-qoder"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-document-qoder:8080
+      BINNY_BIN_ID: binny-document-qoder
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
   browser-one:
     image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
     profiles: [binny-browser]
