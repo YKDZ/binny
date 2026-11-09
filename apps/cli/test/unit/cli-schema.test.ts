@@ -20,8 +20,8 @@ async function run(args: readonly string[]) {
   return { exitCode, output, requestCount };
 }
 
-void describe("offline CLI command contracts", () => {
-  void it("lists command groups and commands without expanding their schemas", async () => {
+void describe("offline CLI command contract", () => {
+  void it("lists command groups and commands by path without expanding their schemas", async () => {
     const directory = await run(["schema"]);
 
     assert.equal(directory.exitCode, 0);
@@ -258,22 +258,37 @@ void describe("offline CLI command contracts", () => {
     );
   });
 
-  void it("points general help to schema, action, configuration, and archive search contracts", async () => {
+  void it("points help to schema, action, configuration, and query discovery", async () => {
     const rootHelp = await run(["--help"]);
     assert.equal(rootHelp.exitCode, 0);
     assert.match(rootHelp.output, /binny schema/u);
 
     const configHelp = await run(["bin", "update", "--help"]);
     assert.equal(configHelp.exitCode, 0);
-    assert.match(configHelp.output, /bin get/u);
+    assert.match(configHelp.output, /bin config-schema/u);
+
+    const binGroupHelp = await run(["bin", "--help"]);
+    assert.equal(binGroupHelp.exitCode, 0);
+    assert.match(binGroupHelp.output, /binny bin list/u);
+    assert.match(binGroupHelp.output, /binny bin get rss-main/u);
+    assert.match(binGroupHelp.output, /binny bin config-schema rss-main/u);
+    assert.match(binGroupHelp.output, /binny bin actions rss-main collect/u);
+
+    const configSchemaHelp = await run(["bin", "config-schema", "--help"]);
+    assert.equal(configSchemaHelp.exitCode, 0);
+    assert.match(configSchemaHelp.output, /does not contact the source/u);
 
     const actionHelp = await run(["run", "trigger", "--help"]);
     assert.equal(actionHelp.exitCode, 0);
     assert.match(actionHelp.output, /bin actions/u);
+    assert.match(actionHelp.output, /network requests/u);
+    assert.match(actionHelp.output, /archived content/u);
 
     const actionsHelp = await run(["bin", "actions", "--help"]);
     assert.equal(actionsHelp.exitCode, 0);
     assert.match(actionsHelp.output, /bin actions <id> \[<action>\]/u);
+    assert.match(actionsHelp.output, /saved declarations only/u);
+    assert.match(actionsHelp.output, /may access their source/u);
 
     const runGroupHelp = await run(["run", "--help"]);
     assert.equal(runGroupHelp.exitCode, 0);
@@ -287,7 +302,7 @@ void describe("offline CLI command contracts", () => {
     assert.equal(scheduleHelp.exitCode, 0);
     assert.match(
       scheduleHelp.output,
-      /已声明的信源适配器动作；可用动作见 bin actions/u,
+      /Declared action name; discover actions with bin actions/u,
     );
 
     const archiveHelp = await run(["archive", "search", "--help"]);
@@ -354,7 +369,7 @@ void describe("offline CLI command contracts", () => {
     assert.equal(invalidPolicy.requestCount, 0);
   });
 
-  void it("shows browsable text summaries and actionable command path errors", async () => {
+  void it("supports argv paths, text summaries, and actionable command path errors", async () => {
     const commandHelp = await run(["schema", "--help"]);
     assert.equal(commandHelp.exitCode, 0);
     assert.doesNotMatch(commandHelp.output, /--url/u);

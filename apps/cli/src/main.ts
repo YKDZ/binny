@@ -27,8 +27,11 @@ import {
   serviceCapabilities,
   serviceMetadataSchema,
   archiveTimelinePageSchema,
-  binConfigurationSchema,
+  binConfigSchemaDiscoverySchema,
+  binDetailsSchema,
+  binListSchema,
   sourceAdapterActionDiscoverySchema,
+  sourceAdapterActionListSchema,
   binErrorSchema,
   binIdSchema,
   browserIdleTimeoutSecondsSchema,
@@ -675,6 +678,12 @@ function cliSchemaDocument(
   };
 }
 
+const cliBinDetailsSchema = withPostgresJsonSchemaProjection(binDetailsSchema);
+const cliBinListSchema = withPostgresJsonSchemaProjection(binListSchema);
+const cliBinConfigSchemaDiscoverySchema = withPostgresJsonSchemaProjection(
+  binConfigSchemaDiscoverySchema,
+);
+
 function cliSchemaCommandLine(root: string, path: readonly string[]): string {
   return [root, ...path].join(" ");
 }
@@ -759,12 +768,21 @@ function renderCliSchemaText(
   ]);
 }
 
-const cliBinConfigurationSchema = withPostgresJsonSchemaProjection(
-  binConfigurationSchema,
+const cliBinActionDiscoverySchema = withPostgresJsonSchemaProjection(
+  z.union([sourceAdapterActionListSchema, sourceAdapterActionDiscoverySchema]),
 );
-const cliBinListSchema = withPostgresJsonSchemaProjection(
-  z.object({ bins: z.array(cliBinConfigurationSchema) }),
-);
+type CliActionSummary = z.infer<
+  typeof sourceAdapterActionListSchema
+>["actions"][string];
+type CliActionDeclaration = z.infer<
+  typeof sourceAdapterActionDiscoverySchema
+>["actions"][string];
+
+function isCliActionDeclaration(
+  action: CliActionSummary | CliActionDeclaration,
+): action is CliActionDeclaration {
+  return "params" in action;
+}
 const cliScheduleListSchema = withPostgresJsonSchemaProjection(
   z.object({ schedules: z.array(scheduleSchema).readonly() }),
 );
@@ -1065,6 +1083,66 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  const serviceMetadataText = (
+    metadata: z.infer<typeof serviceMetadataSchema>,
+  ) =>
+    text.lines([
+      `Product: ${metadata.product.name} ${metadata.product.version}`,
+      `HTTP API protocol: ${metadata.protocols.httpApi}`,
+      `Capabilities: ${metadata.capabilities.join(", ")}`,
+      "Contracts:",
+      `  Archive query v${metadata.contracts.archiveQuery.version}: ${metadata.contracts.archiveQuery.path}`,
+    ]);
+  const binListText = ({ bins }: z.infer<typeof cliBinListSchema>) =>
+    bins.length === 0
+      ? text.line("No bins configured.")
+      : text.lines([
+          "ID\tADAPTER\tSTATUS\tRUNTIME",
+          ...bins.map(
+            ({ id, sourceAdapterId, status, execution }) =>
+              `${id}\t${sourceAdapterId}\t${status}\t${execution.status}`,
+          ),
+        ]);
+  const binDetailsText = (bin: z.infer<typeof cliBinDetailsSchema>) =>
+    text.lines([
+      `Bin: ${bin.id}`,
+      `Source adapter: ${bin.sourceAdapterId}`,
+      `Status: ${bin.status}`,
+      `Runtime: ${bin.execution.status}`,
+      `Source state: ${bin.sourceStateSnapshot.freshness}${
+        "updatedAt" in bin.sourceStateSnapshot
+          ? ` (updated ${bin.sourceStateSnapshot.updatedAt})`
+          : ""
+      }`,
+      `Identity: ${bin.identityId}`,
+      "Configuration:",
+      ...JSON.stringify(bin.config, null, 2).split("\n"),
+    ]);
+  const actionDiscoveryText = (
+    discovery: z.infer<typeof cliBinActionDiscoverySchema>,
+  ) => {
+    const entries = Object.entries(discovery.actions);
+    if (entries.length === 0) return text.line("No actions declared.");
+    const lines = entries.flatMap(([name, declaration]) => {
+      if (!isCliActionDeclaration(declaration))
+        return [`- ${name}: ${declaration.description}`];
+      return [
+        `Action: ${name}`,
+        `Description: ${declaration.description}`,
+        "Parameters:",
+        ...JSON.stringify(declaration.params, null, 2).split("\n"),
+        "Output:",
+        ...JSON.stringify(declaration.output, null, 2).split("\n"),
+        ...(declaration.report === undefined
+          ? []
+          : [
+              "Report:",
+              ...JSON.stringify(declaration.report, null, 2).split("\n"),
+            ]),
+      ];
+    });
+    return text.lines([lines[0]!, ...lines.slice(1)]);
+  };
   let getCliSchemaDocument: (
     commandPath: readonly string[],
     part?: CliSchemaPart,
@@ -1118,7 +1196,15 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "bin",
-        description: "管理信源适配器配置与已声明动作。",
+        description: "Inspect and manage configured bins and declared actions.",
+        helpSupplement: text.lines([
+          "Examples:",
+          "  binny bin list",
+          "  binny bin get rss-main",
+          "  binny bin config-schema rss-main",
+          "  binny bin actions rss-main",
+          "  binny bin actions rss-main collect",
+        ]),
       },
       archive: {
         kind: "commandGroup",
@@ -1236,17 +1322,17 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "service",
         name: "info",
-        description: "读取服务元信息及搜索和聚合 JSON Schema。",
+        description: "Read service version, capabilities, and contract links.",
         input: z.object({}),
         fields: {},
         success: {
           kind: "data",
           variants: {
             discovered: {
-              description: "服务元信息与归档查询契约",
+              description: "Service metadata and contract links",
               exitCode: 0,
-              schema: z.unknown(),
-              text: (result) => outputText("服务元信息与归档查询契约", result),
+              schema: serviceMetadataSchema,
+              text: serviceMetadataText,
             },
           },
         },
@@ -1254,19 +1340,7 @@ function createCliContract(identity: CliCommandIdentity) {
         async handler({ dependencies, outcome }) {
           const metadata = await dependencies.getServiceMetadata();
           if (!metadata.ok) return outcome.failure.apiError(metadata.error);
-          const contractResponse = await dependencies
-            .createClient()
-            .meta.query.$get();
-          if (contractResponse.status !== 200) {
-            return outcome.failure.apiError({
-              code: "service_metadata_unavailable",
-              message: "服务没有提供元信息声明的归档查询契约。",
-            });
-          }
-          return outcome.data.discovered({
-            metadata: metadata.metadata,
-            queryContract: await contractResponse.json(),
-          });
+          return outcome.data.discovered(metadata.metadata);
         },
       }),
       ...command("archiveSearch")({
@@ -1405,7 +1479,7 @@ function createCliContract(identity: CliCommandIdentity) {
               description: "bin 列表",
               exitCode: 0,
               schema: cliBinListSchema,
-              text: ({ bins }) => outputText("Bin 列表", bins),
+              text: binListText,
             },
           },
         },
@@ -1420,9 +1494,9 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "get",
-        description: "读取一个 bin 的配置和状态。",
+        description: "Read a bin's saved configuration and concise status.",
         helpSupplement: text.lines([
-          "配置 JSON Schema 随本命令返回；构造或修改配置前先查看此声明。",
+          "The response includes configuration values and runtime status. Read the full configuration schema with bin config-schema <bin-id>.",
         ]),
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: z.object({ id: binIdSchema }),
@@ -1430,10 +1504,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             found: {
-              description: "bin 配置",
+              description: "Bin configuration and status",
               exitCode: 0,
-              schema: cliBinConfigurationSchema,
-              text: (bin) => outputText("Bin 配置", bin),
+              schema: cliBinDetailsSchema,
+              text: binDetailsText,
             },
           },
         },
@@ -1453,12 +1527,15 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "actions",
-        description: "查看信源适配器声明的动作；可选指定单个动作。",
+        description: "List action names or inspect one action declaration.",
+        helpSupplement: text.lines([
+          "Discovery reads saved declarations only. Inspect an action description before running it; actions may access their source or write archived content.",
+        ]),
         fields: {
-          id: { kind: "positional", description: "bin 标识" },
+          id: { kind: "positional", description: "Bin identifier" },
           action: {
             kind: "positional",
-            description: "可选的已声明动作名称",
+            description: "Optional declared action name",
           },
         },
         input: z.object({
@@ -1469,10 +1546,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             discovered: {
-              description: "已声明动作",
+              description: "Action names or one selected action declaration",
               exitCode: 0,
-              schema: sourceAdapterActionDiscoverySchema,
-              text: (actions) => outputText("已声明动作", actions),
+              schema: cliBinActionDiscoverySchema,
+              text: actionDiscoveryText,
             },
           },
         },
@@ -1491,6 +1568,48 @@ function createCliContract(identity: CliCommandIdentity) {
           throw new Error("服务返回了未声明的动作查询状态。");
         },
       }),
+      ...command("binConfigSchema")({
+        kind: "command",
+        parent: "bin",
+        name: "config-schema",
+        description: "Read the full configuration schema for one bin.",
+        helpSupplement: text.lines([
+          "This command reads the saved schema declaration only and does not contact the source.",
+        ]),
+        fields: { id: { kind: "positional", description: "Bin identifier" } },
+        input: z.object({ id: binIdSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            discovered: {
+              description: "Configuration schema declaration",
+              exitCode: 0,
+              schema: cliBinConfigSchemaDiscoverySchema,
+              text: (declaration) =>
+                text.lines([
+                  `Source adapter: ${declaration.sourceAdapterId}@${declaration.sourceAdapterVersion}`,
+                  "Configuration schema:",
+                  ...JSON.stringify(declaration.configSchema, null, 2).split(
+                    "\n",
+                  ),
+                ]),
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"]["config-schema"].$get({
+              param: { binId: input.id },
+            });
+          if (response.status === 200)
+            return outcome.data.discovered(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error("The service returned an undeclared schema status.");
+        },
+      }),
       ...command("binUpdate")({
         kind: "command",
         parent: "bin",
@@ -1506,7 +1625,8 @@ function createCliContract(identity: CliCommandIdentity) {
           config: {
             kind: "valueOption",
             longOption: "--config",
-            description: "长期配置 JSON 字符串；配置结构见 bin get 返回的声明",
+            description:
+              "Persistent configuration JSON; see bin config-schema <bin-id> for its schema.",
           },
           browserIdleTimeoutSeconds: {
             kind: "valueOption",
@@ -1536,10 +1656,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             updated: {
-              description: "已修改的 bin",
+              description: "Updated bin configuration and status",
               exitCode: 0,
-              schema: cliBinConfigurationSchema,
-              text: (bin) => outputText("已修改 bin", bin),
+              schema: cliBinDetailsSchema,
+              text: binDetailsText,
             },
           },
         },
@@ -1587,10 +1707,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             disabled: {
-              description: "已停用的 bin",
+              description: "Disabled bin configuration and status",
               exitCode: 0,
-              schema: cliBinConfigurationSchema,
-              text: (bin) => outputText("已停用 bin", bin),
+              schema: cliBinDetailsSchema,
+              text: binDetailsText,
             },
           },
         },
@@ -1617,10 +1737,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             enabled: {
-              description: "已启用的 bin",
+              description: "Enabled bin configuration and status",
               exitCode: 0,
-              schema: cliBinConfigurationSchema,
-              text: (bin) => outputText("已启用 bin", bin),
+              schema: cliBinDetailsSchema,
+              text: binDetailsText,
             },
           },
         },
@@ -1674,18 +1794,22 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "run",
         name: "trigger",
-        description: "触发一次独立的动作运行。",
+        description: "Trigger one independent action run.",
+        helpSupplement: text.lines([
+          "The selected action may make network requests to its source and may write archived content. Inspect bin actions <bin-id> <action> before triggering it.",
+        ]),
         fields: {
-          binId: { kind: "positional", description: "bin 标识" },
+          binId: { kind: "positional", description: "Bin identifier" },
           action: {
             kind: "positional",
-            description: "已声明的动作名称；可用动作见 bin actions <binId>",
+            description:
+              "Declared action name; discover actions with bin actions <bin-id>",
           },
           params: {
             kind: "valueOption",
             longOption: "--params",
             description:
-              "本次运行参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
+              "JSON parameters for this run; use bin actions <bin-id> <action> to inspect the declaration",
           },
         },
         input: withPostgresJsonSchemaProjection(
@@ -1993,7 +2117,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "schedule",
         name: "create",
-        description: "创建一个使用 IANA 时区的运行计划。",
+        description: "Create a run schedule in an IANA time zone.",
         fields: {
           binId: { kind: "positional", description: "bin 标识" },
           expression: {
@@ -2010,13 +2134,13 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--action",
             description:
-              "已声明的信源适配器动作；可用动作见 bin actions <binId>",
+              "Declared action name; discover actions with bin actions <bin-id>",
           },
           params: {
             kind: "valueOption",
             longOption: "--params",
             description:
-              "动作参数 JSON 字符串；结构见 bin actions <binId> 的对应动作声明",
+              "JSON parameters for this action; use bin actions <bin-id> <action> to inspect the declaration",
           },
           overlapPolicy: {
             kind: "valueOption",
@@ -2030,6 +2154,9 @@ function createCliContract(identity: CliCommandIdentity) {
           },
         },
         input: cliScheduleCreateInputSchema,
+        helpSupplement: text.lines([
+          "A scheduled action may make network requests to its source and may write archived content whenever it runs.",
+        ]),
         success: {
           kind: "data",
           variants: {

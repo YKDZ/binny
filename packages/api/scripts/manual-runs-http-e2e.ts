@@ -164,6 +164,15 @@ async function createConcurrencyBin(
   runtimeId: string,
 ): Promise<void> {
   await heartbeat(binId, runtimeId, undefined, true);
+  const summary = await client.bins[":binId"].$get({ param: { binId } });
+  assert.equal(summary.status, 200);
+  if (summary.status === 200) {
+    const bin = await summary.json();
+    assert.equal(bin.sourceAdapterId, manifest.id);
+    assert.deepEqual(bin.sourceStateSnapshot, { freshness: "unknown" });
+    assert.equal("sourceAdapter" in bin, false);
+    assert.equal("persistentState" in bin, false);
+  }
   const configured = await client.bins[":binId"].$patch({
     param: { binId },
     json: { config: { section: "concurrency" } },
