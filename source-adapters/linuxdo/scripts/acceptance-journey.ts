@@ -527,9 +527,8 @@ export async function linuxdoUserJourney(input: {
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId },
-        text: { kind: "literal", value: "主题正文版本 1" },
-        select: ["sourceKey"],
+        bins: [binId],
+        text: { groups: [["主题正文版本 1"]] },
         limit: 10,
       }),
     ]),

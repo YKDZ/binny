@@ -8,33 +8,34 @@ import { runCli } from "../../src/main.ts";
 const matchingMetadata = {
   product: { name: "Binny", version: "1.2.3" },
   protocols: { httpApi: publicApiProtocolVersion },
-  capabilities: [
-    "archives.search",
-    "archives.aggregate",
-    "archive.query-contract",
-  ],
-  contracts: { archiveQuery: { version: 1, path: "/meta/query" } },
+  capabilities: ["archives.search", "archive.query-contract"],
+  contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
 };
 
 function fakeService(options: {
   readonly httpApiVersion?: number;
   readonly archiveQueryVersion?: number;
   readonly productVersion?: string;
+  readonly searchResponse?: unknown;
 }) {
   const requests: {
     readonly method: string;
     readonly path: string;
     readonly search: string;
     readonly origin: string;
+    readonly body?: unknown;
   }[] = [];
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const request = new Request(input, init);
     const url = new URL(request.url);
+    const body =
+      request.method === "POST" ? await request.clone().json() : undefined;
     requests.push({
       method: request.method,
       path: url.pathname,
       search: url.search,
       origin: url.origin,
+      ...(body === undefined ? {} : { body }),
     });
     if (url.pathname === "/meta") {
       return Response.json({
@@ -48,7 +49,7 @@ function fakeService(options: {
         },
         contracts: {
           archiveQuery: {
-            version: options.archiveQueryVersion ?? 1,
+            version: options.archiveQueryVersion ?? 2,
             path: "/meta/query",
           },
         },
@@ -56,16 +57,18 @@ function fakeService(options: {
     }
     if (url.pathname === "/meta/query") {
       return Response.json({
-        version: options.archiveQueryVersion ?? 1,
+        version: options.archiveQueryVersion ?? 2,
         operations: {},
       });
     }
     if (url.pathname === "/archives/search") {
-      return Response.json({
-        unit: "item",
-        snapshot: { asOf: "0", mode: "current" },
-        results: [],
-      });
+      return Response.json(
+        options.searchResponse ?? {
+          snapshot: { asOf: "0", mode: "current" },
+          results: [],
+          hasMore: false,
+        },
+      );
     }
     if (url.pathname === "/bins/rss-main/actions") {
       const actionName = url.searchParams.get("action");
@@ -162,7 +165,7 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v1: \/meta\/query/u);
+    assert.match(result.output, /Archive query v2: \/meta\/query/u);
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
@@ -174,8 +177,7 @@ void describe("查询服务发现", () => {
         "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          text: { kind: "literal", value: "needle" },
+          text: { groups: [["needle"]] },
         }),
       ],
       service.fetch,
@@ -199,8 +201,7 @@ void describe("查询服务发现", () => {
         "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          text: { kind: "literal", value: "needle" },
+          text: { groups: [["needle"]] },
         }),
         "--url",
         "http://selected.test",
@@ -225,8 +226,7 @@ void describe("查询服务发现", () => {
         "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          text: { kind: "literal", value: "needle" },
+          text: { groups: [["needle"]] },
         }),
       ],
       service.fetch,
@@ -249,8 +249,7 @@ void describe("查询服务发现", () => {
         "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          text: { kind: "literal", value: "needle" },
+          text: { groups: [["needle"]] },
         }),
       ],
       service.fetch,
@@ -265,6 +264,61 @@ void describe("查询服务发现", () => {
     );
   });
 
+  void it("固定搜索转发关键词组并返回精简候选", async () => {
+    const query = {
+      bins: ["rss-main"],
+      text: {
+        in: "both",
+        groups: [["GPT", "Claude"], ["released"]],
+      },
+      limit: 1,
+    };
+    const searchResponse = {
+      snapshot: { asOf: "12", mode: "current" },
+      hasMore: false,
+      results: [
+        {
+          itemId: "750e8400-e29b-41d4-a716-446655440000",
+          sourceKey: { namespace: "rss", key: "entry/12" },
+          title: "Released model",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          observedAt: "2026-11-09T12:00:00.000Z",
+          matches: [
+            {
+              binId: "rss-main",
+              revisionId: "850e8400-e29b-41d4-a716-446655440000",
+              archiveSeq: "12",
+              observedAt: "2026-11-09T12:00:00.000Z",
+              recordedAt: "2026-11-09T12:00:00.000Z",
+              title: "Released model",
+              sourcePublishedAt: null,
+              sourceModifiedAt: null,
+            },
+          ],
+        },
+      ],
+      nextCursor: undefined,
+    };
+    const service = fakeService({ searchResponse });
+    const result = await run(
+      ["archive", "search", "--query", JSON.stringify(query)],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 0, result.output);
+    const wire = JSON.parse(result.output) as {
+      readonly data: {
+        readonly results: readonly { readonly title: string | null }[];
+      };
+    };
+    assert.equal(wire.data.results[0]?.title, "Released model");
+    assert.deepEqual(
+      service.requests.find(({ path }) => path === "/archives/search")?.body,
+      query,
+    );
+  });
+
   void it("不兼容的公开 HTTP 协议会在查询前给出可读错误", async () => {
     const service = fakeService({ httpApiVersion: 99 });
     const result = await run(
@@ -273,8 +327,7 @@ void describe("查询服务发现", () => {
         "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          text: { kind: "literal", value: "needle" },
+          text: { groups: [["needle"]] },
         }),
       ],
       service.fetch,
@@ -483,18 +536,15 @@ void describe("查询服务发现", () => {
     assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
   });
 
-  void it("不兼容的归档查询契约会在查询前给出可读错误", async () => {
+  void it("不兼容的归档查询契约会在固定搜索前给出可读错误", async () => {
     const service = fakeService({ archiveQueryVersion: 99 });
     const result = await run(
       [
         "archive",
-        "aggregate",
+        "search",
         "--query",
         JSON.stringify({
-          scope: { kind: "current" },
-          unit: "item",
-          groupBy: [],
-          metrics: [{ key: "items", op: "count" }],
+          text: { groups: [["model"]] },
         }),
       ],
       service.fetch,
@@ -503,7 +553,7 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 1);
     assert.match(result.output, /归档查询契约版本/u);
     assert.equal(
-      service.requests.some(({ path }) => path === "/archives/aggregate"),
+      service.requests.some(({ path }) => path === "/archives/search"),
       false,
     );
   });

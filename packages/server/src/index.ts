@@ -79,6 +79,7 @@ export async function createServerRuntime(options: {
   const archives = createArchiveStore(database, {
     resourceDirectory:
       process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
+    executeCancellableSearchQuery: connection.executeCancellableQuery,
     unreferencedResourceAgeMs: environmentMilliseconds(
       "BINNY_RESOURCE_UNREFERENCED_AGE_MS",
       24 * 60 * 60 * 1000,
@@ -88,6 +89,11 @@ export async function createServerRuntime(options: {
       "BINNY_RESOURCE_CLEANUP_INTERVAL_MS",
       60 * 60 * 1000,
       100,
+    ),
+    archiveSearchBudgetMs: environmentMilliseconds(
+      "BINNY_ARCHIVE_SEARCH_BUDGET_MS",
+      10_000,
+      1,
     ),
   });
   const runtime = createRuntimeConnectionStore(database, browserCapacity);

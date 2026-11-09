@@ -7,8 +7,6 @@ import { pipeline } from "node:stream/promises";
 import { createApiClient } from "@binny/api/client";
 import { validationFailure } from "@binny/api/validation";
 import {
-  archiveAggregationInputSchema,
-  archiveAggregationResultSchema,
   archiveCommitSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
@@ -137,9 +135,6 @@ const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
 const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
   z.object({ query: postgresTextSchema.min(1) }).strict(),
 );
-const cliArchiveAggregationInputSchema = withArchiveJsonSchemaProjection(
-  z.object({ query: postgresTextSchema.min(1) }).strict(),
-);
 const browserIdleTimeoutOptionSchema = z.string();
 
 function parseBrowserIdleTimeoutOption(
@@ -253,7 +248,6 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
   const commandsWithoutAutomaticProtocolCheck = new Set([
     "serviceInfo",
     "archiveSearch",
-    "archiveAggregate",
   ]);
   const extendedCommands = Object.fromEntries(
     Object.entries(commands).map(([name, definition]) => {
@@ -1081,6 +1075,26 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  const archiveSearchPageText = (
+    page: z.infer<typeof archiveSearchPageSchema>,
+  ) =>
+    text.lines([
+      `Snapshot: ${page.snapshot.asOf}`,
+      `Matches on this page: ${page.results.length}`,
+      ...(page.results.length === 0
+        ? ["No archived items matched."]
+        : page.results.flatMap((result) => [
+            `- ${result.title ?? result.sourceKey.key}`,
+            `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
+            `  Observed: ${result.observedAt}`,
+            `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+          ])),
+      ...(page.hasMore
+        ? [
+            `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
+          ]
+        : ["End of results."]),
+    ]);
   const jsonSection = (heading: string, payload: unknown) => [
     `${heading}:`,
     ...JSON.stringify(payload, null, 2)
@@ -1409,13 +1423,14 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "archive",
         name: "search",
-        description: "在服务端组合检索正文与归档字段条件。",
+        description:
+          'Search archived items with literal keyword groups. Example: binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
         fields: {
           query: {
             kind: "valueOption",
             longOption: "--query",
             description:
-              "搜索请求 JSON 字符串；完整契约见 service info 的 queryContract",
+              "Fixed search request JSON. Reuse snapshot.asOf for a consistent cut and use nextCursor as cursor when hasMore is true.",
           },
         },
         input: cliArchiveSearchInputSchema,
@@ -1426,7 +1441,7 @@ function createCliContract(identity: CliCommandIdentity) {
               description: "归档搜索结果页",
               exitCode: 0,
               schema: archiveSearchPageSchema,
-              text: (page) => outputText("归档搜索结果", page),
+              text: archiveSearchPageText,
             },
           },
         },
@@ -1438,7 +1453,7 @@ function createCliContract(identity: CliCommandIdentity) {
           } catch {
             const error = {
               code: "invalid_input" as const,
-              message: "搜索请求必须是有效 JSON。",
+              message: "Search request must be valid JSON.",
               path: ["query"],
             };
             return outcome.failure.apiError(error);
@@ -1464,67 +1479,6 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 422)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档搜索状态。");
-        },
-      }),
-      ...command("archiveAggregate")({
-        kind: "command",
-        parent: "archive",
-        name: "aggregate",
-        description: "在完整匹配集合上计算分组与指标。",
-        fields: {
-          query: {
-            kind: "valueOption",
-            longOption: "--query",
-            description:
-              "聚合请求 JSON 字符串；完整契约见 service info 的 queryContract",
-          },
-        },
-        input: cliArchiveAggregationInputSchema,
-        success: {
-          kind: "data",
-          variants: {
-            aggregated: {
-              description: "归档聚合结果页",
-              exitCode: 0,
-              schema: archiveAggregationResultSchema,
-              text: (result) => outputText("归档聚合结果", result),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          let request: unknown;
-          try {
-            request = JSON.parse(input.query) as unknown;
-          } catch {
-            const error = {
-              code: "invalid_input" as const,
-              message: "聚合请求必须是有效 JSON。",
-              path: ["query"],
-            };
-            return outcome.failure.apiError(error);
-          }
-          const checked = archiveAggregationInputSchema.safeParse(request);
-          if (!checked.success) {
-            return outcome.failure.apiError(
-              validationFailure(checked.error.issues).error,
-            );
-          }
-          const compatibilityFailure = await queryCompatibilityFailure(
-            dependencies,
-            serviceCapabilities.archiveAggregation,
-          );
-          if (compatibilityFailure !== undefined) {
-            return outcome.failure.apiError(compatibilityFailure);
-          }
-          const response = await dependencies
-            .createClient()
-            .archives.aggregate.$post({ json: checked.data });
-          if (response.status === 200)
-            return outcome.data.aggregated(await response.json());
-          if (response.status === 400 || response.status === 422)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档聚合状态。");
         },
       }),
       ...command("binList")({

@@ -27,6 +27,7 @@ import {
   archiveRevisions,
   archiveWriteClock,
   binConfigurations,
+  type CancellableQueryExecutor,
   type Database,
   type Transaction,
 } from "@binny/db";
@@ -42,7 +43,6 @@ import {
   sql,
 } from "drizzle-orm";
 
-import { createArchiveAggregationOperation } from "./archive-aggregation.ts";
 import { canonicalJson, failure, validationFailure } from "./archive-common.ts";
 import {
   advanceArchiveSequence,
@@ -394,8 +394,10 @@ async function deleteArchiveItems(
 
 export type ArchiveStoreOptions = {
   readonly resourceDirectory: string;
+  readonly executeCancellableSearchQuery: CancellableQueryExecutor;
   readonly unreferencedResourceAgeMs?: number;
   readonly resourceCleanupIntervalMs?: number;
+  readonly archiveSearchBudgetMs?: number;
 };
 
 export type ArchiveStore = ArchiveOperations & {
@@ -414,8 +416,10 @@ export function createArchiveStore(
     cleanupIntervalMs: options.resourceCleanupIntervalMs ?? 60 * 60 * 1000,
   });
   const readOperations = createArchiveReadOperations(database);
-  const searchOperations = createArchiveSearchOperation(database);
-  const aggregationOperations = createArchiveAggregationOperation(database);
+  const searchOperations = createArchiveSearchOperation(
+    options.executeCancellableSearchQuery,
+    options.archiveSearchBudgetMs ?? 10_000,
+  );
   return {
     initializeResourceStorage: () => resourceStorage.initialize(),
     close: () => resourceStorage.close(),
@@ -936,7 +940,6 @@ export function createArchiveStore(
     },
 
     ...searchOperations,
-    ...aggregationOperations,
 
     ...readOperations,
   };

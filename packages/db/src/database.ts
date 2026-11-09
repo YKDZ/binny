@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
 
+import type { SQL } from "drizzle-orm";
 import { DrizzleQueryError } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
@@ -15,9 +17,19 @@ export type ReservedDatabaseConnection = {
   readonly release: () => void;
 };
 
+export type CancellableDatabaseQuery<Row> = {
+  readonly rows: Promise<readonly Row[]>;
+  readonly cancel: () => void;
+};
+
+export type CancellableQueryExecutor = <Row extends Record<string, unknown>>(
+  query: SQL<Row[]>,
+) => CancellableDatabaseQuery<Row>;
+
 export type DatabaseConnection = {
   readonly database: Database;
   readonly reserveSession: () => Promise<ReservedDatabaseConnection>;
+  readonly executeCancellableQuery: CancellableQueryExecutor;
   readonly close: () => Promise<void>;
 };
 
@@ -28,6 +40,7 @@ export function connectDatabase(connectionString: string): DatabaseConnection {
     connect_timeout: 10,
     idle_timeout: 20,
   });
+  const dialect = new PgDialect();
 
   return {
     database: drizzle({ client }),
@@ -38,6 +51,20 @@ export function connectDatabase(connectionString: string): DatabaseConnection {
       return {
         database: drizzle({ client: reservedClient }),
         release: () => reservedClient.release(),
+      };
+    },
+    executeCancellableQuery<Row extends Record<string, unknown>>(
+      query: SQL<Row[]>,
+    ) {
+      const compiled = dialect.sqlToQuery(query);
+      // PgDialect has prepared these values; postgres.js types an unconfigured parameter list as never[].
+      const pending = client.unsafe<Row[]>(
+        compiled.sql,
+        compiled.params as never[],
+      );
+      return {
+        rows: pending,
+        cancel: () => pending.cancel(),
       };
     },
     close: () => client.end(),

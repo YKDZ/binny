@@ -17,12 +17,8 @@ void describe("CLI 服务地址", () => {
         return Response.json({
           product: { name: "Binny", version: "1.2.3" },
           protocols: { httpApi: publicApiProtocolVersion },
-          capabilities: [
-            "archives.search",
-            "archives.aggregate",
-            "archive.query-contract",
-          ],
-          contracts: { archiveQuery: { version: 1, path: "/meta/query" } },
+          capabilities: ["archives.search", "archive.query-contract"],
+          contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
         });
       }
       request = received;

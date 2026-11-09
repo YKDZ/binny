@@ -832,35 +832,42 @@ async function sourceMetrics(): Promise<SourceMetrics> {
 async function browserFixtureRunIds(
   binId: string,
 ): Promise<ReadonlySet<string>> {
-  const query = {
-    scope: { kind: "current", binId },
-    where: {
-      type: "field",
-      field: "sourceKey.namespace",
-      operator: "eq",
-      value: "binny-browser.browser-session-fixture",
-    },
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit: 100,
-  };
-  const page = cliData<{
-    readonly results: readonly {
-      readonly sourceKey?: { readonly namespace: string; readonly key: string };
-    }[];
-  }>(
-    await cli(["archive", "search", "--query", JSON.stringify(query)]),
-    "found",
-  );
-  return new Set(
-    page.results.flatMap(({ sourceKey }) => {
+  const runIds = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const page = cliData<{
+      readonly results: readonly {
+        readonly sourceKey: {
+          readonly namespace: string;
+          readonly key: string;
+        };
+      }[];
+      readonly nextCursor?: string;
+    }>(
+      await cli([
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: [binId],
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
+      ]),
+      "found",
+    );
+    for (const { sourceKey } of page.results) {
       const prefix = `${binId}:`;
-      return sourceKey?.namespace === "binny-browser.browser-session-fixture" &&
+      if (
+        sourceKey.namespace === "binny-browser.browser-session-fixture" &&
         sourceKey.key.startsWith(prefix)
-        ? [sourceKey.key.slice(prefix.length)]
-        : [];
-    }),
-  );
+      ) {
+        runIds.add(sourceKey.key.slice(prefix.length));
+      }
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return runIds;
 }
 
 async function sourceControl(pathname: string): Promise<void> {
