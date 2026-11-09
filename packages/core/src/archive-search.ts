@@ -27,8 +27,10 @@ import {
   remainingArchiveQueryBudgetMs,
 } from "./archive-query-budget.ts";
 import {
+  canonicalizeArchiveTimeZone,
   archiveTimeZoneAliases,
   localDateBoundarySql,
+  sourceTimeBoundsSql,
   sourceTimeFieldSql,
   sourceTimeWindowDecisionSql,
   type ArchiveTimeZoneAliases,
@@ -275,6 +277,180 @@ function extensionMatches(input: SearchInput) {
     },
   );
   return sql`(${sql.join(fieldMatches, sql` AND `)})`;
+}
+
+function timeZoneSql(timeZone: string): SQL {
+  const canonical = canonicalizeArchiveTimeZone(timeZone);
+  return /^(?:[+-](?:0\d|1[0-3]):[0-5]\d|[+-]14:00)$/u.test(canonical)
+    ? sql`${canonical}::interval`
+    : sql`${canonical}::text`;
+}
+
+function dateDistributionCtes(
+  distribution: Extract<
+    NonNullable<SearchInput["distribution"]>,
+    { by: "date" }
+  >,
+  cursor: SearchDistributionCursor | undefined,
+  aliases: ArchiveTimeZoneAliases,
+) {
+  const zone = timeZoneSql(distribution.timeZone);
+  const sourceTime =
+    distribution.field === "observedAt"
+      ? undefined
+      : sourceTimeFieldSql(sql`selected_views.state_data`, distribution.field);
+  const ranges =
+    sourceTime === undefined
+      ? sql`date_ranges AS (
+          SELECT
+            selected_views.item_id,
+            'instant'::text AS precision,
+            selected_views.observed_at::text AS value,
+            NULL::text AS time_zone,
+            selected_views.observed_at AS start_at,
+            selected_views.observed_at AS end_at,
+            selected_views.observed_at AS possible_start,
+            selected_views.observed_at AS possible_end
+          FROM selected_views
+        )`
+      : (() => {
+          const bounds = sourceTimeBoundsSql(sourceTime, aliases);
+          return sql`date_ranges AS (
+            SELECT
+              selected_views.item_id,
+              ${bounds.precision} AS precision,
+              ${bounds.value} AS value,
+              ${bounds.timeZone} AS time_zone,
+              ${bounds.start} AS start_at,
+              ${bounds.end} AS end_at,
+              ${bounds.possibleStart} AS possible_start,
+              ${bounds.possibleEnd} AS possible_end
+            FROM selected_views
+          )`;
+        })();
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const periodInterval = sql`CASE ${distribution.period}::text
+    WHEN 'day' THEN interval '1 day'
+    WHEN 'month' THEN interval '1 month'
+    ELSE interval '1 year'
+  END`;
+
+  return sql`${ranges}, date_candidates AS (
+    SELECT
+      date_ranges.*,
+      CASE
+        WHEN precision <> 'instant' AND time_zone IS NULL THEN possible_start
+        ELSE start_at
+      END AS range_start,
+      CASE
+        WHEN precision = 'instant' THEN start_at
+        WHEN time_zone IS NULL THEN possible_end
+        ELSE end_at
+      END AS range_end
+    FROM date_ranges
+  ), date_bucketed AS (
+    SELECT
+      date_candidates.*,
+      date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      ) AS bucket_local_start,
+      (date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      )) AT TIME ZONE ${zone} AS bucket_start,
+      (date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      ) + ${periodInterval}) AT TIME ZONE ${zone} AS bucket_end
+    FROM date_candidates
+  ), date_decisions AS (
+    SELECT
+      item_id,
+      CASE ${distribution.period}::text
+        WHEN 'day' THEN to_char(bucket_local_start, 'YYYY-MM-DD')
+        WHEN 'month' THEN to_char(bucket_local_start, 'YYYY-MM')
+        ELSE to_char(bucket_local_start, 'YYYY')
+      END AS date_value,
+      CASE
+        WHEN value IS NULL THEN 'undetermined'
+        WHEN precision = 'instant'
+          AND range_start >= bucket_start
+          AND range_start < bucket_end
+        THEN 'date'
+        WHEN precision = 'instant' THEN 'undetermined'
+        WHEN range_start >= bucket_start AND range_end <= bucket_end
+        THEN 'date'
+        ELSE 'undetermined'
+      END AS group_kind,
+      CASE
+        WHEN value IS NULL THEN 'missingTime'
+        WHEN precision = 'instant' THEN NULL::text
+        WHEN time_zone IS NULL
+          AND NOT (range_start >= bucket_start AND range_end <= bucket_end)
+        THEN 'missingTimeZone'
+        WHEN range_start >= bucket_start AND range_end <= bucket_end
+        THEN NULL::text
+        ELSE 'precisionOverlapsBoundary'
+      END AS reason
+    FROM date_bucketed
+  ), date_assigned AS (
+    SELECT
+      item_id,
+      group_kind,
+      date_value,
+      reason,
+      CASE group_kind
+        WHEN 'date' THEN 'date:' || date_value
+        ELSE 'undetermined:' || reason
+      END COLLATE "C" AS group_key
+    FROM date_decisions
+  ), distribution_base AS (
+    SELECT
+      group_key,
+      group_kind,
+      date_value,
+      reason,
+      count(DISTINCT item_id)::text AS item_count
+    FROM date_assigned
+    GROUP BY group_key, group_kind, date_value, reason
+  ), distribution_total AS (
+    SELECT count(DISTINCT item_id)::text AS total_items
+    FROM selected_views
+  ), distribution_selected AS (
+    SELECT distribution_base.*
+    FROM distribution_base
+    WHERE ${afterCursor}
+    ORDER BY group_key COLLATE "C" ASC
+    LIMIT ${distribution.limit + 1}
+  ), distribution_groups AS (
+    SELECT coalesce(
+      jsonb_agg(
+        CASE group_kind
+          WHEN 'date' THEN jsonb_build_object(
+            'kind', 'date'::text,
+            'value', date_value,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+          ELSE jsonb_build_object(
+            'kind', 'undetermined'::text,
+            'reason', reason,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+        END ORDER BY group_key COLLATE "C" ASC
+      ),
+      '[]'::jsonb
+    ) AS groups
+    FROM distribution_selected
+  ), distribution_summary AS (
+    SELECT distribution_total.total_items, distribution_groups.groups
+    FROM distribution_total CROSS JOIN distribution_groups
+  )`;
 }
 
 function decodeJsonValue(value: unknown): unknown {
@@ -532,7 +708,9 @@ function pageQuery(
           SELECT distribution_total.total_items, distribution_groups.groups
           FROM distribution_total CROSS JOIN distribution_groups
         )`
-        : sql`distribution_summary AS (
+        : distribution.by === "date"
+          ? dateDistributionCtes(distribution, distributionCursor, aliases)
+          : sql`distribution_summary AS (
           SELECT NULL::text AS total_items, '[]'::jsonb AS groups
         )`;
   const classificationFields =
@@ -696,6 +874,7 @@ function pageQuery(
 function timeZoneDiscoveryQuery(
   input: SearchInput,
   snapshot: SearchCursor["snapshot"] | undefined,
+  fields: readonly ("sourcePublishedAt" | "sourceModifiedAt")[],
 ): SQL<SearchZoneRow[]> {
   const snapshotSequence =
     snapshot === undefined
@@ -714,7 +893,10 @@ function timeZoneDiscoveryQuery(
       )})`,
     );
   }
-  const field = input.timeWindow!.field;
+  const zoneQueries = fields.map(
+    (field) =>
+      sql`SELECT state_data->${field}->>'timeZone' AS time_zone FROM latest`,
+  );
 
   return sql<SearchZoneRow[]>`
     WITH clock AS (
@@ -741,9 +923,9 @@ function timeZoneDiscoveryQuery(
       WHERE ${sql.join(latestConditions, sql` AND `)}
       ORDER BY observation.item_id, commit.bin_id, commit.archive_seq DESC, commit.commit_id DESC, observation.ordinal DESC
     ), time_zones AS (
-      SELECT DISTINCT state_data->${field}->>'timeZone' AS time_zone
-      FROM latest
-      WHERE state_data->${field}->>'timeZone' IS NOT NULL
+      SELECT DISTINCT source_time_zones.time_zone
+      FROM (${sql.join(zoneQueries, sql` UNION ALL `)}) AS source_time_zones
+      WHERE source_time_zones.time_zone IS NOT NULL
     )
     SELECT
       fixed_snapshot.archive_sequence::text AS "snapshotAsOf",
@@ -857,14 +1039,26 @@ export function createArchiveSearchOperation(
       try {
         let resolvedQuerySnapshot = snapshot;
         let aliases: ArchiveTimeZoneAliases = new Map();
+        const timeZoneFields = new Set<
+          "sourcePublishedAt" | "sourceModifiedAt"
+        >();
         if (
           input.timeWindow !== undefined &&
           input.timeWindow.field !== "observedAt"
         ) {
+          timeZoneFields.add(input.timeWindow.field);
+        }
+        if (
+          input.distribution?.by === "date" &&
+          input.distribution.field !== "observedAt"
+        ) {
+          timeZoneFields.add(input.distribution.field);
+        }
+        if (timeZoneFields.size > 0) {
           const [zoneRow] =
             await executeArchiveQueryWithinDeadline<SearchZoneRow>(
               executeQuery,
-              timeZoneDiscoveryQuery(input, snapshot),
+              timeZoneDiscoveryQuery(input, snapshot, [...timeZoneFields]),
               deadline,
             );
           if (zoneRow === undefined) {

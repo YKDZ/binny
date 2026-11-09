@@ -3403,6 +3403,15 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       sourceModifiedAt: null,
     },
     {
+      key: "day-utc",
+      sourcePublishedAt: {
+        precision: "day",
+        value: "2026-11-08",
+        timeZone: "UTC",
+      },
+      sourceModifiedAt: null,
+    },
+    {
       key: "day-without-zone",
       sourcePublishedAt: { precision: "day", value: "2026-11-08" },
       sourceModifiedAt: null,
@@ -3434,6 +3443,15 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       key: "modified-only",
       sourcePublishedAt: instant("2026-11-07T12:00:00+08:00"),
       sourceModifiedAt: instant("2026-11-08T12:00:00+08:00"),
+    },
+    {
+      key: "modified-alias",
+      sourcePublishedAt: instant("2026-11-07T12:00:00+08:00"),
+      sourceModifiedAt: {
+        precision: "day",
+        value: "2026-07-01",
+        timeZone: "CET",
+      },
     },
     {
       key: "missing",
@@ -3532,6 +3550,43 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   });
   assert.equal(secondaryView.items[0]?.itemId, multiViewItemId);
 
+  const dateDistributionRequest: ArchiveSearchRequest = {
+    bins: ["binny-runs-one", "binny-runs-two"],
+    text: { in: "body", groups: [[token]] },
+    includeCandidates: false,
+    limit: 1,
+    distribution: {
+      by: "date",
+      field: "sourcePublishedAt",
+      period: "day",
+      timeZone: "Asia/Shanghai",
+      limit: 2,
+    },
+  };
+  const dateDistributionResponse = await client.archives.search.$post({
+    json: dateDistributionRequest,
+  });
+  assert.equal(dateDistributionResponse.status, 200);
+  if (dateDistributionResponse.status !== 200) {
+    throw new Error("Date distribution search failed.");
+  }
+  const dateDistribution = await dateDistributionResponse.json();
+  assert.equal(dateDistribution.candidatesIncluded, false);
+  assert.deepEqual(dateDistribution.results, []);
+  assert.equal(dateDistribution.hasMore, false);
+  assert.equal(dateDistribution.nextCursor, undefined);
+  assert.ok(dateDistribution.distribution);
+  if (dateDistribution.distribution?.by !== "date") {
+    throw new Error("Expected a date distribution page.");
+  }
+  assert.equal(dateDistribution.distribution.totalItems, "19");
+  assert.deepEqual(dateDistribution.distribution.groups, [
+    { kind: "date", value: "2026-03-30", itemCount: "2" },
+    { kind: "date", value: "2026-11-07", itemCount: "3" },
+  ]);
+  assert.equal(dateDistribution.distribution.hasMore, true);
+  assert.ok(dateDistribution.distribution.nextCursor);
+
   const query: ArchiveSearchRequest = {
     bins: ["binny-runs-one", "binny-runs-two"],
     text: { in: "body", groups: [[token]] },
@@ -3550,7 +3605,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   const certain = await certainResponse.json();
   assert.ok(certain.timeSummary);
   assert.equal(certain.timeSummary.certainItems, "4");
-  assert.equal(certain.timeSummary.undeterminedItems, "6");
+  assert.equal(certain.timeSummary.undeterminedItems, "7");
   assert.deepEqual(
     certain.results.map(({ itemId }) => itemId),
     [itemId("middle"), multiViewItemId],
@@ -3585,6 +3640,118 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       },
     ],
   });
+
+  const dateDistributionNextResponse = await client.archives.search.$post({
+    json: {
+      ...dateDistributionRequest,
+      limit: 20,
+      distribution: {
+        by: "date",
+        field: "sourcePublishedAt",
+        period: "day",
+        timeZone: "Asia/Shanghai",
+        limit: 10,
+        cursor: dateDistribution.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(dateDistributionNextResponse.status, 200);
+  if (dateDistributionNextResponse.status !== 200) {
+    throw new Error("Date distribution continuation failed.");
+  }
+  const dateDistributionNext = await dateDistributionNextResponse.json();
+  assert.equal(
+    dateDistributionNext.snapshot.asOf,
+    dateDistribution.snapshot.asOf,
+  );
+  assert.ok(dateDistributionNext.distribution);
+  if (dateDistributionNext.distribution?.by !== "date") {
+    throw new Error("Expected a continued date distribution page.");
+  }
+  assert.equal(dateDistributionNext.distribution.totalItems, "19");
+  assert.deepEqual(dateDistributionNext.distribution.groups, [
+    { kind: "date", value: "2026-11-08", itemCount: "4" },
+    { kind: "date", value: "2026-11-09", itemCount: "1" },
+    { kind: "undetermined", reason: "missingTime", itemCount: "2" },
+    { kind: "undetermined", reason: "missingTimeZone", itemCount: "3" },
+    {
+      kind: "undetermined",
+      reason: "precisionOverlapsBoundary",
+      itemCount: "5",
+    },
+  ]);
+  assert.equal(dateDistributionNext.distribution.hasMore, false);
+  assert.equal(dateDistributionNext.distribution.nextCursor, undefined);
+
+  const monthDistributionResponse = await client.archives.search.$post({
+    json: {
+      ...dateDistributionRequest,
+      asOf: dateDistribution.snapshot.asOf,
+      distribution: {
+        by: "date",
+        field: "sourcePublishedAt",
+        period: "month",
+        timeZone: "Asia/Shanghai",
+        limit: 20,
+      },
+    },
+  });
+  assert.equal(monthDistributionResponse.status, 200);
+  if (monthDistributionResponse.status !== 200) {
+    throw new Error("Month distribution search failed.");
+  }
+  const monthDistribution = await monthDistributionResponse.json();
+  assert.ok(monthDistribution.distribution);
+  if (monthDistribution.distribution?.by !== "date") {
+    throw new Error("Expected a month distribution page.");
+  }
+  assert.deepEqual(monthDistribution.distribution.groups, [
+    { kind: "date", value: "2026-03", itemCount: "3" },
+    { kind: "date", value: "2026-07", itemCount: "1" },
+    { kind: "date", value: "2026-11", itemCount: "11" },
+    { kind: "undetermined", reason: "missingTime", itemCount: "2" },
+    { kind: "undetermined", reason: "missingTimeZone", itemCount: "1" },
+    {
+      kind: "undetermined",
+      reason: "precisionOverlapsBoundary",
+      itemCount: "1",
+    },
+  ]);
+
+  const modifiedAliasDistributionResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: {
+        in: "title",
+        groups: [["Beijing window modified-alias"]],
+      },
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-07",
+        until: "2026-11-08",
+        timeZone: "Asia/Shanghai",
+      },
+      distribution: {
+        by: "date",
+        field: "sourceModifiedAt",
+        period: "day",
+        timeZone: "Europe/Brussels",
+      },
+    },
+  });
+  assert.equal(modifiedAliasDistributionResponse.status, 200);
+  if (modifiedAliasDistributionResponse.status !== 200) {
+    throw new Error("Modified-time date distribution search failed.");
+  }
+  const modifiedAliasDistribution =
+    await modifiedAliasDistributionResponse.json();
+  assert.ok(modifiedAliasDistribution.distribution);
+  if (modifiedAliasDistribution.distribution?.by !== "date") {
+    throw new Error("Expected a modified-time date distribution page.");
+  }
+  assert.deepEqual(modifiedAliasDistribution.distribution.groups, [
+    { kind: "date", value: "2026-07-01", itemCount: "1" },
+  ]);
 
   const certainNextPageResponse = await client.archives.search.$post({
     json: {
@@ -3756,7 +3923,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   assert.equal(undetermined.snapshot.asOf, snapshotAsOf);
   assert.deepEqual(undetermined.timeSummary, {
     certainItems: "4",
-    undeterminedItems: "6",
+    undeterminedItems: "7",
   });
   assert.equal(undetermined.results.length, 5);
   assert.equal(undetermined.hasMore, true);
@@ -3787,7 +3954,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     undeterminedNextPage.nextCursor !== undefined,
   );
   assert.equal(undeterminedNextPage.nextCursor, undefined);
-  assert.equal(undeterminedNextPage.results.length, 1);
+  assert.equal(undeterminedNextPage.results.length, 2);
   assert.equal(undeterminedNextPage.results[0]?.sourcePublishedAt, null);
   const undeterminedResults = [
     ...undetermined.results,
@@ -3799,6 +3966,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     undeterminedIds.toSorted(),
     [
       itemId("day-without-zone"),
+      itemId("day-utc"),
       itemId("month-overlap"),
       itemId("year-overlap"),
       itemId("missing"),
