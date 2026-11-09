@@ -401,7 +401,7 @@ function dateDistributionCtes(
     SELECT
       item_id,
       group_kind,
-      date_value,
+      CASE WHEN group_kind = 'date' THEN date_value ELSE NULL::text END AS date_value,
       reason,
       CASE group_kind
         WHEN 'date' THEN 'date:' || date_value
