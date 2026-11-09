@@ -110,7 +110,11 @@ function createTestContext(
       : {}),
   };
 
-  const context = createSourceAdapterContext(mockClient, runContext);
+  const context = createSourceAdapterContext(
+    mockClient,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
 
   return { context, submissions, uploadedResources };
 }
@@ -159,7 +163,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
     if (path === "/zh-cn/news/news261020.md") {
       res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
       res.end(
-        `# DeepSeek-V3.5 正式发布\n\n发布日期：2026-10-20\n\n我们很高兴宣布 DeepSeek-V3.5 模型正式上线。\n\n\`\`\`python\n# Sample code\nresponse = client.chat.completions.create(model="deepseek-chat")\n\`\`\`\n\n![架构图](/images/architecture.png)\n`,
+        `---\ntitle: DeepSeek-V3.5 正式发布\ndate: "2026-10-20T17:30:00+08:00"\n---\n\n# DeepSeek-V3.5 正式发布\n\n我们很高兴宣布 DeepSeek-V3.5 模型正式上线。\n\n\`\`\`python\n# Sample code\nresponse = client.chat.completions.create(model="deepseek-chat")\n\`\`\`\n\n![架构图](/images/architecture.png)\n`,
       );
       return;
     }
@@ -291,6 +295,30 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
     assert.equal(normalizeDate("2026-5-8"), "2026-05-08");
     assert.equal(normalizeDate("2026年10月20日"), "2026-10-20");
     assert.equal(normalizeDate("2026-10"), "2026-10");
+    assert.equal(
+      normalizeDate("2026-10-20T17:30:00+08:00"),
+      "2026-10-20T17:30:00+08:00",
+    );
+    assert.equal(normalizeDate("2026-13-01"), undefined);
+    assert.equal(
+      sourceAdapter.extensionsSchema.safeParse({
+        region: "unpartitioned",
+        language: "en",
+        kind: "changelog",
+        latestUpdateDate: "2026-10",
+        latestUpdateDatePrecision: "month",
+      }).success,
+      true,
+    );
+    assert.equal(
+      sourceAdapter.extensionsSchema.safeParse({
+        region: "unpartitioned",
+        language: "en",
+        kind: "news",
+        publishedDate: "2026-10-20",
+      }).success,
+      false,
+    );
   });
 
   await t.test(
@@ -321,17 +349,17 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             assert(Array.isArray(item.resources), "Resources must be an array");
           }
 
-          const metadata = item.metadata as Record<string, unknown>;
+          const extensions = item.extensions as Record<string, unknown>;
           assert.equal(
-            metadata.region,
+            extensions.region,
             "unpartitioned",
             "Region must be unpartitioned",
           );
 
           if (item.sourceKey.namespace === "deepseek:zh-cn") {
-            assert.equal(metadata.language, "zh-CN");
+            assert.equal(extensions.language, "zh-CN");
           } else if (item.sourceKey.namespace === "deepseek:en") {
-            assert.equal(metadata.language, "en");
+            assert.equal(extensions.language, "en");
           } else {
             assert.fail(
               `Unexpected sourceKey namespace: ${item.sourceKey.namespace}`,
@@ -350,7 +378,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
         );
       assert(zhUpdates !== undefined, "Chinese changelog must be archived");
       assert.equal(
-        (zhUpdates.metadata as Record<string, unknown>).kind,
+        (zhUpdates.extensions as Record<string, unknown>).kind,
         "changelog",
       );
 
@@ -363,7 +391,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
         );
       assert(enUpdates !== undefined, "English changelog must be archived");
       assert.equal(
-        (enUpdates.metadata as Record<string, unknown>).kind,
+        (enUpdates.extensions as Record<string, unknown>).kind,
         "changelog",
       );
 
@@ -375,7 +403,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "news:news261020",
         );
       assert(zhNews !== undefined, "Chinese news article must be archived");
-      assert.equal((zhNews.metadata as Record<string, unknown>).kind, "news");
+      assert.equal((zhNews.extensions as Record<string, unknown>).kind, "news");
 
       const enNews = submissions
         .flatMap((s) => s.items)
@@ -385,7 +413,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "news:news261020",
         );
       assert(enNews !== undefined, "English news article must be archived");
-      assert.equal((enNews.metadata as Record<string, unknown>).kind, "news");
+      assert.equal((enNews.extensions as Record<string, unknown>).kind, "news");
 
       // Verify media resource upload
       assert(uploadedResources.length > 0, "Image must be uploaded");
@@ -644,10 +672,14 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
         .find((it) => it.sourceKey.key === "changelog:updates");
       assert(zhChangelog !== undefined);
 
-      const changelogMeta = zhChangelog.metadata as Record<string, unknown>;
-      assert.equal(changelogMeta.publishedDate, "2026-10-20");
-      assert.equal(changelogMeta.datePrecision, "day");
-      assert.equal(zhChangelog.sourceModifiedAt, undefined);
+      const changelogExtensions = zhChangelog.extensions as Record<
+        string,
+        unknown
+      >;
+      assert.equal(changelogExtensions.latestUpdateDate, "2026-10-20");
+      assert.equal(changelogExtensions.latestUpdateDatePrecision, "day");
+      assert.equal(zhChangelog.sourcePublishedAt, null);
+      assert.equal(zhChangelog.sourceModifiedAt, null);
 
       // Preserves markdown table
       assert(
@@ -671,10 +703,11 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
         .flatMap((s) => s.items)
         .find((it) => it.sourceKey.key === "news:news261020");
       assert(zhNews !== undefined);
-      const newsMeta = zhNews.metadata as Record<string, unknown>;
-      assert.equal(newsMeta.publishedDate, "2026-10-20");
-      assert.equal(newsMeta.datePrecision, "day");
-      assert.equal(zhNews.sourceModifiedAt, undefined);
+      assert.deepEqual(zhNews.sourcePublishedAt, {
+        precision: "instant",
+        value: "2026-10-20T17:30:00+08:00",
+      });
+      assert.equal(zhNews.sourceModifiedAt, null);
 
       assert(
         zhNews.body?.markdown?.includes("```python"),

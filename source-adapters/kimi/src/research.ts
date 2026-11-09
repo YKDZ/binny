@@ -6,13 +6,13 @@ import {
   hasIncrementalEntryChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
   type CleanContentResult,
   type IncrementalEntryRecord,
   type IncrementalSyncState,
-  type JsonObject,
   type ManualRunFailure,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -22,6 +22,7 @@ import type { z } from "zod";
 import type {
   ActionParams,
   checkOutputSchema,
+  KimiExtensions,
   KimiConfig,
   KimiSourceDefinition,
 } from "./changelog.ts";
@@ -53,14 +54,14 @@ export type InSiteResearchArticle = {
   readonly isExternal: false;
   readonly slug: string;
   readonly url: string;
-  readonly title: string;
+  readonly title: string | null;
   readonly publishedDate?: string | undefined;
 };
 
 export type ExternalResearchCard = {
   readonly isExternal: true;
   readonly url: string;
-  readonly title: string;
+  readonly title: string | null;
   readonly publishedDate?: string | undefined;
 };
 
@@ -70,14 +71,14 @@ export type DiscoveredResearchBlogList = {
 };
 
 export type ExtractedResearchArticle = {
-  readonly title: string;
+  readonly title: string | null;
   readonly cleanResult: CleanContentResult;
   readonly canonicalUrl?: string | undefined;
-  readonly dateModified?: string | undefined;
-  readonly datePublished?: string | undefined;
+  readonly sourceModifiedAt?: string | undefined;
+  readonly sourcePublishedAt?: string | undefined;
 };
 
-/** Computes a SHA-256 fingerprint from JSON-serializable item metadata. */
+/** Computes a SHA-256 fingerprint from the stable identity and content facts of an article. */
 export function computeFingerprint(data: unknown): string {
   return createHash("sha256").update(JSON.stringify(data)).digest("hex");
 }
@@ -96,23 +97,20 @@ export function buildResearchSourceKey(
   };
 }
 
-/** Parses day-precision date strings (YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, Chinese/English formats). */
-export function parseDayDate(raw: string | undefined): string | undefined {
+/** Parses source dates while preserving recognized instant offsets and known precision. */
+export function parseSourceDate(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim();
-
-  // 1. ISO string with time e.g. 2026-10-24T...
-  const isoFullMatch = trimmed.match(/^(20\d\d)-(\d{2})-(\d{2})T/u);
-  if (isoFullMatch?.[1] && isoFullMatch[2] && isoFullMatch[3]) {
-    return `${isoFullMatch[1]}-${isoFullMatch[2]}-${isoFullMatch[3]}`;
-  }
+  const exact = sourceTimeFrom(trimmed);
+  if (exact !== null) return exact.value;
 
   // 2. YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD
   const isoDayMatch = trimmed.match(
     /(?:^|\D)(20\d\d)[-./](\d{1,2})[-./](\d{1,2})(?:$|\D)/u,
   );
   if (isoDayMatch?.[1] && isoDayMatch[2] && isoDayMatch[3]) {
-    return `${isoDayMatch[1]}-${isoDayMatch[2].padStart(2, "0")}-${isoDayMatch[3].padStart(2, "0")}`;
+    const date = `${isoDayMatch[1]}-${isoDayMatch[2].padStart(2, "0")}-${isoDayMatch[3].padStart(2, "0")}`;
+    return sourceTimeFrom(date)?.value;
   }
 
   // 3. YYYY-MM-DD (Chinese format)
@@ -120,7 +118,8 @@ export function parseDayDate(raw: string | undefined): string | undefined {
     /(?:^|\D)(20\d\d)年(\d{1,2})月(\d{1,2})日?(?:$|\D)/u,
   );
   if (cnDayMatch?.[1] && cnDayMatch[2] && cnDayMatch[3]) {
-    return `${cnDayMatch[1]}-${cnDayMatch[2].padStart(2, "0")}-${cnDayMatch[3].padStart(2, "0")}`;
+    const date = `${cnDayMatch[1]}-${cnDayMatch[2].padStart(2, "0")}-${cnDayMatch[3].padStart(2, "0")}`;
+    return sourceTimeFrom(date)?.value;
   }
 
   // 4. Month DD, YYYY
@@ -130,7 +129,8 @@ export function parseDayDate(raw: string | undefined): string | undefined {
   if (enDayMatch?.[1] && enDayMatch[2] && enDayMatch[3]) {
     const m = MONTH_NAMES[enDayMatch[1].toLowerCase()];
     if (m !== undefined) {
-      return `${enDayMatch[3]}-${m}-${enDayMatch[2].padStart(2, "0")}`;
+      const date = `${enDayMatch[3]}-${m}-${enDayMatch[2].padStart(2, "0")}`;
+      return sourceTimeFrom(date)?.value;
     }
   }
 
@@ -306,8 +306,7 @@ export function parseResearchBlogList(
       (titleEl ? getNodeText(titleEl).trim() : null) ||
       ariaLabel ||
       (headingEl ? getNodeText(headingEl).trim() : null) ||
-      (textInside.length > 0 ? textInside : null) ||
-      "Untitled";
+      (textInside.length > 0 ? textInside : null);
 
     // Date extraction from card-date element or container text
     const dateEl = findNodes(
@@ -317,7 +316,7 @@ export function parseResearchBlogList(
         (getNodeAttr(n, "class")?.includes("card-date") ?? false),
     )[0];
     const rawDateText = dateEl ? getNodeText(dateEl) : getNodeText(container);
-    const publishedDate = parseDayDate(rawDateText);
+    const publishedDate = parseSourceDate(rawDateText);
 
     // Identity check: in-site article vs external card
     const isSameHost =
@@ -390,8 +389,8 @@ export function extractResearchArticle(
     : undefined;
 
   // 2. Structured data from JSON-LD
-  let dateModified: string | undefined;
-  let datePublished: string | undefined;
+  let sourceModifiedAt: string | undefined;
+  let sourcePublishedAt: string | undefined;
   let ldHeadline: string | undefined;
 
   const ldScripts = findNodes(
@@ -431,13 +430,13 @@ export function extractResearchArticle(
             typeof itemRecord["dateModified"] === "string" &&
             itemRecord["dateModified"].length > 0
           ) {
-            dateModified = parseDayDate(itemRecord["dateModified"]);
+            sourceModifiedAt = parseSourceDate(itemRecord["dateModified"]);
           }
           if (
             typeof itemRecord["datePublished"] === "string" &&
             itemRecord["datePublished"].length > 0
           ) {
-            datePublished = parseDayDate(itemRecord["datePublished"]);
+            sourcePublishedAt = parseSourceDate(itemRecord["datePublished"]);
           }
           if (
             typeof itemRecord["headline"] === "string" &&
@@ -453,7 +452,7 @@ export function extractResearchArticle(
   }
 
   // 3. Fallback meta dates
-  if (dateModified === undefined) {
+  if (sourceModifiedAt === undefined) {
     const metaMod = findNodes(
       doc,
       (n) =>
@@ -462,11 +461,11 @@ export function extractResearchArticle(
         getNodeAttr(n, "property") === "article:modified_time",
     )[0];
     if (metaMod) {
-      dateModified = parseDayDate(getNodeAttr(metaMod, "content"));
+      sourceModifiedAt = parseSourceDate(getNodeAttr(metaMod, "content"));
     }
   }
 
-  if (datePublished === undefined) {
+  if (sourcePublishedAt === undefined) {
     const metaPub = findNodes(
       doc,
       (n) =>
@@ -475,7 +474,7 @@ export function extractResearchArticle(
         getNodeAttr(n, "property") === "article:published_time",
     )[0];
     if (metaPub) {
-      datePublished = parseDayDate(getNodeAttr(metaPub, "content"));
+      sourcePublishedAt = parseSourceDate(getNodeAttr(metaPub, "content"));
     }
   }
 
@@ -511,7 +510,7 @@ export function extractResearchArticle(
     ldHeadline ||
     (docTitle && docTitle.length > 0 ? docTitle : null) ||
     fallbackTitle ||
-    "Untitled";
+    null;
 
   // 6. Strip unwanted elements (scripts, styles, headers, navs, footers, mini-navs, language switchers)
   removeNodes(container, (n) => {
@@ -550,15 +549,15 @@ export function extractResearchArticle(
     title,
     cleanResult,
     ...(canonicalUrl !== undefined ? { canonicalUrl } : {}),
-    ...(dateModified !== undefined ? { dateModified } : {}),
-    ...(datePublished !== undefined ? { datePublished } : {}),
+    ...(sourceModifiedAt !== undefined ? { sourceModifiedAt } : {}),
+    ...(sourcePublishedAt !== undefined ? { sourcePublishedAt } : {}),
   };
 }
 
 /** Checks research source accessibility and verifies sample article extraction. */
 export async function checkResearchSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   problems: CheckProblem[],
 ): Promise<void> {
   let listHtml: string;
@@ -633,7 +632,7 @@ export async function checkResearchSource(
     const extracted = extractResearchArticle(
       articleHtml,
       sampleArticle.url,
-      sampleArticle.title,
+      sampleArticle.title ?? undefined,
     );
     if (
       !extracted.cleanResult.hasSubstantialContent ||
@@ -661,7 +660,7 @@ export async function checkResearchSource(
 /** Synchronizes Kimi research articles: establishes baseline on first run without detail fetch, or archives new/modified articles. */
 export async function syncResearchSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   state: IncrementalSyncState,
   initializedScopes: string[],
   completedScopes: string[],
@@ -751,35 +750,28 @@ export async function syncResearchSource(
       const extracted = extractResearchArticle(
         articleHtml,
         item.url,
-        item.title,
+        item.title ?? undefined,
       );
 
-      const metadata: JsonObject = {
-        documentKind: "research",
+      const extensions: KimiExtensions = {
+        kind: "research",
         region: source.region,
         language: source.language,
         slug: item.slug,
-        ...(item.publishedDate !== undefined
-          ? { publishedDate: item.publishedDate }
-          : {}),
-        ...(extracted.dateModified !== undefined
-          ? { modifiedDate: extracted.dateModified }
-          : {}),
         ...(extracted.canonicalUrl !== undefined
           ? { canonicalUrl: extracted.canonicalUrl }
           : {}),
-        datePrecision: "day",
       };
 
       await submitCleanedArticle(context, {
         sourceKey: buildResearchSourceKey(source, item.slug),
         sourceRef: item.url,
         title: extracted.title,
-        sourceModifiedAt: undefined,
-        metadata,
-        properties: {
-          title: extracted.title,
-        },
+        sourcePublishedAt: sourceTimeFrom(
+          extracted.sourcePublishedAt ?? item.publishedDate,
+        ),
+        sourceModifiedAt: sourceTimeFrom(extracted.sourceModifiedAt),
+        extensions,
         cleanResult: extracted.cleanResult,
         captureScope: {
           sourceId: source.id,
@@ -822,7 +814,7 @@ export async function syncResearchSource(
 /** Collects Kimi research articles immediately with optional itemUrls or maxItems filters. */
 export async function collectResearchSource(
   source: KimiSourceDefinition,
-  context: SourceAdapterContext<KimiConfig>,
+  context: SourceAdapterContext<KimiConfig, never, KimiExtensions>,
   state: IncrementalSyncState | undefined,
   params: ActionParams,
   completedScopes: string[],
@@ -877,35 +869,28 @@ export async function collectResearchSource(
       const extracted = extractResearchArticle(
         articleHtml,
         item.url,
-        item.title,
+        item.title ?? undefined,
       );
 
-      const metadata: JsonObject = {
-        documentKind: "research",
+      const extensions: KimiExtensions = {
+        kind: "research",
         region: source.region,
         language: source.language,
         slug: item.slug,
-        ...(item.publishedDate !== undefined
-          ? { publishedDate: item.publishedDate }
-          : {}),
-        ...(extracted.dateModified !== undefined
-          ? { modifiedDate: extracted.dateModified }
-          : {}),
         ...(extracted.canonicalUrl !== undefined
           ? { canonicalUrl: extracted.canonicalUrl }
           : {}),
-        datePrecision: "day",
       };
 
       await submitCleanedArticle(context, {
         sourceKey: buildResearchSourceKey(source, item.slug),
         sourceRef: item.url,
         title: extracted.title,
-        sourceModifiedAt: undefined,
-        metadata,
-        properties: {
-          title: extracted.title,
-        },
+        sourcePublishedAt: sourceTimeFrom(
+          extracted.sourcePublishedAt ?? item.publishedDate,
+        ),
+        sourceModifiedAt: sourceTimeFrom(extracted.sourceModifiedAt),
+        extensions,
         cleanResult: extracted.cleanResult,
         captureScope: {
           sourceId: source.id,

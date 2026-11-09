@@ -13,6 +13,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -20,7 +21,6 @@ import {
   type CleanContentResult,
   type IncrementalEntryRecord,
   type IncrementalSyncState,
-  type JsonObject,
   type ManualRunFailure,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -96,6 +96,88 @@ export const paramsSchema = z
 
 export type MinimaxParams = z.infer<typeof paramsSchema>;
 
+const extensionsSchema = z
+  .object({
+    kind: z
+      .enum(["release-notes", "article"])
+      .describe("Kind of MiniMax source content archived in this item."),
+    region: minimaxRegionSchema.describe(
+      "Geographic region assigned to this MiniMax source.",
+    ),
+    language: z
+      .string()
+      .describe("Language used by the MiniMax source content."),
+    latestReleaseEntryDate: z
+      .string()
+      .optional()
+      .describe(
+        "Latest dated entry heading found in the whole models release document.",
+      ),
+    latestReleaseEntryDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe("Known precision of the latest entry heading date."),
+    observedReleaseEntryDates: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Distinct dated entry headings in the whole models release document.",
+      ),
+    modelsReleaseDate: z
+      .string()
+      .optional()
+      .describe(
+        "Release date heading associated with this article in models.md.",
+      ),
+    modelsReleaseDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe(
+        "Known precision of the models.md heading associated with this article.",
+      ),
+    latestArticleContentDate: z
+      .string()
+      .optional()
+      .describe("Latest dated heading found inside the article body."),
+    latestArticleContentDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe(
+        "Known precision of the latest dated heading in the article body.",
+      ),
+    observedArticleContentDates: z
+      .array(z.string())
+      .optional()
+      .describe("Distinct dated headings found inside the article body."),
+    articleContentDate: z
+      .string()
+      .optional()
+      .describe(
+        "Date shown by a non-publication time element in the article content.",
+      ),
+    articleContentDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe(
+        "Known precision of the date shown by a non-publication time element.",
+      ),
+  })
+  .strict();
+
+type MinimaxExtensions = z.output<typeof extensionsSchema>;
+type MinimaxDatePrecision = "instant" | "day" | "month" | "year";
+
+function validatedDate(
+  value: string,
+):
+  | { readonly date: string; readonly precision: MinimaxDatePrecision }
+  | undefined {
+  const sourceTime = sourceTimeFrom(value);
+  return sourceTime === null
+    ? undefined
+    : { date: sourceTime.value, precision: sourceTime.precision };
+}
+
 export const checkOutputSchema = z
   .object({
     availability: z.enum(["available", "unavailable", "unknown"]),
@@ -154,10 +236,17 @@ const MONTH_NAMES: Readonly<Record<string, string>> = {
   december: "12",
 };
 
-/** Parses date strings into ISO day or month precision without fabricating timestamps or days. */
+/** Parses valid source dates while retaining exact instants and stated precision. */
 export function parseDateString(
   text: string,
-): { readonly date: string; readonly precision: "day" | "month" } | undefined {
+):
+  | { readonly date: string; readonly precision: MinimaxDatePrecision }
+  | undefined {
+  const trimmed = text.trim();
+  const exact = validatedDate(trimmed);
+  if (exact !== undefined) return exact;
+  if (/^20\d\d-\d{2}-\d{2}T/iu.test(trimmed)) return undefined;
+
   // 1. Day precision checks
   // 1a: YYYY-MM-DD or YYYY/MM/DD
   const isoDay = text.match(
@@ -279,7 +368,7 @@ export function preprocessModelsMarkdown(raw: string): string {
 
 export type ExtractedReleaseDates = {
   readonly latestDate?: string | undefined;
-  readonly datePrecision?: "day" | "month" | undefined;
+  readonly datePrecision?: MinimaxDatePrecision | undefined;
   readonly observedDates: readonly string[];
 };
 
@@ -289,7 +378,10 @@ export function extractModelsReleaseDates(
 ): ExtractedReleaseDates {
   const lines = markdown.split("\n");
   let inCodeBlock = false;
-  const observed: { date: string; precision: "day" | "month" }[] = [];
+  const observed: {
+    date: string;
+    precision: MinimaxDatePrecision;
+  }[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -321,10 +413,11 @@ export function extractModelsReleaseDates(
     }
   }
 
-  const hasDay = observed.some((item) => item.precision === "day");
-  const datePrecision = hasDay ? "day" : "month";
   const sorted = [...uniqueDates].sort((a, b) => b.localeCompare(a));
   const latestDate = sorted[0];
+  const datePrecision = observed.find(
+    (item) => item.date === latestDate,
+  )?.precision;
 
   return {
     ...(latestDate !== undefined ? { latestDate } : {}),
@@ -339,7 +432,7 @@ export type DiscoveredArticle = {
   readonly pathname: string;
   readonly articlePath: string;
   readonly releaseDate?: string | undefined;
-  readonly releaseDatePrecision?: "day" | "month" | undefined;
+  readonly releaseDatePrecision?: MinimaxDatePrecision | undefined;
 };
 
 /** Discovers first-party detail article links from models.md, excluding external hosts and old APIs. */
@@ -350,7 +443,7 @@ export function discoverArticleLinks(
   const lines = markdown.split("\n");
   let inCode = false;
   let currentDate: string | undefined;
-  let currentPrecision: "day" | "month" | undefined;
+  let currentPrecision: MinimaxDatePrecision | undefined;
   const discovered: DiscoveredArticle[] = [];
   const seenUrls = new Set<string>();
 
@@ -542,7 +635,7 @@ function stripUnwantedElements(container: Element): void {
 function extractHtmlTitle(
   doc: parse5.DefaultTreeAdapterMap["document"],
   fallbackTitle?: string,
-): string {
+): string | null {
   const h1s = findElements(doc, (el) => el.tagName === "h1");
   for (const h1 of h1s) {
     const text = getText(h1).trim();
@@ -567,41 +660,86 @@ function extractHtmlTitle(
       if (cleaned.length > 0) return cleaned;
     }
   }
-  return fallbackTitle ?? "MiniMax Article";
+  return fallbackTitle?.trim() || null;
 }
 
-function extractHtmlArticleDate(
+interface ExtractedHtmlArticleDates {
+  readonly sourcePublishedAt?: string | undefined;
+  readonly sourceModifiedAt?: string | undefined;
+  readonly articleContentDate?: string | undefined;
+  readonly articleContentDatePrecision?: MinimaxDatePrecision | undefined;
+}
+
+function extractHtmlArticleDates(
   doc: parse5.DefaultTreeAdapterMap["document"],
-): { readonly date: string; readonly precision: "day" | "month" } | undefined {
+): ExtractedHtmlArticleDates {
+  let sourcePublishedAt: string | undefined;
+  let sourceModifiedAt: string | undefined;
+  let articleContentDate: string | undefined;
+  let articleContentDatePrecision: MinimaxDatePrecision | undefined;
+
+  const metas = findElements(doc, (el) => el.tagName === "meta");
+  for (const meta of metas) {
+    const property = (
+      getAttribute(meta, "property") ?? getAttribute(meta, "name")
+    )?.toLowerCase();
+    const content = getAttribute(meta, "content")?.trim();
+    if (property === undefined || content === undefined) continue;
+
+    const parsed = parseDateString(content);
+    if (parsed === undefined) continue;
+    if (
+      property === "article:published_time" ||
+      property === "og:published_time" ||
+      property === "publish-date" ||
+      property === "pubdate"
+    ) {
+      sourcePublishedAt ??= parsed.date;
+    } else if (
+      property === "article:modified_time" ||
+      property === "date-modified" ||
+      property === "last-modified"
+    ) {
+      sourceModifiedAt ??= parsed.date;
+    } else if (property === "date") {
+      articleContentDate ??= parsed.date;
+      articleContentDatePrecision ??= parsed.precision;
+    }
+  }
+
   const times = findElements(doc, (el) => el.tagName === "time");
   for (const time of times) {
     const dt = getAttribute(time, "datetime");
     const txt = getText(time).trim();
     const candidate = dt || txt;
-    if (candidate) {
-      const parsed = parseDateString(candidate);
-      if (parsed !== undefined) return parsed;
+    if (!candidate) continue;
+    const parsed = parseDateString(candidate);
+    if (parsed === undefined) continue;
+
+    const itemprop = getAttribute(time, "itemprop")?.toLowerCase();
+    const isPublished =
+      itemprop === "datepublished" ||
+      getAttribute(time, "pubdate") !== undefined;
+    const isModified = itemprop === "datemodified";
+
+    if (isPublished) {
+      sourcePublishedAt ??= parsed.date;
+    } else if (isModified) {
+      sourceModifiedAt ??= parsed.date;
+    } else {
+      articleContentDate ??= parsed.date;
+      articleContentDatePrecision ??= parsed.precision;
     }
   }
-  const metas = findElements(doc, (el) => el.tagName === "meta");
-  for (const m of metas) {
-    const prop = (
-      getAttribute(m, "property") ?? getAttribute(m, "name")
-    )?.toLowerCase();
-    const content = getAttribute(m, "content")?.trim();
-    if (
-      content &&
-      prop &&
-      (prop === "article:published_time" ||
-        prop === "publish-date" ||
-        prop === "pubdate" ||
-        prop === "date")
-    ) {
-      const parsed = parseDateString(content);
-      if (parsed !== undefined) return parsed;
-    }
-  }
-  return undefined;
+
+  return {
+    ...(sourcePublishedAt !== undefined ? { sourcePublishedAt } : {}),
+    ...(sourceModifiedAt !== undefined ? { sourceModifiedAt } : {}),
+    ...(articleContentDate !== undefined ? { articleContentDate } : {}),
+    ...(articleContentDatePrecision !== undefined
+      ? { articleContentDatePrecision }
+      : {}),
+  };
 }
 
 async function fetchText(
@@ -638,10 +776,11 @@ async function fetchText(
 }
 
 export type ExtractedArticle = {
-  readonly title: string;
+  readonly title: string | null;
+  readonly sourcePublishedAt?: string | undefined;
   readonly sourceModifiedAt?: string | undefined;
   readonly cleanResult: CleanContentResult;
-  readonly metadata: JsonObject;
+  readonly extensions: MinimaxExtensions;
 };
 
 export async function extractArticleContent(
@@ -674,28 +813,31 @@ export async function extractArticleContent(
     }
 
     const pageDates = extractModelsReleaseDates(text);
-    const metadata: JsonObject = {
-      documentKind: "article",
+    const extensions: MinimaxExtensions = {
+      kind: "article",
       region: source.region,
       language: source.language,
       ...(article.releaseDate !== undefined
-        ? { releaseDate: article.releaseDate }
+        ? { modelsReleaseDate: article.releaseDate }
         : {}),
       ...(article.releaseDatePrecision !== undefined
-        ? { releaseDatePrecision: article.releaseDatePrecision }
+        ? { modelsReleaseDatePrecision: article.releaseDatePrecision }
         : {}),
       ...(pageDates.latestDate !== undefined
-        ? { articleDate: pageDates.latestDate }
+        ? { latestArticleContentDate: pageDates.latestDate }
         : {}),
       ...(pageDates.datePrecision !== undefined
-        ? { articleDatePrecision: pageDates.datePrecision }
+        ? { latestArticleContentDatePrecision: pageDates.datePrecision }
+        : {}),
+      ...(pageDates.observedDates.length > 0
+        ? { observedArticleContentDates: [...pageDates.observedDates] }
         : {}),
     };
 
     return {
-      title: article.title || "MiniMax Article",
+      title: article.title || null,
       cleanResult,
-      metadata,
+      extensions,
     };
   }
 
@@ -706,7 +848,7 @@ export async function extractArticleContent(
   const title = extractHtmlTitle(doc, article.title);
 
   // Extract page date
-  const pageDate = extractHtmlArticleDate(doc);
+  const pageDates = extractHtmlArticleDates(doc);
 
   // Locate container
   const container = findMainArticleContainer(doc);
@@ -734,26 +876,30 @@ export async function extractArticleContent(
     );
   }
 
-  const metadata: JsonObject = {
-    documentKind: "article",
+  const extensions: MinimaxExtensions = {
+    kind: "article",
     region: source.region,
     language: source.language,
     ...(article.releaseDate !== undefined
-      ? { releaseDate: article.releaseDate }
+      ? { modelsReleaseDate: article.releaseDate }
       : {}),
     ...(article.releaseDatePrecision !== undefined
-      ? { releaseDatePrecision: article.releaseDatePrecision }
+      ? { modelsReleaseDatePrecision: article.releaseDatePrecision }
       : {}),
-    ...(pageDate?.date !== undefined ? { articleDate: pageDate.date } : {}),
-    ...(pageDate?.precision !== undefined
-      ? { articleDatePrecision: pageDate.precision }
+    ...(pageDates.articleContentDate !== undefined
+      ? { articleContentDate: pageDates.articleContentDate }
+      : {}),
+    ...(pageDates.articleContentDatePrecision !== undefined
+      ? { articleContentDatePrecision: pageDates.articleContentDatePrecision }
       : {}),
   };
 
   return {
     title,
+    sourcePublishedAt: pageDates.sourcePublishedAt,
+    sourceModifiedAt: pageDates.sourceModifiedAt,
     cleanResult,
-    metadata,
+    extensions,
   };
 }
 
@@ -782,7 +928,7 @@ export function selectedSources(
 }
 
 export async function executeMinimaxCheck(
-  context: SourceAdapterContext<MinimaxConfig>,
+  context: SourceAdapterContext<MinimaxConfig, never, MinimaxExtensions>,
   params: MinimaxParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -858,7 +1004,7 @@ export async function executeMinimaxCheck(
 }
 
 export async function executeMinimaxSync(
-  context: SourceAdapterContext<MinimaxConfig>,
+  context: SourceAdapterContext<MinimaxConfig, never, MinimaxExtensions>,
   params: MinimaxParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -919,18 +1065,18 @@ export async function executeMinimaxSync(
           ? "MiniMax 模型发布记录"
           : "MiniMax Model Release Notes";
 
-      const releaseNotesMetadata: JsonObject = {
-        documentKind: "release-notes",
+      const releaseNotesExtensions: MinimaxExtensions = {
+        kind: "release-notes",
         region: source.region,
         language: source.language,
         ...(dates.latestDate !== undefined
-          ? { latestDate: dates.latestDate }
+          ? { latestReleaseEntryDate: dates.latestDate }
           : {}),
         ...(dates.datePrecision !== undefined
-          ? { datePrecision: dates.datePrecision }
+          ? { latestReleaseEntryDatePrecision: dates.datePrecision }
           : {}),
         ...(dates.observedDates.length > 0
-          ? { observedDates: [...dates.observedDates] }
+          ? { observedReleaseEntryDates: [...dates.observedDates] }
           : {}),
       };
 
@@ -982,9 +1128,9 @@ export async function executeMinimaxSync(
             },
             sourceRef: source.modelsReleaseUrl,
             title: releaseNotesTitle,
-            sourceModifiedAt: undefined,
-            metadata: releaseNotesMetadata,
-            properties: { title: releaseNotesTitle },
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            extensions: releaseNotesExtensions,
             cleanResult,
             captureScope: {
               sourceId: source.id,
@@ -1031,9 +1177,11 @@ export async function executeMinimaxSync(
               },
               sourceRef: article.url,
               title: articleContent.title,
-              sourceModifiedAt: articleContent.sourceModifiedAt,
-              metadata: articleContent.metadata,
-              properties: { title: articleContent.title },
+              sourcePublishedAt: sourceTimeFrom(
+                articleContent.sourcePublishedAt,
+              ),
+              sourceModifiedAt: sourceTimeFrom(articleContent.sourceModifiedAt),
+              extensions: articleContent.extensions,
               cleanResult: articleContent.cleanResult,
               captureScope: {
                 sourceId: source.id,
@@ -1085,7 +1233,7 @@ export async function executeMinimaxSync(
 }
 
 export async function executeMinimaxCollect(
-  context: SourceAdapterContext<MinimaxConfig>,
+  context: SourceAdapterContext<MinimaxConfig, never, MinimaxExtensions>,
   params: MinimaxParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -1146,18 +1294,18 @@ export async function executeMinimaxCollect(
           ? "MiniMax 模型发布记录"
           : "MiniMax Model Release Notes";
 
-      const releaseNotesMetadata: JsonObject = {
-        documentKind: "release-notes",
+      const releaseNotesExtensions: MinimaxExtensions = {
+        kind: "release-notes",
         region: source.region,
         language: source.language,
         ...(dates.latestDate !== undefined
-          ? { latestDate: dates.latestDate }
+          ? { latestReleaseEntryDate: dates.latestDate }
           : {}),
         ...(dates.datePrecision !== undefined
-          ? { datePrecision: dates.datePrecision }
+          ? { latestReleaseEntryDatePrecision: dates.datePrecision }
           : {}),
         ...(dates.observedDates.length > 0
-          ? { observedDates: [...dates.observedDates] }
+          ? { observedReleaseEntryDates: [...dates.observedDates] }
           : {}),
       };
 
@@ -1174,9 +1322,9 @@ export async function executeMinimaxCollect(
           },
           sourceRef: source.modelsReleaseUrl,
           title: releaseNotesTitle,
-          sourceModifiedAt: undefined,
-          metadata: releaseNotesMetadata,
-          properties: { title: releaseNotesTitle },
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: releaseNotesExtensions,
           cleanResult,
           captureScope: {
             sourceId: source.id,
@@ -1224,9 +1372,9 @@ export async function executeMinimaxCollect(
           },
           sourceRef: article.url,
           title: articleContent.title,
-          sourceModifiedAt: articleContent.sourceModifiedAt,
-          metadata: articleContent.metadata,
-          properties: { title: articleContent.title },
+          sourcePublishedAt: sourceTimeFrom(articleContent.sourcePublishedAt),
+          sourceModifiedAt: sourceTimeFrom(articleContent.sourceModifiedAt),
+          extensions: articleContent.extensions,
           cleanResult: articleContent.cleanResult,
           captureScope: {
             sourceId: source.id,
@@ -1287,22 +1435,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Check MiniMax model releases and article availability.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: executeMinimaxCheck,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Collect MiniMax model releases and linked first-party articles.",
       params: paramsSchema,
       output: collectOutputSchema,
       execute: executeMinimaxCollect,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally synchronize MiniMax model releases and new first-party articles.",
       params: paramsSchema,
