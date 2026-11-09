@@ -438,7 +438,7 @@ function pageQuery(
     input.timeWindow === undefined
       ? sql`'{}'::jsonb`
       : sql`jsonb_build_object(
-        'timeStatus', ${input.timeWindow.review},
+        'timeStatus', ${input.timeWindow.review}::text,
         '__searchTimeSortValue', to_char(
           selected.sort_value AT TIME ZONE 'UTC',
           'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
