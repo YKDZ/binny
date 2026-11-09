@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  runtimeProtocolVersion,
   sourceAdapterManifestSchema,
   type ArchiveSubmissionInput,
   type ManualRun,
@@ -111,7 +112,7 @@ async function heartbeat(
   const response = await client.bins[":binId"].runtime.heartbeat.$post({
     param: { binId },
     json: {
-      protocolVersion: 6,
+      protocolVersion: runtimeProtocolVersion,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true,
@@ -333,6 +334,10 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
             namespace: "binny-lifecycle.cancellation",
             key: queued.runId,
           },
+          title: "Cancellation replay item",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { section: "cancellation replay" },
           body: { text: "取消前已提交的资料。" },
           capture: {
             scope: { runId: queued.runId },
@@ -343,6 +348,49 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
       ],
       relations: [],
     } satisfies ArchiveSubmissionInput;
+    const invalidExtensionResponse = await client.archives.$post({
+      json: {
+        ...submission,
+        requestId: submission.requestId + ":invalid-extension",
+        items: [
+          {
+            ...submission.items[0]!,
+            sourceKey: {
+              namespace: "binny-lifecycle.cancellation",
+              key: queued.runId + ":invalid-extension",
+            },
+            extensions: { undeclared: true },
+          },
+        ],
+      },
+    });
+    assert.equal(invalidExtensionResponse.status, 400);
+    if (invalidExtensionResponse.status === 400) {
+      const invalidExtension = await invalidExtensionResponse.json();
+      assert.equal(invalidExtension.error.code, "invalid_input");
+      assert.deepEqual(invalidExtension.error.path, [
+        "items",
+        0,
+        "extensions",
+        "undeclared",
+      ]);
+    }
+    const rejectedExtensionSearch = await client.archives.search.$post({
+      json: {
+        scope: { kind: "current", binId },
+        where: {
+          type: "field",
+          field: "sourceKey.key",
+          operator: "eq",
+          value: queued.runId + ":invalid-extension",
+        },
+        limit: 10,
+      },
+    });
+    assert.equal(rejectedExtensionSearch.status, 200);
+    if (rejectedExtensionSearch.status === 200) {
+      assert.equal((await rejectedExtensionSearch.json()).results.length, 0);
+    }
     const initialCommit = await client.archives.$post({ json: submission });
     assert.equal(initialCommit.status, 201);
     if (initialCommit.status !== 201) return;
@@ -1039,6 +1087,8 @@ async function verifyScheduledReferenceTime(
       committed.itemId,
       "changed-while-queued",
       schedule.nextDueAt,
+      "受控资料 " + gateKey,
+      "受控正文 " + gateKey,
     );
   } finally {
     if (!removed) {
@@ -1079,6 +1129,8 @@ async function verifyArchivedSection(
   itemId: string,
   expectedSection: string,
   expectedReferenceTime: string,
+  expectedTitle: string,
+  expectedBody: string,
 ): Promise<void> {
   const response = await client.archives.items[":itemId"].$get({
     param: { itemId },
@@ -1086,11 +1138,76 @@ async function verifyArchivedSection(
   });
   assert.equal(response.status, 200);
   const item = await response.json();
-  const metadata = item.views[0]?.state.metadata;
-  assert.equal(metadata?.section, expectedSection);
-  assert.equal(metadata?.adapterLabel, "runtime!");
-  assert.equal(metadata?.actionLabel, "collect!");
-  assert.equal(metadata?.referenceTime, expectedReferenceTime);
+  const view = item.views.find(({ binId }) => binId === "binny-runs-one");
+  assert.ok(view !== undefined);
+  assert.equal(view.state.title, expectedTitle);
+  assert.deepEqual(view.state.sourcePublishedAt, {
+    precision: "month",
+    value: "2026-11",
+  });
+  assert.deepEqual(view.state.sourceModifiedAt, {
+    precision: "instant",
+    value: expectedReferenceTime,
+    timeZone: "UTC",
+  });
+  assert.equal(view.state.body?.text, expectedBody);
+  const extensions = view.state.extensions;
+  assert.equal(extensions?.section, expectedSection);
+  assert.equal(extensions?.adapterLabel, "runtime!");
+  assert.equal(extensions?.actionLabel, "collect!");
+  assert.equal(extensions?.referenceTime, expectedReferenceTime);
+  const observation = item.observations.find(
+    ({ binId }) => binId === "binny-runs-one",
+  );
+  assert.deepEqual(observation?.sourceModifiedAt, view.state.sourceModifiedAt);
+}
+
+async function verifyTypedArchiveAfterRestart(itemId: string): Promise<void> {
+  const response = await client.archives.items[":itemId"].$get({
+    param: { itemId },
+    query: {},
+  });
+  assert.equal(response.status, 200);
+  if (response.status !== 200) return;
+  const item = await response.json();
+  assert.equal(item.views.length, 1);
+  const view = item.views[0];
+  assert.ok(view !== undefined);
+  const referenceTime = view.state.extensions.referenceTime;
+  assert.equal(typeof referenceTime, "string");
+  assert.equal(view.state.title, "受控资料 runs-http-first");
+  assert.deepEqual(view.state.sourcePublishedAt, {
+    precision: "month",
+    value: "2026-11",
+  });
+  assert.deepEqual(view.state.sourceModifiedAt, {
+    precision: "instant",
+    value: referenceTime,
+    timeZone: "UTC",
+  });
+  assert.deepEqual(view.state.extensions, {
+    section: "initial",
+    adapterLabel: "runtime!",
+    actionLabel: "collect!",
+    referenceTime,
+  });
+  assert.equal(view.state.body?.text, "受控正文 runs-http-first");
+  assert.equal(item.revisions.length, 1);
+  assert.equal(item.observations.length, 1);
+  assert.deepEqual(item.observations[0]?.sourceModifiedAt, {
+    precision: "instant",
+    value: referenceTime,
+    timeZone: "UTC",
+  });
+
+  const revisionResponse = await client.archives.revisions[":revisionId"].$get({
+    param: { revisionId: view.revisionId },
+  });
+  assert.equal(revisionResponse.status, 200);
+  if (revisionResponse.status === 200) {
+    const revision = await revisionResponse.json();
+    assert.deepEqual(revision.state, view.state);
+  }
 }
 
 async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
@@ -1269,6 +1386,8 @@ async function verifySerialParallelAndSnapshot(
     firstArchive.itemId,
     "initial",
     completedFirst.referenceTime,
+    "受控资料 " + firstKey,
+    "受控正文 " + firstKey,
   );
 
   await waitForArrival(controlSourceUrl, secondKey);
@@ -1283,6 +1402,8 @@ async function verifySerialParallelAndSnapshot(
     secondArchive.itemId,
     "initial",
     completedSecond.referenceTime,
+    "受控资料 " + secondKey,
+    "受控正文 " + secondKey,
   );
   return firstArchive.itemId;
 }
@@ -1516,6 +1637,15 @@ async function configureRegisteredBin(binId: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const [stage] = process.argv.slice(2);
+  if (stage === "verify-after-restart") {
+    const itemId = process.env.BINNY_E2E_TYPED_ARCHIVE_ITEM_ID;
+    if (itemId === undefined)
+      throw new Error("重启后归档读回需要先前条目 ID。");
+    await verifyTypedArchiveAfterRestart(itemId);
+    return;
+  }
+
   await configureRegisteredBin("binny-runs-one");
   await configureRegisteredBin("binny-runs-two");
   await verifyQueuedCancellation();
@@ -1540,6 +1670,7 @@ async function main(): Promise<void> {
   process.stdout.write(
     "运行 HTTP 队列、check 诊断、普通动作输出、串行并行、归档约束和错误结果旅程通过。\n",
   );
+  process.stdout.write("BINNY_TYPED_ARCHIVE_ITEM_ID=" + existingItemId + "\n");
 }
 
 await main();

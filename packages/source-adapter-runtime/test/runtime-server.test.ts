@@ -12,12 +12,13 @@ import { z } from "zod";
 import { createRuntimeServer } from "../src/runtime-server.ts";
 
 const configSchema = z.object({});
+const extensionsSchema = z.object({}).strict();
 const environment = {
   browser: { required: false, profileReuseAfterRestart: false },
 } as const;
 
 function action() {
-  return defineSourceAdapterAction(configSchema, {
+  return defineSourceAdapterAction(configSchema, extensionsSchema, {
     description: "执行测试动作。",
     params: z.object({}),
     output: z.object({ accepted: z.boolean() }),
@@ -31,15 +32,20 @@ function sourceAdapter(includeConstructor: boolean) {
   const actions = {
     check: action(),
     collect: action(),
-    ...(includeConstructor ? { constructor: action() } : {}),
   };
-  return defineSourceAdapter({
+  const definition = {
     id: "test.runtime-action-lookup",
     version: "1.0.0",
     configSchema,
+    extensionsSchema,
     environment,
-    actions,
-  });
+  };
+  return includeConstructor
+    ? defineSourceAdapter({
+        ...definition,
+        actions: { ...actions, constructor: action() },
+      })
+    : defineSourceAdapter({ ...definition, actions });
 }
 
 async function withRuntimeServer(

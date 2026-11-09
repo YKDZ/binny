@@ -10,7 +10,10 @@ import {
 } from "../src/index.ts";
 
 const configSchema = z.object({});
-const action = defineSourceAdapterAction(configSchema, {
+const extensionsSchema = z
+  .object({ category: z.enum(["question", "reply"]) })
+  .strict();
+const action = defineSourceAdapterAction(configSchema, extensionsSchema, {
   description: "执行测试动作。",
   params: z.object({}),
   output: z.object({ accepted: z.boolean() }),
@@ -19,11 +22,12 @@ const action = defineSourceAdapterAction(configSchema, {
   },
 });
 
-void test("适配器清单公开其持久状态的原生schema", () => {
+void test("adapter manifest publishes extension and state JSON Schemas", () => {
   const sourceAdapter = defineSourceAdapter({
     id: "test.sync-state-contract",
     version: "1.0.0",
     configSchema,
+    extensionsSchema,
     environment: {
       browser: { required: false, profileReuseAfterRestart: false },
     },
@@ -41,6 +45,17 @@ void test("适配器清单公开其持久状态的原生schema", () => {
 
   const manifest = sourceAdapterManifest(sourceAdapter);
 
+  assert.deepEqual(manifest.extensionsSchema.required, ["category"]);
+  assert.equal(manifest.extensionsSchema.additionalProperties, false);
+  const extensionProperties = manifest.extensionsSchema.properties;
+  assert.ok(
+    typeof extensionProperties === "object" && extensionProperties !== null,
+  );
+  assert.deepEqual(
+    (extensionProperties as Record<string, { readonly enum?: unknown[] }>)
+      .category?.enum,
+    ["question", "reply"],
+  );
   assert.deepEqual(manifest.stateSchema?.required, ["cursor"]);
   const properties = manifest.stateSchema?.properties;
   assert.ok(typeof properties === "object" && properties !== null);

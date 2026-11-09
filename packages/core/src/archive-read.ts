@@ -202,15 +202,19 @@ function archiveRevisionDiff(
   second: ArchiveRevisionRead,
 ) {
   const fields = {
+    title: revisionFieldDiff(first.state.title, second.state.title),
+    sourcePublishedAt: revisionFieldDiff(
+      first.state.sourcePublishedAt,
+      second.state.sourcePublishedAt,
+    ),
     sourceRef: revisionFieldDiff(first.state.sourceRef, second.state.sourceRef),
     sourceModifiedAt: revisionFieldDiff(
       first.state.sourceModifiedAt,
       second.state.sourceModifiedAt,
     ),
-    metadata: revisionFieldDiff(first.state.metadata, second.state.metadata),
-    properties: revisionFieldDiff(
-      first.state.properties,
-      second.state.properties,
+    extensions: revisionFieldDiff(
+      first.state.extensions,
+      second.state.extensions,
     ),
     body: revisionFieldDiff(first.state.body, second.state.body),
     capture: revisionFieldDiff(first.state.capture, second.state.capture),
@@ -478,8 +482,8 @@ async function readItem(
 
   // Drizzle RC 没有 JSON 文本提取构建器；这里只保留单个投影表达式。
   const sourceModifiedAt =
-    sql`${archiveRevisions.stateData}->>'sourceModifiedAt'`
-      .mapWith(archiveCommits.binId)
+    sql`${archiveRevisions.stateData}->'sourceModifiedAt'`
+      .mapWith(archiveRevisions.stateData)
       .nullable()
       .as("sourceModifiedAt");
   const observationRows = await transaction
@@ -587,9 +591,7 @@ async function readItem(
         ordinal: row.ordinal,
         binId: row.binId,
         revisionId: row.revisionId,
-        ...(row.sourceModifiedAt === null
-          ? {}
-          : { sourceModifiedAt: row.sourceModifiedAt }),
+        sourceModifiedAt: row.sourceModifiedAt,
         observedAt: isoTimestamp(row.observedAt),
         recordedAt: isoTimestamp(row.recordedAt),
         ...optionalText("runId", row.runId),
@@ -718,8 +720,8 @@ async function readTimelinePage(
       revisionId: nullableColumn(archiveObservations.revisionId, "revisionId"),
       ordinal: archiveObservations.ordinal,
       // RC 没有 JSON 文本提取构建器；只对来源时间字段保留局部运算符。
-      sourceModifiedAt: sql`${archiveRevisions.stateData}->>'sourceModifiedAt'`
-        .mapWith(archiveCommits.binId)
+      sourceModifiedAt: sql`${archiveRevisions.stateData}->'sourceModifiedAt'`
+        .mapWith(archiveRevisions.stateData)
         .nullable()
         .as("sourceModifiedAt"),
       gapSubjectKind: nullColumn(
@@ -988,9 +990,7 @@ async function readTimelinePage(
             kind: "item" as const,
             itemId: row.itemId,
             revisionId: row.revisionId,
-            ...(row.sourceModifiedAt === null
-              ? {}
-              : { sourceModifiedAt: row.sourceModifiedAt }),
+            sourceModifiedAt: row.sourceModifiedAt,
           };
         }
         if (row.kind === "gap") {

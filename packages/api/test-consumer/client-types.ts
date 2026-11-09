@@ -322,7 +322,7 @@ async function checkPublicArchiveContract(): Promise<void> {
   if (revisionDiffResponse.status === 200) {
     const revisionDiff = await revisionDiffResponse.json();
     void (revisionDiff.fields.body.status satisfies "unchanged" | "changed");
-    void (revisionDiff.fields.properties.status satisfies
+    void (revisionDiff.fields.extensions.status satisfies
       | "unchanged"
       | "changed");
     void (revisionDiff.resources.added satisfies readonly string[]);
@@ -358,6 +358,10 @@ async function checkPublicArchiveContract(): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "rss.example", key: "entry/7" },
+          title: "Entry 7",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           body: { text: "正文" },
           capture: {
             scope: { feed: "main" },

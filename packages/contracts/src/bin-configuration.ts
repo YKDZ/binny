@@ -95,6 +95,7 @@ const sourceAdapterManifestStoredFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
+  extensionsSchema: jsonSchemaDocumentSchema,
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
@@ -112,6 +113,7 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
   version: postgresTextSchema.min(1, "信源适配器版本不能为空。"),
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
+  extensionsSchema: jsonSchemaDocumentSchema,
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
@@ -250,7 +252,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 6;
+export const runtimeProtocolVersion = 7;
 
 const sourceAccessSnapshotGroupSchema = z
   .object({

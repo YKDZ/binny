@@ -111,7 +111,7 @@ try {
     throw new Error(`${String(error)}\n${logs}`);
   }
   assert.deepStrictEqual(manifest, {
-    protocolVersion: 6,
+    protocolVersion: 7,
     sourceAdapter: {
       id: "binny-runtime.configuration-validation-fixture",
       version: "1.0.0",
@@ -122,6 +122,12 @@ try {
         $schema: "https://json-schema.org/draft/2020-12/schema",
         properties: { section: { type: "string", default: "sample" } },
         type: "object",
+      },
+      extensionsSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        properties: {},
+        type: "object",
+        additionalProperties: false,
       },
       actions: {
         check: {

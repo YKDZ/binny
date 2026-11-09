@@ -150,6 +150,7 @@ const mockSourceAdapter = {
   id: "test.adapter",
   version: "1.0.0",
   configSchema: { type: "object" },
+  extensionsSchema: { type: "object", additionalProperties: false },
   actions: {
     check: {
       description: "check",

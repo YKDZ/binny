@@ -110,6 +110,8 @@ const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
 const scheduleOnly =
   internalStep === "scheduled-runs" || internalStep === "schedule-overlap";
 const scheduleOverlapOnly = internalStep === "schedule-overlap";
+const archiveModelOnly = internalStep === "archive-model";
+const manualRunsOnly = scheduleOnly || archiveModelOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -3783,10 +3785,9 @@ async function replacementPreservesAcceptedCancellationStep(
   );
 }
 
-async function manualRunsCliStep(
+async function configureManualRunBins(
   baseUrl: string,
   manifest: unknown,
-  heartbeatProxy: HeartbeatDelayProxy,
 ): Promise<void> {
   for (const binId of ["binny-runs-one", "binny-runs-two"]) {
     const registered = await waitForBinRegistration(baseUrl, binId);
@@ -3812,11 +3813,18 @@ async function manualRunsCliStep(
     assert.equal(configured.id, binId);
     assert.deepEqual(configured.config, { section: "initial" });
   }
-
   await Promise.all([
     waitForRuntime(baseUrl, "binny-runs-one"),
     waitForRuntime(baseUrl, "binny-runs-two"),
   ]);
+}
+
+async function manualRunsCliStep(
+  baseUrl: string,
+  manifest: unknown,
+  heartbeatProxy: HeartbeatDelayProxy,
+): Promise<void> {
+  await configureManualRunBins(baseUrl, manifest);
 
   await waitForManualRunSource();
   const sourceRuntimeUrl = manualRunSourceRuntimeUrl();
@@ -3939,7 +3947,17 @@ async function manualRunsCliStep(
   const item = cliData<{
     readonly views: readonly {
       readonly state: {
-        readonly metadata?: {
+        readonly title: string | null;
+        readonly sourcePublishedAt: {
+          readonly precision: string;
+          readonly value: string;
+        } | null;
+        readonly sourceModifiedAt: {
+          readonly precision: string;
+          readonly value: string;
+          readonly timeZone?: string;
+        } | null;
+        readonly extensions: {
           readonly section?: unknown;
           readonly adapterLabel?: unknown;
           readonly actionLabel?: unknown;
@@ -3949,11 +3967,21 @@ async function manualRunsCliStep(
       };
     }[];
   }>(await cli(baseUrl, ["archive", "item", savedItem.itemId]), "found");
-  assert.equal(item.views[0]?.state.metadata?.section, "initial");
-  assert.equal(item.views[0]?.state.metadata?.adapterLabel, "runtime!");
-  assert.equal(item.views[0]?.state.metadata?.actionLabel, "collect!");
+  assert.equal(item.views[0]?.state.title, "受控资料 " + gateKey);
+  assert.deepEqual(item.views[0]?.state.sourcePublishedAt, {
+    precision: "month",
+    value: "2026-11",
+  });
+  assert.deepEqual(item.views[0]?.state.sourceModifiedAt, {
+    precision: "instant",
+    value: triggered.referenceTime,
+    timeZone: "UTC",
+  });
+  assert.equal(item.views[0]?.state.extensions.section, "initial");
+  assert.equal(item.views[0]?.state.extensions.adapterLabel, "runtime!");
+  assert.equal(item.views[0]?.state.extensions.actionLabel, "collect!");
   assert.equal(
-    item.views[0]?.state.metadata?.referenceTime,
+    item.views[0]?.state.extensions.referenceTime,
     triggered.referenceTime,
   );
   assert.equal(item.views[0]?.state.body?.text, "受控正文 " + gateKey);
@@ -4746,7 +4774,16 @@ async function manualRunsCliStep(
 async function manualRunsHttpStep(
   baseUrl: string,
   manifest: unknown,
-): Promise<void> {
+  options: {
+    readonly stage?: "exercise" | "verify-after-restart";
+    readonly itemId?: string;
+  } = {},
+): Promise<string | undefined> {
+  const stage = options.stage ?? "exercise";
+  const scriptArguments = [
+    "scripts/manual-runs-http-e2e.ts",
+    ...(stage === "exercise" ? [] : [stage]),
+  ];
   const result = await run(
     "pnpm",
     [
@@ -4756,7 +4793,7 @@ async function manualRunsHttpStep(
       "exec",
       "node",
       "--conditions=source",
-      "scripts/manual-runs-http-e2e.ts",
+      ...scriptArguments,
     ],
     {
       env: {
@@ -4764,11 +4801,20 @@ async function manualRunsHttpStep(
         BINNY_RUNS_SOURCE_CONTROL_URL: manualRunSourceControlUrl(),
         BINNY_RUNS_RUNTIME_CONTROL_URL: "http://runtime-fifteen-one:8080",
         BINNY_RUNS_SOURCE_ADAPTER_MANIFEST: JSON.stringify(manifest),
+        ...(options.itemId === undefined
+          ? {}
+          : { BINNY_E2E_TYPED_ARCHIVE_ITEM_ID: options.itemId }),
       },
     },
   );
   assert.equal(result.code, 0, result.stderr);
   process.stdout.write(result.stdout);
+  if (stage === "verify-after-restart") return undefined;
+  const itemId = /^BINNY_TYPED_ARCHIVE_ITEM_ID=([0-9a-f-]+)$/mu.exec(
+    result.stdout,
+  )?.[1];
+  assert.ok(itemId, "手工运行归档旅程应返回公开条目 ID。");
+  return itemId;
 }
 
 async function scheduledRunsStep(baseUrl: string): Promise<string> {
@@ -8943,14 +8989,14 @@ async function main(): Promise<void> {
       "      - runtime",
       "  runtime-fifteen-one:",
       "    environment:",
-      scheduleOnly
+      manualRunsOnly
         ? "      BINNY_API_URL: http://server:3000"
         : "      BINNY_API_URL: http://heartbeat-proxy:8082",
       "    networks: !override",
       "      - runtime",
       "  runtime-fifteen-two:",
       "    environment:",
-      scheduleOnly
+      manualRunsOnly
         ? "      BINNY_API_URL: http://server:3000"
         : "      BINNY_API_URL: http://heartbeat-proxy:8082",
       "    networks: !override",
@@ -9019,7 +9065,7 @@ async function main(): Promise<void> {
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
   const runFunctionalJourney =
-    !scheduleOnly &&
+    !manualRunsOnly &&
     !(
       isFullCapacityRun &&
       (capacityPhase === "verify" || capacityPhase === "delete")
@@ -9034,7 +9080,7 @@ async function main(): Promise<void> {
     builtImages.add(imageName);
     await compose(["build", "runtime-fifteen-one"]);
     builtImages.add(runtimeImageName);
-    if (!scheduleOnly) {
+    if (!manualRunsOnly) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
     }
@@ -9049,8 +9095,14 @@ async function main(): Promise<void> {
       builtImages.add(rssBaselineRuntimeImageName);
       activeRssRuntimeImage = rssBaselineRuntimeImageName;
     }
-    const e2eServices = scheduleOnly
-      ? ["postgres", "server", "manual-runs-source", "runtime-fifteen-one"]
+    const e2eServices = manualRunsOnly
+      ? [
+          "postgres",
+          "server",
+          "manual-runs-source",
+          "runtime-fifteen-one",
+          ...(archiveModelOnly ? ["runtime-fifteen-two"] : []),
+        ]
       : [
           "postgres",
           "server",
@@ -9084,7 +9136,7 @@ async function main(): Promise<void> {
       linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
     }
     let activeHeartbeatProxy: HeartbeatDelayProxy | undefined;
-    if (!scheduleOnly) {
+    if (!manualRunsOnly) {
       activeHeartbeatProxy = createHeartbeatDelayProxy(
         await publishedPort("heartbeat-proxy", 8083),
       );
@@ -9122,6 +9174,22 @@ async function main(): Promise<void> {
       } else {
         baseUrl = await scheduledRunsStep(baseUrl);
       }
+    } else if (archiveModelOnly) {
+      const manifest = await createRuntimeFixtureManifest();
+      await configureManualRunBins(baseUrl, manifest);
+      await waitForManualRunSource();
+      const itemId = await manualRunsHttpStep(baseUrl, manifest);
+      assert.ok(itemId);
+      await compose(["kill", "-s", "SIGKILL", "server"]);
+      baseUrl = await restartServer();
+      await waitForApiAndDatabase(baseUrl);
+      await manualRunsHttpStep(baseUrl, manifest, {
+        stage: "verify-after-restart",
+        itemId,
+      });
+      process.stdout.write(
+        "SDK/运行器/HTTP/数据库归档模型及重启后公开读回通过。\n",
+      );
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(installedCliConsumer !== undefined);
@@ -9199,7 +9267,7 @@ async function main(): Promise<void> {
       );
       await verifyLinuxdoCapacityJourney(baseUrl);
     }
-    if (!scheduleOnly) {
+    if (!manualRunsOnly) {
       await runCapacityAcceptance(baseUrl);
     }
   } catch (error) {

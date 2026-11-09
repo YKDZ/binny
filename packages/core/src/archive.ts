@@ -6,6 +6,7 @@ import {
   archiveItemStateSchema,
   archiveRelationStateSchema,
   archiveSubmissionInputSchema,
+  sourceAdapterManifestStoredSchema,
   type ArchiveOperations,
   type ArchiveRelationState,
   type ArchiveSubmissionInput,
@@ -51,6 +52,7 @@ import { createArchiveReadOperations, readCommit } from "./archive-read.ts";
 import { resolveArchiveResources as resolveArchiveResourcesOperation } from "./archive-resource-resolve.ts";
 import { createArchiveResourceStorage } from "./archive-resource-storage.ts";
 import { createArchiveSearchOperation } from "./archive-search.ts";
+import { validateSourceAdapterExtensions } from "./bin-configuration.ts";
 import { lockManualRunForArchiveWrite } from "./manual-run-fencing.ts";
 
 // Drizzle 的 inArray 将每个 ID 展开为参数；分批避开 PostgreSQL 单条语句参数上限。
@@ -474,13 +476,37 @@ export function createArchiveStore(
           }
 
           const bins = await transaction
-            .select({ id: binConfigurations.id })
+            .select({
+              id: binConfigurations.id,
+              sourceAdapter: binConfigurations.sourceAdapter,
+            })
             .from(binConfigurations)
             .where(eq(binConfigurations.id, submission.binId));
-          if (bins[0] === undefined) {
+          const bin = bins[0];
+          if (bin === undefined) {
             return failure(404, "bin_not_found", "没有找到提交所声明的 bin。", [
               "binId",
             ]);
+          }
+
+          const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+            bin.sourceAdapter,
+          );
+          for (const [itemIndex, item] of submission.items.entries()) {
+            const extensionError = validateSourceAdapterExtensions(
+              sourceAdapter,
+              item.extensions,
+            );
+            if (extensionError !== undefined) {
+              return failure(
+                400,
+                "invalid_input",
+                extensionError.message,
+                extensionError.path?.[0] === "extensions"
+                  ? ["items", itemIndex, ...extensionError.path]
+                  : extensionError.path,
+              );
+            }
           }
 
           for (const [itemIndex, item] of submission.items.entries()) {
