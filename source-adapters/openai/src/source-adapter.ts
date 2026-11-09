@@ -10,6 +10,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
   type SourceAdapterContext,
@@ -22,7 +23,6 @@ import {
   detectOpenAiAccessFailure,
   extractDevelopersBlogArticle,
   extractOpenAiNewsArticle,
-  parseDatePrecision,
   parseDevelopersBlogList,
   prepareMarkdownContent,
   type DevelopersBlogPostListing,
@@ -81,6 +81,26 @@ export const configSchema = z
   });
 
 export type OpenAIConfig = z.output<typeof configSchema>;
+
+const extensionsSchema = z
+  .object({
+    region: z
+      .string()
+      .describe("Geographic region assigned to this OpenAI publication."),
+    language: z.string().describe("Language used by the published article."),
+    section: z
+      .enum(["news", "developers-blog"])
+      .describe("OpenAI publication area where the article appeared."),
+    categories: z
+      .array(z.string())
+      .describe("Categories or tags assigned to the article by its source."),
+    authors: z
+      .array(z.string())
+      .describe("Author names shown by the article source."),
+  })
+  .strict();
+
+type OpenAIExtensions = z.output<typeof extensionsSchema>;
 
 export const paramsSchema = z
   .object({
@@ -177,18 +197,15 @@ function getNewsKey(
   return item.url || "unknown";
 }
 
-function validIsoTimestamp(value?: string): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(
-      trimmed,
-    )
-  ) {
-    const d = new Date(trimmed);
-    if (!Number.isNaN(d.getTime())) {
-      return d.toISOString();
-    }
+type FeedItem = ReturnType<typeof parseFeed>["items"][number];
+
+function rawFeedDate(
+  item: FeedItem,
+  names: readonly string[],
+): string | undefined {
+  for (const name of names) {
+    const value = item.element.findElementWithName(name)?.textContentNormalized;
+    if (value !== undefined && value.trim().length > 0) return value.trim();
   }
   return undefined;
 }
@@ -224,20 +241,27 @@ async function fetchNewsRssItems(
 
   const xmlText = await response.text();
   const parsed = parseFeed(xmlText);
-  const json = parsed.toJSON();
 
-  return json.items.map((item) => ({
-    id: item.id || undefined,
-    url: item.url || undefined,
-    title: item.title || undefined,
-    published: item.published || undefined,
-    updated: item.updated || undefined,
-    categories: item.categories
-      ? item.categories
-          .map((c) => (typeof c === "string" ? c : (c.label ?? c.term)))
-          .filter((v): v is string => typeof v === "string" && v.length > 0)
-      : undefined,
-  }));
+  return parsed.items.map((rawItem) => {
+    const item = rawItem.toJSON();
+    return {
+      id: item.id || undefined,
+      url: item.url || undefined,
+      title: item.title || undefined,
+      published: rawFeedDate(rawItem, [
+        "pubdate",
+        "published",
+        "issued",
+        "date",
+      ]),
+      updated: rawFeedDate(rawItem, ["updated", "modified"]),
+      categories: item.categories
+        ? item.categories
+            .map((c) => (typeof c === "string" ? c : (c.label ?? c.term)))
+            .filter((v): v is string => typeof v === "string" && v.length > 0)
+        : undefined,
+    };
+  });
 }
 
 type NewsArticleArchiveResult =
@@ -253,7 +277,7 @@ type NewsArticleArchiveResult =
     };
 
 async function fetchAndArchiveNewsArticle(
-  context: SourceAdapterContext<OpenAIConfig>,
+  context: SourceAdapterContext<OpenAIConfig, never, OpenAIExtensions>,
   feedItem: FeedDiscoveryItem,
   articleUrl: string,
 ): Promise<NewsArticleArchiveResult> {
@@ -318,26 +342,19 @@ async function fetchAndArchiveNewsArticle(
   const updatedAt = extracted.updatedAt;
   const feedPublishedAt = feedItem.published;
 
-  const metadata: Record<string, unknown> = {
-    region: "international",
-    language: "en",
-    section: "news",
-    categories: feedItem.categories ?? extracted.categories,
-    ...(feedPublishedAt !== undefined ? { feedPublishedAt } : {}),
-    ...(publishedAt !== undefined ? { publishedAt } : {}),
-    ...(updatedAt !== undefined ? { updatedAt } : {}),
-    ...(extracted.authors.length > 0 ? { authors: extracted.authors } : {}),
-  };
-
-  const sourceModifiedAt =
-    validIsoTimestamp(updatedAt) ?? validIsoTimestamp(publishedAt);
-
   const submitResult = await submitCleanedArticle(context, {
     sourceKey: { namespace: "openai:news", key },
     sourceRef: articleUrl,
-    title: feedItem.title || extracted.title,
-    ...(sourceModifiedAt !== undefined ? { sourceModifiedAt } : {}),
-    metadata,
+    title: feedItem.title || extracted.title || null,
+    sourcePublishedAt: sourceTimeFrom(publishedAt ?? feedPublishedAt),
+    sourceModifiedAt: sourceTimeFrom(updatedAt),
+    extensions: {
+      region: "international",
+      language: "en",
+      section: "news",
+      categories: [...(feedItem.categories ?? extracted.categories)],
+      authors: [...extracted.authors],
+    },
     cleanResult,
     captureScope: {
       scope: "news",
@@ -395,7 +412,7 @@ type DevelopersBlogArchiveResult =
     };
 
 async function fetchAndArchiveDevelopersBlogArticle(
-  context: SourceAdapterContext<OpenAIConfig>,
+  context: SourceAdapterContext<OpenAIConfig, never, OpenAIExtensions>,
   listing: DevelopersBlogPostListing,
 ): Promise<DevelopersBlogArchiveResult> {
   const userAgent = context.config.news.userAgent;
@@ -509,25 +526,19 @@ async function fetchAndArchiveDevelopersBlogArticle(
     };
   }
 
-  const parsedDate = parseDatePrecision(pageDate ?? "");
-  const metadata: Record<string, unknown> = {
-    region: "international",
-    language: "en",
-    section: "developers-blog",
-    publishedDate: parsedDate.publishedDate,
-    datePrecision: parsedDate.datePrecision,
-    categories: pageCategories,
-    authors: pageAuthors,
-  };
-
   const submitResult = await submitCleanedArticle(context, {
     sourceKey: { namespace: "openai:developers-blog", key: listing.slug },
     sourceRef: listing.url,
-    title: pageTitle,
-    ...(parsedDate.fullIso !== undefined
-      ? { sourceModifiedAt: parsedDate.fullIso }
-      : {}),
-    metadata,
+    title: pageTitle ?? null,
+    sourcePublishedAt: sourceTimeFrom(pageDate),
+    sourceModifiedAt: null,
+    extensions: {
+      region: "international",
+      language: "en",
+      section: "developers-blog",
+      categories: pageCategories,
+      authors: pageAuthors,
+    },
     cleanResult,
     captureScope: {
       scope: "developers-blog",
@@ -556,9 +567,10 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Check availability of OpenAI News and Developers Blog sources.",
       params: paramsSchema,
@@ -866,7 +878,7 @@ export const sourceAdapter = defineSourceAdapter({
       },
     }),
 
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally synchronize OpenAI News and Developers Blog articles.",
       params: paramsSchema,
@@ -1183,7 +1195,7 @@ export const sourceAdapter = defineSourceAdapter({
       },
     }),
 
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Collect and archive OpenAI News and Developers Blog articles.",
       params: paramsSchema,

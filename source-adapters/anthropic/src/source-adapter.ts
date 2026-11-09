@@ -9,10 +9,10 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
   type IncrementalEntryRecord,
-  type JsonObject,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
@@ -47,6 +47,29 @@ export const configSchema = z
   .strict();
 
 export type AnthropicConfig = z.output<typeof configSchema>;
+
+const extensionsSchema = z
+  .object({
+    canonicalPath: z
+      .string()
+      .describe("Canonical path identifying this Anthropic page."),
+    sections: z
+      .array(z.string())
+      .describe("Anthropic publication sections containing this page."),
+    category: z
+      .string()
+      .optional()
+      .describe("Category label shown for this page in an Anthropic listing."),
+    sitemapLastMod: z
+      .string()
+      .optional()
+      .describe(
+        "Last-modified value declared for this page in the sitemap; it is discovery evidence and may not represent a verified article edit.",
+      ),
+  })
+  .strict();
+
+type AnthropicExtensions = z.output<typeof extensionsSchema>;
 
 export const paramsSchema = z
   .object({
@@ -171,7 +194,7 @@ async function fetchHtml(
 
 /** Action: check section reachability and sample article extraction. */
 async function checkAnthropic(
-  context: SourceAdapterContext<AnthropicConfig>,
+  context: SourceAdapterContext<AnthropicConfig, never, AnthropicExtensions>,
   params: AnthropicParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   const { selected, missing } = resolveSelectedSections(context.config, params);
@@ -303,7 +326,7 @@ async function checkAnthropic(
 
 /** Action: incremental sync of Anthropic sections. */
 async function syncAnthropic(
-  context: SourceAdapterContext<AnthropicConfig>,
+  context: SourceAdapterContext<AnthropicConfig, never, AnthropicExtensions>,
   params: AnthropicParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const { selected, missing } = resolveSelectedSections(context.config, params);
@@ -377,7 +400,7 @@ async function syncAnthropic(
         entries: baselineEntries,
       });
 
-      initializedScopes.push(`section:${section.id}`);
+      initializedScopes.push(section.id);
       completedScopes.push(`section:${section.id}`);
       continue;
     }
@@ -484,20 +507,6 @@ async function syncAnthropic(
     const { article } = extraction;
     const sections = Array.from(candidate.sections).sort();
 
-    const metadata: JsonObject = {
-      canonicalPath: candidate.canonicalPath,
-      sections,
-      ...(article.publishedAt ? { publishedAt: article.publishedAt } : {}),
-      ...(article.publishedDate
-        ? {
-            publishedDate: article.publishedDate,
-            datePrecision: article.datePrecision,
-          }
-        : {}),
-      ...(sitemapLastMod ? { sitemapLastMod } : {}),
-      ...(candidate.category ? { category: candidate.category } : {}),
-    };
-
     try {
       const archiveResult = await submitCleanedArticle(context, {
         sourceKey: {
@@ -505,9 +514,19 @@ async function syncAnthropic(
           key: candidate.canonicalPath,
         },
         sourceRef: candidate.url,
-        title: article.title,
-        sourceModifiedAt: article.sourceModifiedAt,
-        metadata,
+        title: article.title || null,
+        sourcePublishedAt: sourceTimeFrom(
+          article.publishedAt ?? article.publishedDate,
+        ),
+        sourceModifiedAt: sourceTimeFrom(article.sourceModifiedAt),
+        extensions: {
+          canonicalPath: candidate.canonicalPath,
+          sections,
+          ...(candidate.category === undefined
+            ? {}
+            : { category: candidate.category }),
+          ...(sitemapLastMod === undefined ? {} : { sitemapLastMod }),
+        },
         cleanResult: article.cleanResult,
         captureScope: {
           source: "anthropic",
@@ -573,7 +592,7 @@ async function syncAnthropic(
 
 /** Action: collect articles explicitly or from section lists. */
 async function collectAnthropic(
-  context: SourceAdapterContext<AnthropicConfig>,
+  context: SourceAdapterContext<AnthropicConfig, never, AnthropicExtensions>,
   params: AnthropicParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   const problems: ProblemItem[] = [];
@@ -632,17 +651,6 @@ async function collectAnthropic(
       }
 
       const { article } = extraction;
-      const metadata: JsonObject = {
-        canonicalPath,
-        ...(article.publishedAt ? { publishedAt: article.publishedAt } : {}),
-        ...(article.publishedDate
-          ? {
-              publishedDate: article.publishedDate,
-              datePrecision: article.datePrecision,
-            }
-          : {}),
-      };
-
       try {
         await submitCleanedArticle(context, {
           sourceKey: {
@@ -650,9 +658,15 @@ async function collectAnthropic(
             key: canonicalPath,
           },
           sourceRef: url,
-          title: article.title,
-          sourceModifiedAt: article.sourceModifiedAt,
-          metadata,
+          title: article.title || null,
+          sourcePublishedAt: sourceTimeFrom(
+            article.publishedAt ?? article.publishedDate,
+          ),
+          sourceModifiedAt: sourceTimeFrom(article.sourceModifiedAt),
+          extensions: {
+            canonicalPath,
+            sections: [],
+          },
           cleanResult: article.cleanResult,
           captureScope: {
             source: "anthropic",
@@ -790,19 +804,6 @@ async function collectAnthropic(
     const { article } = extraction;
     const sections = Array.from(candidate.sections).sort();
 
-    const metadata: JsonObject = {
-      canonicalPath: candidate.canonicalPath,
-      sections,
-      ...(article.publishedAt ? { publishedAt: article.publishedAt } : {}),
-      ...(article.publishedDate
-        ? {
-            publishedDate: article.publishedDate,
-            datePrecision: article.datePrecision,
-          }
-        : {}),
-      ...(candidate.category ? { category: candidate.category } : {}),
-    };
-
     try {
       await submitCleanedArticle(context, {
         sourceKey: {
@@ -810,9 +811,18 @@ async function collectAnthropic(
           key: candidate.canonicalPath,
         },
         sourceRef: candidate.url,
-        title: article.title,
-        sourceModifiedAt: article.sourceModifiedAt,
-        metadata,
+        title: article.title || null,
+        sourcePublishedAt: sourceTimeFrom(
+          article.publishedAt ?? article.publishedDate,
+        ),
+        sourceModifiedAt: sourceTimeFrom(article.sourceModifiedAt),
+        extensions: {
+          canonicalPath: candidate.canonicalPath,
+          sections,
+          ...(candidate.category === undefined
+            ? {}
+            : { category: candidate.category }),
+        },
         cleanResult: article.cleanResult,
         captureScope: {
           source: "anthropic",
@@ -853,22 +863,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Check Anthropic sections reachability and detail extraction.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: checkAnthropic,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Collect articles from Anthropic sections or specific URLs.",
       params: paramsSchema,
       output: collectOutputSchema,
       execute: collectAnthropic,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally synchronize new or modified Anthropic articles.",
       params: paramsSchema,

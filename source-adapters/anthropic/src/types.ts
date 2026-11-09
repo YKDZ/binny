@@ -15,7 +15,6 @@ export interface ExtractedArticle {
   readonly cleanResult: CleanContentResult;
   readonly publishedAt?: string | undefined;
   readonly publishedDate?: string | undefined;
-  readonly datePrecision?: "second" | "day" | undefined;
   readonly sourceModifiedAt?: string | undefined;
   readonly isStandardLayout: boolean;
 }

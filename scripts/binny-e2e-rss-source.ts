@@ -14,6 +14,7 @@ const requests: {
 }[] = [];
 let rssVersion = 1;
 let atomVersion = 1;
+let articleVersion = 1;
 let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
 let photoAvailable = true;
@@ -45,6 +46,7 @@ async function readJson(
 function state(): unknown {
   return {
     requests,
+    articleVersion,
     photoBytes: photoBytes.toString("base64"),
     audioBytes: audioBytes.toString("base64"),
     ...(heldFeedPath === undefined ? {} : { heldFeedPath }),
@@ -79,6 +81,13 @@ function updateState(value: unknown): boolean {
     return false;
   }
   if (
+    "articleVersion" in updates &&
+    (!Number.isSafeInteger(updates.articleVersion) ||
+      Number(updates.articleVersion) < 1)
+  ) {
+    return false;
+  }
+  if (
     "atomTextMode" in updates &&
     updates.atomTextMode !== "text" &&
     updates.atomTextMode !== "html"
@@ -100,6 +109,8 @@ function updateState(value: unknown): boolean {
   if (updates.rssVersion !== undefined) rssVersion = Number(updates.rssVersion);
   if (updates.atomVersion !== undefined)
     atomVersion = Number(updates.atomVersion);
+  if (updates.articleVersion !== undefined)
+    articleVersion = Number(updates.articleVersion);
   if (updates.atomTextMode === "text" || updates.atomTextMode === "html") {
     atomTextMode = updates.atomTextMode;
   }
@@ -172,6 +183,199 @@ function sendFeed(
   response.end(body);
 }
 
+const articleSourceOrigin = "http://rss-e2e-source:8081";
+
+function articleSourceResponse(
+  pathname: string,
+): { readonly mediaType: string; readonly body: string } | undefined {
+  const version = articleVersion;
+  const articleBody = (title: string): string =>
+    `<h1>${title}</h1>
+      <p>Substantive ${title} article body, version ${String(version)}, from the controlled source.</p>
+      <section><h2>Implementation</h2><p>The source response provides a distinct article version.</p></section>`;
+  const html = (body: string) => ({
+    mediaType: "text/html; charset=utf-8",
+    body,
+  });
+  const rssItem = (options: {
+    readonly id: string;
+    readonly title: string;
+    readonly path: string;
+    readonly published: string;
+    readonly description?: string;
+    readonly category?: string;
+  }): string => `<item>
+    <guid isPermaLink="false">${options.id}</guid>
+    <title>${options.title}</title>
+    <link>${articleSourceOrigin}${options.path}</link>
+    ${options.description === undefined ? "" : `<description>${options.description}</description>`}
+    <pubDate>${options.published}</pubDate>
+    ${options.category === undefined ? "" : `<category>${options.category}</category>`}
+  </item>`;
+
+  if (pathname === "/openai/news/rss.xml") {
+    return {
+      mediaType: "application/rss+xml; charset=utf-8",
+      body: `<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel><title>OpenAI News</title>
+          ${rssItem({
+            id: "urn:binny:openai:article",
+            title: `OpenAI Research Update ${String(version)}`,
+            path: "/openai/news/article",
+            published: "Wed, 04 Nov 2026 08:00:00 +0800",
+            description:
+              "A source summary that must not replace article content.",
+            category: "Research",
+          })}
+        </channel></rss>`,
+    };
+  }
+  if (pathname === "/openai/news/article") {
+    const title = `OpenAI Research Update ${String(version)}`;
+    return html(`<!doctype html><html><head>
+      <title>${title} | OpenAI</title>
+      <link rel="canonical" href="${articleSourceOrigin}/openai/news/article" />
+      <meta property="og:title" content="${title}" />
+      <meta property="article:published_time" content="2026-11-03T20:15:00-04:00" />
+      <meta property="article:modified_time" content="2026-11-0${version === 1 ? "4" : "5"}T09:30:00-04:00" />
+      <meta name="author" content="OpenAI Research Team" />
+    </head><body><main><article>${articleBody(title)}</article></main></body></html>`);
+  }
+  if (pathname === "/openai/blog") {
+    const title = `OpenAI Runtime Guide ${String(version)}`;
+    return html(`<!doctype html><html><body><main><div class="posts-list">
+      <article class="post-card">
+        <h2><a href="/blog/runtime-guide">${title}</a></h2>
+        <time datetime="2026-11-04T08:00:00+08:00">Nov 4, 2026</time>
+        <span class="category">Tooling</span>
+        <span class="author">OpenAI Developer Relations</span>
+      </article>
+    </div></main></body></html>`);
+  }
+  if (pathname === "/blog/runtime-guide.md") {
+    return {
+      mediaType: "text/markdown; charset=utf-8",
+      body: [
+        `# OpenAI Runtime Guide ${String(version)}`,
+        "",
+        `This Developers Blog article describes runtime integration, version ${String(version)}.`,
+        "",
+        "```ts",
+        "const result = await collectSource();",
+        "```",
+        "",
+      ].join("\n"),
+    };
+  }
+  if (pathname === "/anthropic/news") {
+    const title = `Anthropic Safety Release ${String(version)}`;
+    return html(`<!doctype html><html><head><title>Anthropic News</title></head><body>
+      <main><div class="featured-grid"><article class="tile">
+        <a href="/anthropic/news/safety-release" class="title-link"><h3>${title}</h3></a>
+        <time datetime="2026-10-10">Oct 10, 2026</time>
+        <span class="category">Announcements</span>
+      </article></div></main></body></html>`);
+  }
+  if (pathname === "/anthropic/news/safety-release") {
+    const title = `Anthropic Safety Release ${String(version)}`;
+    return html(`<!doctype html><html><head>
+      <title>${title} \\ Anthropic</title>
+      <meta property="og:title" content="${title}" />
+      <meta property="article:published_time" content="2026-10-10T09:15:00-04:00" />
+      <meta property="article:modified_time" content="2026-10-${version === 1 ? "12" : "13"}T10:45:00-04:00" />
+    </head><body><main><article>${articleBody(title)}</article></main></body></html>`);
+  }
+  if (pathname === "/google/ai/feed.xml") {
+    return {
+      mediaType: "application/rss+xml; charset=utf-8",
+      body: `<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel><title>Google AI</title>
+          ${rssItem({
+            id: "urn:binny:google:ai-article",
+            title: `Google AI Research ${String(version)}`,
+            path: "/google/ai/article",
+            published: "Tue, 03 Nov 2026 12:00:00 +0530",
+            category: "Research",
+          })}
+        </channel></rss>`,
+    };
+  }
+  if (pathname === "/google/ai/article") {
+    const title = `Google AI Research ${String(version)}`;
+    return html(`<!doctype html><html lang="en"><head><title>${title}</title>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        headline: title,
+        datePublished: "2026-11-03T12:00:00+05:30",
+        dateModified: `2026-11-0${version === 1 ? "4" : "5"}T10:30:00-04:00`,
+        author: { "@type": "Person", name: "Google AI Team" },
+        articleSection: "Research",
+        inLanguage: "en",
+      })}</script>
+    </head><body><article class="uni-blog-article">${articleBody(title)}</article></body></html>`);
+  }
+  if (pathname === "/huggingface/blog/feed.xml") {
+    return {
+      mediaType: "application/rss+xml; charset=utf-8",
+      body: `<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel><title>Hugging Face Blog</title>
+          ${rssItem({
+            id: "urn:binny:huggingface:article",
+            title: `Hugging Face Engineering Note ${String(version)}`,
+            path: "/huggingface/blog/engineering-note",
+            published: "Mon, 06 May 2024 09:30:00 +0530",
+            category: "engineering",
+          })}
+        </channel></rss>`,
+    };
+  }
+  if (pathname === "/huggingface/blog/engineering-note") {
+    const title = `Hugging Face Engineering Note ${String(version)}`;
+    return html(`<!doctype html><html><head><title>${title} - Hugging Face</title>
+      <meta name="author" content="Research Team" />
+      <meta property="article:author" content="https://huggingface.co/research-team" />
+      <meta property="article:tag" content="engineering" />
+    </head><body><nav><a href="/blog">Blog</a></nav><article>
+      <header><h1>${title}</h1>
+        <div class="authors"><a href="/authors/research-team">Research Team</a></div>
+        <time datetime="2024-05-${version === 1 ? "10" : "11"}T16:00:00+02:00">May ${version === 1 ? "10" : "11"}, 2024</time>
+      </header><div class="blog-content">${articleBody(title)}
+        <span class="tag">systems</span>
+      </div></article></body></html>`);
+  }
+  if (pathname === "/mistral/news/rss") {
+    return {
+      mediaType: "text/plain; charset=utf-8",
+      body: `<?xml version="1.0" encoding="UTF-8"?>
+        <rss version="2.0"><channel><title>Mistral News</title>
+          ${rssItem({
+            id: `${articleSourceOrigin}/mistral/news/ai-update`,
+            title: `Mistral AI Update ${String(version)}`,
+            path: "/mistral/news/ai-update",
+            published: "Mon, 02 Nov 2026 10:00:00 +0230",
+            description: `Mistral RSS summary version ${String(version)}.`,
+            category: "Engineering",
+          })}
+        </channel></rss>`,
+    };
+  }
+  if (pathname === "/mistral/news/ai-update") {
+    const title = `Mistral AI Update ${String(version)}`;
+    return html(`<!doctype html><html lang="en"><head><title>${title}</title>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        headline: title,
+        dateModified: `2026-11-0${version === 1 ? "3" : "4"}T08:30:00+02:00`,
+        author: { "@type": "Person", name: "Mistral Engineering" },
+        articleSection: "Engineering",
+      })}</script>
+    </head><body><main><article>${articleBody(title)}</article></main></body></html>`);
+  }
+  return undefined;
+}
+
 const server = createServer((request, response) => {
   void (async () => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -193,6 +397,16 @@ const server = createServer((request, response) => {
         ...(typeof ifNoneMatch === "string" ? { ifNoneMatch } : {}),
         ...(typeof ifModifiedSince === "string" ? { ifModifiedSince } : {}),
       });
+    }
+    if (
+      pathname.startsWith("/openai/") ||
+      pathname.startsWith("/anthropic/") ||
+      pathname.startsWith("/google/") ||
+      pathname.startsWith("/huggingface/") ||
+      pathname.startsWith("/mistral/") ||
+      pathname === "/blog/runtime-guide.md"
+    ) {
+      requests.push({ path: pathname });
     }
     if (request.method === "GET" && pathname === "/health") {
       sendJson(response, 200, { process: "ready" });
@@ -223,6 +437,17 @@ const server = createServer((request, response) => {
       return;
     }
 
+    if (request.method === "GET") {
+      const sourceResponse = articleSourceResponse(pathname);
+      if (sourceResponse !== undefined) {
+        response.writeHead(200, {
+          "content-type": sourceResponse.mediaType,
+        });
+        response.end(sourceResponse.body);
+        return;
+      }
+    }
+
     if (
       request.method === "GET" &&
       ["/rss", "/rss-edited"].includes(pathname)
@@ -235,7 +460,7 @@ const server = createServer((request, response) => {
         response,
         { etag },
         "application/rss+xml; charset=utf-8",
-        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item><item><guid isPermaLink="false">urn:binny:rss:rss-title-only</guid><title>RSS 仅标题資料🌿</title><description>原生短文正文🌿</description></item></channel></rss>`,
+        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>Binny RSS 受控信源</title><link>http://rss-e2e-source:8081/rss</link><description>RSS 全文受控信源</description><item><guid isPermaLink="false">urn:binny:rss:rss-item</guid><title>RSS 全文测试文章</title><pubDate>Wed, 28 Oct 2026 01:23:45 +0200</pubDate><dc:date>2026-10-29</dc:date><updated>2026-10-30T12:34:56-03:00</updated><link>http://rss-e2e-source:8081/story/rss</link><description>RSS 摘要版本 ${String(rssVersion)}</description><content:encoded><![CDATA[<article><h1>RSS 全文</h1><p>RSS 正文版本 ${String(rssVersion)}</p><p>代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/photo.png" alt="RSS 封面" /></article>]]></content:encoded><enclosure url="/media/audio.mp3" length="22" type="audio/mpeg" /><author>作者</author><category>工程</category></item><item><guid isPermaLink="false">urn:binny:rss:rss-item-escaped</guid><title>RSS XML 转义 HTML 测试文章</title><content:encoded>&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content:encoded></item><item><guid isPermaLink="false">urn:binny:rss:rss-summary</guid><title>RSS 仅摘要条目</title><description>只有摘要版本 ${String(rssVersion)}</description></item><item><guid isPermaLink="false">urn:binny:rss:rss-title-only</guid><title>RSS 仅标题資料🌿</title><description>原生短文正文🌿</description></item></channel></rss>`,
       );
       return;
     }
@@ -273,7 +498,7 @@ const server = createServer((request, response) => {
         response,
         { lastModified },
         "application/atom+xml; charset=utf-8",
-        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:rss:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-rss-atom</id><title>Atom 全文测试文章</title><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}；代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>作者乙</name></author><category term="测试" /></entry><entry><id>tag:example.test,2026:atom-text-explicit</id><title>Atom 显式纯文本</title><content type="text">代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-default</id><title>Atom 默认纯文本</title><content>代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-html-literal</id><title>Atom HTML 中的代码文字</title><content type="html">&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content></entry><entry><id>tag:example.test,2026:atom-text-entities</id><title>Atom 纯文本中的实体字面值</title><content type="text">A &amp;lt;widget&amp;gt; &amp;amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-kind-switch</id><title>Atom 正文类型切换</title><content type="${atomTextMode}">语义固定内容</content></entry></feed>`,
+        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:rss:atom-feed</id><title>Binny Atom 受控信源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:binny-rss-atom</id><title>Atom 全文测试文章</title><published>2026-10-27</published><updated>2026-10-28T12:34:56-05:00</updated><link href="http://rss-e2e-source:8081/story/atom" /><summary>Atom 摘要版本 ${String(atomVersion)}</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 全文版本 ${String(atomVersion)}；代码 &lt;widget&gt; 与 A &amp; B</p><img src="/media/atom.png" alt="Atom 插图" /></div></content><author><name>作者乙</name></author><category term="测试" /></entry><entry><id>tag:example.test,2026:atom-text-explicit</id><title>Atom 显式纯文本</title><content type="text">代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-default</id><title>Atom 默认纯文本</title><content>代码 &lt;widget&gt; 与 A &amp; B</content></entry><entry><id>tag:example.test,2026:atom-html-literal</id><title>Atom HTML 中的代码文字</title><content type="html">&lt;p&gt;代码 &amp;lt;widget&amp;gt; 与 A &amp;amp; B&lt;/p&gt;</content></entry><entry><id>tag:example.test,2026:atom-text-entities</id><title>Atom 纯文本中的实体字面值</title><content type="text">A &amp;lt;widget&amp;gt; &amp;amp; B</content></entry><entry><id>tag:example.test,2026:atom-text-kind-switch</id><title>Atom 正文类型切换</title><content type="${atomTextMode}">语义固定内容</content></entry></feed>`,
       );
       return;
     }

@@ -350,67 +350,10 @@ export function cleanContainerTree(
   walk(container);
 }
 
-export function normalizeDateString(raw?: string): string | undefined {
+export function sourceDateText(raw?: string): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim();
-  if (trimmed.length === 0) return undefined;
-
-  // Day precision YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/u.test(trimmed)) {
-    return trimmed;
-  }
-  // Month precision YYYY-MM
-  if (/^\d{4}-\d{2}$/u.test(trimmed)) {
-    return trimmed;
-  }
-  // Year precision YYYY
-  if (/^\d{4}$/u.test(trimmed)) {
-    return trimmed;
-  }
-
-  // Full timestamp ISO with timezone (Z or +/-offset)
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/iu.test(
-      trimmed,
-    )
-  ) {
-    const parsed = Date.parse(trimmed);
-    if (Number.isFinite(parsed)) {
-      return new Date(parsed).toISOString();
-    }
-    return trimmed;
-  }
-
-  const parsed = Date.parse(trimmed);
-  if (Number.isFinite(parsed)) {
-    const hasTime = /(?:\d{1,2}:\d{2}|GMT|UTC|[+-]\d{2})/iu.test(trimmed);
-    if (hasTime) {
-      return new Date(parsed).toISOString();
-    }
-    const date = new Date(parsed);
-    const year = date.getUTCFullYear();
-    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-    const day = String(date.getUTCDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
-  }
-
-  return trimmed;
-}
-
-export function toFullIsoTimestamp(value?: string): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/iu.test(
-      trimmed,
-    )
-  ) {
-    const parsed = Date.parse(trimmed);
-    if (Number.isFinite(parsed)) {
-      return new Date(parsed).toISOString();
-    }
-  }
-  return undefined;
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 interface JsonLdEntry {
@@ -527,7 +470,7 @@ export function extractPageMetadata(
       name === "publication-date"
     ) {
       if (!articlePublishedAt) {
-        articlePublishedAt = normalizeDateString(content);
+        articlePublishedAt = sourceDateText(content);
       }
     } else if (
       prop === "article:modified_time" ||
@@ -535,7 +478,7 @@ export function extractPageMetadata(
       name === "article:modified_time"
     ) {
       if (!articleUpdatedAt) {
-        articleUpdatedAt = normalizeDateString(content);
+        articleUpdatedAt = sourceDateText(content);
       }
     } else if (prop === "article:author" || name === "author") {
       authors.add(content);
@@ -577,10 +520,10 @@ export function extractPageMetadata(
         if (!title && entry.headline) title = entry.headline;
         if (!title && entry.name) title = entry.name;
         if (!articlePublishedAt && entry.datePublished) {
-          articlePublishedAt = normalizeDateString(entry.datePublished);
+          articlePublishedAt = sourceDateText(entry.datePublished);
         }
         if (!articleUpdatedAt && entry.dateModified) {
-          articleUpdatedAt = normalizeDateString(entry.dateModified);
+          articleUpdatedAt = sourceDateText(entry.dateModified);
         }
         for (const author of entry.authors) {
           authors.add(author);
@@ -609,8 +552,8 @@ export function extractPageMetadata(
       classAttr.includes("updated");
 
     const dateVal = datetime
-      ? normalizeDateString(datetime)
-      : normalizeDateString(getElementText(time).trim());
+      ? sourceDateText(datetime)
+      : sourceDateText(getElementText(time).trim());
     if (dateVal) {
       if (isUpdated) {
         if (!articleUpdatedAt) articleUpdatedAt = dateVal;

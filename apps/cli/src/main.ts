@@ -16,6 +16,7 @@ import {
   archiveResourceMetadataSchema,
   archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
+  archiveSearchInputIssue,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
@@ -1494,8 +1495,15 @@ function createCliContract(identity: CliCommandIdentity) {
           }
           const checked = archiveSearchInputSchema.safeParse(request);
           if (!checked.success) {
+            const issue = archiveSearchInputIssue(
+              request,
+              checked.error.issues,
+            );
             return outcome.failure.apiError(
-              validationFailure(checked.error.issues).error,
+              validationFailure(
+                issue === undefined ? checked.error.issues : [issue],
+                { preserveOriginalMessage: true },
+              ).error,
             );
           }
           const compatibilityFailure = await queryCompatibilityFailure(

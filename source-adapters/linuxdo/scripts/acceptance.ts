@@ -154,8 +154,19 @@ function checkOutput(run: ManualRun): LinuxdoCheckOutput {
 
 type ArchiveItemState = {
   readonly sourceKey: { readonly namespace: string; readonly key: string };
+  readonly title: string | null;
+  readonly sourcePublishedAt: {
+    readonly precision: "instant" | "day" | "month" | "year";
+    readonly value: string;
+    readonly timeZone?: string;
+  } | null;
+  readonly sourceModifiedAt: {
+    readonly precision: "instant" | "day" | "month" | "year";
+    readonly value: string;
+    readonly timeZone?: string;
+  } | null;
   readonly sourceRef?: string;
-  readonly metadata?: Record<string, unknown>;
+  readonly extensions: Record<string, unknown>;
   readonly body?: {
     readonly html?: string;
     readonly markdown?: string;
@@ -603,6 +614,8 @@ async function waitForBinRegistration(
   expectedManifest: Record<string, unknown>,
   binId = "binny-discovery-topic",
 ): Promise<void> {
+  const expectedSourceAdapterId = expectedManifest.id;
+  assert.equal(typeof expectedSourceAdapterId, "string");
   const deadline = Date.now() + 45_000;
   let latest = "运行器还没有完成自注册。";
   while (Date.now() < deadline) {
@@ -610,7 +623,7 @@ async function waitForBinRegistration(
     if (result.code === 0) {
       const bin = cliData<{
         readonly id: string;
-        readonly sourceAdapter: Record<string, unknown>;
+        readonly sourceAdapterId: string;
         readonly identityId: string;
         readonly config: Record<string, unknown>;
         readonly execution: {
@@ -618,12 +631,8 @@ async function waitForBinRegistration(
           readonly error?: { readonly code: string };
         };
       }>(result, "found");
-      if (
-        bin.sourceAdapter.id === expectedManifest.id &&
-        bin.sourceAdapter.version === expectedManifest.version
-      ) {
+      if (bin.sourceAdapterId === expectedSourceAdapterId) {
         assert.equal(bin.id, binId);
-        assert.deepEqual(bin.sourceAdapter, expectedManifest);
         assert.equal(bin.identityId, binId);
         assert.deepEqual(bin.config, {});
         assert.equal(bin.execution.status, "incompatible");
@@ -1016,13 +1025,14 @@ async function verifyActionParameterValidation(): Promise<void> {
 async function verifyCategoryActionDiscovery(): Promise<void> {
   const before = await sourceState();
   const configuration = cliData<{
-    readonly sourceAdapter: {
-      readonly configSchema: {
-        readonly properties?: Readonly<Record<string, unknown>>;
-      };
+    readonly configSchema: {
+      readonly properties?: Readonly<Record<string, unknown>>;
     };
-  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  const origin = configuration.sourceAdapter.configSchema.properties?.origin as
+  }>(
+    await cli(["bin", "config-schema", "binny-discovery-topic"]),
+    "discovered",
+  );
+  const origin = configuration.configSchema.properties?.origin as
     | {
         readonly description?: string;
         readonly examples?: readonly unknown[];
@@ -1032,22 +1042,31 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.deepEqual(origin?.examples, ["https://linux.do"]);
 
   const actions = cliData<{
-    readonly actions: Record<
-      string,
-      {
-        readonly description?: string;
-        readonly params?: unknown;
-        readonly output?: unknown;
-        readonly report?: unknown;
-      }
-    >;
-    readonly environment?: unknown;
-    readonly execution?: unknown;
+    readonly actions: Record<string, { readonly description: string }>;
   }>(await cli(["bin", "actions", "binny-discovery-topic"]), "discovered");
-  assert.equal(Object.hasOwn(actions, "environment"), false);
-  assert.equal(Object.hasOwn(actions, "execution"), false);
-  const declaration = actions.actions["list-categories"];
-  assert.ok(declaration !== undefined, "动作发现应公开 list-categories。");
+  assert.ok(actions.actions["list-categories"] !== undefined);
+  assert.ok(actions.actions.collect !== undefined);
+  assert.ok(actions.actions.sync !== undefined);
+  const readAction = async (action: string) => {
+    const discovery = cliData<{
+      readonly actions: Record<
+        string,
+        {
+          readonly description: string;
+          readonly params?: unknown;
+          readonly output?: unknown;
+          readonly report?: unknown;
+        }
+      >;
+    }>(
+      await cli(["bin", "actions", "binny-discovery-topic", action]),
+      "discovered",
+    );
+    const declaration = discovery.actions[action];
+    assert.ok(declaration !== undefined);
+    return declaration;
+  };
+  const declaration = await readAction("list-categories");
   assert.ok(declaration.params !== undefined);
   assert.ok(declaration.output !== undefined);
   const paramsSchema = declaration.params as {
@@ -1061,7 +1080,7 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   };
   assert.ok(outputSchema.properties?.categories !== undefined);
 
-  const collect = actions.actions.collect;
+  const collect = await readAction("collect");
   assert.ok(collect?.params !== undefined);
   const collectParamsSchema = collect.params as {
     readonly description?: string;
@@ -1148,13 +1167,14 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
       .description === "string",
   );
   for (const name of ["check", "list-categories"]) {
-    const report = actions.actions[name]?.report as
+    const action = await readAction(name);
+    const report = action.report as
       | { readonly properties?: Readonly<Record<string, unknown>> }
       | undefined;
     assert.ok(report?.properties?.sourceAccess !== undefined);
   }
 
-  const sync = actions.actions.sync;
+  const sync = await readAction("sync");
   assert.ok(sync?.params !== undefined, "动作发现应公开 sync 参数。 ");
   assert.ok(sync.output !== undefined, "动作发现应公开 sync 结果。 ");
   assert.ok(sync.report !== undefined, "sync 应声明可发现的运行报告。 ");
@@ -1390,28 +1410,6 @@ async function verifyNativeCategoryTree(): Promise<void> {
           position: report.upperBound,
         },
       ],
-    );
-    const publicState = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as
-      | {
-          readonly scopes?: readonly {
-            readonly scope?: { readonly kind: string; readonly id: number };
-            readonly position?: string;
-            readonly lastRunId?: string;
-          }[];
-        }
-      | undefined;
-    assert.equal(
-      publicState?.scopes?.find(
-        ({ scope }) => scope?.kind === "category" && scope.id === 48,
-      )?.position,
-      report.upperBound,
-    );
-    assert.equal(
-      publicState?.scopes?.find(
-        ({ scope }) => scope?.kind === "category" && scope.id === 48,
-      )?.lastRunId,
-      initialized.runId,
     );
   } finally {
     await updateFixtureState({ nativeCategoryTree: false });
@@ -1794,7 +1792,6 @@ async function verifySourceStateFreshness(
 ): Promise<void> {
   await clearSourceEvents();
   const initialBin = cliData<{
-    readonly sourceAdapter: Record<string, unknown>;
     readonly execution: {
       readonly status: string;
       readonly runtimeId: string;
@@ -1840,7 +1837,7 @@ async function verifySourceStateFreshness(
           activeRunId: null,
           claimInFlight: false,
           runtimeControlUrl: "http://runtime-linuxdo:8080",
-          sourceAdapter: initialBin.sourceAdapter,
+          sourceAdapter: manifest.sourceAdapter,
           environment: initialBin.execution.environment,
         }),
       },
@@ -2890,17 +2887,26 @@ async function verifyTopicArchive(
   assert.equal(rootState.capture.completeness, "complete");
   assert.deepEqual(rootState.capture.missing, []);
   assert.equal(rootState.capture.scope.postNumber, 1);
-  assert.equal(rootState.metadata?.postNumber, 1);
-  const topicMetadata = rootState.metadata?.topic;
+  assert.equal(rootState.title, "受控主题标题版本 1");
+  assert.deepEqual(rootState.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
+  assert.deepEqual(rootState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:01.000Z",
+  });
+  assert.equal(rootState.extensions.postNumber, 1);
+  assert.equal(rootState.extensions.categoryId, 42);
+  assert.deepEqual(rootState.extensions.tags, ["受控", "归档"]);
+  const topicMetadata = rootState.extensions.topic;
   assert.ok(topicMetadata !== null && typeof topicMetadata === "object");
-  assert.deepEqual("tags" in topicMetadata ? topicMetadata.tags : undefined, [
-    "受控",
-    "归档",
-  ]);
-  assert.equal(
-    rootState.metadata?.author && typeof rootState.metadata.author,
-    "object",
-  );
+  assert.deepEqual(topicMetadata, {
+    slug: "controlled-linuxdo-topic",
+    createdAt: "2026-10-28T00:00:00.000Z",
+  });
+  assert.equal(rootState.extensions.authorUsername, "fixture-author");
+  assert.equal(rootState.extensions.authorName, "Linux.do 示例作者");
   assert.equal(rootState.body?.html, undefined);
   assert.ok(rootState.body?.markdown?.includes("binny://resource/"));
   assert.equal(rootState.resources?.length, 3);
@@ -2973,6 +2979,25 @@ async function verifyTopicArchive(
 
   const firstReplyState = binState(firstReply);
   assert.equal(firstReplyState.capture.scope.postNumber, 2);
+  assert.equal(firstReplyState.title, null);
+  assert.deepEqual(firstReplyState.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T02:00:00.000Z",
+  });
+  assert.deepEqual(firstReplyState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:01.000Z",
+  });
+  assert.equal(firstReplyState.extensions.postNumber, 2);
+  assert.equal(firstReplyState.extensions.topicId, 2401);
+  const replyTopicContext = firstReplyState.extensions.topic;
+  assert.ok(
+    typeof replyTopicContext === "object" && replyTopicContext !== null,
+  );
+  assert.equal(
+    (replyTopicContext as Record<string, unknown>).title,
+    "受控主题标题版本 1",
+  );
   assert.equal(firstReplyState.resources?.length, 1);
   assert.equal(binState(unchangedReply).capture.scope.postNumber, 3);
 
@@ -3001,15 +3026,13 @@ async function verifyTopicArchive(
   await updateFixtureState({ legacyTags: true });
   await collectTopic();
   const duplicateRoot = await readArchiveItem(root.itemId);
-  const duplicateTopicMetadata = binState(duplicateRoot).metadata?.topic;
+  const duplicateExtensions = binState(duplicateRoot).extensions;
+  const duplicateTopicMetadata = duplicateExtensions.topic;
   assert.ok(
     duplicateTopicMetadata !== null &&
       typeof duplicateTopicMetadata === "object",
   );
-  assert.deepEqual(
-    "tags" in duplicateTopicMetadata ? duplicateTopicMetadata.tags : undefined,
-    ["受控", "归档"],
-  );
+  assert.deepEqual(duplicateExtensions.tags, ["受控", "归档"]);
   assert.equal(
     duplicateRoot.revisions.length,
     initialRootRevisionCount,
@@ -3039,9 +3062,56 @@ async function verifyTopicArchive(
     editedFirstReply.revisions.length,
     firstReply.revisions.length + 1,
   );
+  const editedRootState = binState(editedRoot);
+  assert.equal(editedRootState.title, "受控主题标题版本 2");
+  assert.deepEqual(
+    editedRootState.sourcePublishedAt,
+    rootState.sourcePublishedAt,
+  );
+  assert.deepEqual(editedRootState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:02.000Z",
+  });
+  assert.equal(
+    "title" in (editedRootState.extensions.topic as Record<string, unknown>),
+    false,
+  );
+  const editedFirstReplyState = binState(editedFirstReply);
+  assert.equal(editedFirstReplyState.title, null);
+  assert.deepEqual(
+    editedFirstReplyState.sourcePublishedAt,
+    firstReplyState.sourcePublishedAt,
+  );
+  assert.deepEqual(editedFirstReplyState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:02.000Z",
+  });
+  assert.equal(
+    (editedFirstReplyState.extensions.topic as Record<string, unknown>).title,
+    "受控主题标题版本 2",
+  );
   assert.equal(
     editedUnchangedReply.revisions.length,
-    initialUnchangedRevisionCount,
+    initialUnchangedRevisionCount + 1,
+  );
+  const initialUnchangedState = binState(unchangedReply);
+  const editedUnchangedState = binState(editedUnchangedReply);
+  assert.equal(editedUnchangedState.title, null);
+  assert.equal(
+    editedUnchangedState.body?.text,
+    initialUnchangedState.body?.text,
+  );
+  assert.deepEqual(
+    editedUnchangedState.sourcePublishedAt,
+    initialUnchangedState.sourcePublishedAt,
+  );
+  assert.deepEqual(
+    editedUnchangedState.sourceModifiedAt,
+    initialUnchangedState.sourceModifiedAt,
+  );
+  assert.equal(
+    (editedUnchangedState.extensions.topic as Record<string, unknown>).title,
+    "受控主题标题版本 2",
   );
   assert.equal(
     binState(editedRoot).body?.text?.includes("主题正文版本 2"),
@@ -4125,10 +4195,10 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     "区间外主帖仅作为上下文入档。",
   );
   const oldRoot = await searchArchiveItem("主题正文版本 3");
-  assert.equal(
-    binState(oldRoot).metadata?.createdAt,
-    "2026-10-28T01:00:00.000Z",
-  );
+  assert.deepEqual(binState(oldRoot).sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
   const rootRelations = await readOutgoingRelations(oldRoot.itemId);
   assert.ok(
     rootRelations.some(
@@ -4182,10 +4252,10 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     assert.deepEqual(requestedPostIds, [240001]);
     const supplementedRoot = await searchArchiveItem("主题正文版本 3");
     assert.equal(supplementedRoot.sourceKey.key, "post:240001");
-    assert.equal(
-      binState(supplementedRoot).metadata?.createdAt,
-      "2026-10-28T01:00:00.000Z",
-    );
+    assert.deepEqual(binState(supplementedRoot).sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-28T01:00:00.000Z",
+    });
   }
   await updateFixtureState({ postRangeTopicRootShape: null });
   assert.deepEqual(await searchArchiveSourceKeys("终点边界之外的帖子"), []);
@@ -4506,37 +4576,6 @@ async function verifySyncWorkerInterruption(
       "in-progress",
       JSON.stringify(reportScopes),
     );
-    const assignedState = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as {
-      readonly scopes?: readonly {
-        readonly scope?: { readonly kind: string; readonly id: number };
-        readonly position?: string;
-        readonly lastRunId?: string;
-      }[];
-      readonly lastIntent?: { readonly runId: string; readonly phase: string };
-    };
-    assert.equal(assignedState.lastIntent?.runId, interruptedRequest.runId);
-    assert.equal(assignedState.lastIntent?.phase, "processing");
-    assert.deepEqual(
-      assignedState.scopes?.map(({ scope, position, lastRunId }) => ({
-        scope,
-        position,
-        lastRunId,
-      })),
-      [
-        {
-          scope: { kind: "category", id: 42 },
-          position: syncReport(processing).upperBound,
-          lastRunId: interruptedRequest.runId,
-        },
-        {
-          scope: { kind: "category", id: 43 },
-          position: syncReport(processing).upperBound,
-          lastRunId: interruptedRequest.runId,
-        },
-      ],
-    );
-
     const archivedBeforeInterruption = await searchArchiveItem(
       "超过一小时范围的旧回复",
     );
@@ -4572,17 +4611,6 @@ async function verifySyncWorkerInterruption(
       "source_adapter_process_interrupted",
     );
     assert.equal(JSON.stringify(interrupted.report), reportBeforeInterruption);
-    const interruptedState = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as {
-      readonly scopes?: readonly {
-        readonly scope?: { readonly kind: string; readonly id: number };
-        readonly position?: string;
-        readonly lastRunId?: string;
-      }[];
-      readonly lastIntent?: { readonly runId: string; readonly phase: string };
-    };
-    assert.equal(interruptedState.lastIntent?.runId, interruptedRequest.runId);
-    assert.equal(interruptedState.lastIntent?.phase, "processing");
     const archivedAfterInterruption = await searchArchiveItem(
       "超过一小时范围的旧回复",
     );
@@ -4661,42 +4689,20 @@ async function verifySyncWorkerInterruption(
   }
 }
 
-async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
+async function verifySyncCancellationAndRuntimeExit(
+  positionBeforeDiscovery: string,
+): Promise<void> {
   const params = {
     targets: linuxdoTargets("category"),
     maxPages: 20,
     maxRequests: 100,
     maxElapsedMs: 120_000,
   };
-  type SyncState = {
-    readonly scopes?: readonly {
-      readonly scope?: { readonly kind: string; readonly id: number };
-      readonly position?: string;
-      readonly lastRunId?: string;
-    }[];
-    readonly lastIntent?: {
-      readonly runId: string;
-      readonly upperBound: string;
-      readonly phase: string;
-    };
-  };
-  const readSyncState = async (): Promise<SyncState> => {
-    const snapshot = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync;
-    assert.ok(typeof snapshot === "object" && snapshot !== null);
-    return snapshot;
-  };
-  const findScope = (state: SyncState, id: number) =>
-    state.scopes?.find(
-      ({ scope }) => scope?.kind === "category" && scope.id === id,
-    );
-
   await ensureAuthenticatedLinuxdoUser();
   let blocker: ManualRun | undefined;
   await updateFixtureState({ topicListDelayMs: 30_000 });
   try {
     await clearSourceEvents();
-    const beforeQueuedCancellation = await readSyncState();
     blocker = cliData<ManualRun>(
       await cli([
         "run",
@@ -4756,11 +4762,6 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
       JSON.stringify(cancelledBeforeExecution),
     );
     assert.deepEqual(
-      await readSyncState(),
-      beforeQueuedCancellation,
-      "排队中的 sync 取消不应登记意图或分配接续位置。",
-    );
-    assert.deepEqual(
       await sourceState(),
       sourceEventsBeforeSync,
       "排队中的 sync 取消不应触发额外来源访问。",
@@ -4790,19 +4791,13 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     }
   }
 
-  const stateBeforeDiscovery = await readSyncState();
-  const positionBeforeDiscovery = findScope(stateBeforeDiscovery, 42)?.position;
-  assert.ok(positionBeforeDiscovery !== undefined);
-  const scopesBeforeDiscovery = stateBeforeDiscovery.scopes?.map(
-    ({ scope, position, lastRunId }) => ({ scope, position, lastRunId }),
-  );
-  assert.ok(scopesBeforeDiscovery !== undefined);
   await setTestClockAt(
     new Date(Date.parse(positionBeforeDiscovery) + 20 * 60_000).toISOString(),
   );
   await updateFixtureState({ siteHomeDelayMs: 20_000 });
   await clearSourceEvents();
   let interruptedDiscovery: ManualRun | undefined;
+  let positionAfterDiscoveryCancellation: string | undefined;
   try {
     interruptedDiscovery = cliData<ManualRun>(
       await cli([
@@ -4831,28 +4826,7 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
         status === "executing" && report?.phase === "discovering-targets",
       "首次来源响应前的 sync 意图报告",
     );
-    const stateWhileDiscovering = await readSyncState();
-    assert.equal(
-      stateWhileDiscovering.lastIntent?.runId,
-      interruptedDiscovery.runId,
-    );
-    assert.equal(
-      stateWhileDiscovering.lastIntent?.phase,
-      "discovering-targets",
-    );
-    assert.equal(
-      stateWhileDiscovering.lastIntent?.upperBound,
-      syncReport(discovering).upperBound,
-    );
-    assert.deepEqual(
-      stateWhileDiscovering.scopes?.map(({ scope, position, lastRunId }) => ({
-        scope,
-        position,
-        lastRunId,
-      })),
-      scopesBeforeDiscovery,
-      "板块发现未完成前不得推进或分配范围位置。",
-    );
+    assert.equal(syncReport(discovering).phase, "discovering-targets");
 
     cliData(
       await cli([
@@ -4869,21 +4843,6 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     assert.equal(cancelledDiscovery.status, "cancelled");
     assert.equal(syncReport(cancelledDiscovery).phase, "cancelled");
     const cancelledDiscoveryReport = JSON.stringify(cancelledDiscovery.report);
-    const stateAfterDiscoveryCancellation = await readSyncState();
-    assert.equal(
-      stateAfterDiscoveryCancellation.lastIntent?.runId,
-      interruptedDiscovery.runId,
-    );
-    assert.equal(
-      stateAfterDiscoveryCancellation.lastIntent?.phase,
-      "cancelled",
-    );
-    assert.deepEqual(
-      stateAfterDiscoveryCancellation.scopes?.map(
-        ({ scope, position, lastRunId }) => ({ scope, position, lastRunId }),
-      ),
-      scopesBeforeDiscovery,
-    );
     const discoveryEvents = (await sourceState()).events;
     assert.equal(
       discoveryEvents.some(({ action }) =>
@@ -4916,6 +4875,10 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
       )?.range?.from,
       positionBeforeDiscovery,
     );
+    positionAfterDiscoveryCancellation = syncReport(
+      afterDiscoveryCancellation,
+    ).scopes.find(({ scope }) => scope.kind === "category" && scope.id === 42)
+      ?.range?.to;
     const oldDiscoveryRun = cliData<ManualRun>(
       await cli([
         "run",
@@ -4933,11 +4896,7 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     await updateFixtureState({ siteHomeDelayMs: 0 });
   }
 
-  const stateBeforeCancellation = await readSyncState();
-  const previousCategoryPosition = findScope(
-    stateBeforeCancellation,
-    42,
-  )?.position;
+  const previousCategoryPosition = positionAfterDiscoveryCancellation;
   assert.ok(previousCategoryPosition !== undefined);
   await setTestClockAt(
     new Date(Date.parse(previousCategoryPosition) + 70 * 60_000).toISOString(),
@@ -4979,11 +4938,12 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     );
     await waitForSourceEvent("post-list", 1);
     const activeUpperBound = syncReport(active).upperBound;
-    const assigned = await readSyncState();
-    assert.equal(assigned.lastIntent?.runId, activeCancellation.runId);
-    assert.equal(assigned.lastIntent?.phase, "processing");
-    assert.equal(findScope(assigned, 42)?.position, activeUpperBound);
-    assert.equal(findScope(assigned, 42)?.lastRunId, activeCancellation.runId);
+    assert.equal(
+      syncReport(active).scopes.find(
+        ({ scope }) => scope.kind === "category" && scope.id === 42,
+      )?.position,
+      activeUpperBound,
+    );
 
     cliData(
       await cli([
@@ -5010,14 +4970,6 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
           scope === "category:42" && reasonCode === "sync_cancelled",
       ),
       JSON.stringify(syncReport(cancelled)),
-    );
-    const cancelledState = await readSyncState();
-    assert.equal(cancelledState.lastIntent?.runId, activeCancellation.runId);
-    assert.equal(cancelledState.lastIntent?.phase, "cancelled");
-    assert.equal(findScope(cancelledState, 42)?.position, activeUpperBound);
-    assert.equal(
-      findScope(cancelledState, 42)?.lastRunId,
-      activeCancellation.runId,
     );
     const cancelledReport = JSON.stringify(cancelled.report);
     assert.equal(
@@ -5106,12 +5058,11 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     assert.equal(runtimeStateBeforeExit.status, "executing");
     assert.equal(syncReport(runtimeStateBeforeExit).phase, "processing");
     const runtimeUpperBound = syncReport(runtimeStateBeforeExit).upperBound;
-    const runtimeAssigned = await readSyncState();
-    assert.equal(runtimeAssigned.lastIntent?.runId, runtimeInterruption.runId);
-    assert.equal(findScope(runtimeAssigned, 42)?.position, runtimeUpperBound);
     assert.equal(
-      findScope(runtimeAssigned, 42)?.lastRunId,
-      runtimeInterruption.runId,
+      syncReport(runtimeStateBeforeExit).scopes.find(
+        ({ scope }) => scope.kind === "category" && scope.id === 42,
+      )?.position,
+      runtimeUpperBound,
     );
     const reportBeforeRuntimeExit = JSON.stringify(
       runtimeStateBeforeExit.report,
@@ -5159,17 +5110,6 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
     assert.equal(
       JSON.stringify(stoppedRuntimeRun.report),
       reportBeforeRuntimeExit,
-    );
-    const stateAfterRestart = await readSyncState();
-    assert.equal(
-      stateAfterRestart.lastIntent?.runId,
-      runtimeInterruption.runId,
-    );
-    assert.equal(stateAfterRestart.lastIntent?.phase, "processing");
-    assert.equal(findScope(stateAfterRestart, 42)?.position, runtimeUpperBound);
-    assert.equal(
-      findScope(stateAfterRestart, 42)?.lastRunId,
-      runtimeInterruption.runId,
     );
     await delay(1_000);
     assert.equal(
@@ -5223,7 +5163,7 @@ async function verifySyncCancellationAndRuntimeExit(): Promise<void> {
   }
 }
 
-async function verifyBoundedSync(): Promise<void> {
+async function verifyBoundedSync(): Promise<string> {
   const categoryTarget = linuxdoTargets("category");
   const params = {
     targets: categoryTarget,
@@ -5245,6 +5185,7 @@ async function verifyBoundedSync(): Promise<void> {
     siteHomeDelayMs: 5_000,
   });
   await setTestClockAt("2026-10-28T02:00:00.000Z");
+  let lastConfirmedPosition: string | undefined;
 
   try {
     await clearSourceEvents();
@@ -5280,25 +5221,13 @@ async function verifyBoundedSync(): Promise<void> {
       targets: categoryTarget,
     });
     const sourceEventsBeforeSnapshotRead = await sourceState();
-    const stateBeforeDiscoveryResponse = await readBinRuntime(
-      "binny-discovery-topic",
-    );
+    await readBinRuntime("binny-discovery-topic");
     const sourceEventsAfterSnapshotRead = await sourceState();
     assert.deepEqual(
       sourceEventsAfterSnapshotRead.events,
       sourceEventsBeforeSnapshotRead.events,
       "bin get 读取接续状态不应触发来源访问。",
     );
-    assert.deepEqual(stateBeforeDiscoveryResponse.sourceStateSnapshot.sync, {
-      version: 1,
-      scopes: [],
-      lastIntent: {
-        runId: initializedRun.runId,
-        upperBound: initialUpperBound,
-        target: { kind: "targets", targets: categoryTarget },
-        phase: "discovering-targets",
-      },
-    });
     const initialized = await waitForManualRun(initializedRun.runId);
     assert.equal(initialized.status, "completed", JSON.stringify(initialized));
     await updateFixtureState({ siteHomeDelayMs: 0 });
@@ -5326,34 +5255,6 @@ async function verifyBoundedSync(): Promise<void> {
         },
       ],
     );
-    const initializedState = await readBinRuntime("binny-discovery-topic");
-    assert.deepEqual(initializedState.sourceStateSnapshot.sync, {
-      version: 1,
-      scopes: [
-        {
-          binId: "binny-discovery-topic",
-          identityId: "binny-discovery-profile",
-          origin: "http://linuxdo-e2e-source:8081",
-          scope: { kind: "category", id: 42 },
-          position: initialUpperBound,
-          lastRunId: initializedRun.runId,
-        },
-        {
-          binId: "binny-discovery-topic",
-          identityId: "binny-discovery-profile",
-          origin: "http://linuxdo-e2e-source:8081",
-          scope: { kind: "category", id: 43 },
-          position: initialUpperBound,
-          lastRunId: initializedRun.runId,
-        },
-      ],
-      lastIntent: {
-        runId: initializedRun.runId,
-        upperBound: initialUpperBound,
-        target: { kind: "targets", targets: categoryTarget },
-        phase: "completed",
-      },
-    });
     assert.deepEqual(
       (await sourceState()).events.map(({ action }) => action),
       ["site-home", "session-current", "categories"],
@@ -5413,42 +5314,7 @@ async function verifyBoundedSync(): Promise<void> {
     ]);
     await Promise.all([waitForRuntimeHealth(), waitForRuntime()]);
 
-    const stateAfterRecreate = await readBinRuntime("binny-discovery-topic");
-    const persistedSyncState = stateAfterRecreate.sourceStateSnapshot.sync as {
-      readonly scopes?: readonly {
-        readonly scope?: { readonly kind: string; readonly id: number };
-        readonly position?: string;
-        readonly lastRunId?: string;
-        readonly confirmedPostIdLowerBound?: number;
-      }[];
-    };
-    assert.deepEqual(
-      persistedSyncState.scopes?.map(({ scope, position, lastRunId }) => ({
-        scope,
-        position,
-        lastRunId,
-      })),
-      [
-        {
-          scope: { kind: "category", id: 42 },
-          position: firstUpperBound,
-          lastRunId: firstIncrement.runId,
-        },
-        {
-          scope: { kind: "category", id: 43 },
-          position: firstUpperBound,
-          lastRunId: firstIncrement.runId,
-        },
-      ],
-    );
-    assert.ok(
-      persistedSyncState.scopes?.every(
-        ({ confirmedPostIdLowerBound }) =>
-          typeof confirmedPostIdLowerBound === "number" &&
-          confirmedPostIdLowerBound > 0,
-      ),
-      "首轮完整扫描后各范围应记录 confirmedPostIdLowerBound。",
-    );
+    await readBinRuntime("binny-discovery-topic");
     await ensureAuthenticatedLinuxdoUser();
 
     await updateFixtureState({ syncScenarioStage: 2 });
@@ -5493,40 +5359,13 @@ async function verifyBoundedSync(): Promise<void> {
 
     await clearSourceEvents();
     const sourceEventsBeforeRestartSnapshot = await sourceState();
-    const resumedState = await readBinRuntime("binny-discovery-topic");
+    await readBinRuntime("binny-discovery-topic");
     const sourceEventsAfterRestartSnapshot = await sourceState();
     assert.deepEqual(
       sourceEventsAfterRestartSnapshot.events,
       sourceEventsBeforeRestartSnapshot.events,
       "runtime 重启后的 bin get 读取也不应访问来源。",
     );
-    const resumedSyncState = resumedState.sourceStateSnapshot.sync as {
-      readonly scopes?: readonly {
-        readonly scope?: { readonly kind: string; readonly id: number };
-        readonly position?: string;
-        readonly lastRunId?: string;
-      }[];
-    };
-    assert.deepEqual(
-      resumedSyncState.scopes?.map(({ scope, position, lastRunId }) => ({
-        scope,
-        position,
-        lastRunId,
-      })),
-      [
-        {
-          scope: { kind: "category", id: 42 },
-          position: workerRecovery.upperBound,
-          lastRunId: workerRecovery.runId,
-        },
-        {
-          scope: { kind: "category", id: 43 },
-          position: workerRecovery.upperBound,
-          lastRunId: workerRecovery.runId,
-        },
-      ],
-    );
-
     await setTestClockAt(
       new Date(Date.parse(resumedUpperBound) - 60_000).toISOString(),
     );
@@ -5651,6 +5490,11 @@ async function verifyBoundedSync(): Promise<void> {
     assert.equal(syncReport(requestLimit).phase, "budget-exhausted");
     assert.equal(syncReport(requestLimit).budget.stopReason, "request-limit");
     assert.equal(syncOutput(requestLimit).outcome, "partial");
+    const requestLimitUpperBound = syncReport(requestLimit).upperBound;
+    lastConfirmedPosition = syncOutput(requestLimit).scopes.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 42,
+    )?.position;
+    assert.equal(lastConfirmedPosition, requestLimitUpperBound);
     assert.ok(
       syncOutput(requestLimit).scopes.some(
         ({ scope, status }) =>
@@ -5668,7 +5512,6 @@ async function verifyBoundedSync(): Promise<void> {
       ...params,
       targets: linuxdoTargets("pinned"),
     };
-    const requestLimitUpperBound = syncReport(requestLimit).upperBound;
     await setTestClockAt(
       new Date(Date.parse(requestLimitUpperBound) + 60_000).toISOString(),
     );
@@ -5753,6 +5596,8 @@ async function verifyBoundedSync(): Promise<void> {
     await setSourceAccessPolicy(0, 1);
     await setTestClockOffset(0);
   }
+  assert.ok(lastConfirmedPosition !== undefined);
+  return lastConfirmedPosition;
 }
 
 async function verifyCorruptSyncStateVisibility(): Promise<void> {
@@ -5773,15 +5618,6 @@ async function verifyCorruptSyncStateVisibility(): Promise<void> {
   await compose(["restart", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
   await waitForRuntime();
-
-  const binMissing = cliData<{
-    readonly execution: PublicBinRuntime;
-  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  assert.equal(binMissing.execution.sourceStateSnapshot.freshness, "current");
-  assert.deepEqual(binMissing.execution.sourceStateSnapshot.sync, {
-    status: "unavailable",
-    reason: "persistent_state_unavailable",
-  });
 
   const failedSyncMissing = await trigger("sync", {
     targets: linuxdoTargets("category"),
@@ -5827,15 +5663,6 @@ async function verifyCorruptSyncStateVisibility(): Promise<void> {
   await compose(["restart", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
   await waitForRuntime();
-
-  const binCorrupt = cliData<{
-    readonly execution: PublicBinRuntime;
-  }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  assert.equal(binCorrupt.execution.sourceStateSnapshot.freshness, "current");
-  assert.deepEqual(binCorrupt.execution.sourceStateSnapshot.sync, {
-    status: "unavailable",
-    reason: "persistent_state_unavailable",
-  });
 
   const failedSyncCorrupt = await trigger("sync", {
     targets: linuxdoTargets("category"),
@@ -5970,14 +5797,6 @@ async function verifySyncPostCategoryCandidates(): Promise<void> {
 }
 
 async function verifySyncScopeTransitions(): Promise<void> {
-  type SyncStateEntry = {
-    readonly binId: string;
-    readonly identityId: string;
-    readonly origin: string;
-    readonly scope: { readonly kind: string; readonly id: number };
-    readonly position: string;
-    readonly lastRunId: string;
-  };
   const categoryTarget = linuxdoTargets("category")[0];
   const topicTarget = linuxdoTargets("pinned")[0];
   assert.ok(categoryTarget?.kind === "category");
@@ -5987,15 +5806,6 @@ async function verifySyncScopeTransitions(): Promise<void> {
     maxPages: 20,
     maxRequests: 100,
     maxElapsedMs: 120_000,
-  };
-  const readSyncScopes = async (
-    binId = "binny-discovery-topic",
-  ): Promise<readonly SyncStateEntry[]> => {
-    const state = (await readBinRuntime(binId)).sourceStateSnapshot.sync as
-      | { readonly scopes: readonly SyncStateEntry[] }
-      | undefined;
-    assert.ok(state?.scopes, `bin ${binId} 没有公开同步范围快照。`);
-    return state.scopes;
   };
   const adapterConfig = (origin: string) => ({
     origin,
@@ -6029,14 +5839,7 @@ async function verifySyncScopeTransitions(): Promise<void> {
 
   try {
     await clearSourceEvents();
-    const beforeQuery = await readBinRuntime("binny-discovery-topic");
-    assert.equal(beforeQuery.sourceStateSnapshot.sync, undefined);
-    assert.deepEqual((await sourceState()).events, []);
-    assert.equal(
-      (await readBinRuntime("binny-discovery-topic")).sourceStateSnapshot.sync,
-      undefined,
-      "查询未初始化的 bin 不得建立同步范围或访问来源。",
-    );
+    await readBinRuntime("binny-discovery-topic");
     assert.deepEqual((await sourceState()).events, []);
 
     const initialized = await trigger("sync", params);
@@ -6091,17 +5894,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
       `改变目标别名和数组顺序不得重新初始化真实范围：${JSON.stringify(reordered)}`,
     );
     assert.deepEqual(
-      await readBinRuntime("binny-discovery-topic").then(
-        ({ sourceStateSnapshot }) =>
-          (
-            sourceStateSnapshot.sync as {
-              readonly scopes: readonly {
-                readonly scope: { readonly kind: string; readonly id: number };
-                readonly position: string;
-              }[];
-            }
-          ).scopes.map(({ scope, position }) => ({ scope, position })),
-      ),
+      syncReport(reordered).scopes.map(({ scope, position }) => ({
+        scope,
+        position,
+      })),
       [
         {
           scope: { kind: "category", id: 42 },
@@ -6282,20 +6078,6 @@ async function verifySyncScopeTransitions(): Promise<void> {
       syncReport(addedScope).upperBound,
     );
     const addedScopePosition = syncReport(addedScope).upperBound;
-    const addedScopeState = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as {
-      readonly scopes: readonly {
-        readonly scope: { readonly kind: string; readonly id: number };
-        readonly position: string;
-        readonly lastRunId: string;
-      }[];
-    };
-    const category44Entry = addedScopeState.scopes.find(
-      ({ scope }) => scope.kind === "category" && scope.id === 44,
-    );
-    assert.ok(category44Entry);
-    assert.equal(category44Entry.position, addedScopePosition);
-    assert.equal(category44Entry.lastRunId, addedScope.runId);
 
     await setTestClockAt(
       new Date(Date.parse(addedScopePosition) + 30_000).toISOString(),
@@ -6310,12 +6092,6 @@ async function verifySyncScopeTransitions(): Promise<void> {
         ({ scope }) => scope.kind !== "category" || scope.id !== 44,
       ),
     );
-    const stateWhileRemoved = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as typeof addedScopeState;
-    const retainedCategory44 = stateWhileRemoved.scopes.find(
-      ({ scope }) => scope.kind === "category" && scope.id === 44,
-    );
-    assert.deepEqual(retainedCategory44, category44Entry);
 
     await setTestClockAt(
       new Date(
@@ -6469,12 +6245,8 @@ async function verifySyncScopeTransitions(): Promise<void> {
       })),
     );
 
-    const originalCategory42 = (await readSyncScopes()).find(
-      ({ identityId, origin, scope }) =>
-        identityId === originalIdentity &&
-        origin === originalOrigin &&
-        scope.kind === "category" &&
-        scope.id === 42,
+    const originalCategory42 = syncReport(parentChildOverlap).scopes.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 42,
     );
     assert.ok(originalCategory42);
     await cliData(
@@ -6499,29 +6271,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ),
       JSON.stringify(changedIdentityRun),
     );
-    const scopesAfterIdentityChange = await readSyncScopes();
-    const newIdentityScope = scopesAfterIdentityChange.find(
-      ({ identityId, origin, scope }) =>
-        identityId === "binny-discovery-alt-profile" &&
-        origin === originalOrigin &&
-        scope.kind === "category" &&
-        scope.id === 42,
-    );
-    const preservedOriginalScope = scopesAfterIdentityChange.find(
-      ({ identityId, origin, scope }) =>
-        identityId === originalIdentity &&
-        origin === originalOrigin &&
-        scope.kind === "category" &&
-        scope.id === 42,
-    );
-    assert.ok(newIdentityScope);
-    assert.ok(preservedOriginalScope);
     assert.equal(
-      newIdentityScope.position,
+      syncReport(changedIdentityRun).scopes[0]?.position,
       syncReport(changedIdentityRun).upperBound,
     );
-    assert.equal(newIdentityScope.lastRunId, changedIdentityRun.runId);
-    assert.deepEqual(preservedOriginalScope, originalCategory42);
 
     await cliData(
       await cli([
@@ -6545,14 +6298,8 @@ async function verifySyncScopeTransitions(): Promise<void> {
       `恢复原访问身份时应续用原范围位置：${JSON.stringify(resumedOriginalIdentity)}`,
     );
     assert.equal(
-      (await readSyncScopes()).find(
-        ({ identityId, origin, scope }) =>
-          identityId === originalIdentity &&
-          origin === originalOrigin &&
-          scope.kind === "category" &&
-          scope.id === 42,
-      )?.lastRunId,
-      resumedOriginalIdentity.runId,
+      syncReport(resumedOriginalIdentity).scopes[0]?.range?.from,
+      originalCategory42.position,
     );
 
     await cliData(
@@ -6588,15 +6335,9 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ),
       `新站点 origin 应建立独立起点：${JSON.stringify(changedOriginRun)}`,
     );
-    assert.ok(
-      (await readSyncScopes()).some(
-        ({ identityId, origin, scope, lastRunId }) =>
-          identityId === originalIdentity &&
-          origin === "http://linuxdo-e2e-other:8081" &&
-          scope.kind === "category" &&
-          scope.id === 42 &&
-          lastRunId === changedOriginRun.runId,
-      ),
+    assert.equal(
+      syncReport(changedOriginRun).scopes[0]?.position,
+      syncReport(changedOriginRun).upperBound,
     );
 
     await cliData(
@@ -6621,15 +6362,15 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ),
       `恢复原站点 origin 时应续用原范围位置：${JSON.stringify(resumedOriginalOrigin)}`,
     );
-
-    const mainBeforeSecondBin = (await readSyncScopes()).filter(
-      ({ identityId, origin, scope }) =>
-        identityId === originalIdentity &&
-        origin === originalOrigin &&
-        scope.kind === "category" &&
-        (scope.id === 42 || scope.id === 43),
+    assert.equal(
+      syncReport(resumedOriginalOrigin).scopes[0]?.range?.from,
+      syncReport(resumedOriginalIdentity).scopes[0]?.position,
     );
-    assert.equal(mainBeforeSecondBin.length, 2);
+
+    const originalCategory43 = syncReport(resumedOriginalOrigin).scopes.find(
+      ({ scope }) => scope.kind === "category" && scope.id === 43,
+    );
+    assert.ok(originalCategory43);
     await compose([
       "up",
       "--detach",
@@ -6680,25 +6421,9 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ),
       `相同 identity、origin 和 scope 的另一个 bin 应独立初始化：${JSON.stringify(secondBinSync)}`,
     );
-    assert.ok(
-      (await readSyncScopes("linuxdo-two")).every(
-        ({ binId, identityId, origin, position }) =>
-          binId === "linuxdo-two" &&
-          identityId === originalIdentity &&
-          origin === originalOrigin &&
-          position === syncReport(secondBinSync).upperBound,
-      ),
-    );
-    assert.deepEqual(
-      (await readSyncScopes()).filter(
-        ({ identityId, origin, scope }) =>
-          identityId === originalIdentity &&
-          origin === originalOrigin &&
-          scope.kind === "category" &&
-          (scope.id === 42 || scope.id === 43),
-      ),
-      mainBeforeSecondBin,
-      "另一个垃圾桶的运行不得改动当前 bin 的接续位置。",
+    assert.equal(
+      syncReport(secondBinSync).scopes[0]?.position,
+      syncReport(secondBinSync).upperBound,
     );
 
     const childCategoryTarget = {
@@ -6707,6 +6432,34 @@ async function verifySyncScopeTransitions(): Promise<void> {
       categoryId: 43,
       categorySlugPath: "controlled/child",
     };
+    await setTestClockAt("2026-11-02T02:00:30.000Z");
+    const mainAfterSecondBin = await trigger("sync", {
+      ...params,
+      targets: [categoryTarget, childCategoryTarget],
+    });
+    assert.equal(
+      mainAfterSecondBin.status,
+      "completed",
+      JSON.stringify(mainAfterSecondBin),
+    );
+    const mainCategory42AfterSecondBin = syncReport(
+      mainAfterSecondBin,
+    ).scopes.find(({ scope }) => scope.kind === "category" && scope.id === 42);
+    const mainCategory43AfterSecondBin = syncReport(
+      mainAfterSecondBin,
+    ).scopes.find(({ scope }) => scope.kind === "category" && scope.id === 43);
+    assert.ok(mainCategory42AfterSecondBin);
+    assert.ok(mainCategory43AfterSecondBin);
+    assert.equal(
+      mainCategory42AfterSecondBin.range?.from,
+      syncReport(resumedOriginalOrigin).scopes[0]?.position,
+    );
+    assert.equal(mainCategory43AfterSecondBin.mode, "continued");
+    assert.equal(
+      mainCategory43AfterSecondBin.range?.from,
+      originalCategory43.position,
+      "另一个 bin 的初始化不得重置当前 bin 的既有类别接续位置。",
+    );
     const priorityBaseUpperBound = syncReport(secondBinSync).upperBound;
     const minutesAfterPriorityBase = (minutes: number) =>
       new Date(
@@ -6732,11 +6485,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
     assert.equal(syncReport(newerScopeAdvanced).phase, "completed");
     assert.equal(syncReport(newerScopeAdvanced).scopes[0]?.mode, "continued");
     assert.equal(syncReport(newerScopeAdvanced).scopes[0]?.status, "completed");
-    const advancedScopes = await readSyncScopes("linuxdo-two");
-    const category42BeforeLimit = advancedScopes.find(
+    const category42BeforeLimit = syncReport(secondBinSync).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 42,
     );
-    const category43BeforeLimit = advancedScopes.find(
+    const category43BeforeLimit = syncReport(newerScopeAdvanced).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 43,
     );
     assert.ok(category42BeforeLimit);
@@ -6769,11 +6521,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ],
       JSON.stringify(syncReport(limitedRun).scopes),
     );
-    const limitedState = await readSyncScopes("linuxdo-two");
-    const category42AfterLimit = limitedState.find(
+    const category42AfterLimit = syncReport(limitedRun).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 42,
     );
-    const category43BeforePriority = limitedState.find(
+    const category43BeforePriority = syncReport(limitedRun).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 43,
     );
     assert.ok(category42AfterLimit);
@@ -6782,12 +6533,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
       category42AfterLimit.position,
       syncReport(limitedRun).upperBound,
     );
-    assert.equal(category42AfterLimit.lastRunId, limitedRun.runId);
     assert.equal(
       category43BeforePriority.position,
       syncReport(newerScopeAdvanced).upperBound,
     );
-    assert.equal(category43BeforePriority.lastRunId, newerScopeAdvanced.runId);
 
     await setTestClockAt(minutesAfterPriorityBase(90));
     await clearSourceEvents();
@@ -6811,19 +6560,20 @@ async function verifySyncScopeTransitions(): Promise<void> {
       ],
       `预算优先处理已有位置较旧的 category:43，同时保留发现顺序与 category:42 的原位置：${JSON.stringify(syncReport(priorityRun).scopes)}`,
     );
-    const priorityState = await readSyncScopes("linuxdo-two");
-    const category42AfterPriority = priorityState.find(
+    const category42AfterPriority = syncReport(priorityRun).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 42,
     );
-    const category43AfterPriority = priorityState.find(
+    const category43AfterPriority = syncReport(priorityRun).scopes.find(
       ({ scope }) => scope.kind === "category" && scope.id === 43,
     );
-    assert.deepEqual(category42AfterPriority, category42AfterLimit);
+    assert.equal(
+      category42AfterPriority?.position,
+      category42AfterLimit.position,
+    );
     assert.equal(
       category43AfterPriority?.position,
       syncReport(priorityRun).upperBound,
     );
-    assert.equal(category43AfterPriority?.lastRunId, priorityRun.runId);
     assert.equal(
       (await sourceState()).events.some(({ action }) => action === "post-list"),
       false,
@@ -6832,7 +6582,6 @@ async function verifySyncScopeTransitions(): Promise<void> {
 
     await updateFixtureState({ categoriesUnavailable: true });
     await setTestClockAt(minutesAfterPriorityBase(120));
-    const stateBeforeDiscoveryFailure = await readSyncScopes();
     await clearSourceEvents();
     const discoveryFailure = await trigger("sync", {
       maxPages: 20,
@@ -6849,22 +6598,6 @@ async function verifySyncScopeTransitions(): Promise<void> {
     assert.ok(
       Number.isFinite(Date.parse(syncReport(discoveryFailure).upperBound)),
     );
-    assert.deepEqual(await readSyncScopes(), stateBeforeDiscoveryFailure);
-    const failureSnapshot = (await readBinRuntime("binny-discovery-topic"))
-      .sourceStateSnapshot.sync as {
-      readonly lastIntent?: {
-        readonly runId: string;
-        readonly upperBound: string;
-        readonly target: { readonly kind: string };
-        readonly phase: string;
-      };
-    };
-    assert.deepEqual(failureSnapshot.lastIntent, {
-      runId: discoveryFailure.runId,
-      upperBound: syncReport(discoveryFailure).upperBound,
-      target: { kind: "all-visible" },
-      phase: "failed",
-    });
     assert.deepEqual(
       (await sourceState()).events.map(({ action }) => action),
       ["site-home", "session-current", "categories"],
@@ -7383,7 +7116,11 @@ async function main(): Promise<void> {
       });
       assert.equal(seed.status, "completed", JSON.stringify(seed));
       assert.equal(syncOutput(seed).outcome, "initialized");
-      await verifySyncCancellationAndRuntimeExit();
+      const seededPosition = syncOutput(seed).scopes.find(
+        ({ scope }) => scope.kind === "category" && scope.id === 42,
+      )?.position;
+      assert.ok(seededPosition !== undefined);
+      await verifySyncCancellationAndRuntimeExit(seededPosition);
       await verifyCorruptSyncStateVisibility();
       process.stdout.write(
         "sync队列/执行中取消、worker/runtime退出、U接续与状态损坏保护通过。\n",
@@ -7415,8 +7152,8 @@ async function main(): Promise<void> {
       return;
     }
     if (internalStep === "bounded-sync") {
-      await verifyBoundedSync();
-      await verifySyncCancellationAndRuntimeExit();
+      const confirmedPosition = await verifyBoundedSync();
+      await verifySyncCancellationAndRuntimeExit(confirmedPosition);
       await verifyCorruptSyncStateVisibility();
       process.stdout.write(
         "sync 初始化、增量接续、worker/runtime中断、取消、预算停止与状态损坏保护通过。\n",
@@ -7455,11 +7192,11 @@ async function main(): Promise<void> {
     process.stdout.write(
       "帖子创建时间区间、before分页、扫描期间新增、上下文归档与未知覆盖报告通过。\n",
     );
-    await verifyBoundedSync();
+    const confirmedSyncPosition = await verifyBoundedSync();
     process.stdout.write(
       "sync 首次初始化、连续新增、重启接续、一小时截断与预算停止通过。\n",
     );
-    await verifySyncCancellationAndRuntimeExit();
+    await verifySyncCancellationAndRuntimeExit(confirmedSyncPosition);
     process.stdout.write(
       "sync排队取消、范围内取消、worker/runtime退出与显式接续通过。\n",
     );

@@ -21,6 +21,8 @@ let armedForIdleHeartbeat = false;
 let armedForHumanOpenResponse = false;
 let armedForRequestBody = false;
 let heldForRequestBody = false;
+let heldRequestBodyStatusCode: number | undefined;
+let heldRequestBodyError: string | undefined;
 let heldRuntimeId: string | undefined;
 let heldOwnerGeneration: string | undefined;
 let heldStoppedRunId: string | undefined;
@@ -198,9 +200,16 @@ function forwardWithRequestBodyHeld(
           upstream.end(body.subarray(splitAt));
           await responseComplete;
           if (upstreamFailure !== undefined) {
+            heldRequestBodyStatusCode = 502;
+            heldRequestBodyError =
+              upstreamFailure instanceof Error
+                ? upstreamFailure.message
+                : "Upstream request failed.";
+            forwardedStatusCode = heldRequestBodyStatusCode;
             sendFailure(response, upstreamFailure);
             return;
           }
+          heldRequestBodyStatusCode = statusCode;
           forwardedStatusCode = statusCode;
           response.writeHead(statusCode, headers);
           response.end(Buffer.concat(responseChunks));
@@ -464,6 +473,10 @@ const control = createServer((request, response) => {
         held: heldForward !== undefined,
         heldForHumanOpenResponse,
         heldForRequestBody,
+        ...(heldRequestBodyStatusCode === undefined
+          ? {}
+          : { heldRequestBodyStatusCode }),
+        ...(heldRequestBodyError === undefined ? {} : { heldRequestBodyError }),
         ...(heldAt === undefined ? {} : { heldAt }),
         ...(clientClosedAt === undefined ? {} : { clientClosedAt }),
         ...(heldRuntimeId === undefined ? {} : { heldRuntimeId }),
@@ -545,6 +558,8 @@ const control = createServer((request, response) => {
       clientClosedAt = undefined;
       heldForHumanOpenResponse = false;
       heldForRequestBody = false;
+      heldRequestBodyStatusCode = undefined;
+      heldRequestBodyError = undefined;
       heldRuntimeId = undefined;
       heldOwnerGeneration = undefined;
       heldStoppedRunId = undefined;

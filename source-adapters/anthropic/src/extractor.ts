@@ -1,5 +1,5 @@
 // Detail page content, date, and metadata extractor for Anthropic articles.
-import { cleanContent } from "@binny/source-adapter-sdk";
+import { cleanContent, sourceTimeFrom } from "@binny/source-adapter-sdk";
 import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 
 import { parseCardDate } from "./discovery.ts";
@@ -42,12 +42,6 @@ function findElements(
     }
   }
   return results;
-}
-
-function isIsoTimestamp(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/iu.test(
-    value.trim(),
-  );
 }
 
 interface ParsedMetaInfo {
@@ -303,18 +297,21 @@ export function extractArticleContent(
   const isoPublished =
     metaInfo.metaPublishedTime ?? metaInfo.jsonLdPublishedTime;
   const isoModified = metaInfo.metaModifiedTime ?? metaInfo.jsonLdModifiedTime;
+  const parsedPublished =
+    isoPublished === undefined ? null : sourceTimeFrom(isoPublished);
 
   let publishedAt: string | undefined;
   let publishedDate: string | undefined;
-  let datePrecision: "second" | "day" | undefined;
   let sourceModifiedAt: string | undefined;
 
-  if (isoPublished && isIsoTimestamp(isoPublished)) {
-    publishedAt = new Date(isoPublished).toISOString();
-    datePrecision = "second";
+  if (parsedPublished !== null) {
+    if (parsedPublished.precision === "instant") {
+      publishedAt = parsedPublished.value;
+    } else {
+      publishedDate = parsedPublished.value;
+    }
   } else if (cardDate) {
     publishedDate = cardDate;
-    datePrecision = "day";
   } else {
     // Check for visible date in detail page
     const times = findElements(document, (el) => el.tagName === "time");
@@ -323,7 +320,6 @@ export function extractArticleContent(
       const parsed = dt ? parseCardDate(dt) : parseCardDate(getText(time));
       if (parsed) {
         publishedDate = parsed;
-        datePrecision = "day";
         break;
       }
     }
@@ -332,13 +328,12 @@ export function extractArticleContent(
       const parsed = parseCardDate(earlyText);
       if (parsed) {
         publishedDate = parsed;
-        datePrecision = "day";
       }
     }
   }
 
-  if (isoModified && isIsoTimestamp(isoModified)) {
-    sourceModifiedAt = new Date(isoModified).toISOString();
+  if (isoModified) {
+    sourceModifiedAt = sourceTimeFrom(isoModified)?.value;
   }
 
   // Clean HTML content
@@ -369,7 +364,6 @@ export function extractArticleContent(
       cleanResult,
       publishedAt,
       publishedDate,
-      datePrecision,
       sourceModifiedAt,
       isStandardLayout,
     },

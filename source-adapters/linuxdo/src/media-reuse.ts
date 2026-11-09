@@ -31,18 +31,30 @@ export type DiscourseOpTopicMetadata = {
   readonly id: number;
   readonly title?: string | undefined;
   readonly slug?: string | undefined;
+  readonly created_at?: string | undefined;
   readonly category_id?: number | null | undefined;
   readonly tags?: readonly (string | { readonly name: string })[] | undefined;
-  readonly version?: number | undefined;
 };
 
 export type DiscourseOpPost = {
   readonly id: number;
   readonly post_number: number;
+  readonly title?: string | null | undefined;
+  readonly created_at?: string | undefined;
+  readonly username?: string | undefined;
+  readonly name?: string | null | undefined;
   readonly cooked?: string | null | undefined;
   readonly updated_at?: string | undefined;
   readonly version?: number | undefined;
 };
+
+type SourceModifiedAt = ArchiveResourceResolveItem["state"]["sourceModifiedAt"];
+type SourcePublishedAt =
+  ArchiveResourceResolveItem["state"]["sourcePublishedAt"];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -56,7 +68,8 @@ export function isOpUnchanged(
   topic: DiscourseOpTopicMetadata,
   post: DiscourseOpPost,
   archivedOp: ArchiveResourceResolveItem,
-  modifiedAtFn?: (post: DiscourseOpPost) => string | undefined,
+  modifiedAtFn?: (post: DiscourseOpPost) => SourceModifiedAt,
+  publishedAtFn?: (post: DiscourseOpPost) => SourcePublishedAt,
 ): boolean {
   if (archivedOp.state.capture.completeness !== "complete") {
     return false;
@@ -66,22 +79,43 @@ export function isOpUnchanged(
   const currentModifiedAt = modifiedAtFn
     ? modifiedAtFn(post)
     : post.updated_at
-      ? new Date(Date.parse(post.updated_at)).toISOString()
-      : undefined;
-  if (currentModifiedAt !== archivedOp.state.sourceModifiedAt) {
+      ? { precision: "instant", value: post.updated_at }
+      : null;
+  if (
+    JSON.stringify(currentModifiedAt) !==
+    JSON.stringify(archivedOp.state.sourceModifiedAt)
+  ) {
+    return false;
+  }
+  // Reuse only when the archived publication fact also matches the current post.
+  const currentPublishedAt = publishedAtFn
+    ? publishedAtFn(post)
+    : post.created_at
+      ? { precision: "instant", value: post.created_at }
+      : null;
+  if (
+    JSON.stringify(currentPublishedAt) !==
+    JSON.stringify(archivedOp.state.sourcePublishedAt)
+  ) {
     return false;
   }
 
-  const archivedMetadata = archivedOp.state.metadata;
-  if (!archivedMetadata) {
+  const archivedExtensions = archivedOp.state.extensions;
+
+  if (
+    topic.id !== archivedExtensions.topicId ||
+    post.post_number !== archivedExtensions.postNumber ||
+    (post.username ?? null) !== archivedExtensions.authorUsername ||
+    (post.name ?? null) !== archivedExtensions.authorName
+  ) {
     return false;
   }
 
   // 2. Compare post version when available.
   if (
     post.version !== undefined &&
-    archivedMetadata.postVersion !== undefined &&
-    post.version !== archivedMetadata.postVersion
+    archivedExtensions.postVersion !== undefined &&
+    post.version !== archivedExtensions.postVersion
   ) {
     return false;
   }
@@ -90,47 +124,45 @@ export function isOpUnchanged(
   if (
     post.cooked !== undefined &&
     post.cooked !== null &&
-    typeof archivedMetadata.cookedHash === "string"
+    typeof archivedExtensions.cookedHash === "string"
   ) {
     const currentCookedHash = hashContent(post.cooked);
-    if (currentCookedHash !== archivedMetadata.cookedHash) {
+    if (currentCookedHash !== archivedExtensions.cookedHash) {
       return false;
     }
   }
 
-  // 4. Compare topic metadata (title, categoryId, slug, tags).
-  const archivedTopic = archivedMetadata.topic as
-    | Record<string, unknown>
-    | undefined;
-  if (!archivedTopic) {
+  // 4. Compare the post's public title and the topic context used by its body.
+  const archivedTopic = archivedExtensions.topic;
+  if (!isRecord(archivedTopic)) return false;
+
+  const postTitle = post.title?.trim() || null;
+  if (postTitle !== archivedOp.state.title) {
+    return false;
+  }
+  const archivedTopicTitle = archivedTopic.title ?? postTitle;
+  if ((topic.title?.trim() || null) !== archivedTopicTitle) {
     return false;
   }
 
-  if ((topic.title ?? null) !== (archivedTopic.title ?? null)) {
-    return false;
-  }
-
-  if ((topic.category_id ?? null) !== (archivedTopic.categoryId ?? null)) {
+  if ((topic.category_id ?? null) !== (archivedExtensions.categoryId ?? null)) {
     return false;
   }
 
   if ((topic.slug ?? null) !== (archivedTopic.slug ?? null)) {
     return false;
   }
-
-  if (
-    topic.version !== undefined &&
-    archivedTopic.version !== undefined &&
-    topic.version !== archivedTopic.version
-  ) {
+  if ((topic.created_at ?? null) !== archivedTopic.createdAt) {
     return false;
   }
 
   const currentTags = (topic.tags ?? [])
     .map((tag) => (typeof tag === "string" ? tag : tag.name))
-    .toSorted();
-  const archivedTags = Array.isArray(archivedTopic.tags)
-    ? (archivedTopic.tags as string[]).toSorted()
+    .toSorted((left, right) => left.localeCompare(right));
+  const archivedTags = Array.isArray(archivedExtensions.tags)
+    ? archivedExtensions.tags.toSorted((left, right) =>
+        left.localeCompare(right),
+      )
     : [];
 
   if (currentTags.length !== archivedTags.length) {

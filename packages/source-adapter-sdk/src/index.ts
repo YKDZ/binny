@@ -70,6 +70,8 @@ export type {
   IncrementalSyncState,
 } from "./incremental-sync.ts";
 
+export { sourceTimeFrom } from "./source-time.ts";
+
 export {
   createSourceAccessBudget,
   SourceAccessBudgetExceededError,

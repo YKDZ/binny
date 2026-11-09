@@ -503,6 +503,7 @@ const discoursePostSchema = z.looseObject({
   id: postIdSchema,
   topic_id: topicIdSchema.optional(),
   post_number: postIdSchema,
+  title: z.string().nullable().optional(),
   cooked: z.string().nullable().optional(),
   username: z.string().optional(),
   name: z.string().nullable().optional(),
@@ -547,6 +548,53 @@ type ConfiguredTarget = z.infer<typeof configuredTargetSchema>;
 type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
 type SourceAccessReport = z.output<typeof sourceAccessReportSchema>;
 type CollectParams = z.output<typeof collectParamsSchema>;
+const linuxDoExtensionsSchema = z.strictObject({
+  topicId: topicIdSchema.describe(
+    "Linux.do topic ID associated with this post.",
+  ),
+  postNumber: postIdSchema.describe("Post floor number within the topic."),
+  categoryId: topicIdSchema
+    .nullable()
+    .describe("Topic category ID, or null when the source omitted it."),
+  tags: z.array(z.string()).describe("Topic tags attached to this post."),
+  authorUsername: z
+    .string()
+    .nullable()
+    .describe("Post author's Linux.do username, or null when omitted."),
+  authorName: z
+    .string()
+    .nullable()
+    .describe("Post author's display name, or null when omitted."),
+  postVersion: z
+    .int()
+    .optional()
+    .describe("Discourse post version, when supplied."),
+  cookedHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/u)
+    .optional()
+    .describe("SHA-256 digest used to verify reusable cooked content."),
+  media: z
+    .array(z.strictObject({ url: z.url(), resourceId: z.uuid() }))
+    .describe("Source media URLs mapped to the archived resource IDs."),
+  topic: z
+    .strictObject({
+      slug: z.string().nullable(),
+      createdAt: z.string().nullable(),
+      title: z.string().optional(),
+    })
+    .describe("Additional topic context kept distinct from post facts."),
+});
+type LinuxDoExtensions = z.output<typeof linuxDoExtensionsSchema>;
+type LinuxdoContext<TReport extends z.ZodType = never> = SourceAdapterContext<
+  SourceAdapterConfig,
+  TReport,
+  LinuxDoExtensions
+>;
+type ArchiveItemInput = Parameters<
+  SourceAdapterContext["archive"]["submit"]
+>[0]["items"][number];
+type SourceTime = NonNullable<ArchiveItemInput["sourcePublishedAt"]>;
 type DateCollectionParams = CollectParams & {
   readonly date: string;
   readonly timeZone: string;
@@ -1985,7 +2033,7 @@ function listCheckDiagnostic(
 }
 
 async function checkTopic(
-  context: SourceAdapterContext<SourceAdapterConfig, typeof checkReportSchema>,
+  context: LinuxdoContext<typeof checkReportSchema>,
   params: CheckParams,
 ) {
   const site = siteFromConfig(context.config);
@@ -2216,10 +2264,7 @@ function buildDiscoveredCategories(
 }
 
 async function listCategories(
-  context: SourceAdapterContext<
-    SourceAdapterConfig,
-    typeof listCategoriesReportSchema
-  >,
+  context: LinuxdoContext<typeof listCategoriesReportSchema>,
 ) {
   const site = siteFromConfig(context.config);
   let report = listCategoriesReportSchema.parse({
@@ -2425,7 +2470,7 @@ function syncScopeReference(
 }
 
 function syncScopeIdentity(
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "binId" | "identityId">,
   origin: URL,
   scope: SyncScopeReference,
 ) {
@@ -2473,7 +2518,7 @@ function syncRange(
 }
 
 function syncScopePlans(
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "binId" | "identityId">,
   origin: URL,
   targets: readonly SyncScopeTarget[],
   state: SyncPersistentState,
@@ -2601,7 +2646,7 @@ function syncStateJson(state: SyncPersistentState): JsonObject {
 }
 
 async function loadSyncPersistentState(
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "persistentState">,
 ): Promise<SyncPersistentState> {
   if (context.persistentState === undefined) {
     throw sourceAdapterActionError({
@@ -2639,7 +2684,7 @@ async function loadSyncPersistentState(
 }
 
 async function saveSyncPersistentState(
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "persistentState">,
   state: SyncPersistentState,
 ): Promise<void> {
   if (context.persistentState === undefined) {
@@ -2691,7 +2736,7 @@ function syncIntent(params: SyncParams): SyncTargetIntent {
 
 function syncStateWithIntent(
   state: SyncPersistentState,
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "runId">,
   upperBound: string,
   intent: SyncTargetIntent,
   phase: NonNullable<SyncPersistentState["lastIntent"]>["phase"],
@@ -2805,7 +2850,7 @@ async function resolvePostRangeTargets(
 }
 
 async function checkOneTopic(
-  context: SourceAdapterContext<SourceAdapterConfig, typeof checkReportSchema>,
+  context: LinuxdoContext<typeof checkReportSchema>,
   site: ReturnType<typeof siteFromConfig>,
   topicId: number,
   publishSourceAccess: (report: SourceAccessReport) => Promise<void>,
@@ -3398,7 +3443,7 @@ async function downloadMedia(
   kind: "inline-image" | "attachment" | "image",
   url: string,
   siteOrigin: URL,
-  context: SourceAdapterContext,
+  context: LinuxdoContext,
 ): Promise<MediaDownload> {
   let mediaUrl: URL;
   try {
@@ -3537,12 +3582,22 @@ function mediaProblem(
   return undefined;
 }
 
-function modifiedAt(post: DiscoursePost): string | undefined {
-  if (post.updated_at === undefined) return undefined;
-  const timestamp = Date.parse(post.updated_at);
-  return Number.isFinite(timestamp)
-    ? new Date(timestamp).toISOString()
-    : undefined;
+function sourceTime(value: string | undefined): SourceTime | null {
+  if (
+    value === undefined ||
+    !z.iso.datetime({ offset: true }).safeParse(value).success
+  ) {
+    return null;
+  }
+  return { precision: "instant", value };
+}
+
+function modifiedAt(post: DiscoursePost): SourceTime | null {
+  return sourceTime(post.updated_at);
+}
+
+function publishedAt(post: DiscoursePost): SourceTime | null {
+  return sourceTime(post.created_at);
 }
 
 function postDiagnostics(
@@ -3574,7 +3629,7 @@ function postDiagnostics(
 export async function archivePost(
   page: Page,
   request: APIRequestContext,
-  context: SourceAdapterContext,
+  context: LinuxdoContext,
   siteOrigin: URL,
   siteNamespace: string,
   topic: DiscourseTopic,
@@ -3607,13 +3662,19 @@ export async function archivePost(
           item.sourceKey.namespace === opKey.namespace &&
           item.sourceKey.key === opKey.key,
       );
-      if (archivedOp && isOpUnchanged(topic, post, archivedOp, modifiedAt)) {
+      const archivedExtensions =
+        archivedOp === undefined
+          ? undefined
+          : linuxDoExtensionsSchema.safeParse(archivedOp.state.extensions);
+      if (
+        archivedOp !== undefined &&
+        archivedExtensions?.success === true &&
+        isOpUnchanged(topic, post, archivedOp, modifiedAt, publishedAt)
+      ) {
         const resourceMetadataById = new Map<string, ArchiveResourceMetadata>(
           archivedOp.resourceMetadata.map((meta) => [meta.resourceId, meta]),
         );
-        const archivedMedia = Array.isArray(archivedOp.state.metadata?.media)
-          ? archivedOp.state.metadata.media
-          : undefined;
+        const archivedMedia = archivedExtensions.data.media;
 
         const immutableMappedResourceIds = new Set<string>();
         if (archivedMedia) {
@@ -3683,6 +3744,7 @@ export async function archivePost(
           const state = {
             sourceKey: archivedOp.sourceKey,
             ...archivedOp.state,
+            extensions: archivedExtensions.data,
             ...(archivedOp.state.body
               ? {
                   body: {
@@ -3834,40 +3896,35 @@ export async function archivePost(
     .filter((value): value is string => value !== undefined && value.length > 0)
     .join("\n");
   const sourceModifiedAt = modifiedAt(post);
+  const topicTags =
+    topic.tags?.map((tag) => (typeof tag === "string" ? tag : tag.name)) ?? [];
+  const postTitle = post.title?.trim() || null;
+  const topicTitle = topic.title?.trim() || null;
   const state = {
     sourceKey: sourceKey(siteNamespace, post.id),
     sourceRef: sourcePostUrl(siteOrigin, topic, post),
-    ...(sourceModifiedAt === undefined ? {} : { sourceModifiedAt }),
-    metadata: {
+    title: postTitle,
+    sourcePublishedAt: publishedAt(post),
+    sourceModifiedAt,
+    extensions: {
       topicId: topic.id,
-      postId: post.id,
       postNumber: post.post_number,
-      author: {
-        username: post.username ?? null,
-        name: post.name ?? null,
-      },
+      categoryId: topic.category_id ?? null,
+      tags: topicTags,
+      authorUsername: post.username ?? null,
+      authorName: post.name ?? null,
       ...(post.version !== undefined ? { postVersion: post.version } : {}),
       ...(post.cooked !== undefined && post.cooked !== null
         ? { cookedHash: hashContent(post.cooked) }
         : {}),
-      ...(recordedMedia.length > 0 ? { media: recordedMedia } : {}),
-      ...(post.created_at === undefined ? {} : { createdAt: post.created_at }),
-      ...(post.post_number === 1
-        ? {
-            topic: {
-              title: topic.title ?? null,
-              slug: topic.slug ?? null,
-              categoryId: topic.category_id ?? null,
-              tags:
-                topic.tags?.map((tag) =>
-                  typeof tag === "string" ? tag : tag.name,
-                ) ?? [],
-              ...(topic.created_at === undefined
-                ? {}
-                : { createdAt: topic.created_at }),
-            },
-          }
-        : {}),
+      media: recordedMedia,
+      topic: {
+        slug: topic.slug ?? null,
+        createdAt: topic.created_at ?? null,
+        ...(topicTitle === postTitle || topicTitle === null
+          ? {}
+          : { title: topicTitle }),
+      },
     },
     body: { markdown: body.markdown, text: body.text, searchText },
     resources: [...archiveResourceManifest(resources)],
@@ -3888,7 +3945,7 @@ export async function archivePost(
 }
 
 async function collectPostRangeTopic(
-  context: SourceAdapterContext,
+  context: LinuxdoContext,
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
@@ -4064,7 +4121,7 @@ async function collectPostRangeTopic(
 }
 
 async function collectTopicContent(
-  context: SourceAdapterContext,
+  context: LinuxdoContext,
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
@@ -4347,7 +4404,7 @@ type DiscoveryProgress = {
 };
 
 async function collectListTarget(
-  context: SourceAdapterContext,
+  context: LinuxdoContext,
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
@@ -4486,7 +4543,7 @@ async function collectListTarget(
 
 function failureWithProgress(
   error: unknown,
-  context: SourceAdapterContext,
+  context: Pick<SourceAdapterContext, "signal">,
   completedScopes: readonly string[],
 ) {
   if (isSourceAdapterActionError(error)) {
@@ -4525,7 +4582,7 @@ function failureWithProgress(
 }
 
 async function collectPostCreatedRange(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: LinuxdoContext,
   page: Page,
   request: APIRequestContext,
   site: ReturnType<typeof siteFromConfig>,
@@ -4710,10 +4767,7 @@ async function collectPostCreatedRange(
 }
 
 async function collectTopic(
-  context: SourceAdapterContext<
-    SourceAdapterConfig,
-    typeof collectReportSchema
-  >,
+  context: LinuxdoContext<typeof collectReportSchema>,
   params: CollectParams,
 ): Promise<z.output<typeof collectOutputSchema>> {
   const actionStartedAt = Date.now();
@@ -5065,7 +5119,7 @@ async function collectTopic(
 }
 
 async function sync(
-  context: SourceAdapterContext<SourceAdapterConfig, typeof syncReportSchema>,
+  context: LinuxdoContext<typeof syncReportSchema>,
   params: SyncParams,
 ): Promise<z.output<typeof syncOutputSchema>> {
   // 这是同步唯一的日历上界；来源访问耗时由独立的 monotonic budget 计算。
@@ -5469,44 +5523,61 @@ async function sync(
 
 export const sourceAdapter = defineSourceAdapter({
   id: "binny.source-adapter-linuxdo",
-  version: "1.0.0",
+  version: "1.0.1",
   description: "按长期主题目标发现并归档 Linux.do 帖子与媒体。",
   environment: {
     browser: { required: true, profileReuseAfterRestart: true },
   },
   configSchema: sourceAdapterConfigSchema,
+  extensionsSchema: linuxDoExtensionsSchema,
   stateSchema: syncPersistentStateSchema,
   stateSnapshotSchema: syncPublicStateSchema,
   actions: {
-    "list-categories": defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "发现当前 Linux.do 登录账号可见的板块及其采集引用。",
-      params: listCategoriesParamsSchema,
-      output: listCategoriesOutputSchema,
-      report: listCategoriesReportSchema,
-      execute: listCategories,
-    }),
-    check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "检查登录状态以及所选 Linux.do 目标的可见范围。",
-      params: checkParamsSchema,
-      output: checkOutputSchema,
-      report: checkReportSchema,
-      execute: checkTopic,
-    }),
-    collect: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "发现所选 Linux.do 目标的主题并归档帖子、回复和媒体。",
-      params: collectParamsSchema,
-      output: collectOutputSchema,
-      report: collectReportSchema,
-      execute: collectTopic,
-    }),
-    sync: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description:
-        "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
-      params: syncParamsSchema,
-      output: syncOutputSchema,
-      report: syncReportSchema,
-      execute: sync,
-    }),
+    "list-categories": defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      linuxDoExtensionsSchema,
+      {
+        description: "发现当前 Linux.do 登录账号可见的板块及其采集引用。",
+        params: listCategoriesParamsSchema,
+        output: listCategoriesOutputSchema,
+        report: listCategoriesReportSchema,
+        execute: listCategories,
+      },
+    ),
+    check: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      linuxDoExtensionsSchema,
+      {
+        description: "检查登录状态以及所选 Linux.do 目标的可见范围。",
+        params: checkParamsSchema,
+        output: checkOutputSchema,
+        report: checkReportSchema,
+        execute: checkTopic,
+      },
+    ),
+    collect: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      linuxDoExtensionsSchema,
+      {
+        description: "发现所选 Linux.do 目标的主题并归档帖子、回复和媒体。",
+        params: collectParamsSchema,
+        output: collectOutputSchema,
+        report: collectReportSchema,
+        execute: collectTopic,
+      },
+    ),
+    sync: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      linuxDoExtensionsSchema,
+      {
+        description:
+          "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
+        params: syncParamsSchema,
+        output: syncOutputSchema,
+        report: syncReportSchema,
+        execute: sync,
+      },
+    ),
   },
 });
 

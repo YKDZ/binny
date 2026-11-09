@@ -10,6 +10,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -67,11 +68,38 @@ const syncOutputSchema = z
 export type HuggingFaceConfig = z.output<typeof configSchema>;
 export type HuggingFaceParams = z.output<typeof paramsSchema>;
 
+const extensionsSchema = z
+  .object({
+    authors: z
+      .array(
+        z
+          .object({
+            name: z.string(),
+            handle: z.string().optional(),
+            url: z.url().optional(),
+          })
+          .strict(),
+      )
+      .describe(
+        "Author names and profile links identified on the Hugging Face article page.",
+      ),
+    categories: z
+      .array(z.string())
+      .describe("Categories and tags assigned to the blog article."),
+    region: z
+      .string()
+      .describe("Geographic region assigned to the Hugging Face publication."),
+    language: z.string().describe("Language used by the published article."),
+  })
+  .strict();
+
+type HuggingFaceExtensions = z.output<typeof extensionsSchema>;
+
 export interface ParsedFeedItem {
   readonly id: string | null;
   readonly url: string;
   readonly title: string | null;
-  readonly published: Date | null;
+  readonly published: string | null;
   readonly categories: readonly string[];
 }
 
@@ -200,6 +228,16 @@ async function fetchArticleHtml(
 }
 
 /** Parses feed items from XML string. */
+type FeedItem = ReturnType<typeof parseFeed>["items"][number];
+
+function rawFeedDate(item: FeedItem, names: readonly string[]): string | null {
+  for (const name of names) {
+    const value = item.element.findElementWithName(name)?.textContentNormalized;
+    if (value !== undefined && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
 function parseFeedItems(xmlText: string, baseUrl: string): ParsedFeedItem[] {
   const parsed = parseFeed(xmlText);
   return parsed.items.map((item) => {
@@ -216,7 +254,7 @@ function parseFeedItems(xmlText: string, baseUrl: string): ParsedFeedItem[] {
       id: item.id,
       url: rawUrl,
       title: item.title,
-      published: item.published,
+      published: rawFeedDate(item, ["pubdate", "published", "issued", "date"]),
       categories,
     };
   });
@@ -224,7 +262,11 @@ function parseFeedItems(xmlText: string, baseUrl: string): ParsedFeedItem[] {
 
 /** Processes, extracts, cleans, and submits an article; rejects failed/empty pages. */
 async function processAndSubmitArticle(
-  context: SourceAdapterContext<HuggingFaceConfig>,
+  context: SourceAdapterContext<
+    HuggingFaceConfig,
+    never,
+    HuggingFaceExtensions
+  >,
   itemUrl: string,
   feedItem: ParsedFeedItem | undefined,
 ): Promise<{
@@ -270,7 +312,7 @@ async function processAndSubmitArticle(
   }
 
   const key = extractSlugOrKey(itemUrl, feedItem?.id);
-  const feedPublishedAt = feedItem?.published?.toISOString();
+  const feedPublishedAt = feedItem?.published ?? undefined;
   const articlePublishedAt = extracted.articlePublishedAt;
   const publishedDate = articlePublishedAt ?? feedPublishedAt;
 
@@ -289,16 +331,9 @@ async function processAndSubmitArticle(
 
   const title = extracted.title ?? feedItem?.title ?? undefined;
 
-  const metadata: Record<string, unknown> = {
-    ...(title === undefined ? {} : { title }),
+  const extensions: HuggingFaceExtensions = {
     authors,
     categories,
-    ...(feedPublishedAt ? { feedPublishedAt } : {}),
-    ...(articlePublishedAt
-      ? { articlePublishedAt, publishedDate: articlePublishedAt }
-      : feedPublishedAt
-        ? { publishedDate: feedPublishedAt }
-        : {}),
     region: "international",
     language: "en",
   };
@@ -306,9 +341,10 @@ async function processAndSubmitArticle(
   const result = await submitCleanedArticle(context, {
     sourceKey: { namespace: "huggingface:blog", key },
     sourceRef: itemUrl,
-    ...(title === undefined ? {} : { title }),
-    ...(publishedDate === undefined ? {} : { sourceModifiedAt: publishedDate }),
-    metadata,
+    title: title ?? null,
+    sourcePublishedAt: sourceTimeFrom(publishedDate),
+    sourceModifiedAt: null,
+    extensions,
     cleanResult: extracted.cleanResult,
     captureScope: {
       scope: "blog",
@@ -341,7 +377,11 @@ async function processAndSubmitArticle(
 
 /** Check action: verifies feed parsing and validates extraction on 1 sample article. */
 async function checkHuggingFace(
-  context: SourceAdapterContext<HuggingFaceConfig>,
+  context: SourceAdapterContext<
+    HuggingFaceConfig,
+    never,
+    HuggingFaceExtensions
+  >,
   params: HuggingFaceParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   void params;
@@ -454,7 +494,11 @@ async function checkHuggingFace(
 
 /** Sync action: records baseline on initial sync without HTML requests; syncs only new/modified items on subsequent syncs. */
 async function syncHuggingFace(
-  context: SourceAdapterContext<HuggingFaceConfig>,
+  context: SourceAdapterContext<
+    HuggingFaceConfig,
+    never,
+    HuggingFaceExtensions
+  >,
   params: HuggingFaceParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   void params;
@@ -508,7 +552,7 @@ async function syncHuggingFace(
     const entries: Record<string, IncrementalEntryRecord> = {};
     for (const item of items) {
       const key = extractSlugOrKey(item.url, item.id);
-      const pubDate = item.published?.toISOString();
+      const pubDate = item.published ?? undefined;
       const fingerprint = computeFeedItemFingerprint({
         title: item.title,
         url: item.url,
@@ -548,7 +592,7 @@ async function syncHuggingFace(
     const fingerprint = computeFeedItemFingerprint({
       title: item.title,
       url: item.url,
-      published: item.published?.toISOString(),
+      published: item.published ?? undefined,
       categories: item.categories,
     });
     const existing = scope.entries[key];
@@ -579,7 +623,11 @@ async function syncHuggingFace(
 
 /** Collect action: collects explicitly requested URLs or up to maxItems from feed. */
 async function collectHuggingFace(
-  context: SourceAdapterContext<HuggingFaceConfig>,
+  context: SourceAdapterContext<
+    HuggingFaceConfig,
+    never,
+    HuggingFaceExtensions
+  >,
   params: HuggingFaceParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   const scopeId = "blog";
@@ -665,22 +713,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Check Hugging Face blog feed availability and full-text extraction.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: checkHuggingFace,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Collect Hugging Face blog articles by URLs or limit.",
       params: paramsSchema,
       output: collectOutputSchema,
       execute: collectHuggingFace,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally synchronize new or updated Hugging Face blog posts.",
       params: paramsSchema,

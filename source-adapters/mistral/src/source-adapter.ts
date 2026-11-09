@@ -12,6 +12,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -75,15 +76,46 @@ const syncOutputSchema = z
 type MistralConfig = z.output<typeof configSchema>;
 type MistralParams = z.output<typeof paramsSchema>;
 
+const extensionsSchema = z
+  .object({
+    region: z.string().describe("Geographic region assigned to Mistral News."),
+    language: z.string().describe("Language used by the published article."),
+    categories: z
+      .array(z.string())
+      .describe(
+        "Categories assigned by the Mistral News feed or article page.",
+      ),
+    authors: z
+      .array(z.string())
+      .describe("Author names identified on the Mistral article or RSS feed."),
+    rssDescription: z
+      .string()
+      .optional()
+      .describe("Article summary text supplied by the Mistral RSS feed."),
+  })
+  .strict();
+
+type MistralExtensions = z.output<typeof extensionsSchema>;
+
 interface ParsedMistralFeedItem {
   readonly id: string;
   readonly title: string;
   readonly url: string;
-  readonly published: Date | null;
-  readonly updated: Date | null;
+  readonly published: string | null;
+  readonly updated: string | null;
   readonly description: string | null;
   readonly categories: readonly string[];
   readonly authors: readonly string[];
+}
+
+type FeedItem = ReturnType<typeof parseFeed>["items"][number];
+
+function rawFeedDate(item: FeedItem, names: readonly string[]): string | null {
+  for (const name of names) {
+    const value = item.element.findElementWithName(name)?.textContentNormalized;
+    if (value !== undefined && value.trim().length > 0) return value.trim();
+  }
+  return null;
 }
 
 interface ExtractedArticleMetadata {
@@ -156,26 +188,17 @@ export function extractSlugOrGuid(url: string, guid?: string | null): string {
 export function computeFeedFingerprint(item: {
   readonly title?: string | null;
   readonly url?: string | null;
-  readonly published?: Date | string | null;
-  readonly updated?: Date | string | null;
+  readonly published?: string | null;
+  readonly updated?: string | null;
   readonly description?: string | null;
 }): string {
-  const publishedStr =
-    item.published instanceof Date
-      ? item.published.toISOString()
-      : (item.published ?? "");
-  const updatedStr =
-    item.updated instanceof Date
-      ? item.updated.toISOString()
-      : (item.updated ?? "");
-
   return createHash("sha256")
     .update(
       JSON.stringify({
         title: item.title ?? "",
         url: item.url ?? "",
-        published: publishedStr,
-        updated: updatedStr,
+        published: item.published ?? "",
+        updated: item.updated ?? "",
         description: item.description ?? "",
       }),
     )
@@ -601,8 +624,8 @@ export async function requestFeed(
       id: item.id ?? item.url ?? "",
       title: item.title ?? "",
       url: item.url ?? item.id ?? "",
-      published: item.published ?? null,
-      updated: item.updated ?? null,
+      published: rawFeedDate(item, ["pubdate", "published", "issued", "date"]),
+      updated: rawFeedDate(item, ["updated", "modified"]),
       description: item.description ?? null,
       categories,
       authors,
@@ -637,7 +660,7 @@ export async function fetchArticleHtml(
 }
 
 async function processAndSubmitArticle(
-  context: SourceAdapterContext<MistralConfig>,
+  context: SourceAdapterContext<MistralConfig, never, MistralExtensions>,
   articleUrl: string,
   feedItem?: ParsedMistralFeedItem,
 ): Promise<{
@@ -661,9 +684,7 @@ async function processAndSubmitArticle(
   }
 
   const key = extractSlugOrGuid(articleUrl, feedItem?.id);
-  const feedPublishedAt = feedItem?.published
-    ? feedItem.published.toISOString()
-    : undefined;
+  const feedPublishedAt = feedItem?.published ?? undefined;
 
   const allCategories = [
     ...new Set([...(feedItem?.categories ?? []), ...articleMeta.categories]),
@@ -672,35 +693,27 @@ async function processAndSubmitArticle(
     ...new Set([...(feedItem?.authors ?? []), ...articleMeta.authors]),
   ];
 
-  const metadata: Record<string, unknown> = {
+  const extensions: MistralExtensions = {
     region: "international",
     language: articleMeta.language ?? "en",
-    ...(feedPublishedAt !== undefined ? { feedPublishedAt } : {}),
-    ...(articleMeta.articlePublishedAt !== undefined
-      ? { articlePublishedAt: articleMeta.articlePublishedAt }
-      : {}),
-    ...(articleMeta.articleUpdatedAt !== undefined
-      ? { articleUpdatedAt: articleMeta.articleUpdatedAt }
-      : {}),
-    ...(articleMeta.visibleDate !== undefined
-      ? { visibleDate: articleMeta.visibleDate }
-      : {}),
-    ...(allCategories.length > 0 ? { categories: allCategories } : {}),
-    ...(allAuthors.length > 0 ? { authors: allAuthors } : {}),
+    categories: allCategories,
+    authors: allAuthors,
     ...(feedItem?.description ? { rssDescription: feedItem.description } : {}),
   };
 
-  const title = feedItem?.title?.trim() || undefined;
+  const title = feedItem?.title?.trim() || null;
 
   const submitResult = await submitCleanedArticle(context, {
     sourceKey: { namespace: "mistral:news", key },
     sourceRef: articleUrl,
     title,
-    sourceModifiedAt:
-      articleMeta.articleUpdatedAt ??
+    sourcePublishedAt: sourceTimeFrom(
       articleMeta.articlePublishedAt ??
-      feedPublishedAt,
-    metadata,
+        articleMeta.visibleDate ??
+        feedPublishedAt,
+    ),
+    sourceModifiedAt: sourceTimeFrom(articleMeta.articleUpdatedAt),
+    extensions,
     cleanResult,
     captureScope: {
       scope: "news",
@@ -744,7 +757,7 @@ function failureFromProblems(
 }
 
 async function checkMistralNews(
-  context: SourceAdapterContext<MistralConfig>,
+  context: SourceAdapterContext<MistralConfig, never, MistralExtensions>,
   params: MistralParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   let feedResult: Awaited<ReturnType<typeof requestFeed>>;
@@ -864,7 +877,7 @@ async function checkMistralNews(
 }
 
 async function syncMistralNews(
-  context: SourceAdapterContext<MistralConfig>,
+  context: SourceAdapterContext<MistralConfig, never, MistralExtensions>,
   params: MistralParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const state = await loadIncrementalSyncState(context);
@@ -909,10 +922,8 @@ async function syncMistralNews(
       const fingerprint = computeFeedFingerprint(item);
       entries[key] = {
         fingerprint,
-        ...(item.published
-          ? { publishedAt: item.published.toISOString() }
-          : {}),
-        ...(item.updated ? { updatedAt: item.updated.toISOString() } : {}),
+        ...(item.published ? { publishedAt: item.published } : {}),
+        ...(item.updated ? { updatedAt: item.updated } : {}),
         archivedCompleteness: "baseline",
       };
     }
@@ -949,7 +960,7 @@ async function syncMistralNews(
     const hasChanged = hasIncrementalEntryChanged(
       previous,
       fingerprint,
-      item.updated?.toISOString(),
+      item.updated ?? undefined,
     );
 
     if (!hasChanged) {
@@ -965,10 +976,8 @@ async function syncMistralNews(
 
       upsertIncrementalScopeEntry(state, "news", key, {
         fingerprint,
-        ...(item.published
-          ? { publishedAt: item.published.toISOString() }
-          : {}),
-        ...(item.updated ? { updatedAt: item.updated.toISOString() } : {}),
+        ...(item.published ? { publishedAt: item.published } : {}),
+        ...(item.updated ? { updatedAt: item.updated } : {}),
         archivedCompleteness: submitResult.hasMediaFailures
           ? "partial"
           : "complete",
@@ -997,7 +1006,7 @@ async function syncMistralNews(
 }
 
 async function collectMistralNews(
-  context: SourceAdapterContext<MistralConfig>,
+  context: SourceAdapterContext<MistralConfig, never, MistralExtensions>,
   params: MistralParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   let targetItems: {
@@ -1082,10 +1091,10 @@ async function collectMistralNews(
         upsertIncrementalScopeEntry(state, "news", key, {
           fingerprint,
           ...(target.feedItem?.published
-            ? { publishedAt: target.feedItem.published.toISOString() }
+            ? { publishedAt: target.feedItem.published }
             : {}),
           ...(target.feedItem?.updated
-            ? { updatedAt: target.feedItem.updated.toISOString() }
+            ? { updatedAt: target.feedItem.updated }
             : {}),
           archivedCompleteness: submitResult.hasMediaFailures
             ? "partial"
@@ -1117,22 +1126,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Check Mistral News availability and sample article extraction.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: checkMistralNews,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Collect and archive Mistral News articles.",
       params: paramsSchema,
       output: collectOutputSchema,
       execute: collectMistralNews,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Incrementally sync Mistral News articles.",
       params: paramsSchema,
       output: syncOutputSchema,

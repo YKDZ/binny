@@ -1,36 +1,10 @@
 // Discovery rules for Anthropic News, Research, and Engineering section list pages.
 import { createHash } from "node:crypto";
 
+import { sourceTimeFrom } from "@binny/source-adapter-sdk";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 import type { DiscoveredArticle } from "./types.ts";
-
-const MONTH_MAP: Readonly<Record<string, string>> = {
-  jan: "01",
-  january: "01",
-  feb: "02",
-  february: "02",
-  mar: "03",
-  march: "03",
-  apr: "04",
-  april: "04",
-  may: "05",
-  jun: "06",
-  june: "06",
-  jul: "07",
-  july: "07",
-  aug: "08",
-  august: "08",
-  sep: "09",
-  sept: "09",
-  september: "09",
-  oct: "10",
-  october: "10",
-  nov: "11",
-  november: "11",
-  dec: "12",
-  december: "12",
-};
 
 const EXCLUDED_CANONICAL_PATHS = new Set([
   "/",
@@ -67,24 +41,7 @@ const EXCLUDED_PREFIXES = [
 ];
 
 export function parseCardDate(text: string): string | undefined {
-  const isoMatch = text.match(/\b(\d{4})-(\d{2})-(\d{2})\b/u);
-  if (isoMatch && isoMatch[1] && isoMatch[2] && isoMatch[3]) {
-    return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
-  }
-
-  const engMatch = text.match(
-    /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Sept|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),?\s+(\d{4})\b/iu,
-  );
-  if (engMatch && engMatch[1] && engMatch[2] && engMatch[3]) {
-    const month = MONTH_MAP[engMatch[1].toLowerCase()];
-    if (month !== undefined) {
-      const day = engMatch[2].padStart(2, "0");
-      const year = engMatch[3];
-      return `${year}-${month}-${day}`;
-    }
-  }
-
-  return undefined;
+  return sourceTimeFrom(text)?.value;
 }
 
 export function isExcludedPath(pathname: string): boolean {
