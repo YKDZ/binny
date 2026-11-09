@@ -148,8 +148,10 @@ function itemFor(
   const body = bodyFor(ordinal, revision);
   return {
     sourceKey: sourceKeyFor(ordinal),
-    metadata: { title: "归档容量样本 " + String(ordinal) },
-    properties: {
+    title: "归档容量样本 " + String(ordinal),
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {
       capacityOrdinal: ordinal,
       group: ordinal % 100,
       score: (ordinal * 17) % 10_007,

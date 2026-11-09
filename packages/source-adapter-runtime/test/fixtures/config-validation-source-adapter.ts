@@ -15,6 +15,7 @@ const configSchema = z
     path: ["section"],
     message: "该板块不可用。",
   });
+const extensionsSchema = z.object({}).strict();
 
 export default defineSourceAdapter({
   id: "binny-runtime.configuration-validation-fixture",
@@ -23,8 +24,9 @@ export default defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "报告配置验证测试状态。",
       params: z.object({}),
       output: z.object({ available: z.boolean() }),
@@ -32,7 +34,7 @@ export default defineSourceAdapter({
         return { available: true };
       },
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "报告配置验证测试范围。",
       params: z.object({}),
       output: z.object({ section: z.string() }),

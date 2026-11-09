@@ -54,6 +54,10 @@ const submission = await client.archives.$post({
     items: [
       {
         sourceKey: { namespace: "e2e", key: "sdk-resource" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { html: body.content, searchText: "SDK 媒体" },
         resources: [...body.resources],
         capture: {

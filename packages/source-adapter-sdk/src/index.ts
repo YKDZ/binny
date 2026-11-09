@@ -141,12 +141,17 @@ export type SourceAdapterPersistentStateStore = {
   save(state: JsonObject): Promise<void>;
 };
 
-export type SourceAdapterArchiveSubmission = Omit<
-  ArchiveSubmissionInput,
+/**
+ * A formal archive request authored with the extension type owned by the
+ * adapter's `extensionsSchema`. The Core validates the same JSON Schema before
+ * writing; successful retries reuse their original archive revision.
+ */
+export type SourceAdapterArchiveSubmission<TExtensions extends object> = Omit<
+  ArchiveSubmissionInput<TExtensions>,
   "requestId" | "binId" | "runId" | "sourceAdapterVersion" | "relations"
 > & {
   readonly requestId?: string;
-  readonly relations?: ArchiveSubmissionInput["relations"];
+  readonly relations?: ArchiveSubmissionInput<TExtensions>["relations"];
 };
 
 /** 将真实媒体字节上传到核心，成功后返回可提交的归档资源元信息。 */
@@ -251,7 +256,7 @@ export type SourceAdapterBrowserConnection = z.infer<
   typeof sourceAdapterBrowserConnectionSchema
 >;
 
-type SourceAdapterContextBase<TConfig> = {
+type SourceAdapterContextBase<TConfig, TExtensions extends object> = {
   readonly binId: string;
   readonly identityId: string;
   readonly runId: string;
@@ -263,7 +268,14 @@ type SourceAdapterContextBase<TConfig> = {
   readonly sourceAccess?: SourceAccessClient;
   readonly persistentState?: SourceAdapterPersistentStateStore;
   readonly archive: {
-    submit(input: SourceAdapterArchiveSubmission): Promise<ArchiveCommit>;
+    /**
+     * Submit public source facts and adapter-declared extensions through the
+     * Core archive API. Invalid values reject with `SourceAdapterActionError`
+     * and do not create a successful commit.
+     */
+    submit(
+      input: SourceAdapterArchiveSubmission<TExtensions>,
+    ): Promise<ArchiveCommit>;
   };
   readonly resources: {
     upload(body: BodyInit, mediaType: string): Promise<ArchiveResourceUpload>;
@@ -276,7 +288,8 @@ type SourceAdapterContextBase<TConfig> = {
 export type SourceAdapterContext<
   TConfig = unknown,
   TReport extends z.ZodType = never,
-> = SourceAdapterContextBase<TConfig> &
+  TExtensions extends object = {},
+> = SourceAdapterContextBase<TConfig, TExtensions> &
   ([TReport] extends [never]
     ? object
     : { readonly report: (report: z.input<TReport>) => Promise<void> });
@@ -296,73 +309,95 @@ export type SourceAdapterAction<
   TParams extends z.ZodType = z.ZodType,
   TOutput extends z.ZodType = z.ZodType,
   TReport extends z.ZodType = never,
+  TExtensions extends object = {},
 > = {
   readonly description: string;
   readonly params: TParams;
   readonly output: TOutput;
-  execute(
-    context: SourceAdapterContext<z.output<TConfig>, TReport>,
+  readonly execute: (
+    context: SourceAdapterContext<z.output<TConfig>, TReport, TExtensions>,
     params: z.output<TParams>,
-  ): Promise<z.input<TOutput>>;
+  ) => Promise<z.input<TOutput>>;
+  readonly [sourceAdapterExtensionsType]: TExtensions;
 } & ([TReport] extends [never] ? object : { readonly report: TReport });
 
-/** 用同一份配置声明、参数 schema 与输出 schema 定义一个可执行动作。 */
+declare const sourceAdapterExtensionsType: unique symbol;
+
+/** Use the adapter-owned extension schema to type archive submissions in an action. */
 export function defineSourceAdapterAction<
   TConfig extends z.ZodType,
+  TExtensionsSchema extends z.ZodObject,
   TParams extends z.ZodType,
   TOutput extends z.ZodType,
 >(
   configSchema: TConfig,
+  extensionsSchema: TExtensionsSchema,
   action: {
     readonly description: string;
     readonly params: TParams;
     readonly output: TOutput;
-    execute(
-      context: SourceAdapterContext<z.output<TConfig>>,
+    readonly execute: (
+      context: SourceAdapterContext<
+        z.output<TConfig>,
+        never,
+        z.output<TExtensionsSchema>
+      >,
       params: z.output<TParams>,
-    ): Promise<z.input<TOutput>>;
+    ) => Promise<z.input<TOutput>>;
   },
-): SourceAdapterAction<TConfig, TParams, TOutput>;
+): SourceAdapterAction<
+  TConfig,
+  TParams,
+  TOutput,
+  never,
+  z.output<TExtensionsSchema>
+>;
 export function defineSourceAdapterAction<
   TConfig extends z.ZodType,
+  TExtensionsSchema extends z.ZodObject,
   TParams extends z.ZodType,
   TOutput extends z.ZodType,
   TReport extends z.ZodType,
 >(
   configSchema: TConfig,
+  extensionsSchema: TExtensionsSchema,
   action: {
     readonly description: string;
     readonly params: TParams;
     readonly output: TOutput;
     readonly report: TReport;
-    execute(
-      context: SourceAdapterContext<z.output<TConfig>, TReport>,
+    readonly execute: (
+      context: SourceAdapterContext<
+        z.output<TConfig>,
+        TReport,
+        z.output<TExtensionsSchema>
+      >,
       params: z.output<TParams>,
-    ): Promise<z.input<TOutput>>;
+    ) => Promise<z.input<TOutput>>;
   },
-): SourceAdapterAction<TConfig, TParams, TOutput, TReport>;
+): SourceAdapterAction<
+  TConfig,
+  TParams,
+  TOutput,
+  TReport,
+  z.output<TExtensionsSchema>
+>;
 export function defineSourceAdapterAction(
   configSchema: z.ZodType,
-  action: SourceAdapterActionShape,
-): SourceAdapterActionShape {
+  extensionsSchema: z.ZodObject,
+  action: SourceAdapterActionRuntimeShape,
+): SourceAdapterActionRuntimeShape {
   void configSchema;
+  void extensionsSchema;
   return action;
 }
 
-// 异构动作先按各自动作 schema 校验，再由运行器统一调用。
-type SourceAdapterActionExecutor = {
-  bivarianceHack(
-    context: SourceAdapterContext,
-    params: unknown,
-  ): Promise<unknown>;
-}["bivarianceHack"];
-
-type SourceAdapterActionShape = {
+type SourceAdapterActionRuntimeShape = {
   readonly description: string;
   readonly params: z.ZodType;
   readonly output: z.ZodType;
   readonly report?: z.ZodType;
-  readonly execute: SourceAdapterActionExecutor;
+  execute(context: SourceAdapterContext, params: unknown): Promise<unknown>;
 };
 
 const sourceAdapterActionErrorType = "binny.source-adapter-action-error";
@@ -370,7 +405,7 @@ export type SourceAdapterRunContext<
   TConfig = unknown,
   TReport extends z.ZodType = z.ZodType,
 > = Omit<
-  SourceAdapterContextBase<TConfig>,
+  SourceAdapterContextBase<TConfig, {}>,
   | "archive"
   | "resources"
   | "binId"
@@ -429,11 +464,16 @@ export function sourceAdapterActionError(
 /** Provides actions with formal API archive submission capabilities bound to run/bin/version. */
 export function createSourceAdapterContext<
   TConfig,
+  TExtensionsSchema extends z.ZodObject,
   TReport extends z.ZodType = z.ZodType,
 >(
   client: SourceAdapterApiClient,
   context: SourceAdapterRunContext<TConfig, TReport>,
-): SourceAdapterContext<TConfig, TReport> {
+  extensionsSchema: TExtensionsSchema,
+): SourceAdapterContext<TConfig, TReport, z.output<TExtensionsSchema>> {
+  // The schema is passed at runtime so the context's submit type has one
+  // explicit owner. Core performs value validation from its manifest schema.
+  void extensionsSchema;
   const { browser, ...runContext } = context;
   return {
     ...runContext,
@@ -449,7 +489,7 @@ export function createSourceAdapterContext<
               binId: context.binId,
               runId: context.runId,
               sourceAdapterVersion: context.sourceAdapterVersion,
-            },
+            } as ArchiveSubmissionInput,
           },
           { init: { signal: context.signal } },
         );
@@ -489,17 +529,22 @@ export function createSourceAdapterContext<
         });
       },
     },
-  } as SourceAdapterContext<TConfig, TReport>;
+  } as SourceAdapterContext<TConfig, TReport, z.output<TExtensionsSchema>>;
 }
 
 export interface SourceAdapterDefinition<
   TConfig extends z.ZodType = z.ZodType,
-  TActions extends Readonly<Record<string, SourceAdapterActionShape>> & {
-    readonly check: SourceAdapterActionShape;
-    readonly collect: SourceAdapterActionShape;
-  } = Readonly<Record<string, SourceAdapterActionShape>> & {
-    readonly check: SourceAdapterActionShape;
-    readonly collect: SourceAdapterActionShape;
+  TExtensionsSchema extends z.ZodObject = z.ZodObject,
+  TActions extends Readonly<
+    Record<string, SourceAdapterActionShape<z.output<TExtensionsSchema>>>
+  > & {
+    readonly check: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
+    readonly collect: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
+  } = Readonly<
+    Record<string, SourceAdapterActionShape<z.output<TExtensionsSchema>>>
+  > & {
+    readonly check: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
+    readonly collect: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
   },
 > {
   readonly id: string;
@@ -507,6 +552,8 @@ export interface SourceAdapterDefinition<
   readonly description?: string;
   readonly environment: SourceAdapterEnvironment;
   readonly configSchema: TConfig;
+  /** Owns extension values accepted by every action's archive context. */
+  readonly extensionsSchema: TExtensionsSchema;
   readonly stateSchema?: z.ZodType;
   readonly stateSnapshotSchema?: z.ZodType;
   readonly actions: TActions;
@@ -514,9 +561,12 @@ export interface SourceAdapterDefinition<
 
 type TypedSourceAdapterActions<
   TConfig extends z.ZodType,
-  TActions extends Readonly<Record<string, SourceAdapterActionSchema>> & {
-    readonly check: SourceAdapterActionSchema;
-    readonly collect: SourceAdapterActionSchema;
+  TExtensionsSchema extends z.ZodObject,
+  TActions extends Readonly<
+    Record<string, SourceAdapterActionShape<z.output<TExtensionsSchema>>>
+  > & {
+    readonly check: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
+    readonly collect: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
   },
 > = {
   readonly [Name in keyof TActions]: SourceAdapterAction<
@@ -525,22 +575,30 @@ type TypedSourceAdapterActions<
     TActions[Name]["output"],
     TActions[Name] extends { readonly report: infer TReport extends z.ZodType }
       ? TReport
-      : never
+      : never,
+    z.output<TExtensionsSchema>
   >;
 };
 
-type SourceAdapterActionSchema = {
+type SourceAdapterActionSchema<TExtensions extends object> = {
   readonly description: string;
   readonly params: z.ZodType;
   readonly output: z.ZodType;
   readonly report?: z.ZodType;
+  readonly [sourceAdapterExtensionsType]: TExtensions;
 };
+
+type SourceAdapterActionShape<TExtensions extends object> =
+  SourceAdapterActionSchema<TExtensions> & SourceAdapterActionRuntimeShape;
 
 export function defineSourceAdapter<
   TConfig extends z.ZodType,
-  TActions extends Readonly<Record<string, SourceAdapterActionSchema>> & {
-    readonly check: SourceAdapterActionSchema;
-    readonly collect: SourceAdapterActionSchema;
+  TExtensionsSchema extends z.ZodObject,
+  TActions extends Readonly<
+    Record<string, SourceAdapterActionShape<z.output<TExtensionsSchema>>>
+  > & {
+    readonly check: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
+    readonly collect: SourceAdapterActionShape<z.output<TExtensionsSchema>>;
   },
 >(definition: {
   readonly id: string;
@@ -548,12 +606,16 @@ export function defineSourceAdapter<
   readonly description?: string;
   readonly environment: SourceAdapterEnvironment;
   readonly configSchema: TConfig;
+  /** This strict object schema owns the values accepted under `extensions`. */
+  readonly extensionsSchema: TExtensionsSchema;
   readonly stateSchema?: z.ZodType;
   readonly stateSnapshotSchema?: z.ZodType;
-  readonly actions: TActions & TypedSourceAdapterActions<TConfig, TActions>;
+  readonly actions: TActions &
+    TypedSourceAdapterActions<TConfig, TExtensionsSchema, TActions>;
 }): SourceAdapterDefinition<
   TConfig,
-  TActions & TypedSourceAdapterActions<TConfig, TActions>
+  TExtensionsSchema,
+  TActions & TypedSourceAdapterActions<TConfig, TExtensionsSchema, TActions>
 > {
   return definition;
 }
@@ -561,7 +623,7 @@ export function defineSourceAdapter<
 export function sourceAdapterManifest(
   definition: SourceAdapterDefinition,
 ): SourceAdapterManifest {
-  const manifestAction = (action: SourceAdapterActionShape) => ({
+  const manifestAction = (action: SourceAdapterActionRuntimeShape) => ({
     description: action.description,
     params: z.toJSONSchema(action.params, { io: "input" }),
     output: z.toJSONSchema(action.output, { io: "output" }),
@@ -588,6 +650,9 @@ export function sourceAdapterManifest(
       : { description: definition.description }),
     environment: definition.environment,
     configSchema: z.toJSONSchema(definition.configSchema, { io: "input" }),
+    extensionsSchema: z.toJSONSchema(definition.extensionsSchema.strict(), {
+      io: "input",
+    }),
     ...(definition.stateSchema === undefined
       ? {}
       : {

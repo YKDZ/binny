@@ -501,15 +501,17 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
 
   const originalState = {
     sourceKey: { namespace: "e2e", key: "resource-history" },
+    title: "原始完整版本",
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {
+      sourceDetails: { nested: { nullable: null, removed: "旧值" } },
+      attributes: {
+        nested: { nullable: null, removed: "旧值" },
+        values: ["左", null, "右"],
+      },
+    },
     sourceRef: "https://example.test/resource-history",
-    metadata: {
-      title: "原始完整版本",
-      nested: { nullable: null, removed: "旧值" },
-    },
-    properties: {
-      nested: { nullable: null, removed: "旧值" },
-      values: ["左", null, "右"],
-    },
     body: {
       html: `<p>原文媒体：binny://resource/${first.resourceId}</p>`,
       markdown: `原文位置 binny://resource/${first.resourceId}；外链 https://example.test/image.png`,
@@ -567,7 +569,12 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-text-marker-only" },
-        metadata: { note: `binny://resource/${orphan.resourceId}` },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          sourceDetails: { note: `binny://resource/${orphan.resourceId}` },
+        },
         body: { text: `正文保留标记 binny://resource/${orphan.resourceId}` },
         capture: {
           scope: { phase: "text-marker-only" },
@@ -596,6 +603,10 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
       items: [
         {
           sourceKey: { namespace: "e2e", key: "invalid-resource-reference" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           body: { text: "悬空资源引用" },
           resources: [{ resourceId: randomUUID() }],
           capture: {
@@ -628,6 +639,10 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-attachment-only" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         resources: [{ resourceId: first.resourceId }],
         capture: {
           scope: { phase: "attachment-only" },
@@ -651,13 +666,15 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
-        metadata: {
-          title: "本次只取得部分资料",
-          nested: { added: "新值" },
-        },
-        properties: {
-          nested: { nullable: null, added: "新值" },
-          values: ["右", null, "左"],
+        title: "本次只取得部分资料",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          sourceDetails: { nested: { added: "新值" } },
+          attributes: {
+            nested: { nullable: null, added: "新值" },
+            values: ["右", null, "左"],
+          },
         },
         body: {
           html: "<p>本次部分正文</p>",
@@ -678,10 +695,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   const partialRead = await readArchiveItem(client, firstItem.itemId);
   assert.equal(partialRead.views[0]?.revisionId, partialItem.revisionId);
   assert.equal(partialRead.views[0]?.state.body?.text, "本次取得的正文");
-  assert.equal(
-    partialRead.views[0]?.state.metadata?.title,
-    "本次只取得部分资料",
-  );
+  assert.equal(partialRead.views[0]?.state.title, "本次只取得部分资料");
   assert.equal(partialRead.views[0]?.state.capture.completeness, "partial");
   assert.deepEqual(partialRead.views[0]?.state.capture.missing, [
     { path: "resources.image", reason: "媒体下载失败" },
@@ -711,31 +725,20 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
       },
     },
   });
-  assert.deepEqual(firstToPartialDiff.fields.metadata, {
+  assert.deepEqual(firstToPartialDiff.fields.extensions, {
     status: "changed",
-    before: { present: true, value: originalState.metadata },
+    before: { present: true, value: originalState.extensions },
     after: {
       present: true,
       value: {
-        title: "本次只取得部分资料",
-        nested: { added: "新值" },
+        sourceDetails: { nested: { added: "新值" } },
+        attributes: {
+          nested: { nullable: null, added: "新值" },
+          values: ["右", null, "左"],
+        },
       },
     },
   });
-  assert.equal(firstToPartialDiff.fields.properties.status, "changed");
-  if (firstToPartialDiff.fields.properties.status === "changed") {
-    assert.deepEqual(firstToPartialDiff.fields.properties.before, {
-      present: true,
-      value: originalState.properties,
-    });
-    assert.deepEqual(firstToPartialDiff.fields.properties.after, {
-      present: true,
-      value: {
-        nested: { nullable: null, added: "新值" },
-        values: ["右", null, "左"],
-      },
-    });
-  }
   assert.equal(firstToPartialDiff.fields.capture.status, "changed");
   assert.deepEqual(firstToPartialDiff.resources, {
     added: [],
@@ -754,8 +757,10 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "resource-history" },
-        metadata: { title: "补齐后的资料" },
-        properties: { completion: { media: true } },
+        title: "补齐后的资料",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { completion: { media: true } } },
         body: { markdown: "补齐后的正文" },
         resources: [{ resourceId: replacement.resourceId }],
         capture: {
@@ -816,8 +821,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
   );
   assert.equal(sameRevisionDiff.hasChanges, false);
   assert.deepEqual(sameRevisionDiff.resources, { added: [], removed: [] });
-  assert.equal(sameRevisionDiff.fields.metadata.status, "unchanged");
-  assert.equal(sameRevisionDiff.fields.properties.status, "unchanged");
+  assert.equal(sameRevisionDiff.fields.extensions.status, "unchanged");
   const mixedCaseSameRevisionDiff = await readArchiveRevisionDiff(
     client,
     firstItem.revisionId.toUpperCase(),
@@ -891,7 +895,7 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     throw new Error("读取历史资源版本失败：" + (await historicRead.text()));
   }
   const historicRevision = await historicRead.json();
-  assert.equal(historicRevision.state.metadata?.title, "原始完整版本");
+  assert.equal(historicRevision.state.title, "原始完整版本");
   assert.deepEqual(historicRevision.state.resources, [
     { resourceId: first.resourceId },
   ]);
@@ -908,8 +912,13 @@ async function verifyArchiveResourceHttp(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e", key: "immutable-media-item" },
-        metadata: {
-          media: [{ url: mediaTestUrl, resourceId: first.resourceId }],
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          sourceDetails: {
+            media: [{ url: mediaTestUrl, resourceId: first.resourceId }],
+          },
         },
         body: { text: "带不可变媒体引用的条目" },
         resources: [{ resourceId: first.resourceId }],
@@ -1031,6 +1040,10 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "atomic-baseline" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "原子拒绝后的对象" },
         capture: {
           scope: { case: "atomic" },
@@ -1048,6 +1061,10 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: "missing-bin" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           body: { text: "不存在的 bin" },
           capture: {
             scope: { case: "missing-bin" },
@@ -1072,6 +1089,10 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: "empty-failure" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           sourceRef: "https://example.test/unfetched",
           capture: {
             scope: { case: "failed-fetch" },
@@ -1099,7 +1120,12 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: "unsafe-json-number" },
-          properties: { count: Number.MAX_SAFE_INTEGER + 1 },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            attributes: { count: Number.MAX_SAFE_INTEGER + 1 },
+          },
           capture: {
             scope: { case: "invalid-json" },
             completeness: "complete",
@@ -1119,12 +1145,17 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
   assert.deepEqual(unsafeNumberError.error.path, [
     "items",
     0,
-    "properties",
+    "extensions",
+    "attributes",
     "count",
   ]);
 
   const validAtomicItem = {
     sourceKey: { namespace: "e2e", key: "atomic-retry" },
+    title: null,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {},
     body: { text: "原子拒绝后的对象" },
     capture: {
       scope: { case: "atomic" },
@@ -1139,6 +1170,10 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
       validAtomicItem,
       {
         sourceKey: { namespace: "e2e" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "无稳定对象键" },
         capture: {
           scope: { case: "atomic" },
@@ -1187,6 +1222,10 @@ async function verifyArchiveAtomicity(client: ArchiveClient): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "partial-capture" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "已取得的正文" },
         capture: {
           scope: { section: "main" },
@@ -1223,6 +1262,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: foreignTarget,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "只在另一个 bin 取得的目标" },
         capture: {
           scope: { case: "relation" },
@@ -1262,6 +1305,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: from,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "关系来源资料" },
         capture: {
           scope: { case: "relation" },
@@ -1271,6 +1318,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
       },
       {
         sourceKey: to,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "同批关系目标" },
         capture: {
           scope: { case: "relation" },
@@ -1490,6 +1541,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: from,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "关系来源资料" },
         capture: {
           scope: { case: "relation" },
@@ -1714,6 +1769,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
       items: [
         {
           sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           body: { text: "拒绝整批时不能留下" },
           capture: {
             scope: { case: "relation-atomic" },
@@ -1758,6 +1817,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
     items: [
       {
         sourceKey: { namespace: "e2e-relations", key: "atomic-from" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "拒绝整批时不能留下" },
         capture: {
           scope: { case: "relation-atomic" },
@@ -1852,6 +1915,10 @@ async function verifyArchiveRelations(client: ArchiveClient): Promise<{
 async function verifyArchiveIdempotency(client: ArchiveClient): Promise<void> {
   const retryItem = {
     sourceKey: { namespace: "e2e", key: "idempotent-retry" },
+    title: null,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {},
     body: { text: "同一请求重放" },
     capture: {
       scope: { case: "idempotency" },
@@ -1937,8 +2004,13 @@ async function verifyArchivePrototypeKeys(
   ] as const);
   const state = {
     sourceKey: { namespace: "e2e", key: "prototype-json" },
-    metadata,
-    properties,
+    title: null,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {
+      sourceDetails: metadata,
+      attributes: properties,
+    },
     body: { text: "保留自有 JSON 键" },
     capture: {
       scope,
@@ -1961,8 +2033,11 @@ async function verifyArchivePrototypeKeys(
   assert.ok(revisionId);
 
   const persisted = await readArchiveItem(client, itemId);
-  assert.deepEqual(persisted.views[0]?.state.metadata, metadata);
-  assert.deepEqual(persisted.views[0]?.state.properties, properties);
+  assert.deepEqual(
+    persisted.views[0]?.state.extensions.sourceDetails,
+    metadata,
+  );
+  assert.deepEqual(persisted.views[0]?.state.extensions.attributes, properties);
   assert.deepEqual(persisted.views[0]?.state.capture.scope, scope);
   assert.deepEqual(persisted.views[0]?.diagnostics?.[0]?.details, details);
 
@@ -1981,7 +2056,14 @@ async function verifyArchivePrototypeKeys(
     items: [
       {
         sourceKey: { namespace: "e2e", key: "prototype-json-conflict" },
-        properties: Object.fromEntries([["__proto__", { value: 1 }]] as const),
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          attributes: Object.fromEntries([
+            ["__proto__", { value: 1 }],
+          ] as const),
+        },
         body: { text: "幂等键冲突负例" },
         capture: {
           scope: { case: "prototype-conflict" },
@@ -2000,7 +2082,12 @@ async function verifyArchivePrototypeKeys(
   const conflictingResponse = await client.archives.$post({
     json: {
       ...firstConflictRequest,
-      items: [{ ...firstConflictItem, properties: changedOwnKey }],
+      items: [
+        {
+          ...firstConflictItem,
+          extensions: { attributes: changedOwnKey },
+        },
+      ],
     },
   });
   if (conflictingResponse.status !== 409) {
@@ -2042,6 +2129,10 @@ async function verifyPersistableTextBoundary(
       items: [
         {
           sourceKey: { namespace: "e2e", key: "postgres-text-nul" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
           body: { text: "a\u0000b" },
           capture: {
             scope: {},
@@ -2065,7 +2156,10 @@ async function verifyPersistableTextBoundary(
       items: [
         {
           sourceKey: { namespace: "e2e", key: "postgres-text-key-nul" },
-          properties: { ["bad\u0000key"]: "value" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { attributes: { ["bad\u0000key"]: "value" } },
           body: { text: "正常中文正文🌿" },
           capture: {
             scope: {},
@@ -2078,7 +2172,7 @@ async function verifyPersistableTextBoundary(
   });
   await expectUnsupportedPostgresText(
     invalidArchiveKey,
-    ["items", 0, "properties", "bad\u0000key"],
+    ["items", 0, "extensions", "attributes", "bad\u0000key"],
     "键中含空字符的归档属性",
   );
 
@@ -2088,6 +2182,10 @@ async function verifyPersistableTextBoundary(
     items: [
       {
         sourceKey: { namespace: "e2e", key: "postgres-text-valid" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "合法中文和 emoji 🌿" },
         capture: {
           scope: { language: "中文🌿" },
@@ -2172,10 +2270,17 @@ async function verifyArchiveABA(
 > {
   const abaA = {
     sourceKey: { namespace: "e2e", key: "aba-item" },
+    title: "状态 A",
+    sourcePublishedAt: null,
+    extensions: {
+      sourceDetails: { authors: ["writer"] },
+      attributes: { counts: { replies: 2, stars: 4 }, tags: ["a", "b"] },
+    },
     sourceRef: "https://example.test/aba-item",
-    sourceModifiedAt: "2026-10-28T12:00:00+08:00",
-    metadata: { title: "状态 A", authors: ["writer"] },
-    properties: { counts: { replies: 2, stars: 4 }, tags: ["a", "b"] },
+    sourceModifiedAt: {
+      precision: "instant" as const,
+      value: "2026-10-28T12:00:00+08:00",
+    },
     body: { markdown: "正文 A🌿", searchText: "正文 A🌿" },
     capture: {
       scope: { source: "e2e", topic: "42" },
@@ -2206,9 +2311,18 @@ async function verifyArchiveABA(
     items: [
       {
         ...abaA,
-        sourceModifiedAt: "2026-10-28T04:01:00.000Z",
-        metadata: { title: "状态 B", authors: ["writer"] },
-        properties: { counts: { replies: 3, stars: 5 }, tags: ["a", "b"] },
+        title: "状态 B",
+        extensions: {
+          sourceDetails: { authors: ["writer"] },
+          attributes: {
+            counts: { replies: 3, stars: 5 },
+            tags: ["a", "b"],
+          },
+        },
+        sourceModifiedAt: {
+          precision: "instant" as const,
+          value: "2026-10-28T04:01:00.000Z",
+        },
         body: { markdown: "正文 B", searchText: "正文 B" },
         diagnostics: [{ code: "body_changed", message: "正文发生变化" }],
       },
@@ -2223,9 +2337,18 @@ async function verifyArchiveABA(
     items: [
       {
         ...abaA,
-        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
-        metadata: { authors: ["writer"], title: "状态 A" },
-        properties: { tags: ["a", "b"], counts: { stars: 4, replies: 2 } },
+        title: "状态 A",
+        extensions: {
+          sourceDetails: { authors: ["writer"] },
+          attributes: {
+            tags: ["a", "b"],
+            counts: { stars: 4, replies: 2 },
+          },
+        },
+        sourceModifiedAt: {
+          precision: "instant" as const,
+          value: "2026-10-28T04:00:00.000Z",
+        },
         capture: {
           scope: { topic: "42", source: "e2e" },
           completeness: "complete" as const,
@@ -2252,8 +2375,7 @@ async function verifyArchiveABA(
   );
   assert.equal(firstToSecondDiff.hasChanges, true);
   assert.equal(firstToSecondDiff.fields.body.status, "changed");
-  assert.equal(firstToSecondDiff.fields.metadata.status, "changed");
-  assert.equal(firstToSecondDiff.fields.properties.status, "changed");
+  assert.equal(firstToSecondDiff.fields.extensions.status, "changed");
   assert.deepEqual(firstToSecondDiff.resources, { added: [], removed: [] });
   const firstToReusedDiff = await readArchiveRevisionDiff(
     client,
@@ -2302,10 +2424,10 @@ async function verifyArchiveABA(
   assert.equal(historicalView.views[0]?.state.body?.markdown, "正文 B");
   assert.equal(historicalView.revisions.length, 2);
   assert.equal(historicalView.observations.length, 2);
-  assert.equal(
-    historicalView.observations[0]?.sourceModifiedAt,
-    "2026-10-28T04:00:00.000Z",
-  );
+  assert.deepEqual(historicalView.observations[0]?.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T04:00:00.000Z",
+  });
   assert.equal(
     historicalView.observations[0]?.observedAt,
     "2026-10-28T04:01:00.000Z",
@@ -2346,7 +2468,7 @@ async function verifyArchiveABA(
     firstHistoricalItemEvent?.kind === "item"
       ? firstHistoricalItemEvent.sourceModifiedAt
       : undefined,
-    "2026-10-28T04:00:00.000Z",
+    { precision: "instant", value: "2026-10-28T04:00:00.000Z" },
   );
   assert.equal(
     firstHistoricalItemEvent?.kind === "item"
@@ -2430,10 +2552,10 @@ async function verifyArchiveABA(
       lateCommit.archiveSeq,
     ],
   );
-  assert.equal(
+  assert.deepEqual(
     currentTimeline.events.filter((event) => event.kind === "item")[3]
       ?.sourceModifiedAt,
-    "2026-10-28T04:00:00.000Z",
+    { precision: "instant", value: "2026-10-28T04:00:00.000Z" },
   );
   assert.equal(
     currentTimeline.events.filter((event) => event.kind === "item")[3]
@@ -2480,8 +2602,11 @@ async function verifyArchiveABA(
     throw new Error("读取 A 版本失败：" + (await abaRevisionResponse.text()));
   }
   const abaRevision = await abaRevisionResponse.json();
-  assert.equal(abaRevision.state.sourceModifiedAt, "2026-10-28T04:00:00.000Z");
-  assert.equal(abaRevision.state.metadata?.title, "状态 A");
+  assert.deepEqual(abaRevision.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T04:00:00.000Z",
+  });
+  assert.equal(abaRevision.state.title, "状态 A");
   assert.equal(abaRevision.state.body?.markdown, "正文 A🌿");
 
   return {
@@ -2510,7 +2635,10 @@ async function verifyConcurrentArchiveIdentity(
       items: [
         {
           sourceKey: concurrentSourceKey,
-          metadata: { view: "main" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { sourceDetails: { view: "main" } },
           body: { text: "main view" },
           capture: {
             scope: { case: "cross-bin" },
@@ -2526,7 +2654,10 @@ async function verifyConcurrentArchiveIdentity(
       items: [
         {
           sourceKey: concurrentSourceKey,
-          metadata: { view: "secondary" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { sourceDetails: { view: "secondary" } },
           body: { text: "secondary view" },
           capture: {
             scope: { case: "cross-bin" },
@@ -2767,8 +2898,14 @@ async function verifySearchRoute(
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-unicode" },
+        title: null,
+        sourcePublishedAt: null,
+        extensions: {},
         sourceRef: "https://example.test/search-unicode",
-        sourceModifiedAt: "2026-10-28T04:04:00.000Z",
+        sourceModifiedAt: {
+          precision: "instant" as const,
+          value: "2026-10-28T04:04:00.000Z",
+        },
         body: {
           html: "<p>HTML-only phrase is not search text</p>",
           searchText: "前🙂中文短串后",
@@ -3158,6 +3295,10 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "分视图文字" },
         capture: {
           scope: { case: "search-view" },
@@ -3174,6 +3315,10 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "另一份内容" },
         capture: {
           scope: { case: "search-view" },
@@ -3342,6 +3487,10 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
   const sharedKey = { namespace: "e2e", key: "search-shared-revision" };
   const sharedState = {
     sourceKey: sharedKey,
+    title: null,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {},
     body: { searchText: "相同正文跨两个来源" },
     capture: {
       scope: { case: "shared-search" },
@@ -3459,6 +3608,10 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-latest-partial" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "旧完整版本onlyneedle" },
         capture: {
           scope: { case: "search-partial" },
@@ -3474,6 +3627,10 @@ async function verifySearchSourceViews(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-latest-partial" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "最新部分版本onlyneedle" },
         capture: {
           scope: { case: "search-partial" },
@@ -3554,8 +3711,11 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
   };
   const sharedState = {
     sourceKey: { namespace: "e2e", key: "aggregation-shared-p" },
+    title: null,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: { attributes: { price: 10, category: "x" } },
     body: { searchText: "聚合完整候选集合" },
-    properties: { price: 10, category: "x" },
     capture: {
       scope: { case: "aggregation" },
       completeness: "complete" as const,
@@ -3583,8 +3743,11 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "aggregation-distinct-q" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { price: 10, category: "x" } },
         body: { searchText: "聚合完整候选集合" },
-        properties: { price: 10, category: "x" },
         capture: {
           scope: { case: "aggregation" },
           completeness: "complete",
@@ -3601,8 +3764,11 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: thirdKey },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { price: 2, category: "y" } },
         body: { searchText: "聚合完整候选集合" },
-        properties: { price: 2, category: "y" },
         capture: {
           scope: { case: "aggregation" },
           completeness: "complete",
@@ -3740,8 +3906,11 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "aggregation-late-" + runId },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { price: 100, category: "z" } },
         body: { searchText: "聚合完整候选集合" },
-        properties: { price: 100, category: "z" },
         capture: {
           scope: { case: "aggregation" },
           completeness: "complete",
@@ -3816,7 +3985,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     binId: "binny-runs-one",
     items: decimalKeys.map((key, index) => ({
       sourceKey: { namespace: "e2e", key },
-      properties: { price: index === 0 ? 0.1 : 0.2 },
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: { attributes: { price: index === 0 ? 0.1 : 0.2 } },
       capture: {
         scope: { case: "aggregation-decimal" },
         completeness: "complete" as const,
@@ -3932,15 +4104,24 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: nullKey },
-        properties: { marker: null, price: 9 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { marker: null, price: 9 } },
       },
       {
         sourceKey: { namespace: "e2e", key: missingKey },
-        properties: { price: 4 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { price: 4 } },
       },
       {
         sourceKey: { namespace: "e2e", key: valueKey },
-        properties: { marker: "blue", price: 2 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { marker: "blue", price: 2 } },
       },
     ].map((item) => ({
       ...item,
@@ -4035,6 +4216,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
       binId,
       items: [relationRoot, relationTarget].map((sourceKey) => ({
         sourceKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "聚合关系视图" },
         capture: {
           scope: { case: "aggregation-relation" },
@@ -4177,8 +4362,11 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: cycleKey },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { attributes: { cycle } },
           body: { searchText: "聚合历史状态 " + cycle },
-          properties: { cycle },
           capture: {
             scope: { case: "aggregation-aba" },
             completeness: "complete",
@@ -4227,7 +4415,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: timeKey },
-          properties: { observation: suffix },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: { attributes: { observation: suffix } },
           capture: {
             scope: { case: "aggregation-time" },
             completeness: "complete",
@@ -4318,6 +4509,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: dstKey },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "聚合时区边界" },
         capture: {
           scope: { case: "aggregation-dst" },
@@ -4441,6 +4636,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
       ] as const
     ).map(([sourceKey, searchText]) => ({
       sourceKey,
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: {},
       body: { searchText },
       capture: {
         scope: { case: "aggregation-path" },
@@ -4495,6 +4694,10 @@ async function verifyAggregationFirstSlice(baseUrl: string): Promise<void> {
           namespace: "e2e",
           key: "aggregation-budget-" + runId,
         },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "a".repeat(250_000) },
         capture: {
           scope: { case: "aggregation-budget" },
@@ -4542,6 +4745,10 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: firstOrderKey },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: resultIdOrderNeedle + " initial" },
         capture: {
           scope: { case: "search-result-id-order" },
@@ -4557,6 +4764,10 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: secondOrderKey },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: resultIdOrderNeedle + " initial" },
         capture: {
           scope: { case: "search-result-id-order" },
@@ -4582,6 +4793,10 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: smallerResultKey },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: resultIdOrderNeedle + " later" },
         capture: {
           scope: { case: "search-result-id-order" },
@@ -4650,8 +4865,13 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-a" },
-        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
-        properties: { rank: 1 },
+        title: null,
+        sourcePublishedAt: null,
+        extensions: { attributes: { rank: 1 } },
+        sourceModifiedAt: {
+          precision: "instant" as const,
+          value: "2026-10-28T04:00:00.000Z",
+        },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -4668,8 +4888,13 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-b" },
-        sourceModifiedAt: "2026-10-28T04:00:00.000Z",
-        properties: { rank: 1 },
+        title: null,
+        sourcePublishedAt: null,
+        extensions: { attributes: { rank: 1 } },
+        sourceModifiedAt: {
+          precision: "instant" as const,
+          value: "2026-10-28T04:00:00.000Z",
+        },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -4685,7 +4910,10 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-page-null-time" },
-        properties: { rank: "0" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: "0" } },
         body: { searchText: "稳定分页唯一needle" },
         capture: {
           scope: { case: "search-page" },
@@ -4749,8 +4977,13 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
       items: [
         {
           sourceKey: { namespace: "e2e", key: "search-page-c" },
-          sourceModifiedAt: "2026-10-28T04:00:00.000Z",
-          properties: { rank: 0 },
+          title: null,
+          sourcePublishedAt: null,
+          extensions: { attributes: { rank: 0 } },
+          sourceModifiedAt: {
+            precision: "instant" as const,
+            value: "2026-10-28T04:00:00.000Z",
+          },
           body: { searchText: "稳定分页唯一needle" },
           capture: {
             scope: { case: "search-page" },
@@ -4820,6 +5053,10 @@ async function verifySearchPagination(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: "search-wide-regex-budget" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "a".repeat(250_000) },
         capture: {
           scope: { case: "search-budget" },
@@ -4905,16 +5142,21 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: numberLow },
-        properties: {
-          profile: {
-            score: 2,
-            nullable: null,
-            active: true,
-            details: { name: "低", flags: ["a", 3] },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          sourceDetails: { stats: { views: 7 } },
+          attributes: {
+            profile: {
+              score: 2,
+              nullable: null,
+              active: true,
+              details: { name: "低", flags: ["a", 3] },
+            },
+            events: [{ score: 4 }, { score: 9 }],
           },
-          events: [{ score: 4 }, { score: 9 }],
         },
-        metadata: { stats: { views: 7 } },
         capture: {
           scope: { case: "json-path" },
           completeness: "complete",
@@ -4923,7 +5165,14 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: numberHigh },
-        properties: { profile: { score: 10, nullable: null, active: false } },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          attributes: {
+            profile: { score: 10, nullable: null, active: false },
+          },
+        },
         capture: {
           scope: { case: "json-path" },
           completeness: "complete",
@@ -4932,8 +5181,13 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: stringValue },
-        properties: {
-          profile: { score: "10", nullable: "not null", active: true },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          attributes: {
+            profile: { score: "10", nullable: "not null", active: true },
+          },
         },
         capture: {
           scope: { case: "json-path" },
@@ -4943,7 +5197,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: missingValue },
-        properties: { profile: { active: true } },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { profile: { active: true } } },
         capture: {
           scope: { case: "json-path" },
           completeness: "complete",
@@ -4952,7 +5209,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: prototypeValue },
-        properties: prototypeProperties,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: prototypeProperties },
         capture: {
           scope: { case: "json-path" },
           completeness: "complete",
@@ -5439,7 +5699,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: { namespace: "e2e", key: cursorKeys[0]! },
-        properties: { rank: 2 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 2 } },
         capture: {
           scope: { case: "json-cursor-delete" },
           completeness: "complete",
@@ -5448,7 +5711,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: cursorKeys[1]! },
-        properties: { rank: 10 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 10 } },
         capture: {
           scope: { case: "json-cursor-delete" },
           completeness: "complete",
@@ -5457,7 +5723,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: cursorKeys[2]! },
-        properties: { rank: 9 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 9 } },
         capture: {
           scope: { case: "json-cursor-delete" },
           completeness: "complete",
@@ -5466,7 +5735,10 @@ async function verifySearchJsonPathFilter(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: { namespace: "e2e", key: cursorKeys[3]! },
-        properties: { rank: "not a number" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: "not a number" } },
         capture: {
           scope: { case: "json-cursor-delete" },
           completeness: "complete",
@@ -5702,6 +5974,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: rootSplit,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "关联筛选根对象" },
         capture: {
           scope: { case: "relation-query" },
@@ -5711,6 +5987,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: rootEmpty,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "没有关联的根对象" },
         capture: {
           scope: { case: "relation-query" },
@@ -5720,7 +6000,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: targetAuthor,
-        properties: { author: "甲" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { author: "甲" } },
         body: { searchText: "没有这个词" },
         capture: {
           scope: { case: "relation-query" },
@@ -5730,7 +6013,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: targetText,
-        properties: { author: "乙" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { author: "乙" } },
         body: { searchText: "目标词在另一个目标" },
         capture: {
           scope: { case: "relation-query" },
@@ -5740,6 +6026,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: rootMatch,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "另一个关联筛选根对象" },
         capture: {
           scope: { case: "relation-query" },
@@ -5749,7 +6039,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: targetMatch,
-        properties: { author: "甲" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { author: "甲" } },
         body: { searchText: "目标词和作者同在此目标" },
         capture: {
           scope: { case: "relation-query" },
@@ -5759,7 +6052,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: directionRoot,
-        properties: { rank: 0 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 0 } },
         body: { searchText: "root text" },
         capture: {
           scope: { case: "relation-query" },
@@ -5769,7 +6065,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: directionSourceA,
-        properties: { rank: 2 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 2 } },
         body: { searchText: "source a" },
         capture: {
           scope: { case: "relation-query" },
@@ -5779,7 +6078,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: directionSourceB,
-        properties: { rank: "2" },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: "2" } },
         body: { searchText: "source b" },
         capture: {
           scope: { case: "relation-query" },
@@ -5789,7 +6091,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: directionSourceC,
-        properties: { rank: 3 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 3 } },
         body: { searchText: "source c" },
         capture: {
           scope: { case: "relation-query" },
@@ -5799,7 +6104,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       },
       {
         sourceKey: directionTargetD,
-        properties: { rank: 4 },
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { rank: 4 } },
         body: { searchText: "target d" },
         capture: {
           scope: { case: "relation-query" },
@@ -5921,6 +6229,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     binId: "binny-runs-two",
     items: [pathUnknown, pathForeign].map((sourceKey) => ({
       sourceKey,
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: {},
       body: { searchText: "只在次要来源观察的路径端点" },
       capture: {
         scope: { case: "bounded-path" },
@@ -5962,8 +6274,11 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
       { sourceKey: pathD, searchText: "有限路径终点资料" },
     ].map(({ sourceKey, searchText }) => ({
       sourceKey,
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: { attributes: { pathRole: sourceKey.key } },
       body: { searchText },
-      properties: { pathRole: sourceKey.key },
       capture: {
         scope: { case: "bounded-path" },
         completeness: "complete" as const,
@@ -6562,8 +6877,11 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: foreignTarget,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: { attributes: { author: "甲" } },
         body: { searchText: "只在另一来源中的目标词" },
-        properties: { author: "甲" },
         capture: {
           scope: { case: "relation-query" },
           completeness: "complete",
@@ -6582,6 +6900,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: foreignRoot,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "外来源目标测试根" },
         capture: {
           scope: { case: "relation-query" },
@@ -6668,6 +6990,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: rootSplit,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "第二来源中的相同根条目" },
         capture: {
           scope: { case: "relation-query" },
@@ -7607,6 +7933,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     items: [
       {
         sourceKey: pathD,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { searchText: "更新后的路径终点资料" },
         capture: {
           scope: { case: "bounded-path" },
@@ -7709,6 +8039,10 @@ async function verifyRelationSearch(baseUrl: string): Promise<void> {
     binId: "binny-runs-one",
     items: fanoutKeys.map((sourceKey) => ({
       sourceKey,
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: {},
       body: { searchText: "有限路径预算扇出图" },
       capture: {
         scope: { case: "bounded-path-budget" },
@@ -7818,7 +8152,10 @@ async function verifyHardDeleteEntryPoint(
     items: [
       {
         sourceKey: targetKey,
-        metadata: { title: "应删除的正文状态" },
+        title: "应删除的正文状态",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "hard delete target first revision secret" },
         resources: [
           { resourceId: sharedResource.resourceId },
@@ -7835,8 +8172,13 @@ async function verifyHardDeleteEntryPoint(
       },
       {
         sourceKey: ownerKey,
-        metadata: {
-          note: "未登记标记 binny://resource/" + exclusiveResource.resourceId,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
+          sourceDetails: {
+            note: "未登记标记 binny://resource/" + exclusiveResource.resourceId,
+          },
         },
         body: {
           text: "未登记标记 binny://resource/" + exclusiveResource.resourceId,
@@ -7850,6 +8192,10 @@ async function verifyHardDeleteEntryPoint(
       },
       {
         sourceKey: unrelatedKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "普通关系不扩大删除集合" },
         capture: {
           scope: { case: "hard-delete-unrelated" },
@@ -7906,7 +8252,10 @@ async function verifyHardDeleteEntryPoint(
     items: [
       {
         sourceKey: targetKey,
-        metadata: { title: "第二个 bin 的内容状态" },
+        title: "第二个 bin 的内容状态",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "hard delete target second revision secret" },
         resources: [
           { resourceId: sharedResource.resourceId },
@@ -8215,6 +8564,10 @@ async function verifyHardDeleteEntryPoint(
     items: [
       {
         sourceKey: targetKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: "真实新采集允许重新归档" },
         capture: {
           scope: { case: "hard-delete-fresh-capture" },
@@ -8469,6 +8822,10 @@ async function verifyDeclaredCascadeDeleteEntryPoint(
             : [];
       return {
         sourceKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: sourceKey.key },
         resources,
         capture: {
@@ -8770,6 +9127,10 @@ async function verifyConcurrentCascadeWrites(
       binId: "binny-runs-one",
       items: [rootKey, targetKey].map((sourceKey) => ({
         sourceKey,
+        title: null,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
         body: { text: sourceKey.key },
         capture: {
           scope: { case: "declared-cascade-race" },
@@ -8915,6 +9276,10 @@ async function verifyArchiveJourney(baseUrl: string): Promise<ArchiveJourney> {
     binId: "binny-runs-one",
     items: [cliCascadeRootKey, cliCascadeTargetKey].map((sourceKey) => ({
       sourceKey,
+      title: null,
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+      extensions: {},
       body: { text: sourceKey.key },
       capture: {
         scope: { case: "declared-cascade-cli" },
@@ -9049,9 +9414,9 @@ async function verifyArchivePersistence(
     resourceMarkerItem.views[0]?.state.body?.text,
     `正文保留标记 binny://resource/${archive.orphanResourceId}`,
   );
-  assert.equal(
-    resourceMarkerItem.views[0]?.state.metadata?.note,
-    `binny://resource/${archive.orphanResourceId}`,
+  assert.deepEqual(
+    resourceMarkerItem.views[0]?.state.extensions.sourceDetails,
+    { note: `binny://resource/${archive.orphanResourceId}` },
   );
   assert.equal(resourceMarkerItem.views[0]?.state.resources, undefined);
 
@@ -9110,7 +9475,7 @@ async function verifyArchivePersistence(
     new Uint8Array(await sdkResourceResponse.arrayBuffer()),
     sdkBytes,
   );
-  const sdkResourceMetadata = {
+  const sdkResourceDetails = {
     resourceId: sdkResource.resourceId,
     mediaType: sdkResourceResponse.headers.get("content-type"),
     size: Number(sdkResourceResponse.headers.get("content-length")),
@@ -9206,7 +9571,7 @@ async function verifyArchivePersistence(
     resourceMarkerItem,
     resourceRevision: historicalResource,
     sdkItem,
-    sdkResourceMetadata,
+    sdkResourceDetails,
     firstTimelinePage,
     secondTimelinePage,
     commit,
