@@ -511,6 +511,104 @@ Models release document version ${String(version)}.
   return undefined;
 }
 
+function qoderSourceResponse(
+  pathname: string,
+): { readonly mediaType: string; readonly body: string } | undefined {
+  const version = documentVersion;
+  const text = (body: string) => ({
+    mediaType: "text/markdown; charset=utf-8",
+    body,
+  });
+  const html = (body: string) => ({
+    mediaType: "text/html; charset=utf-8",
+    body,
+  });
+
+  if (pathname === "/qoder/cn/llms.txt") {
+    return text(`# Qoder CN Sources
+
+## 活动
+- [Qoder Model Launch 活动](/qoder/cn/events/model-launch.md): 受控活动资料
+
+## 公告
+- [Qoder Feature Announcement](/qoder/cn/announcements/feature-rollout.md): 受控公告资料
+
+## 更新日志
+- [Qoder CN CLI 更新日志](/qoder/cn/changelogs/cli.md): CN CLI release history
+`);
+  }
+  if (pathname === "/qoder/cn/events/model-launch.md") {
+    const effectiveDate =
+      version === 1
+        ? "2026年11月8日至2026年11月9日"
+        : "2026年11月9日至2026年11月10日";
+    return text(`# Qoder Model Launch 活动
+
+活动时间：${effectiveDate}
+
+Qoder CN event body version ${String(version)}.
+`);
+  }
+  if (pathname === "/qoder/cn/announcements/feature-rollout.md") {
+    return text(`# Qoder Feature Announcement
+
+Qoder CN announcement body version ${String(version)}.
+`);
+  }
+  if (pathname === "/qoder/cn/changelogs/cli.md") {
+    const updateDate = version === 1 ? "2026-11-08" : "2026-11-09";
+    const updateVersion = version === 1 ? "1.4.0" : "1.4.1";
+    return text(`# Qoder CN CLI Changelog
+
+<Update label="${updateDate}" description="${updateVersion}">
+  - Qoder CN changelog body version ${String(version)}.
+</Update>
+`);
+  }
+  if (pathname === "/qoder/international/llms.txt") {
+    return text(`# Qoder International Changelog
+
+## Changelogs
+- [Qoder International Release Notes](/qoder/international/changelogs/product.md): International product history
+`);
+  }
+  if (pathname === "/qoder/international/changelogs/product.md") {
+    const updateDate = version === 1 ? "2026-11-08" : "2026-11-09";
+    const updateVersion = version === 1 ? "2.8.0" : "2.8.1";
+    return text(`# Qoder International Release Notes
+
+<Update label="${updateDate}" description="${updateVersion}">
+  - Qoder international changelog body version ${String(version)}.
+</Update>
+`);
+  }
+  if (pathname === "/blog") {
+    const title = `Qoder Blog Release ${String(version)}`;
+    return html(`<!doctype html><html><body><main>
+      <article class="blog-card">
+        <h2><a href="/blog/qoder-source-adapter-e2e">${title}</a></h2>
+        <time datetime="2026-11-08T12:30:00+08:00">Nov 8, 2026</time>
+        <span class="category">Engineering</span>
+        <p class="summary">Qoder blog summary version ${String(version)}.</p>
+      </article>
+    </main></body></html>`);
+  }
+  if (pathname === "/blog/qoder-source-adapter-e2e") {
+    const title = `Qoder Blog Release ${String(version)}`;
+    const modifiedDate = version === 1 ? "2026-11-09" : "2026-11-10";
+    return html(`<!doctype html><html><head>
+      <link rel="canonical" href="${articleSourceOrigin}/blog/qoder-source-adapter-e2e" />
+      <meta property="article:published_time" content="2026-11-08T12:30:00+08:00" />
+      <meta property="article:modified_time" content="${modifiedDate}T09:15:00-04:00" />
+      <meta name="author" content="Qoder Engineering" />
+      <meta property="article:tag" content="Engineering, Release" />
+    </head><body><main><article><h1>${title}</h1>
+      <p>Qoder international blog article body version ${String(version)}.</p>
+    </article></main></body></html>`);
+  }
+  return undefined;
+}
+
 const server = createServer((request, response) => {
   void (async () => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -543,6 +641,9 @@ const server = createServer((request, response) => {
       pathname.startsWith("/qwen/") ||
       pathname.startsWith("/kimi/") ||
       pathname.startsWith("/minimax/") ||
+      pathname.startsWith("/qoder/") ||
+      pathname === "/blog" ||
+      pathname === "/blog/qoder-source-adapter-e2e" ||
       pathname === "/blog/runtime-guide.md"
     ) {
       requests.push({ path: pathname });
@@ -578,7 +679,9 @@ const server = createServer((request, response) => {
 
     if (request.method === "GET") {
       const sourceResponse =
-        documentSourceResponse(pathname) ?? articleSourceResponse(pathname);
+        qoderSourceResponse(pathname) ??
+        documentSourceResponse(pathname) ??
+        articleSourceResponse(pathname);
       if (sourceResponse !== undefined) {
         response.writeHead(200, {
           "content-type": sourceResponse.mediaType,

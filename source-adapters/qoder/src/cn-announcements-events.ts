@@ -15,12 +15,13 @@ import {
   type IncrementalOngoingDocumentRecord,
 } from "@binny/source-adapter-sdk";
 
-import { cleanQoderMdx } from "./mdx-cleaner.ts";
+import { cleanQoderMdx, extractQoderDocumentTitle } from "./mdx-cleaner.ts";
 import type {
   QoderCheckOutput,
   QoderCollectOutput,
   QoderCollectParams,
   QoderConfig,
+  QoderExtensions,
   QoderSyncOutput,
 } from "./source-adapter.ts";
 
@@ -267,9 +268,16 @@ function failureFromProblems(
   );
 }
 
+function isEventDocument(doc: DiscoveredCnDoc): boolean {
+  return (
+    /(?:event|活动|事件)/iu.test(doc.section) ||
+    /(?:^|\/)(?:events?|活动|事件)(?:\/|$)/iu.test(doc.docKey)
+  );
+}
+
 /** Checks Qoder CN documentation index availability. */
 export async function checkCnAnnouncementsEvents(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderCheckOutput> {
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
 
@@ -324,7 +332,7 @@ export async function checkCnAnnouncementsEvents(
  * active directory ongoing-document semantics.
  */
 export async function syncCnAnnouncementsEvents(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderSyncOutput> {
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
   const state = await loadIncrementalSyncState(context);
@@ -416,6 +424,7 @@ export async function syncCnAnnouncementsEvents(
       );
 
       if (hasOngoingDocumentChanged(previous, contentHash)) {
+        const isEvent = isEventDocument(doc);
         const effectiveDate = extractEffectiveDate(rawMd);
         const submitResult = await submitCleanedArticle(context, {
           sourceKey: {
@@ -423,12 +432,16 @@ export async function syncCnAnnouncementsEvents(
             key: doc.docKey,
           },
           sourceRef: doc.canonicalUrl,
-          title: doc.title,
-          sourceModifiedAt: undefined, // NEVER fabricate!
-          metadata: {
+          title:
+            doc.title === doc.docKey
+              ? extractQoderDocumentTitle(cleanResult.markdown)
+              : doc.title,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
             region: "cn",
             language: "zh-CN",
-            title: doc.title,
+            category: isEvent ? "event" : "announcement",
             section: doc.section,
             ...(doc.description ? { summary: doc.description } : {}),
             ...(effectiveDate ? { effectiveDate } : {}),
@@ -481,7 +494,7 @@ export async function syncCnAnnouncementsEvents(
 
 /** Explicitly collects Qoder CN announcements and events. */
 export async function collectCnAnnouncementsEvents(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
 ): Promise<QoderCollectOutput> {
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
@@ -531,6 +544,7 @@ export async function collectCnAnnouncementsEvents(
         cleanResult.markdown,
         cleanResult.text,
       );
+      const isEvent = isEventDocument(doc);
       const effectiveDate = extractEffectiveDate(rawMd);
 
       const submitResult = await submitCleanedArticle(context, {
@@ -539,12 +553,16 @@ export async function collectCnAnnouncementsEvents(
           key: doc.docKey,
         },
         sourceRef: doc.canonicalUrl,
-        title: doc.title,
-        sourceModifiedAt: undefined,
-        metadata: {
+        title:
+          doc.title === doc.docKey
+            ? extractQoderDocumentTitle(cleanResult.markdown)
+            : doc.title,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
           region: "cn",
           language: "zh-CN",
-          title: doc.title,
+          category: isEvent ? "event" : "announcement",
           section: doc.section,
           ...(doc.description ? { summary: doc.description } : {}),
           ...(effectiveDate ? { effectiveDate } : {}),
