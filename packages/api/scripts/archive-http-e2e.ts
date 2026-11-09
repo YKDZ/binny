@@ -2984,6 +2984,16 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     items: [
       makeItem("shared", "Needle model", "A literal release is available."),
       makeItem("split", "CrossViewAlpha", "No second keyword here."),
+      makeItem(
+        "distribution-shared",
+        "Distribution shared",
+        "Distribution marker.",
+      ),
+      makeItem(
+        "distribution-primary",
+        "Distribution primary",
+        "Distribution marker.",
+      ),
       {
         ...makeItem("title-only", "TitleOnlyToken", "Unrelated body."),
         body: {
@@ -3016,6 +3026,11 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     items: [
       makeItem("shared", "needle model", "Another literal release."),
       makeItem("split", "Unrelated title", "CrossViewBeta only."),
+      makeItem(
+        "distribution-shared",
+        "Distribution shared",
+        "Distribution marker.",
+      ),
     ],
   });
   const updated = await submitArchive(client, {
@@ -3082,6 +3097,16 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       ["binny-runs-two", secondaryShared.revisionId],
     ],
   );
+
+  const binDistributionResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "title", groups: [["Distribution"]] },
+      limit: 1,
+      distribution: { by: "bin", limit: 1 },
+    } as never,
+  });
+  assert.equal(binDistributionResponse.status, 200);
 
   const crossView = await client.archives.search.$post({
     json: {
