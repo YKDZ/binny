@@ -58,6 +58,9 @@ const collectParamsSchema = z
       .default("collect")
       .transform((value) => value + "!"),
     invalidOutput: z.boolean().optional(),
+    archiveModelVariant: z
+      .enum(["baseline", "public-change", "extension-change"])
+      .optional(),
     waitBeforeSourceMs: z.int().min(0).max(60_000).optional(),
     waitAfterCommitMs: z.int().min(0).max(60_000).optional(),
     validationDelayMs: z.int().min(0).max(10_000).optional(),
@@ -147,6 +150,56 @@ export default defineSourceAdapter({
       async execute(context, params) {
         if (params.waitBeforeSourceMs !== undefined)
           await delay(params.waitBeforeSourceMs);
+        if (params.archiveModelVariant !== undefined) {
+          const publicFactsChanged = params.archiveModelVariant !== "baseline";
+          const extensionChange =
+            params.archiveModelVariant === "extension-change";
+          const submission = {
+            requestId: "binny-runs:typed-archive-model:" + context.runId,
+            items: [
+              {
+                sourceKey: {
+                  namespace: "binny-runs.typed-archive-model",
+                  key: "stable-item",
+                },
+                title: publicFactsChanged
+                  ? "Typed archive public change"
+                  : "Typed archive baseline",
+                sourcePublishedAt: publicFactsChanged
+                  ? { precision: "day", value: "2026-11-08" }
+                  : { precision: "month", value: "2026-11" },
+                sourceModifiedAt: publicFactsChanged
+                  ? {
+                      precision: "instant",
+                      value: "2026-11-08T12:30:00+01:00",
+                      timeZone: "Europe/Paris",
+                    }
+                  : {
+                      precision: "instant",
+                      value: "2026-11-08T12:00:00+02:00",
+                      timeZone: "+02:00",
+                    },
+                extensions: {
+                  section: extensionChange
+                    ? "archive-model-extension-change"
+                    : "archive-model",
+                  adapterLabel: context.config.label,
+                  actionLabel: params.actionLabel,
+                },
+                body: { text: "Typed archive stable body" },
+                capture: {
+                  scope: { fixture: "archive-model" },
+                  completeness: "complete",
+                  missing: [],
+                },
+              },
+            ],
+          } satisfies SourceAdapterArchiveSubmission<
+            z.output<typeof extensionsSchema>
+          >;
+          await context.archive.submit(submission);
+          return { completedScopes: ["archive/typed-version"] };
+        }
         const response = await fetch(
           new URL("/source/collect", params.sourceUrl),
           {

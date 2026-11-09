@@ -1171,7 +1171,7 @@ async function verifyArchivedSection(
   assert.deepEqual(observation?.sourceModifiedAt, view.state.sourceModifiedAt);
 }
 
-async function verifyTypedArchiveAfterRestart(itemId: string): Promise<void> {
+async function verifyTypedArchiveHistory(itemId: string): Promise<void> {
   const response = await client.archives.items[":itemId"].$get({
     param: { itemId },
     query: {},
@@ -1179,44 +1179,201 @@ async function verifyTypedArchiveAfterRestart(itemId: string): Promise<void> {
   assert.equal(response.status, 200);
   if (response.status !== 200) return;
   const item = await response.json();
+  assert.equal(item.itemId, itemId);
+  assert.deepEqual(item.sourceKey, {
+    namespace: "binny-runs.typed-archive-model",
+    key: "stable-item",
+  });
   assert.equal(item.views.length, 1);
   const view = item.views[0];
   assert.ok(view !== undefined);
-  const referenceTime = view.state.extensions.referenceTime;
-  assert.equal(typeof referenceTime, "string");
-  assert.equal(view.state.title, "受控资料 runs-http-first");
+  assert.equal(view.state.title, "Typed archive public change");
   assert.deepEqual(view.state.sourcePublishedAt, {
-    precision: "month",
-    value: "2026-11",
+    precision: "day",
+    value: "2026-11-08",
   });
   assert.deepEqual(view.state.sourceModifiedAt, {
     precision: "instant",
-    value: referenceTime,
-    timeZone: "UTC",
+    value: "2026-11-08T12:30:00+01:00",
+    timeZone: "Europe/Paris",
   });
   assert.deepEqual(view.state.extensions, {
-    section: "initial",
+    section: "archive-model-extension-change",
     adapterLabel: "runtime!",
     actionLabel: "collect!",
-    referenceTime,
   });
-  assert.equal(view.state.body?.text, "受控正文 runs-http-first");
-  assert.equal(item.revisions.length, 1);
-  assert.equal(item.observations.length, 1);
-  assert.deepEqual(item.observations[0]?.sourceModifiedAt, {
-    precision: "instant",
-    value: referenceTime,
-    timeZone: "UTC",
+  assert.equal(view.state.body?.text, "Typed archive stable body");
+
+  assert.equal(item.revisions.length, 3);
+  assert.equal(item.observations.length, 4);
+  const chronologicalObservations = [...item.observations].sort(
+    (first, second) => {
+      const firstSequence = BigInt(first.archiveSeq);
+      const secondSequence = BigInt(second.archiveSeq);
+      if (firstSequence < secondSequence) return -1;
+      if (firstSequence > secondSequence) return 1;
+      return first.ordinal - second.ordinal;
+    },
+  );
+  const firstRevisionId = chronologicalObservations[0]?.revisionId;
+  const repeatedRevisionId = chronologicalObservations[1]?.revisionId;
+  const publicChangeRevisionId = chronologicalObservations[2]?.revisionId;
+  const extensionChangeRevisionId = chronologicalObservations[3]?.revisionId;
+  assert.ok(firstRevisionId !== undefined);
+  assert.equal(repeatedRevisionId, firstRevisionId);
+  assert.ok(publicChangeRevisionId !== undefined);
+  assert.ok(extensionChangeRevisionId !== undefined);
+  assert.notEqual(publicChangeRevisionId, firstRevisionId);
+  assert.notEqual(extensionChangeRevisionId, publicChangeRevisionId);
+  assert.deepEqual(
+    item.revisions.map(({ revisionId }) => revisionId),
+    [firstRevisionId, publicChangeRevisionId, extensionChangeRevisionId],
+  );
+
+  const readRevision = async (revisionId: string) => {
+    const revisionResponse = await client.archives.revisions[
+      ":revisionId"
+    ].$get({ param: { revisionId } });
+    assert.equal(revisionResponse.status, 200);
+    if (revisionResponse.status !== 200) return undefined;
+    const revision = await revisionResponse.json();
+    assert.equal(revision.itemId, itemId);
+    assert.deepEqual(revision.sourceKey, item.sourceKey);
+    return revision;
+  };
+  const firstRevision = await readRevision(firstRevisionId);
+  const publicChangeRevision = await readRevision(publicChangeRevisionId);
+  const extensionChangeRevision = await readRevision(extensionChangeRevisionId);
+  assert.ok(firstRevision !== undefined);
+  assert.ok(publicChangeRevision !== undefined);
+  assert.ok(extensionChangeRevision !== undefined);
+
+  const baselineState = {
+    title: "Typed archive baseline",
+    sourcePublishedAt: { precision: "month", value: "2026-11" },
+    sourceModifiedAt: {
+      precision: "instant",
+      value: "2026-11-08T12:00:00+02:00",
+      timeZone: "+02:00",
+    },
+    extensions: {
+      section: "archive-model",
+      adapterLabel: "runtime!",
+      actionLabel: "collect!",
+    },
+    body: { text: "Typed archive stable body" },
+    capture: {
+      scope: { fixture: "archive-model" },
+      completeness: "complete",
+      missing: [],
+    },
+  };
+  assert.deepEqual(firstRevision.state, baselineState);
+  assert.deepEqual(publicChangeRevision.state, {
+    ...baselineState,
+    title: "Typed archive public change",
+    sourcePublishedAt: { precision: "day", value: "2026-11-08" },
+    sourceModifiedAt: {
+      precision: "instant",
+      value: "2026-11-08T12:30:00+01:00",
+      timeZone: "Europe/Paris",
+    },
+  });
+  assert.deepEqual(extensionChangeRevision.state, {
+    ...publicChangeRevision.state,
+    extensions: {
+      section: "archive-model-extension-change",
+      adapterLabel: "runtime!",
+      actionLabel: "collect!",
+    },
   });
 
-  const revisionResponse = await client.archives.revisions[":revisionId"].$get({
-    param: { revisionId: view.revisionId },
+  const publicDiffResponse = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId,
+      secondRevisionId: publicChangeRevisionId,
+    },
   });
-  assert.equal(revisionResponse.status, 200);
-  if (revisionResponse.status === 200) {
-    const revision = await revisionResponse.json();
-    assert.deepEqual(revision.state, view.state);
+  assert.equal(publicDiffResponse.status, 200);
+  if (publicDiffResponse.status === 200) {
+    const diff = await publicDiffResponse.json();
+    assert.equal(diff.itemId, itemId);
+    assert.equal(diff.hasChanges, true);
+    assert.equal(diff.fields.title.status, "changed");
+    assert.equal(diff.fields.sourcePublishedAt.status, "changed");
+    assert.equal(diff.fields.sourceModifiedAt.status, "changed");
+    assert.equal(diff.fields.extensions.status, "unchanged");
+    assert.equal(diff.fields.body.status, "unchanged");
+    assert.equal(diff.fields.capture.status, "unchanged");
   }
+  const extensionDiffResponse = await client.archives.revisions[
+    ":firstRevisionId"
+  ].diff[":secondRevisionId"].$get({
+    param: {
+      firstRevisionId: publicChangeRevisionId,
+      secondRevisionId: extensionChangeRevisionId,
+    },
+  });
+  assert.equal(extensionDiffResponse.status, 200);
+  if (extensionDiffResponse.status === 200) {
+    const diff = await extensionDiffResponse.json();
+    assert.equal(diff.itemId, itemId);
+    assert.equal(diff.hasChanges, true);
+    assert.equal(diff.fields.title.status, "unchanged");
+    assert.equal(diff.fields.sourcePublishedAt.status, "unchanged");
+    assert.equal(diff.fields.sourceModifiedAt.status, "unchanged");
+    assert.equal(diff.fields.extensions.status, "changed");
+    assert.equal(diff.fields.body.status, "unchanged");
+    assert.equal(diff.fields.capture.status, "unchanged");
+  }
+}
+
+async function triggerTypedArchiveRun(
+  variant: "baseline" | "public-change" | "extension-change",
+): Promise<{ readonly itemId: string; readonly revisionId: string }> {
+  const response = await client.bins[":binId"].runs.$post({
+    param: { binId: "binny-runs-one" },
+    json: {
+      action: "collect",
+      params: {
+        sourceUrl: sourceRuntimeUrl,
+        gateKey: "typed-archive-" + variant,
+        sourceKey: "typed-archive-history",
+        archiveModelVariant: variant,
+      },
+    },
+  });
+  assert.equal(response.status, 202);
+  if (response.status !== 202)
+    return assert.fail("typed archive run was rejected");
+  const queued = await response.json();
+  const completed = await waitForRun(
+    "binny-runs-one",
+    queued.runId,
+    "completed",
+  );
+  await verifyRunCommit(completed);
+  const locator = completed.result?.commits[0];
+  const item = locator?.items[0];
+  assert.ok(item !== undefined);
+  return { itemId: item.itemId, revisionId: item.revisionId };
+}
+
+async function verifyTypedArchiveVersionHistory(): Promise<string> {
+  const baseline = await triggerTypedArchiveRun("baseline");
+  const repeated = await triggerTypedArchiveRun("baseline");
+  assert.equal(repeated.itemId, baseline.itemId);
+  assert.equal(repeated.revisionId, baseline.revisionId);
+  const publicChange = await triggerTypedArchiveRun("public-change");
+  assert.equal(publicChange.itemId, baseline.itemId);
+  assert.notEqual(publicChange.revisionId, baseline.revisionId);
+  const extensionChange = await triggerTypedArchiveRun("extension-change");
+  assert.equal(extensionChange.itemId, baseline.itemId);
+  assert.notEqual(extensionChange.revisionId, publicChange.revisionId);
+  await verifyTypedArchiveHistory(baseline.itemId);
+  return baseline.itemId;
 }
 
 async function verifyDynamicValidation(sourceUrl: string): Promise<void> {
@@ -1651,7 +1808,7 @@ async function main(): Promise<void> {
     const itemId = process.env.BINNY_E2E_TYPED_ARCHIVE_ITEM_ID;
     if (itemId === undefined)
       throw new Error("重启后归档读回需要先前条目 ID。");
-    await verifyTypedArchiveAfterRestart(itemId);
+    await verifyTypedArchiveHistory(itemId);
     return;
   }
 
@@ -1676,10 +1833,13 @@ async function main(): Promise<void> {
   await verifyOrdinaryAction();
   await verifySchedulesCrud(sourceRuntimeUrl);
   await verifyScheduledReferenceTime(sourceRuntimeUrl, sourceControlUrl);
+  const typedArchiveItemId = await verifyTypedArchiveVersionHistory();
   process.stdout.write(
     "运行 HTTP 队列、check 诊断、普通动作输出、串行并行、归档约束和错误结果旅程通过。\n",
   );
-  process.stdout.write("BINNY_TYPED_ARCHIVE_ITEM_ID=" + existingItemId + "\n");
+  process.stdout.write(
+    "BINNY_TYPED_ARCHIVE_ITEM_ID=" + typedArchiveItemId + "\n",
+  );
 }
 
 await main();
