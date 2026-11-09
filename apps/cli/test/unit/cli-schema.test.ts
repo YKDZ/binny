@@ -20,7 +20,7 @@ async function run(args: readonly string[]) {
   return { exitCode, output, requestCount };
 }
 
-void describe("离线 CLI 命令契约", () => {
+void describe("offline CLI command contracts", () => {
   void it("lists command groups and commands without expanding their schemas", async () => {
     const directory = await run(["schema"]);
 
@@ -258,7 +258,7 @@ void describe("离线 CLI 命令契约", () => {
     );
   });
 
-  void it("普通帮助指向 schema、动作、配置和归档查询契约入口", async () => {
+  void it("points general help to schema, action, configuration, and archive search contracts", async () => {
     const rootHelp = await run(["--help"]);
     assert.equal(rootHelp.exitCode, 0);
     assert.match(rootHelp.output, /binny schema/u);
