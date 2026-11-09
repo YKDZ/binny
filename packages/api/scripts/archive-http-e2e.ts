@@ -16,6 +16,7 @@ import {
   serviceMetadataSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
+import type { ArchiveSearchRequest } from "@binny/contracts";
 import type { AnySchema } from "ajv/dist/2020.js";
 import * as z from "zod";
 
@@ -3052,7 +3053,7 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
   assert.equal(primaryShared.itemId, secondaryShared.itemId);
   assert.equal(primaryShared.itemId, latestPrimaryShared.itemId);
 
-  const query = {
+  const query: ArchiveSearchRequest = {
     bins: ["binny-runs-one", "binny-runs-two"],
     text: {
       in: "both" as const,
@@ -3256,6 +3257,155 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     json: { ...paginationQuery, cursor: "invalid", limit: 2 },
   });
   assert.equal(malformedCursor.status, 400);
+}
+
+async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const runId = randomUUID();
+  const token = "beijing-window-" + runId;
+  const fixtures = [
+    {
+      key: "before",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-11-07T23:59:59.999+08:00",
+        timeZone: "Asia/Shanghai",
+      },
+    },
+    {
+      key: "from",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-11-08T00:00:00+08:00",
+        timeZone: "Asia/Shanghai",
+      },
+    },
+    {
+      key: "until",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-11-09T00:00:00+08:00",
+        timeZone: "Asia/Shanghai",
+      },
+    },
+    { key: "missing", sourcePublishedAt: null },
+  ] as const;
+  const committed = await submitArchive(client, {
+    requestId: "e2e:time-window:first:" + runId,
+    binId: "binny-runs-one",
+    items: fixtures.map(({ key, sourcePublishedAt }) => ({
+      sourceKey: { namespace: "e2e", key: token + ":" + key },
+      title: "Beijing window " + key,
+      sourcePublishedAt,
+      sourceModifiedAt: null,
+      extensions: {},
+      body: { text: token },
+      capture: {
+        scope: { case: "time-window" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+  });
+  const itemIds = new Map(
+    committed.items.map(({ sourceKey, itemId }) => [sourceKey.key, itemId]),
+  );
+  const fromItemId = itemIds.get(token + ":from");
+  const missingItemId = itemIds.get(token + ":missing");
+  assert.ok(fromItemId);
+  assert.ok(missingItemId);
+
+  const query: ArchiveSearchRequest = {
+    bins: ["binny-runs-one"],
+    text: { in: "body", groups: [[token]] },
+    timeWindow: {
+      field: "sourcePublishedAt",
+      from: "2026-11-08",
+      until: "2026-11-09",
+      timeZone: "Asia/Shanghai",
+    },
+  };
+  const certainResponse = await client.archives.search.$post({
+    json: {
+      ...query,
+      text: { in: "body", groups: [[token]] },
+    },
+  });
+  assert.equal(certainResponse.status, 200);
+  if (certainResponse.status !== 200)
+    throw new Error("Certain-time search failed.");
+  const certain = await certainResponse.json();
+  assert.ok(certain.timeSummary);
+  assert.equal(certain.timeSummary.certainItems, "1");
+  assert.equal(certain.timeSummary.undeterminedItems, "1");
+  assert.deepEqual(
+    certain.results.map(({ itemId }) => itemId),
+    [fromItemId],
+  );
+  assert.equal(certain.results[0]?.timeStatus, "certain");
+  assert.equal(certain.results[0]?.matches[0]?.timeMatch?.status, "certain");
+  const snapshotAsOf = certain.snapshot.asOf;
+
+  await submitArchive(client, {
+    requestId: "e2e:time-window:after-snapshot:" + runId,
+    binId: "binny-runs-one",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: token + ":later" },
+        title: "Later Beijing window item",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-11-08T12:00:00+08:00",
+          timeZone: "Asia/Shanghai",
+        },
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: token },
+        capture: {
+          scope: { case: "time-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  const undeterminedResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[token]] },
+      asOf: snapshotAsOf,
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08",
+        until: "2026-11-09",
+        timeZone: "Asia/Shanghai",
+        review: "undetermined",
+      },
+    },
+  });
+  assert.equal(undeterminedResponse.status, 200);
+  if (undeterminedResponse.status !== 200) {
+    throw new Error("Undetermined-time review failed.");
+  }
+  const undetermined = await undeterminedResponse.json();
+  assert.equal(undetermined.snapshot.asOf, snapshotAsOf);
+  assert.deepEqual(undetermined.timeSummary, {
+    certainItems: "1",
+    undeterminedItems: "1",
+  });
+  assert.deepEqual(
+    undetermined.results.map(({ itemId }) => itemId),
+    [missingItemId],
+  );
+  assert.equal(
+    undetermined.results[0]?.matches[0]?.timeMatch?.status,
+    "undetermined",
+  );
+  assert.equal(
+    undetermined.results[0]?.matches[0]?.timeMatch?.reason,
+    "missingTime",
+  );
 }
 
 async function verifyHardDeleteEntryPoint(
@@ -4616,6 +4766,7 @@ async function main(): Promise<void> {
   }
   if (stage === "fixed-search") {
     await verifyFixedSearch(baseUrl);
+    await verifyTimeWindowSearch(baseUrl);
     process.stdout.write("固定归档搜索与分页验收通过。\n");
     return;
   }

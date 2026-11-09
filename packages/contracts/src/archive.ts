@@ -332,7 +332,8 @@ function isValidSourceTimeZone(value: string): boolean {
   }
 }
 
-const sourceTimeZoneSchema = z
+/** A caller supplied IANA zone name or explicit UTC offset. */
+export const archiveTimeZoneSchema = z
   .string()
   .min(1, "Source time zone cannot be empty.")
   .refine(
@@ -341,7 +342,7 @@ const sourceTimeZoneSchema = z
   );
 
 const sourceTimeFields = {
-  timeZone: sourceTimeZoneSchema.optional(),
+  timeZone: archiveTimeZoneSchema.optional(),
 };
 
 const sourceTimeValueSchemas = [
@@ -1009,6 +1010,70 @@ export const archiveSearchTextSchema = withArchiveJsonSchemaProjection(
 );
 export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
+/**
+ * Filter by a local calendar window. `from` is inclusive and `until` is
+ * exclusive; both boundaries are local midnights in `timeZone`, so calendar
+ * days retain their actual length across daylight-saving changes. Review
+ * selects confirmed matches or views whose precision/time-zone evidence is
+ * insufficient to decide membership.
+ */
+export const archiveSearchTimeWindowSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      field: z
+        .enum(["sourcePublishedAt", "sourceModifiedAt", "observedAt"])
+        .describe("The source or archive time fact used for this window."),
+      from: z.iso
+        .date()
+        .describe(
+          "Inclusive local calendar date, interpreted at local midnight.",
+        ),
+      until: z.iso
+        .date()
+        .describe(
+          "Exclusive local calendar date, interpreted at local midnight.",
+        ),
+      timeZone: archiveTimeZoneSchema.describe(
+        "Required caller time zone used to interpret both local date bounds.",
+      ),
+      review: z
+        .enum(["certain", "undetermined"])
+        .default("certain")
+        .describe(
+          "Enumerate confirmed matching views or views whose time evidence is insufficient.",
+        ),
+    })
+    .strict()
+    .superRefine((window, context) => {
+      if (window.from >= window.until) {
+        context.addIssue({
+          code: "custom",
+          path: ["until"],
+          message: "The exclusive until date must be later than from.",
+        });
+      }
+    }),
+);
+export type ArchiveSearchTimeWindow = z.infer<
+  typeof archiveSearchTimeWindowSchema
+>;
+
+const archiveSearchTimeMatchSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("certain") }).strict(),
+  z
+    .object({
+      status: z.literal("undetermined"),
+      reason: z.enum([
+        "missingTime",
+        "missingTimeZone",
+        "precisionOverlapsBoundary",
+      ]),
+    })
+    .strict(),
+]);
+
+const archiveSearchCountSchema = z.string().regex(/^(?:0|[1-9]\d*)$/u);
+
 function archiveSearchBinsSchema(requiredExtensionScope = false) {
   return z
     .array(binIdSchema, {
@@ -1036,6 +1101,7 @@ function archiveSearchBinsSchema(requiredExtensionScope = false) {
 
 const archiveSearchInputCommonFields = {
   text: archiveSearchTextSchema.optional(),
+  timeWindow: archiveSearchTimeWindowSchema.optional(),
   asOf: archiveSnapshotSequenceSchema.optional(),
   limit: z.number().int().min(1).max(100).default(50),
   cursor: postgresTextSchema.min(1).max(4096).optional(),
@@ -1120,6 +1186,7 @@ const archiveSearchMatchSchema = z
     sourceRef: nonEmptyText.optional(),
     sourcePublishedAt: sourceTimeSchema.nullable(),
     sourceModifiedAt: sourceTimeSchema.nullable(),
+    timeMatch: archiveSearchTimeMatchSchema.optional(),
   })
   .strict();
 
@@ -1131,22 +1198,36 @@ const archiveSearchResultSchema = z
     sourcePublishedAt: sourceTimeSchema.nullable(),
     sourceModifiedAt: sourceTimeSchema.nullable(),
     observedAt: timestampSchema,
+    timeStatus: z.enum(["certain", "undetermined"]).optional(),
     matches: z.array(archiveSearchMatchSchema).min(1),
   })
   .strict();
 
 /**
- * Results are deduplicated by item while retaining every matching bin view and
- * its immutable revision reference. Ordering uses the newest matching
- * observation descending, then item ID ascending. `hasMore` and `nextCursor`
- * agree on whether another page is available. The cursor binds filters and
- * snapshot but does not bind the page size.
+ * Results are deduplicated by item while retaining every selected bin view and
+ * its immutable revision reference. Without a time window, ordering uses the
+ * newest matching observation descending; with a time window, it uses the
+ * newest selected time fact descending. Exact values and known-zone coarse
+ * values use the represented instant or interval start; an undetermined
+ * zone-free coarse value uses its written local period start as an ordering
+ * key. A null time sorts last, and these keys never replace the stored public
+ * SourceTime fact. Item ID breaks ties. Counts are distinct
+ * per review set, so one item with certain and undetermined views may count in
+ * both. `hasMore` and `nextCursor` agree. The cursor binds filters and snapshot
+ * but does not bind the page size.
  */
 export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
   z
     .object({
       snapshot: archiveSnapshotSchema,
       results: z.array(archiveSearchResultSchema),
+      timeSummary: z
+        .object({
+          certainItems: archiveSearchCountSchema,
+          undeterminedItems: archiveSearchCountSchema,
+        })
+        .strict()
+        .optional(),
       hasMore: z.boolean(),
       nextCursor: z.string().min(1).max(4096).optional(),
     })
