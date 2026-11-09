@@ -15,6 +15,7 @@ const requests: {
 let rssVersion = 1;
 let atomVersion = 1;
 let articleVersion = 1;
+let documentVersion = 1;
 let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
 let photoAvailable = true;
@@ -47,6 +48,7 @@ function state(): unknown {
   return {
     requests,
     articleVersion,
+    documentVersion,
     photoBytes: photoBytes.toString("base64"),
     audioBytes: audioBytes.toString("base64"),
     ...(heldFeedPath === undefined ? {} : { heldFeedPath }),
@@ -88,6 +90,13 @@ function updateState(value: unknown): boolean {
     return false;
   }
   if (
+    "documentVersion" in updates &&
+    (!Number.isSafeInteger(updates.documentVersion) ||
+      Number(updates.documentVersion) < 1)
+  ) {
+    return false;
+  }
+  if (
     "atomTextMode" in updates &&
     updates.atomTextMode !== "text" &&
     updates.atomTextMode !== "html"
@@ -111,6 +120,8 @@ function updateState(value: unknown): boolean {
     atomVersion = Number(updates.atomVersion);
   if (updates.articleVersion !== undefined)
     articleVersion = Number(updates.articleVersion);
+  if (updates.documentVersion !== undefined)
+    documentVersion = Number(updates.documentVersion);
   if (updates.atomTextMode === "text" || updates.atomTextMode === "html") {
     atomTextMode = updates.atomTextMode;
   }
@@ -376,6 +387,130 @@ function articleSourceResponse(
   return undefined;
 }
 
+function documentSourceResponse(
+  pathname: string,
+): { readonly mediaType: string; readonly body: string } | undefined {
+  const version = documentVersion;
+  const html = (body: string) => ({
+    mediaType: "text/html; charset=utf-8",
+    body,
+  });
+  if (pathname === "/deepseek/updates.md") {
+    const updateDate = version === 1 ? "2026-11-08" : "2026-11-09";
+    return {
+      mediaType: "text/markdown; charset=utf-8",
+      body: `# DeepSeek API Updates
+
+## ${updateDate}
+
+Cumulative updates document version ${String(version)}.
+
+- See [Research Update](/deepseek/news/news261108).
+`,
+    };
+  }
+  if (pathname === "/deepseek/news/news261108.md") {
+    const published =
+      version === 1 ? "2026-11-08T12:30:00+08:00" : "2026-11-08T13:30:00+08:00";
+    return {
+      mediaType: "text/markdown; charset=utf-8",
+      body: `---
+title: DeepSeek Research Update ${String(version)}
+date: "${published}"
+---
+
+# DeepSeek Research Update ${String(version)}
+
+DeepSeek article body version ${String(version)}.
+`,
+    };
+  }
+  if (pathname === "/qwen/api/v2/article/retrieval") {
+    const title = `Qwen Research Note ${String(version)}`;
+    return {
+      mediaType: "application/json; charset=utf-8",
+      body: JSON.stringify({
+        articles: [
+          {
+            id: "qwen-research-note-1",
+            path: "research-note",
+            title,
+            language: "en-US",
+            content: `<article><link rel="canonical" href="http://rss-e2e-source:8081/qwen/research-note" /><h2>Research note</h2><p>Qwen article body version ${String(version)}.</p></article>`,
+            extra: {
+              date: "2026-11-08T12:30:00+08:00",
+              author: "Qwen Research",
+              tags: ["research", "models"],
+            },
+          },
+        ],
+      }),
+    };
+  }
+  if (pathname === "/kimi/changelog.md") {
+    const updateDate = version === 1 ? "2026-11-08" : "2026-11-09";
+    return {
+      mediaType: "text/markdown; charset=utf-8",
+      body: `# Kimi Platform Changelog
+
+## ${updateDate}
+
+Cumulative changelog body version ${String(version)}.
+`,
+    };
+  }
+  if (pathname === "/kimi/blog") {
+    const title = `Kimi Research ${String(version)}`;
+    return html(`<!doctype html><html><body><main>
+      <article class="card"><a href="/kimi/blog/research-update">
+        <span class="card-title">${title}</span><span class="card-date">2026-11-08</span>
+      </a></article>
+    </main></body></html>`);
+  }
+  if (pathname === "/kimi/blog/research-update") {
+    const title = `Kimi Research ${String(version)}`;
+    return html(`<!doctype html><html><head>
+      <link rel="canonical" href="${articleSourceOrigin}/kimi/blog/research-update" />
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "Article",
+        headline: title,
+        datePublished: "2026-11-08T12:30:00+08:00",
+        dateModified: `2026-11-0${version === 1 ? "8" : "9"}T09:15:00-04:00`,
+      })}</script>
+    </head><body><main><article><h1>${title}</h1>
+      <p>Kimi research article body version ${String(version)}.</p>
+    </article></main></body></html>`);
+  }
+  if (pathname === "/minimax/models.md") {
+    const updateDate = version === 1 ? "2026-11-08" : "2026-11-09";
+    const title = `MiniMax Model Update ${String(version)}`;
+    return {
+      mediaType: "text/markdown; charset=utf-8",
+      body: `# MiniMax Model Release Notes
+
+## ${updateDate}
+
+Models release document version ${String(version)}.
+
+- [${title}](/minimax/news/minimax-m4)
+`,
+    };
+  }
+  if (pathname === "/minimax/news/minimax-m4") {
+    const title = `MiniMax Model Update ${String(version)}`;
+    return html(`<!doctype html><html><head>
+      <title>${title} | MiniMax</title>
+      <meta property="article:published_time" content="2026-11-07T12:30:00+08:00" />
+      <meta property="article:modified_time" content="2026-11-0${version === 1 ? "8" : "9"}T09:15:00-04:00" />
+    </head><body><article><h1>${title}</h1>
+      <time datetime="2026-12-01">Launch event</time>
+      <p>MiniMax article body version ${String(version)}.</p>
+    </article></body></html>`);
+  }
+  return undefined;
+}
+
 const server = createServer((request, response) => {
   void (async () => {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -404,6 +539,10 @@ const server = createServer((request, response) => {
       pathname.startsWith("/google/") ||
       pathname.startsWith("/huggingface/") ||
       pathname.startsWith("/mistral/") ||
+      pathname.startsWith("/deepseek/") ||
+      pathname.startsWith("/qwen/") ||
+      pathname.startsWith("/kimi/") ||
+      pathname.startsWith("/minimax/") ||
       pathname === "/blog/runtime-guide.md"
     ) {
       requests.push({ path: pathname });
@@ -438,7 +577,8 @@ const server = createServer((request, response) => {
     }
 
     if (request.method === "GET") {
-      const sourceResponse = articleSourceResponse(pathname);
+      const sourceResponse =
+        documentSourceResponse(pathname) ?? articleSourceResponse(pathname);
       if (sourceResponse !== undefined) {
         response.writeHead(200, {
           "content-type": sourceResponse.mediaType,
