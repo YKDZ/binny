@@ -651,7 +651,10 @@ export function createArchiveResourceStorage(
     executeQuery: CancellableQueryExecutor,
     deadline: number,
   ): Promise<ReadonlyMap<string, boolean>> {
-    const uniqueResourceIds = [...new Set(resourceIds)];
+    // PostgreSQL returns UUID text in lowercase even when the immutable state preserves source casing.
+    const uniqueResourceIds = [
+      ...new Set(resourceIds.map((resourceId) => resourceId.toLowerCase())),
+    ];
     if (uniqueResourceIds.length === 0) return new Map();
 
     remainingArchiveQueryBudgetMs(deadline);
