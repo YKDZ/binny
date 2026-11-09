@@ -19,12 +19,15 @@ let armedForStoppedRunId: string | undefined;
 let armedForBinId = "binny-runs-one";
 let armedForIdleHeartbeat = false;
 let armedForHumanOpenResponse = false;
+let armedForRequestBody = false;
+let heldForRequestBody = false;
 let heldRuntimeId: string | undefined;
 let heldOwnerGeneration: string | undefined;
 let heldStoppedRunId: string | undefined;
 let forwardedRuntimeId: string | undefined;
 let forwardedOwnerGeneration: string | undefined;
 let forwardedAt: number | undefined;
+let forwardedStatusCode: number | undefined;
 let forwardedBrowserIdleTimeoutSeconds: number | null | undefined;
 
 function readPort(name: string, fallback: number): number {
@@ -59,6 +62,7 @@ function sendFailure(response: ServerResponse, error: unknown): void {
 
 type ForwardedResponse = {
   readonly body: Buffer;
+  readonly statusCode: number;
   readonly deliver: () => void;
 };
 
@@ -87,7 +91,7 @@ function forward(
       if (finished) return;
       finished = true;
       responseBody = Buffer.concat(responseChunks);
-      resolve({ body: responseBody, deliver });
+      resolve({ body: responseBody, statusCode, deliver });
     };
     const upstream = createRequest(
       {
@@ -143,6 +147,101 @@ function forward(
   });
 }
 
+function forwardWithRequestBodyHeld(
+  request: IncomingMessage,
+  response: ServerResponse,
+  body: Buffer,
+): Promise<() => Promise<void>> {
+  return new Promise((resolveHold, rejectHold) => {
+    const responseChunks: Buffer[] = [];
+    let statusCode = 502;
+    let headers: OutgoingHttpHeaders = {
+      "content-type": "application/json",
+    };
+    let upstreamFailure: unknown;
+    let bodyHeld = false;
+    let released = false;
+    let responseFinished = false;
+    let resolveResponse: () => void = () => {};
+    const responseComplete = new Promise<void>((resolve) => {
+      resolveResponse = resolve;
+    });
+    const upstream = createRequest({
+      hostname: "server",
+      port: 3000,
+      path: request.url ?? "/",
+      method: request.method ?? "POST",
+      headers: {
+        ...request.headers,
+        expect: "100-continue",
+        host: "server:3000",
+      },
+    });
+    // The server's automatic 100 Continue confirms it accepted the request headers.
+    const continueTimeout = setTimeout(() => {
+      upstream.destroy(
+        new Error("The API did not accept the partial heartbeat body."),
+      );
+    }, 10_000);
+    continueTimeout.unref();
+    upstream.once("continue", () => {
+      if (bodyHeld) return;
+      bodyHeld = true;
+      const splitAt = Math.min(body.length - 1, Math.ceil(body.length / 2));
+      upstream.write(body.subarray(0, splitAt), () => {
+        clearTimeout(continueTimeout);
+        heldAt = Date.now();
+        heldForRequestBody = true;
+        resolveHold(async () => {
+          if (released) return;
+          released = true;
+          upstream.end(body.subarray(splitAt));
+          await responseComplete;
+          if (upstreamFailure !== undefined) {
+            sendFailure(response, upstreamFailure);
+            return;
+          }
+          forwardedStatusCode = statusCode;
+          response.writeHead(statusCode, headers);
+          response.end(Buffer.concat(responseChunks));
+        });
+      });
+    });
+    upstream.once("response", (upstreamResponse) => {
+      if (!bodyHeld) {
+        clearTimeout(continueTimeout);
+        rejectHold(
+          new Error("The API responded before accepting the heartbeat body."),
+        );
+      }
+      statusCode = upstreamResponse.statusCode ?? 502;
+      headers = upstreamResponse.headers;
+      upstreamResponse.on("data", (chunk: Buffer) => {
+        responseChunks.push(chunk);
+      });
+      upstreamResponse.once("end", () => {
+        responseFinished = true;
+        resolveResponse();
+      });
+      upstreamResponse.once("error", (error: unknown) => {
+        upstreamFailure = error;
+        responseFinished = true;
+        resolveResponse();
+      });
+    });
+    upstream.once("error", (error: unknown) => {
+      clearTimeout(continueTimeout);
+      upstreamFailure = error;
+      if (!bodyHeld) rejectHold(error);
+      if (!responseFinished) {
+        responseFinished = true;
+        resolveResponse();
+      }
+    });
+    upstream.flushHeaders();
+  });
+}
+
 function holdsHumanOpenResponse(body: Buffer): boolean {
   try {
     const value = JSON.parse(body.toString("utf8")) as {
@@ -177,6 +276,38 @@ async function handleRuntimeRequest(
     decoded.activeRunId === null &&
     "claimInFlight" in decoded &&
     decoded.claimInFlight === false;
+  if (
+    armed &&
+    armedForRequestBody &&
+    requestBinId === armedForBinId &&
+    isIdleHeartbeat
+  ) {
+    armed = false;
+    heldAt = undefined;
+    clientClosedAt = undefined;
+    heldForHumanOpenResponse = false;
+    heldForRequestBody = false;
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "runtimeId" in decoded &&
+      typeof decoded.runtimeId === "string"
+    ) {
+      heldRuntimeId = decoded.runtimeId;
+      forwardedRuntimeId = decoded.runtimeId;
+    }
+    if (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "ownerGeneration" in decoded &&
+      typeof decoded.ownerGeneration === "string"
+    ) {
+      heldOwnerGeneration = decoded.ownerGeneration;
+      forwardedOwnerGeneration = decoded.ownerGeneration;
+    }
+    heldForward = await forwardWithRequestBodyHeld(request, response, body);
+    return;
+  }
   const matchesStoppedRun =
     typeof decoded === "object" &&
     decoded !== null &&
@@ -253,6 +384,7 @@ async function handleRuntimeRequest(
     body,
     deferForHumanOpenResponse,
   );
+  forwardedStatusCode = forwarded.statusCode;
   const holdHumanOpenResponse =
     armed &&
     armedForHumanOpenResponse &&
@@ -331,6 +463,7 @@ const control = createServer((request, response) => {
         armed,
         held: heldForward !== undefined,
         heldForHumanOpenResponse,
+        heldForRequestBody,
         ...(heldAt === undefined ? {} : { heldAt }),
         ...(clientClosedAt === undefined ? {} : { clientClosedAt }),
         ...(heldRuntimeId === undefined ? {} : { heldRuntimeId }),
@@ -341,6 +474,7 @@ const control = createServer((request, response) => {
         ...(forwardedOwnerGeneration === undefined
           ? {}
           : { forwardedOwnerGeneration }),
+        ...(forwardedStatusCode === undefined ? {} : { forwardedStatusCode }),
         ...(forwardedAt === undefined ? {} : { forwardedAt }),
         ...(forwardedBrowserIdleTimeoutSeconds === undefined
           ? {}
@@ -366,6 +500,11 @@ const control = createServer((request, response) => {
         value !== null &&
         "humanOpenResponse" in value &&
         value.humanOpenResponse === true;
+      const requestBody =
+        typeof value === "object" &&
+        value !== null &&
+        "requestBody" in value &&
+        value.requestBody === true;
       const binId =
         typeof value === "object" &&
         value !== null &&
@@ -382,7 +521,10 @@ const control = createServer((request, response) => {
           : undefined;
       if (
         binId.length === 0 ||
-        (!idleHeartbeat && !humanOpenResponse && stoppedRunId === undefined)
+        (!idleHeartbeat &&
+          !humanOpenResponse &&
+          !requestBody &&
+          stoppedRunId === undefined)
       ) {
         sendJson(response, 400, {
           error: "必须指定 bin 以及 idle heartbeat 或待确认的 run。",
@@ -397,13 +539,16 @@ const control = createServer((request, response) => {
       armedForBinId = binId;
       armedForIdleHeartbeat = idleHeartbeat;
       armedForHumanOpenResponse = humanOpenResponse;
+      armedForRequestBody = requestBody;
       armedForStoppedRunId = stoppedRunId;
       heldAt = undefined;
       clientClosedAt = undefined;
       heldForHumanOpenResponse = false;
+      heldForRequestBody = false;
       heldRuntimeId = undefined;
       heldOwnerGeneration = undefined;
       heldStoppedRunId = undefined;
+      forwardedStatusCode = undefined;
       sendJson(response, 200, { armed });
       return;
     }
