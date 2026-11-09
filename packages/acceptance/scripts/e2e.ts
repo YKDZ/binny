@@ -109,6 +109,8 @@ const isFullCapacityRun = capacityProfile === "full";
 const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
 const scheduleOnly =
   internalStep === "scheduled-runs" || internalStep === "schedule-overlap";
+const scheduledRunsOnly = internalStep === "scheduled-runs";
+const useHeartbeatProxy = !scheduleOnly || scheduledRunsOnly;
 const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
@@ -9431,16 +9433,16 @@ async function main(): Promise<void> {
       "      - runtime",
       "  runtime-fifteen-one:",
       "    environment:",
-      scheduleOnly
-        ? "      BINNY_API_URL: http://server:3000"
-        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      useHeartbeatProxy
+        ? "      BINNY_API_URL: http://heartbeat-proxy:8082"
+        : "      BINNY_API_URL: http://server:3000",
       "    networks: !override",
       "      - runtime",
       "  runtime-fifteen-two:",
       "    environment:",
-      scheduleOnly
-        ? "      BINNY_API_URL: http://server:3000"
-        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      useHeartbeatProxy
+        ? "      BINNY_API_URL: http://heartbeat-proxy:8082"
+        : "      BINNY_API_URL: http://server:3000",
       "    networks: !override",
       "      - runtime",
       "  runtime-linuxdo:",
@@ -9522,11 +9524,11 @@ async function main(): Promise<void> {
     builtImages.add(imageName);
     await compose(["build", "runtime-fifteen-one"]);
     builtImages.add(runtimeImageName);
-    if (!scheduleOnly) {
+    if (!scheduleOnly || scheduledRunsOnly) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
     }
-    if (runFunctionalJourney) {
+    if (runFunctionalJourney || scheduledRunsOnly) {
       await compose(["build", "runtime-linuxdo"]);
       builtImages.add(linuxdoRuntimeImageName);
     }
@@ -9552,20 +9554,21 @@ async function main(): Promise<void> {
     await waitForApiAndDatabase(baseUrl);
     await verifyEmptyBinList(baseUrl);
 
-    const e2eServices = scheduleOnly
-      ? ["postgres", "server", "manual-runs-source", "runtime-fifteen-one"]
-      : [
-          "postgres",
-          "server",
-          "manual-runs-source",
-          "rss-e2e-source",
-          "runtime-fifteen-one",
-          "runtime-fifteen-two",
-          "runtime-rss",
-          "runtime-rss-two",
-          "heartbeat-proxy",
-        ];
-    if (runFunctionalJourney) {
+    const e2eServices =
+      scheduleOnly && !scheduledRunsOnly
+        ? ["postgres", "server", "manual-runs-source", "runtime-fifteen-one"]
+        : [
+            "postgres",
+            "server",
+            "manual-runs-source",
+            "rss-e2e-source",
+            "runtime-fifteen-one",
+            "runtime-fifteen-two",
+            "runtime-rss",
+            "runtime-rss-two",
+            "heartbeat-proxy",
+          ];
+    if (runFunctionalJourney || scheduledRunsOnly) {
       e2eServices.push(
         "runtime-linuxdo",
         "runtime-linuxdo-two",
@@ -9599,27 +9602,45 @@ async function main(): Promise<void> {
     baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
     if (scheduleOnly) {
-      const registered = await waitForBinRegistration(
-        baseUrl,
-        "binny-runs-one",
+      const runtimeBinIds = scheduledRunsOnly
+        ? [
+            "binny-runs-one",
+            "binny-runs-two",
+            "binny-rss-one",
+            "binny-rss-two",
+            "binny-integration-linuxdo",
+            "binny-integration-linuxdo-two",
+          ]
+        : ["binny-runs-one"];
+      const registrations = await Promise.all(
+        runtimeBinIds.map((binId) => waitForBinRegistration(baseUrl, binId)),
       );
-      assert.equal(
-        registered.sourceAdapterVersion,
-        rssManifestVersion(await createRuntimeFixtureManifest()),
+      const fixtureManifestVersion = rssManifestVersion(
+        await createRuntimeFixtureManifest(),
       );
-      cliData(
-        await cli(baseUrl, [
-          "bin",
-          "update",
-          "binny-runs-one",
-          "--identity",
-          "binny-runs-one-identity",
-          "--config",
-          JSON.stringify({ section: "initial" }),
-        ]),
-        "updated",
+      const runsBinIds = scheduledRunsOnly
+        ? ["binny-runs-one", "binny-runs-two"]
+        : ["binny-runs-one"];
+      for (const binId of runsBinIds) {
+        const registration = registrations.find((entry) => entry.id === binId);
+        assert.ok(registration !== undefined);
+        assert.equal(registration.sourceAdapterVersion, fixtureManifestVersion);
+        cliData(
+          await cli(baseUrl, [
+            "bin",
+            "update",
+            binId,
+            "--identity",
+            binId + "-identity",
+            "--config",
+            JSON.stringify({ section: "initial" }),
+          ]),
+          "updated",
+        );
+      }
+      await Promise.all(
+        runsBinIds.map((binId) => waitForRuntime(baseUrl, binId)),
       );
-      await waitForRuntime(baseUrl, "binny-runs-one");
       if (scheduleOverlapOnly) {
         await verifyScheduleOverlapPolicy(baseUrl);
       } else {
