@@ -13,6 +13,7 @@ import {
   manualRunApiSchemas as contractManualRunApiSchemas,
   scheduleApiSchemas as contractScheduleApiSchemas,
   scheduleCreateInputSchema,
+  scheduleListQuerySchema,
   scheduleUpdateInputSchema,
   manualRunListQuerySchema,
   archiveQueryContractPath,
@@ -36,6 +37,7 @@ import {
   type ManualRunListOperations,
   type RuntimeConnectionOperations,
   type ScheduleOperations,
+  type ScheduleListOperations,
   toInputJsonSchema,
   toPostgresJsonSchema,
 } from "@binny/contracts";
@@ -59,6 +61,7 @@ export type {
   ManualRunListOperations,
   RuntimeConnectionOperations,
   ScheduleOperations,
+  ScheduleListOperations,
 } from "@binny/contracts";
 
 export type ApiOperations = {
@@ -67,6 +70,7 @@ export type ApiOperations = {
   readonly runs: ManualRunOperations;
   readonly runListings: ManualRunListOperations;
   readonly schedules: ScheduleOperations;
+  readonly scheduleListings: ScheduleListOperations;
   readonly archives: ArchiveOperations;
   readonly humanSessions: HumanSessionOperations;
 };
@@ -344,12 +348,7 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       },
     )
     .get(
-      "/bins/:binId/runs",
-      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
-        if (!result.success)
-          return c.json(validationFailure(result.error.issues), 400);
-        return undefined;
-      }),
+      "/runs",
       zValidator("query", manualRunListQuerySchema, (result, c) => {
         if (!result.success)
           return c.json(validationFailure(result.error.issues), 400);
@@ -357,7 +356,6 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       }),
       async (c) => {
         const result = await operations.runListings.listRuns(
-          c.req.valid("param").binId,
           c.req.valid("query"),
         );
         if (!result.ok) return c.json({ error: result.error }, result.status);
@@ -401,18 +399,18 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       },
     )
     .get(
-      "/bins/:binId/schedules",
-      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+      "/schedules",
+      zValidator("query", scheduleListQuerySchema, (result, c) => {
         if (!result.success)
           return c.json(validationFailure(result.error.issues), 400);
         return undefined;
       }),
       async (c) => {
-        const result = await operations.schedules.listSchedules(
-          c.req.valid("param").binId,
+        const result = await operations.scheduleListings.listScheduleSummaries(
+          c.req.valid("query"),
         );
         if (!result.ok) return c.json({ error: result.error }, result.status);
-        return c.json({ schedules: result.value }, 200);
+        return c.json(result.value, 200);
       },
     )
     .post(

@@ -45,12 +45,16 @@ import {
   manualRunListPageSchema,
   manualRunListQuerySchema,
   manualRunSchema,
+  type ManualRun,
   postgresTextSchema,
   scheduleCreateInputSchema,
   scheduleDeleteResultSchema,
   scheduleErrorSchema,
+  scheduleListPageSchema,
+  scheduleListQuerySchema,
   scheduleOverlapPolicySchema,
   scheduleSchema,
+  type Schedule,
   scheduleUpdateInputSchema,
   withArchiveJsonSchemaProjection,
   withPostgresJsonSchemaProjection,
@@ -783,9 +787,6 @@ function isCliActionDeclaration(
 ): action is CliActionDeclaration {
   return "params" in action;
 }
-const cliScheduleListSchema = withPostgresJsonSchemaProjection(
-  z.object({ schedules: z.array(scheduleSchema).readonly() }),
-);
 const cliScheduleCreateInputSchema = withPostgresJsonSchemaProjection(
   z
     .object({
@@ -820,9 +821,6 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
         overlapPolicy !== undefined,
       { message: "至少提供一个需要修改的字段。" },
     ),
-);
-const cliRunListInputSchema = withPostgresJsonSchemaProjection(
-  manualRunListQuerySchema.safeExtend({ binId: binIdSchema }),
 );
 const errorOutputSchema = z.union([
   binErrorSchema.shape.error,
@@ -1083,6 +1081,69 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  const jsonSection = (heading: string, payload: unknown) => [
+    `${heading}:`,
+    ...JSON.stringify(payload, null, 2)
+      .split("\n")
+      .map((line) => `  ${line}`),
+  ];
+  const runDetailText = (run: ManualRun) =>
+    text.lines([
+      "Run",
+      `ID: ${run.runId}`,
+      `Bin: ${run.binId}`,
+      `Action: ${run.action}`,
+      `Status: ${run.status}`,
+      `Source adapter: ${run.sourceAdapterId}@${run.sourceAdapterVersion}`,
+      `Trigger: ${run.trigger.kind}`,
+      ...(run.trigger.kind === "schedule"
+        ? [
+            `Schedule: ${run.trigger.scheduleId}`,
+            `Scheduled for: ${run.trigger.scheduledFor}`,
+          ]
+        : []),
+      ...(run.queueReason === undefined
+        ? []
+        : [`Queue reason: ${run.queueReason}`]),
+      `Created at: ${run.createdAt}`,
+      `Reference time: ${run.referenceTime}`,
+      ...(run.startedAt === undefined ? [] : [`Started at: ${run.startedAt}`]),
+      ...(run.finishedAt === undefined
+        ? []
+        : [`Finished at: ${run.finishedAt}`]),
+      ...(run.cancellationRequestedAt === undefined
+        ? []
+        : [`Cancellation requested at: ${run.cancellationRequestedAt}`]),
+      ...(run.stopConfirmedAt === undefined
+        ? []
+        : [`Stop confirmed at: ${run.stopConfirmedAt}`]),
+      ...(run.report === undefined ? [] : jsonSection("Report", run.report)),
+      ...(run.result === undefined ? [] : jsonSection("Result", run.result)),
+    ]);
+  const scheduleDetailText = (schedule: Schedule) =>
+    text.lines([
+      "Schedule",
+      `ID: ${schedule.scheduleId}`,
+      `Bin: ${schedule.binId}`,
+      `Action: ${schedule.action}`,
+      `Expression: ${schedule.expression}`,
+      `Time zone: ${schedule.timeZone}`,
+      `Overlap policy: ${schedule.overlapPolicy}`,
+      `Enabled: ${schedule.enabled}`,
+      `Next due at: ${schedule.nextDueAt}`,
+      ...(schedule.lastRunId === undefined
+        ? []
+        : [`Last run: ${schedule.lastRunId}`]),
+      ...(schedule.lastSkip === undefined
+        ? []
+        : jsonSection("Last skip", schedule.lastSkip)),
+      ...(schedule.lastError === undefined
+        ? []
+        : jsonSection("Last error", schedule.lastError)),
+      `Created at: ${schedule.createdAt}`,
+      `Updated at: ${schedule.updatedAt}`,
+      ...jsonSection("Parameters", schedule.params),
+    ]);
   const serviceMetadataText = (
     metadata: z.infer<typeof serviceMetadataSchema>,
   ) =>
@@ -1854,76 +1915,95 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "run",
         name: "list",
         description:
-          "按动作、状态和运行创建时间分页查找运行；运行创建时间不代表帖子创建时间。",
+          "List action runs across all bins with optional action, status, and creation-time filters.",
+        helpSupplement: text.lines([
+          "Examples:",
+          `  ${identity.commandName} run list --status failed --limit 10`,
+          `  ${identity.commandName} run list --bin-id forum --created-from 2026-11-01T00:00:00Z`,
+          `  ${identity.commandName} run get forum <runId>`,
+          "The lower creation-time bound is inclusive; the upper bound is exclusive. Continue with the same filters and page size.",
+        ]),
         fields: {
-          binId: { kind: "positional", description: "bin 标识" },
+          binId: {
+            kind: "valueOption",
+            longOption: "--bin-id",
+            description: "Limit results to one bin; defaults to all bins",
+          },
           action: {
             kind: "valueOption",
             longOption: "--action",
-            description: "按动作名称筛选",
+            description: "Filter by action name",
           },
           status: {
             kind: "valueOption",
             longOption: "--status",
-            description: "按运行状态筛选",
+            description: "Filter by run status",
           },
           createdFrom: {
             kind: "valueOption",
             longOption: "--created-from",
-            description: "按运行创建时间筛选，包含此时间",
+            description: "Inclusive lower bound for run creation time",
           },
           createdBefore: {
             kind: "valueOption",
             longOption: "--created-before",
-            description: "按运行创建时间筛选，不包含此时间",
+            description: "Exclusive upper bound for run creation time",
           },
           limit: {
             kind: "valueOption",
             longOption: "--limit",
-            description: "每页数量，默认 20，最大 100",
+            description: "Rows per page; default 20, maximum 100",
           },
           cursor: {
             kind: "valueOption",
             longOption: "--cursor",
-            description: "上一页返回的游标",
+            description: "Cursor returned by the previous page",
           },
         },
-        input: cliRunListInputSchema,
+        input: manualRunListQuerySchema,
         success: {
           kind: "data",
           variants: {
             listed: {
-              description: "运行摘要和下一页游标",
+              description: "Run summaries and next-page cursor",
               exitCode: 0,
               schema: manualRunListPageSchema,
-              text: (page) => outputText("运行记录", page),
+              text: (page) =>
+                text.lines([
+                  "Runs",
+                  ...page.runs.map(
+                    (run) =>
+                      `${run.createdAt}  ${run.binId}  ${run.action}  ${run.status}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
+                  ),
+                  ...(page.nextCursor === undefined
+                    ? []
+                    : [
+                        `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
+                      ]),
+                ]),
             },
           },
         },
         failures,
         async handler({ input, dependencies, outcome }) {
-          const { binId, ...query } = input;
           const response = await dependencies
             .createClient()
-            .bins[":binId"].runs.$get({
-              param: { binId },
-              query,
-            });
+            .runs.$get({ query: input });
           if (response.status === 200)
             return outcome.data.listed(await response.json());
           if (response.status === 400)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行列表状态。");
+          throw new Error("Service returned an undeclared run-list status.");
         },
       }),
       ...command("runGet")({
         kind: "command",
         parent: "run",
         name: "get",
-        description: "读取一次运行的状态和结果。",
+        description: "Read one run's status and result.",
         fields: {
-          binId: { kind: "positional", description: "bin 标识" },
-          runId: { kind: "positional", description: "运行标识" },
+          binId: { kind: "positional", description: "Bin ID" },
+          runId: { kind: "positional", description: "Run ID" },
         },
         input: z.object({
           binId: binIdSchema,
@@ -1933,10 +2013,10 @@ function createCliContract(identity: CliCommandIdentity) {
           kind: "data",
           variants: {
             found: {
-              description: "运行状态和结果",
+              description: "Run status and result",
               exitCode: 0,
               schema: manualRunSchema,
-              text: (run) => outputText("运行状态", run),
+              text: runDetailText,
             },
           },
         },
@@ -1951,7 +2031,7 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.found(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行读取状态。");
+          throw new Error("Service returned an undeclared run-detail status.");
         },
       }),
       ...command("runCancel")({
@@ -2199,17 +2279,63 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "schedule",
         name: "list",
-        description: "列出一个 bin 的运行计划。",
-        fields: { binId: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ binId: binIdSchema }),
+        description:
+          "List schedules across all bins with optional action and enabled-state filters.",
+        helpSupplement: text.lines([
+          "Examples:",
+          `  ${identity.commandName} schedule list`,
+          `  ${identity.commandName} schedule list --bin-id forum --enabled false`,
+          `  ${identity.commandName} schedule get forum <scheduleId>`,
+          "Continue with the same filters and page size to read every matching schedule.",
+        ]),
+        fields: {
+          binId: {
+            kind: "valueOption",
+            longOption: "--bin-id",
+            description: "Limit results to one bin; defaults to all bins",
+          },
+          action: {
+            kind: "valueOption",
+            longOption: "--action",
+            description: "Filter by action name",
+          },
+          enabled: {
+            kind: "valueOption",
+            longOption: "--enabled",
+            description: "Filter by enabled state using true or false",
+          },
+          limit: {
+            kind: "valueOption",
+            longOption: "--limit",
+            description: "Rows per page; default 20, maximum 100",
+          },
+          cursor: {
+            kind: "valueOption",
+            longOption: "--cursor",
+            description: "Cursor returned by the previous page",
+          },
+        },
+        input: scheduleListQuerySchema,
         success: {
           kind: "data",
           variants: {
             listed: {
-              description: "运行计划列表",
+              description: "Schedule summaries and next-page cursor",
               exitCode: 0,
-              schema: cliScheduleListSchema,
-              text: (result) => outputText("运行计划", result),
+              schema: scheduleListPageSchema,
+              text: (page) =>
+                text.lines([
+                  "Schedules",
+                  ...page.schedules.map(
+                    (schedule) =>
+                      `${schedule.enabled ? "enabled" : "disabled"}  ${schedule.binId}  ${schedule.action}  ${schedule.nextDueAt}  ${schedule.scheduleId}  ${identity.commandName} schedule get ${schedule.binId} ${schedule.scheduleId}`,
+                  ),
+                  ...(page.nextCursor === undefined
+                    ? []
+                    : [
+                        `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
+                      ]),
+                ]),
             },
           },
         },
@@ -2217,32 +2343,34 @@ function createCliContract(identity: CliCommandIdentity) {
         async handler({ input, dependencies, outcome }) {
           const response = await dependencies
             .createClient()
-            .bins[":binId"].schedules.$get({ param: { binId: input.binId } });
+            .schedules.$get({ query: input });
           if (response.status === 200)
             return outcome.data.listed(await response.json());
-          if (response.status === 400 || response.status === 404)
+          if (response.status === 400)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划列表状态。");
+          throw new Error(
+            "Service returned an undeclared schedule-list status.",
+          );
         },
       }),
       ...command("scheduleGet")({
         kind: "command",
         parent: "schedule",
         name: "get",
-        description: "读取一个运行计划。",
+        description: "Read one schedule and its action parameters.",
         fields: {
-          binId: { kind: "positional", description: "bin 标识" },
-          scheduleId: { kind: "positional", description: "计划标识" },
+          binId: { kind: "positional", description: "Bin ID" },
+          scheduleId: { kind: "positional", description: "Schedule ID" },
         },
         input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
         success: {
           kind: "data",
           variants: {
             found: {
-              description: "运行计划详情",
+              description: "Schedule details and action parameters",
               exitCode: 0,
               schema: scheduleSchema,
-              text: (schedule) => outputText("运行计划", schedule),
+              text: scheduleDetailText,
             },
           },
         },
@@ -2257,7 +2385,9 @@ function createCliContract(identity: CliCommandIdentity) {
             return outcome.data.found(await response.json());
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划读取状态。");
+          throw new Error(
+            "Service returned an undeclared schedule-detail status.",
+          );
         },
       }),
       ...command("scheduleUpdate")({

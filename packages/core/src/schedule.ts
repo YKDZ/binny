@@ -389,34 +389,6 @@ export async function startScheduleDispatcher(
 
 export function createScheduleStore(database: Database): ScheduleStore {
   return {
-    async listSchedules(binId) {
-      return await database.transaction(async (transaction) => {
-        const [bin] = await transaction
-          .select({ id: binConfigurations.id })
-          .from(binConfigurations)
-          .where(eq(binConfigurations.id, binId));
-        if (bin === undefined) {
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
-        }
-        const rows = await transaction
-          .select()
-          .from(schedules)
-          .where(eq(schedules.binId, binId))
-          .orderBy(schedules.createdAt, schedules.scheduleId);
-        const lastRunIds = await latestScheduleRunIds(
-          transaction,
-          binId,
-          rows.map(({ scheduleId }) => scheduleId),
-        );
-        return {
-          ok: true,
-          value: rows.map((row) =>
-            toSchedule(row, lastRunIds.get(row.scheduleId)),
-          ),
-        };
-      });
-    },
-
     async getSchedule(binId, scheduleId) {
       return await database.transaction(async (transaction) => {
         const [bin] = await transaction

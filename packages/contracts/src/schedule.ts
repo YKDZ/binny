@@ -143,7 +143,6 @@ export type ScheduleOperation<T> =
     };
 
 export type ScheduleOperations = {
-  listSchedules(binId: string): Promise<ScheduleOperation<readonly Schedule[]>>;
   getSchedule(
     binId: string,
     scheduleId: string,

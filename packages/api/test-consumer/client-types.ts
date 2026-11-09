@@ -309,13 +309,35 @@ async function checkPublicScheduleContract(): Promise<void> {
     json: { ...createInput, overlapPolicy: "parallel" },
   });
 
-  const listed = await client.bins[":binId"].schedules.$get({
-    param: { binId },
+  const listedRuns = await client.runs.$get({
+    query: {
+      binId,
+      action: "collect",
+      status: "failed",
+      createdFrom: "2026-11-01T00:00:00Z",
+      createdBefore: "2026-11-05T00:00:00Z",
+      limit: "10",
+    },
   });
-  if (listed.status === 200) {
-    void (await listed.json()).schedules;
-  } else if (listed.status === 404) {
-    void (await listed.json()).error.code;
+  if (listedRuns.status === 200) {
+    const run = (await listedRuns.json()).runs[0];
+    void run?.binId;
+    // @ts-expect-error summary rows omit saved parameters.
+    void run?.params;
+  } else if (listedRuns.status === 400) {
+    void (await listedRuns.json()).error.code;
+  }
+
+  const listedSchedules = await client.schedules.$get({
+    query: { binId, action: "collect", enabled: "false", limit: "10" },
+  });
+  if (listedSchedules.status === 200) {
+    const schedule = (await listedSchedules.json()).schedules[0];
+    void schedule?.binId;
+    // @ts-expect-error summary rows omit saved action parameters.
+    void schedule?.params;
+  } else if (listedSchedules.status === 400) {
+    void (await listedSchedules.json()).error.code;
   }
 
   const updated = await client.bins[":binId"].schedules[":scheduleId"].$patch({

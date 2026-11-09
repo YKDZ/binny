@@ -17,7 +17,8 @@ function invalidCursor(): ManualRunListOperation<never> {
     status: 400,
     error: {
       code: "invalid_input",
-      message: "运行列表游标无效或与当前筛选条件不匹配。",
+      message:
+        "The run-list cursor is invalid or does not match these filters.",
       path: ["cursor"],
     },
   };
@@ -44,6 +45,7 @@ function filterForCursor(
   limit: number,
 ): ManualRunListFilter {
   return {
+    ...(input.binId === undefined ? {} : { binId: input.binId }),
     ...(input.action === undefined ? {} : { action: input.action }),
     ...(input.status === undefined ? {} : { status: input.status }),
     ...(input.createdFrom === undefined
@@ -58,11 +60,10 @@ function filterForCursor(
 
 function cursorMatches(
   cursor: ManualRunListCursor,
-  binId: string,
   filter: ManualRunListFilter,
 ): boolean {
   return (
-    cursor.binId === binId &&
+    cursor.filter.binId === filter.binId &&
     cursor.filter.action === filter.action &&
     cursor.filter.status === filter.status &&
     cursor.filter.createdFrom === filter.createdFrom &&
@@ -71,12 +72,12 @@ function cursorMatches(
   );
 }
 
-/** 按运行创建顺序读取历史，游标固定复合键以排除页间新增记录。 */
+/** Pages all bins in stable creation order; the compound cursor keeps newer runs out of later pages. */
 export function createManualRunListStore(
   database: Database,
 ): ManualRunListOperations {
   return {
-    async listRuns(binId, input) {
+    async listRuns(input) {
       const checkedInput = manualRunListQuerySchema.safeParse(input);
       if (!checkedInput.success) {
         const issue = checkedInput.error.issues[0];
@@ -85,7 +86,7 @@ export function createManualRunListStore(
           status: 400,
           error: {
             code: "invalid_input",
-            message: issue?.message ?? "运行记录筛选条件无效。",
+            message: issue?.message ?? "Run list filters are invalid.",
             ...(issue === undefined
               ? {}
               : {
@@ -104,17 +105,19 @@ export function createManualRunListStore(
         query.cursor === undefined ? undefined : decodeCursor(query.cursor);
       if (
         query.cursor !== undefined &&
-        (cursor === undefined || !cursorMatches(cursor, binId, filter))
+        (cursor === undefined || !cursorMatches(cursor, filter))
       ) {
         return invalidCursor();
       }
 
-      const conditions = [eq(manualRuns.binId, binId)];
+      const conditions = [];
+      if (query.binId !== undefined)
+        conditions.push(eq(manualRuns.binId, query.binId));
       if (query.action !== undefined)
         conditions.push(eq(manualRuns.action, query.action));
       if (query.status !== undefined)
         conditions.push(eq(manualRuns.status, query.status));
-      // 使用原始 ISO 字符串转换时区，避免 Date 模式截断筛选时间的微秒。
+      // Cast the original ISO string so Date conversion does not truncate filter microseconds.
       if (query.createdFrom !== undefined) {
         conditions.push(
           sql`${manualRuns.createdAt} >= ${query.createdFrom}::timestamptz`,
@@ -132,6 +135,11 @@ export function createManualRunListStore(
             lt(manualRuns.createdAt, cursorCreatedAt),
             and(
               eq(manualRuns.createdAt, cursorCreatedAt),
+              lt(manualRuns.binId, cursor.before.binId),
+            ),
+            and(
+              eq(manualRuns.createdAt, cursorCreatedAt),
+              eq(manualRuns.binId, cursor.before.binId),
               lt(manualRuns.runId, cursor.before.runId),
             ),
           )!,
@@ -141,6 +149,7 @@ export function createManualRunListStore(
       const rows = await database
         .select({
           runId: manualRuns.runId,
+          binId: manualRuns.binId,
           action: manualRuns.action,
           status: manualRuns.status,
           startedAt: manualRuns.startedAt,
@@ -150,7 +159,11 @@ export function createManualRunListStore(
         })
         .from(manualRuns)
         .where(and(...conditions))
-        .orderBy(desc(manualRuns.createdAt), desc(manualRuns.runId))
+        .orderBy(
+          desc(manualRuns.createdAt),
+          desc(manualRuns.binId),
+          desc(manualRuns.runId),
+        )
         .limit(limit + 1);
 
       const hasMore = rows.length > limit;
@@ -158,6 +171,7 @@ export function createManualRunListStore(
       const runs = pageRows.map((row) =>
         manualRunListSummarySchema.parse({
           runId: row.runId,
+          binId: row.binId,
           action: row.action,
           status: row.status,
           createdAt: row.createdAt,
@@ -174,10 +188,10 @@ export function createManualRunListStore(
         hasMore && lastRow !== undefined
           ? encodeCursor({
               version: 1,
-              binId,
               filter,
               before: {
                 createdAt: lastRow.createdAt,
+                binId: lastRow.binId,
                 runId: lastRow.runId,
               },
             })
