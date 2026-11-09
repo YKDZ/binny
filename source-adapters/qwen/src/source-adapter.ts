@@ -12,10 +12,10 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
   type IncrementalEntryRecord,
-  type JsonObject,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
@@ -60,6 +60,51 @@ export const qwenParamsSchema = z
   .default({});
 
 export type QwenParams = z.infer<typeof qwenParamsSchema>;
+
+const extensionsSchema = z
+  .object({
+    language: z
+      .string()
+      .describe("Language of the Qwen article returned for this request."),
+    region: z
+      .literal("global")
+      .describe("Geographic region assigned to the Qwen article."),
+    canonicalUrl: z
+      .string()
+      .optional()
+      .describe("Canonical URL linked from the Qwen article content."),
+    qwenArticleId: z
+      .string()
+      .optional()
+      .describe("Article identifier returned by the Qwen retrieval API."),
+    author: z
+      .string()
+      .optional()
+      .describe("Author name supplied by the Qwen retrieval API."),
+    tags: z
+      .array(z.string())
+      .optional()
+      .describe("Tags supplied by the Qwen retrieval API."),
+    gitUrl: z
+      .string()
+      .optional()
+      .describe("Source repository URL supplied by the Qwen retrieval API."),
+    coverUrl: z
+      .string()
+      .optional()
+      .describe("Cover image URL supplied by the Qwen retrieval API."),
+    introduction: z
+      .string()
+      .optional()
+      .describe("Introduction text supplied by the Qwen retrieval API."),
+    description: z
+      .string()
+      .optional()
+      .describe("Description supplied by the Qwen retrieval API."),
+  })
+  .strict();
+
+type QwenExtensions = z.output<typeof extensionsSchema>;
 
 export const checkOutputSchema = z
   .object({
@@ -180,48 +225,47 @@ export function extractCanonicalUrl(content: string): string | undefined {
   return undefined;
 }
 
-/** Parses article publication date and determines its precision without fabricating timestamps. */
+/** Preserves the source publication date for SourceTime validation at submission. */
 export function parseArticleDate(rawDate?: string): {
   readonly publishedDate?: string;
-  readonly datePrecision?: "year" | "month" | "day" | "second";
-  readonly sourceModifiedAt?: string;
 } {
   if (rawDate === undefined || rawDate.trim().length === 0) {
     return {};
   }
   const trimmed = rawDate.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "day",
-    };
-  }
-  if (/^\d{4}-\d{2}$/.test(trimmed)) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "month",
-    };
-  }
-  if (/^\d{4}$/.test(trimmed)) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "year",
-    };
-  }
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(
-      trimmed,
-    )
-  ) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "second",
-      sourceModifiedAt: trimmed,
-    };
-  }
   return {
     publishedDate: trimmed,
-    datePrecision: "second",
+  };
+}
+
+function qwenExtensions(
+  article: RawQwenArticle,
+  language: QwenLanguage,
+  canonicalUrl: string | undefined,
+): QwenExtensions {
+  return {
+    language,
+    region: "global",
+    ...(canonicalUrl !== undefined ? { canonicalUrl } : {}),
+    ...(article.id !== undefined ? { qwenArticleId: article.id } : {}),
+    ...(article.extra?.author !== undefined
+      ? { author: article.extra.author }
+      : {}),
+    ...(article.extra?.tags !== undefined
+      ? { tags: [...article.extra.tags] }
+      : {}),
+    ...(article.extra?.git_url !== undefined
+      ? { gitUrl: article.extra.git_url }
+      : {}),
+    ...(article.extra?.cover_small !== undefined
+      ? { coverUrl: article.extra.cover_small }
+      : {}),
+    ...(article.extra?.introduction !== undefined
+      ? { introduction: article.extra.introduction }
+      : {}),
+    ...(article.extra?.description !== undefined
+      ? { description: article.extra.description }
+      : {}),
   };
 }
 
@@ -453,6 +497,7 @@ async function syncAction(
         });
         const rawDate = article.extra?.date ?? article.date;
         const dateInfo = parseArticleDate(rawDate);
+        const sourcePublishedAt = sourceTimeFrom(dateInfo.publishedDate);
         const fingerprint = computeArticleFingerprint(
           article.title ?? "",
           rawDate ?? "",
@@ -461,8 +506,8 @@ async function syncAction(
         );
         baselineEntries[article.path] = {
           fingerprint,
-          ...(dateInfo.publishedDate !== undefined
-            ? { publishedAt: dateInfo.publishedDate }
+          ...(sourcePublishedAt !== null
+            ? { publishedAt: sourcePublishedAt.value }
             : {}),
           archivedCompleteness: "baseline",
         };
@@ -490,6 +535,7 @@ async function syncAction(
         });
         const rawDate = article.extra?.date ?? article.date;
         const dateInfo = parseArticleDate(rawDate);
+        const sourcePublishedAt = sourceTimeFrom(dateInfo.publishedDate);
         const fingerprint = computeArticleFingerprint(
           article.title ?? "",
           rawDate ?? "",
@@ -501,51 +547,21 @@ async function syncAction(
         const changed = hasIncrementalEntryChanged(
           previousEntry,
           fingerprint,
-          dateInfo.publishedDate,
+          sourcePublishedAt?.value,
         );
 
         if (changed) {
           const canonicalUrl = extractCanonicalUrl(article.content ?? "");
-          const metadata: JsonObject = {
-            language,
-            region: "global",
-            ...(canonicalUrl !== undefined ? { canonicalUrl } : {}),
-            ...(article.id !== undefined ? { qwenArticleId: article.id } : {}),
-            ...(dateInfo.publishedDate !== undefined
-              ? { publishedDate: dateInfo.publishedDate }
-              : {}),
-            ...(dateInfo.datePrecision !== undefined
-              ? { datePrecision: dateInfo.datePrecision }
-              : {}),
-            ...(article.extra?.author !== undefined
-              ? { author: article.extra.author }
-              : {}),
-            ...(article.extra?.tags !== undefined
-              ? { tags: [...article.extra.tags] }
-              : {}),
-            ...(article.extra?.git_url !== undefined
-              ? { gitUrl: article.extra.git_url }
-              : {}),
-            ...(article.extra?.cover_small !== undefined
-              ? { coverUrl: article.extra.cover_small }
-              : {}),
-            ...(article.extra?.introduction !== undefined
-              ? { introduction: article.extra.introduction }
-              : {}),
-            ...(article.extra?.description !== undefined
-              ? { description: article.extra.description }
-              : {}),
-          };
-
           const submitResult = await submitCleanedArticle(context, {
             sourceKey: {
               namespace: `qwen:${language}`,
               key: article.path,
             },
             sourceRef,
-            title: article.title,
-            sourceModifiedAt: dateInfo.sourceModifiedAt,
-            metadata,
+            title: article.title?.trim() || null,
+            sourcePublishedAt,
+            sourceModifiedAt: null,
+            extensions: qwenExtensions(article, language, canonicalUrl),
             cleanResult,
             captureScope: {
               language,
@@ -557,8 +573,8 @@ async function syncAction(
 
           upsertIncrementalScopeEntry(state, scopeId, article.path, {
             fingerprint,
-            ...(dateInfo.publishedDate !== undefined
-              ? { publishedAt: dateInfo.publishedDate }
+            ...(sourcePublishedAt !== null
+              ? { publishedAt: sourcePublishedAt.value }
               : {}),
             archivedCompleteness: submitResult.hasMediaFailures
               ? "partial"
@@ -623,38 +639,8 @@ async function collectAction(
       });
       const rawDate = article.extra?.date ?? article.date;
       const dateInfo = parseArticleDate(rawDate);
+      const sourcePublishedAt = sourceTimeFrom(dateInfo.publishedDate);
       const canonicalUrl = extractCanonicalUrl(article.content ?? "");
-
-      const metadata: JsonObject = {
-        language,
-        region: "global",
-        ...(canonicalUrl !== undefined ? { canonicalUrl } : {}),
-        ...(article.id !== undefined ? { qwenArticleId: article.id } : {}),
-        ...(dateInfo.publishedDate !== undefined
-          ? { publishedDate: dateInfo.publishedDate }
-          : {}),
-        ...(dateInfo.datePrecision !== undefined
-          ? { datePrecision: dateInfo.datePrecision }
-          : {}),
-        ...(article.extra?.author !== undefined
-          ? { author: article.extra.author }
-          : {}),
-        ...(article.extra?.tags !== undefined
-          ? { tags: [...article.extra.tags] }
-          : {}),
-        ...(article.extra?.git_url !== undefined
-          ? { gitUrl: article.extra.git_url }
-          : {}),
-        ...(article.extra?.cover_small !== undefined
-          ? { coverUrl: article.extra.cover_small }
-          : {}),
-        ...(article.extra?.introduction !== undefined
-          ? { introduction: article.extra.introduction }
-          : {}),
-        ...(article.extra?.description !== undefined
-          ? { description: article.extra.description }
-          : {}),
-      };
 
       const submitResult = await submitCleanedArticle(context, {
         sourceKey: {
@@ -662,9 +648,10 @@ async function collectAction(
           key: article.path,
         },
         sourceRef,
-        title: article.title,
-        sourceModifiedAt: dateInfo.sourceModifiedAt,
-        metadata,
+        title: article.title?.trim() || null,
+        sourcePublishedAt,
+        sourceModifiedAt: null,
+        extensions: qwenExtensions(article, language, canonicalUrl),
         cleanResult,
         captureScope: {
           language,
@@ -683,8 +670,8 @@ async function collectAction(
 
       upsertIncrementalScopeEntry(state, scopeId, article.path, {
         fingerprint,
-        ...(dateInfo.publishedDate !== undefined
-          ? { publishedAt: dateInfo.publishedDate }
+        ...(sourcePublishedAt !== null
+          ? { publishedAt: sourcePublishedAt.value }
           : {}),
         archivedCompleteness: submitResult.hasMediaFailures
           ? "partial"
@@ -707,21 +694,22 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema: qwenConfigSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(qwenConfigSchema, {
+    check: defineSourceAdapterAction(qwenConfigSchema, extensionsSchema, {
       description: "Check Qwen bilingual retrieval endpoints availability.",
       params: qwenParamsSchema,
       output: checkOutputSchema,
       execute: checkAction,
     }),
-    collect: defineSourceAdapterAction(qwenConfigSchema, {
+    collect: defineSourceAdapterAction(qwenConfigSchema, extensionsSchema, {
       description: "Collect Qwen bilingual research articles.",
       params: qwenParamsSchema,
       output: collectOutputSchema,
       execute: collectAction,
     }),
-    sync: defineSourceAdapterAction(qwenConfigSchema, {
+    sync: defineSourceAdapterAction(qwenConfigSchema, extensionsSchema, {
       description: "Incrementally sync Qwen bilingual research articles.",
       params: qwenParamsSchema,
       output: syncOutputSchema,

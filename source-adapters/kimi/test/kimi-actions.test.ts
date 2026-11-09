@@ -102,10 +102,36 @@ function createTestContext(
       : {}),
   };
 
-  const context = createSourceAdapterContext(mockClient, runContext);
+  const context = createSourceAdapterContext(
+    mockClient,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
 
   return { context, submissions, uploadedResources };
 }
+
+void test("Kimi extensions constrain source-specific changelog and research facts", () => {
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({
+      kind: "research",
+      region: "international",
+      language: "en",
+      slug: "kimi-k3",
+      canonicalUrl: "https://www.kimi.ai/blog/kimi-k3",
+    }).success,
+    true,
+  );
+  assert.equal(
+    sourceAdapter.extensionsSchema.safeParse({
+      kind: "research",
+      region: "international",
+      language: "en",
+      publishedDate: "2026-11-08",
+    }).success,
+    false,
+  );
+});
 
 void test("Kimi platform changelogs source adapter actions and ongoing documents", async (t) => {
   let cnPlatformChangelogVersion = 1;
@@ -336,18 +362,19 @@ void test("Kimi platform changelogs source adapter actions and ongoing documents
         key: "changelog:cn-platform-changelog",
       });
       assert.equal(cnItem.sourceRef, `${origin}/docs/changelog/index.md`);
-      assert.equal(cnItem.properties?.["title"], "Kimi 开放平台更新日志");
+      assert.equal(cnItem.title, "Kimi 开放平台更新日志");
+      assert.equal(cnItem.sourcePublishedAt, null);
       assert.equal(
         cnItem.sourceModifiedAt,
-        undefined,
+        null,
         "month precision date must not fabricate timestamp",
       );
-      assert.equal(cnItem.metadata?.["documentKind"], "changelog");
-      assert.equal(cnItem.metadata?.["region"], "cn");
-      assert.equal(cnItem.metadata?.["language"], "zh-CN");
-      assert.equal(cnItem.metadata?.["datePrecision"], "month");
-      assert.equal(cnItem.metadata?.["latestDate"], "2026-10");
-      assert.deepEqual(cnItem.metadata?.["observedDates"], [
+      assert.equal(cnItem.extensions.kind, "changelog");
+      assert.equal(cnItem.extensions.region, "cn");
+      assert.equal(cnItem.extensions.language, "zh-CN");
+      assert.equal(cnItem.extensions.latestChangelogDatePrecision, "month");
+      assert.equal(cnItem.extensions.latestChangelogDate, "2026-10");
+      assert.deepEqual(cnItem.extensions.observedChangelogDates, [
         "2026-10",
         "2026-09",
       ]);
@@ -371,15 +398,16 @@ void test("Kimi platform changelogs source adapter actions and ongoing documents
       assert.equal(intItem.sourceRef, `${origin}/docs/platform-changelog.md`);
       assert.equal(
         intItem.sourceModifiedAt,
-        undefined,
+        null,
         "month precision date must not fabricate timestamp",
       );
-      assert.equal(intItem.metadata?.["documentKind"], "changelog");
-      assert.equal(intItem.metadata?.["region"], "international");
-      assert.equal(intItem.metadata?.["language"], "en");
-      assert.equal(intItem.metadata?.["datePrecision"], "month");
-      assert.equal(intItem.metadata?.["latestDate"], "2026-10");
-      assert.deepEqual(intItem.metadata?.["observedDates"], [
+      assert.equal(intItem.sourcePublishedAt, null);
+      assert.equal(intItem.extensions.kind, "changelog");
+      assert.equal(intItem.extensions.region, "international");
+      assert.equal(intItem.extensions.language, "en");
+      assert.equal(intItem.extensions.latestChangelogDatePrecision, "month");
+      assert.equal(intItem.extensions.latestChangelogDate, "2026-10");
+      assert.deepEqual(intItem.extensions.observedChangelogDates, [
         "2026-10",
         "2026-09",
       ]);
@@ -403,15 +431,16 @@ void test("Kimi platform changelogs source adapter actions and ongoing documents
       );
       assert.equal(
         hostedItem.sourceModifiedAt,
-        undefined,
+        null,
         "day precision date must not fabricate timestamp",
       );
-      assert.equal(hostedItem.metadata?.["documentKind"], "changelog");
-      assert.equal(hostedItem.metadata?.["region"], "cn");
-      assert.equal(hostedItem.metadata?.["language"], "zh-CN");
-      assert.equal(hostedItem.metadata?.["datePrecision"], "day");
-      assert.equal(hostedItem.metadata?.["latestDate"], "2026-10-14");
-      assert.deepEqual(hostedItem.metadata?.["observedDates"], [
+      assert.equal(hostedItem.sourcePublishedAt, null);
+      assert.equal(hostedItem.extensions.kind, "changelog");
+      assert.equal(hostedItem.extensions.region, "cn");
+      assert.equal(hostedItem.extensions.language, "zh-CN");
+      assert.equal(hostedItem.extensions.latestChangelogDatePrecision, "day");
+      assert.equal(hostedItem.extensions.latestChangelogDate, "2026-10-14");
+      assert.deepEqual(hostedItem.extensions.observedChangelogDates, [
         "2026-10-14",
         "2026-09-25",
       ]);
@@ -520,7 +549,7 @@ void test("Kimi platform changelogs source adapter actions and ongoing documents
         key: "changelog:cn-platform-changelog",
       });
       assert.ok(revisionItem.body?.markdown?.includes("2026年11月"));
-      assert.equal(revisionItem.metadata?.["latestDate"], "2026-11");
+      assert.equal(revisionItem.extensions.latestChangelogDate, "2026-11");
     },
   );
 
@@ -763,7 +792,8 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
     "@context": "https://schema.org",
     "@type": "Article",
     "headline": "Kimi K3.1 Pro 技术博客",
-    "dateModified": "2026-10-28"
+    "datePublished": "2026-10-25T14:30:00+08:00",
+    "dateModified": "2026-10-28T09:15:00-04:00"
   }
   </script>
 </head>
@@ -1029,15 +1059,15 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
       assert.equal(submissions.length, 3);
 
       const zhItem = submissions.find(
-        (s) => s.items[0]?.metadata?.["language"] === "zh-CN",
+        (s) => s.items[0]?.extensions["language"] === "zh-CN",
       )?.items[0];
       const cnEnItem = submissions.find(
         (s) =>
-          s.items[0]?.metadata?.["region"] === "cn" &&
-          s.items[0]?.metadata?.["language"] === "en",
+          s.items[0]?.extensions["region"] === "cn" &&
+          s.items[0]?.extensions["language"] === "en",
       )?.items[0];
       const intEnItem = submissions.find(
-        (s) => s.items[0]?.metadata?.["region"] === "international",
+        (s) => s.items[0]?.extensions["region"] === "international",
       )?.items[0];
 
       assert.ok(zhItem && cnEnItem && intEnItem);
@@ -1061,17 +1091,17 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
       assert.equal(cnEnItem.sourceRef, `${origin}/cn-en/blog/kimi-k3-1-pro`);
       assert.equal(intEnItem.sourceRef, `${origin}/int/blog/kimi-k3-1-pro`);
 
-      // Observed canonicalUrl preserved as fact in metadata
+      // Observed canonicalUrl remains a source-specific extension fact.
       assert.equal(
-        zhItem.metadata?.["canonicalUrl"],
+        zhItem.extensions["canonicalUrl"],
         "https://www.kimi.ai/blog/kimi-k3-1-pro",
       );
       assert.equal(
-        cnEnItem.metadata?.["canonicalUrl"],
+        cnEnItem.extensions["canonicalUrl"],
         "https://www.kimi.ai/blog/kimi-k3-1-pro",
       );
       assert.equal(
-        intEnItem.metadata?.["canonicalUrl"],
+        intEnItem.extensions["canonicalUrl"],
         "https://www.kimi.ai/blog/kimi-k3-1-pro",
       );
     },
@@ -1126,7 +1156,7 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
   );
 
   await t.test(
-    "list card publication date and detail page dateModified are preserved separately at day precision",
+    "research publication and modification instants preserve their source offsets independently",
     async () => {
       const testConfig: KimiConfig = {
         sources: [
@@ -1144,18 +1174,20 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
       const item = submissions[0]?.items[0];
       assert.ok(item !== undefined);
 
-      // List card publication date normalized from 2026.10.25 to 2026-10-25
-      assert.equal(item.metadata?.["publishedDate"], "2026-10-25");
-      // Detail page JSON-LD dateModified preserved separately
-      assert.equal(item.metadata?.["modifiedDate"], "2026-10-28");
-      assert.equal(item.metadata?.["datePrecision"], "day");
-      assert.notEqual(
-        item.metadata?.["publishedDate"],
-        item.metadata?.["modifiedDate"],
+      assert.deepEqual(item.sourcePublishedAt, {
+        precision: "instant",
+        value: "2026-10-25T14:30:00+08:00",
+      });
+      assert.deepEqual(item.sourceModifiedAt, {
+        precision: "instant",
+        value: "2026-10-28T09:15:00-04:00",
+      });
+      assert.equal(item.extensions.kind, "research");
+      assert.equal(item.extensions.slug, "kimi-k3-1-pro");
+      assert.equal(
+        item.extensions.canonicalUrl,
+        "https://www.kimi.ai/blog/kimi-k3-1-pro",
       );
-
-      // sourceModifiedAt is undefined when date precision is day-only
-      assert.equal(item.sourceModifiedAt, undefined);
     },
   );
 

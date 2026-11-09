@@ -15,6 +15,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -22,7 +23,6 @@ import {
   type CleanContentResult,
   type IncrementalEntryRecord,
   type IncrementalSyncState,
-  type JsonObject,
   type ManualRunFailure,
   type SourceAdapterContext,
   type SubmitCleanedArticleResult,
@@ -97,6 +97,40 @@ export const paramsSchema = z
 
 export type DeepSeekParams = z.infer<typeof paramsSchema>;
 
+const extensionsSchema = z
+  .object({
+    region: z
+      .literal("unpartitioned")
+      .describe("Geographic region assigned to this DeepSeek source."),
+    language: z
+      .string()
+      .describe("Language of the DeepSeek source document or news article."),
+    kind: z
+      .enum(["changelog", "news"])
+      .describe("Kind of DeepSeek source content archived in this item."),
+    latestUpdateDate: z
+      .string()
+      .optional()
+      .describe(
+        "Latest dated update heading found inside the whole changelog.",
+      ),
+    latestUpdateDatePrecision: z
+      .enum(["instant", "day", "month", "year"])
+      .optional()
+      .describe(
+        "Known precision of the latest update heading in the changelog.",
+      ),
+  })
+  .strict();
+
+type DeepSeekExtensions = z.output<typeof extensionsSchema>;
+type SourceDatePrecision = DeepSeekExtensions["latestUpdateDatePrecision"];
+
+interface ExtractedSourceDate {
+  readonly date: string;
+  readonly precision: NonNullable<SourceDatePrecision>;
+}
+
 export const checkOutputSchema = z
   .object({
     availability: z.enum(["available", "unavailable", "unknown"]),
@@ -128,11 +162,10 @@ export interface DiscoveredNewsArticle {
 }
 
 export interface FetchedNewsArticle {
-  readonly title: string;
+  readonly title: string | null;
   readonly cleanResult: CleanContentResult;
   readonly format: "markdown" | "html";
   readonly publishedDate?: string | undefined;
-  readonly datePrecision?: "day" | "month" | undefined;
 }
 
 export function selectedSources(
@@ -186,31 +219,39 @@ export function resolveUrl(href: string, baseUrl: string): string {
 
 export function normalizeDate(raw: string): string | undefined {
   const trimmed = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}T/iu.test(trimmed)) {
+    return sourceTimeFrom(trimmed)?.value;
+  }
+  const exact = sourceTimeFrom(trimmed);
+  if (exact !== null) return exact.value;
+
+  const normalized = (value: string): string | undefined =>
+    sourceTimeFrom(value)?.value;
   const match1 = trimmed.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
   if (match1?.[1] && match1[2] && match1[3]) {
     const year = match1[1];
     const month = match1[2].padStart(2, "0");
     const day = match1[3].padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return normalized(`${year}-${month}-${day}`);
   }
   const match2 = trimmed.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日?$/);
   if (match2?.[1] && match2[2] && match2[3]) {
     const year = match2[1];
     const month = match2[2].padStart(2, "0");
     const day = match2[3].padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return normalized(`${year}-${month}-${day}`);
   }
   const match3 = trimmed.match(/^(\d{4})[-/.](\d{1,2})$/);
   if (match3?.[1] && match3[2]) {
     const year = match3[1];
     const month = match3[2].padStart(2, "0");
-    return `${year}-${month}`;
+    return normalized(`${year}-${month}`);
   }
   const match4 = trimmed.match(/^(\d{4})年(\d{1,2})月$/);
   if (match4?.[1] && match4[2]) {
     const year = match4[1];
     const month = match4[2].padStart(2, "0");
-    return `${year}-${month}`;
+    return normalized(`${year}-${month}`);
   }
   return undefined;
 }
@@ -330,45 +371,49 @@ export function extractHtmlTitle(html: string): string | undefined {
 
 export function extractArticleDate(
   markdown: string,
-): { readonly date: string; readonly precision: "day" | "month" } | undefined {
+): ExtractedSourceDate | undefined {
   const fmMatch = markdown.match(/^---\s*\n([\s\S]*?)\n---/);
   if (fmMatch?.[1]) {
     const dateMatch = fmMatch[1].match(/^date:\s*["']?([^"'\n\r]+)["']?/m);
     if (dateMatch?.[1]) {
       const norm = normalizeDate(dateMatch[1]);
       if (norm) {
+        const sourceTime = sourceTimeFrom(norm);
+        if (sourceTime === null) return undefined;
         return {
           date: norm,
-          precision: norm.length === 10 ? "day" : "month",
+          precision: sourceTime.precision,
         };
       }
     }
   }
   const lineMatch = markdown.match(
-    /(?:^#+\s+|\*\*|^)(\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/m,
+    /(?:^#+\s+|\*\*|^)(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})|\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/m,
   );
   if (lineMatch?.[1]) {
     const norm = normalizeDate(lineMatch[1]);
     if (norm) {
+      const sourceTime = sourceTimeFrom(norm);
+      if (sourceTime === null) return undefined;
       return {
         date: norm,
-        precision: norm.length === 10 ? "day" : "month",
+        precision: sourceTime.precision,
       };
     }
   }
   return undefined;
 }
 
-export function extractHtmlDate(
-  html: string,
-): { readonly date: string; readonly precision: "day" | "month" } | undefined {
+export function extractHtmlDate(html: string): ExtractedSourceDate | undefined {
   const timeMatch = html.match(/<time[^>]*datetime=["']([^"']+)["'][^>]*>/i);
   if (timeMatch?.[1]) {
     const norm = normalizeDate(timeMatch[1]);
     if (norm) {
+      const sourceTime = sourceTimeFrom(norm);
+      if (sourceTime === null) return undefined;
       return {
         date: norm,
-        precision: norm.length === 10 ? "day" : "month",
+        precision: sourceTime.precision,
       };
     }
   }
@@ -378,21 +423,25 @@ export function extractHtmlDate(
   if (metaMatch?.[1]) {
     const norm = normalizeDate(metaMatch[1]);
     if (norm) {
+      const sourceTime = sourceTimeFrom(norm);
+      if (sourceTime === null) return undefined;
       return {
         date: norm,
-        precision: norm.length === 10 ? "day" : "month",
+        precision: sourceTime.precision,
       };
     }
   }
   const textMatch = html.match(
-    /(\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/,
+    /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})|\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/,
   );
   if (textMatch?.[1]) {
     const norm = normalizeDate(textMatch[1]);
     if (norm) {
+      const sourceTime = sourceTimeFrom(norm);
+      if (sourceTime === null) return undefined;
       return {
         date: norm,
-        precision: norm.length === 10 ? "day" : "month",
+        precision: sourceTime.precision,
       };
     }
   }
@@ -404,31 +453,30 @@ export function discoverNewsArticles(
   updatesUrl: string,
 ): {
   readonly articles: readonly DiscoveredNewsArticle[];
-  readonly latestChangelogDate?:
-    | { readonly date: string; readonly precision: "day" | "month" }
-    | undefined;
+  readonly latestChangelogDate?: ExtractedSourceDate | undefined;
 } {
   const lines = rawMarkdown.split("\n");
-  let currentDateContext:
-    | { readonly date: string; readonly precision: "day" | "month" }
-    | undefined;
-  let latestChangelogDate:
-    | { readonly date: string; readonly precision: "day" | "month" }
-    | undefined;
+  let currentDateContext: ExtractedSourceDate | undefined;
+  let latestChangelogDate: ExtractedSourceDate | undefined;
   const articles: DiscoveredNewsArticle[] = [];
   const seenSlugs = new Set<string>();
 
   for (const line of lines) {
     const dateMatch = line.match(
-      /(?:^#+\s+|\*\*|^)(\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/,
+      /(?:^#+\s+|\*\*|^)(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})|\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?)/,
     );
     if (dateMatch?.[1]) {
       const norm = normalizeDate(dateMatch[1]);
       if (norm) {
-        const precision: "day" | "month" = norm.length === 10 ? "day" : "month";
-        currentDateContext = { date: norm, precision };
-        if (!latestChangelogDate) {
-          latestChangelogDate = currentDateContext;
+        const sourceTime = sourceTimeFrom(norm);
+        if (sourceTime !== null) {
+          currentDateContext = {
+            date: norm,
+            precision: sourceTime.precision,
+          };
+          if (!latestChangelogDate) {
+            latestChangelogDate = currentDateContext;
+          }
         }
       }
     }
@@ -530,7 +578,7 @@ export async function fetchNewsArticle(
   discoveredMeta?: {
     readonly linkText?: string | undefined;
     readonly date?: string | undefined;
-    readonly datePrecision?: "day" | "month" | undefined;
+    readonly datePrecision?: SourceDatePrecision | undefined;
   },
 ): Promise<FetchedNewsArticle> {
   const cleanUrl = articleUrl.replace(/\.md$/i, "").replace(/\/+$/, "");
@@ -560,23 +608,21 @@ export async function fetchNewsArticle(
         if (clean.hasSubstantialContent && clean.text.trim().length > 0) {
           const extractedDate =
             extractArticleDate(text) ??
-            (discoveredMeta?.date
+            (discoveredMeta?.date !== undefined
               ? {
                   date: discoveredMeta.date,
                   precision: discoveredMeta.datePrecision ?? "day",
                 }
               : undefined);
           const title =
-            extractMarkdownTitle(text) ??
-            discoveredMeta?.linkText ??
-            extractNewsSlug(articleUrl) ??
-            "DeepSeek News";
+            extractMarkdownTitle(text)?.trim() ||
+            discoveredMeta?.linkText?.trim() ||
+            null;
           return {
             title,
             cleanResult: clean,
             format: "markdown",
             publishedDate: extractedDate?.date,
-            datePrecision: extractedDate?.precision,
           };
         }
       }
@@ -621,57 +667,35 @@ export async function fetchNewsArticle(
   }
   const extractedDate =
     extractHtmlDate(htmlText) ??
-    (discoveredMeta?.date
+    (discoveredMeta?.date !== undefined
       ? {
           date: discoveredMeta.date,
           precision: discoveredMeta.datePrecision ?? "day",
         }
       : undefined);
   const title =
-    extractHtmlTitle(htmlText) ??
-    discoveredMeta?.linkText ??
-    extractNewsSlug(articleUrl) ??
-    "DeepSeek News";
+    extractHtmlTitle(htmlText)?.trim() ||
+    discoveredMeta?.linkText?.trim() ||
+    null;
   return {
     title,
     cleanResult: clean,
     format: "html",
     publishedDate: extractedDate?.date,
-    datePrecision: extractedDate?.precision,
   };
 }
 
 async function submitChangelogArticle(
-  context: SourceAdapterContext<DeepSeekConfig>,
+  context: SourceAdapterContext<DeepSeekConfig, never, DeepSeekExtensions>,
   source: DeepSeekSourceDefinition,
   cleanResult: CleanContentResult,
-  latestChangelogDate?: {
-    readonly date: string;
-    readonly precision: "day" | "month";
-  },
+  latestChangelogDate?: ExtractedSourceDate,
 ): Promise<SubmitCleanedArticleResult> {
   const changelogTitle =
     source.title ??
     (source.language === "zh-CN"
       ? "DeepSeek API 更新日志"
       : "DeepSeek API Updates");
-  const metadata: JsonObject = {
-    region: "unpartitioned",
-    language: source.language,
-    kind: "changelog",
-    title: changelogTitle,
-    ...(latestChangelogDate
-      ? {
-          publishedDate: latestChangelogDate.date,
-          datePrecision: latestChangelogDate.precision,
-        }
-      : {}),
-  };
-  const properties: JsonObject = {
-    title: changelogTitle,
-    ...(latestChangelogDate ? { publishedDate: latestChangelogDate.date } : {}),
-  };
-
   return await submitCleanedArticle(context, {
     sourceKey: {
       namespace: `deepseek:${source.id}`,
@@ -679,9 +703,19 @@ async function submitChangelogArticle(
     },
     sourceRef: source.updatesUrl,
     title: changelogTitle,
-    sourceModifiedAt: undefined,
-    metadata,
-    properties,
+    sourcePublishedAt: null,
+    sourceModifiedAt: null,
+    extensions: {
+      region: "unpartitioned",
+      language: source.language,
+      kind: "changelog",
+      ...(latestChangelogDate !== undefined
+        ? {
+            latestUpdateDate: latestChangelogDate.date,
+            latestUpdateDatePrecision: latestChangelogDate.precision,
+          }
+        : {}),
+    },
     cleanResult,
     captureScope: {
       sourceId: source.id,
@@ -693,30 +727,11 @@ async function submitChangelogArticle(
 }
 
 async function submitNewsArticle(
-  context: SourceAdapterContext<DeepSeekConfig>,
+  context: SourceAdapterContext<DeepSeekConfig, never, DeepSeekExtensions>,
   source: DeepSeekSourceDefinition,
   article: DiscoveredNewsArticle,
   fetchedNews: FetchedNewsArticle,
 ): Promise<SubmitCleanedArticleResult> {
-  const metadata: JsonObject = {
-    region: "unpartitioned",
-    language: source.language,
-    kind: "news",
-    title: fetchedNews.title,
-    ...(fetchedNews.publishedDate
-      ? {
-          publishedDate: fetchedNews.publishedDate,
-          datePrecision: fetchedNews.datePrecision ?? "day",
-        }
-      : {}),
-  };
-  const properties: JsonObject = {
-    title: fetchedNews.title,
-    ...(fetchedNews.publishedDate
-      ? { publishedDate: fetchedNews.publishedDate }
-      : {}),
-  };
-
   return await submitCleanedArticle(context, {
     sourceKey: {
       namespace: `deepseek:${source.id}`,
@@ -724,9 +739,15 @@ async function submitNewsArticle(
     },
     sourceRef: article.url,
     title: fetchedNews.title,
-    sourceModifiedAt: undefined,
-    metadata,
-    properties,
+    sourcePublishedAt: sourceTimeFrom(
+      fetchedNews.publishedDate ?? article.date,
+    ),
+    sourceModifiedAt: null,
+    extensions: {
+      region: "unpartitioned",
+      language: source.language,
+      kind: "news",
+    },
     cleanResult: fetchedNews.cleanResult,
     captureScope: {
       sourceId: source.id,
@@ -739,7 +760,7 @@ async function submitNewsArticle(
 }
 
 export async function executeDeepSeekCheck(
-  context: SourceAdapterContext<DeepSeekConfig>,
+  context: SourceAdapterContext<DeepSeekConfig, never, DeepSeekExtensions>,
   params: DeepSeekParams,
 ): Promise<z.infer<typeof checkOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -827,7 +848,7 @@ export async function executeDeepSeekCheck(
 }
 
 export async function executeDeepSeekSync(
-  context: SourceAdapterContext<DeepSeekConfig>,
+  context: SourceAdapterContext<DeepSeekConfig, never, DeepSeekExtensions>,
   params: DeepSeekParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -966,6 +987,9 @@ export async function executeDeepSeekSync(
                 datePrecision: "day",
               },
             );
+            const sourcePublishedAt = sourceTimeFrom(
+              fetchedNews.publishedDate ?? article.date,
+            );
             const submitResult = await submitNewsArticle(
               context,
               source,
@@ -974,8 +998,8 @@ export async function executeDeepSeekSync(
             );
             upsertIncrementalScopeEntry(state, scopeId, newsKey, {
               fingerprint: article.fingerprint,
-              ...(fetchedNews.publishedDate
-                ? { publishedAt: fetchedNews.publishedDate }
+              ...(sourcePublishedAt !== null
+                ? { publishedAt: sourcePublishedAt.value }
                 : {}),
               archivedCompleteness: submitResult.hasMediaFailures
                 ? "partial"
@@ -1032,7 +1056,7 @@ export async function executeDeepSeekSync(
 }
 
 export async function executeDeepSeekCollect(
-  context: SourceAdapterContext<DeepSeekConfig>,
+  context: SourceAdapterContext<DeepSeekConfig, never, DeepSeekExtensions>,
   params: DeepSeekParams,
 ): Promise<z.infer<typeof collectOutputSchema>> {
   const { sources, missing } = selectedSources(context.config, params);
@@ -1144,6 +1168,9 @@ export async function executeDeepSeekCollect(
               datePrecision: "day",
             },
           );
+          const sourcePublishedAt = sourceTimeFrom(
+            fetchedNews.publishedDate ?? article.date,
+          );
           const submitResult = await submitNewsArticle(
             context,
             source,
@@ -1157,8 +1184,8 @@ export async function executeDeepSeekCollect(
               `news:${article.slug}`,
               {
                 fingerprint: article.fingerprint,
-                ...(fetchedNews.publishedDate
-                  ? { publishedAt: fetchedNews.publishedDate }
+                ...(sourcePublishedAt !== null
+                  ? { publishedAt: sourcePublishedAt.value }
                   : {}),
                 archivedCompleteness: submitResult.hasMediaFailures
                   ? "partial"
@@ -1219,22 +1246,23 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Check DeepSeek changelog and news source availability.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: executeDeepSeekCheck,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Collect DeepSeek updates changelog and linked news articles.",
       params: paramsSchema,
       output: collectOutputSchema,
       execute: executeDeepSeekCollect,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description:
         "Incrementally sync DeepSeek updates changelog and newly published news articles.",
       params: paramsSchema,
