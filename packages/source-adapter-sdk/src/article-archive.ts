@@ -6,6 +6,7 @@ import type {
   ArchiveResourceMetadata,
   ArchiveResourceReference,
   JsonObject,
+  SourceTime,
 } from "@binny/contracts";
 
 import {
@@ -220,19 +221,27 @@ export async function uploadCleanedMedia(
   };
 }
 
-export type SubmitCleanedArticleInput = {
+/**
+ * Cleaned article facts and extension values submitted by `submitCleanedArticle`.
+ * The extension type is inferred from the adapter schema at the action seam.
+ */
+export type SubmitCleanedArticleInput<TExtensions extends object> = {
   readonly sourceKey: { readonly namespace: string; readonly key: string };
-  readonly sourceRef: string;
-  readonly title?: string | undefined;
-  readonly sourceModifiedAt?: string | undefined;
-  readonly metadata?: JsonObject | undefined;
-  readonly properties?: JsonObject | undefined;
+  readonly sourceRef?: string | undefined;
+  /** Source title, or `null` when it was not available. */
+  readonly title: string | null;
+  /** Source publication time, preserving exact instant/day/month/year precision. */
+  readonly sourcePublishedAt: SourceTime | null;
+  /** Source modification time, preserving exact instant/day/month/year precision. */
+  readonly sourceModifiedAt: SourceTime | null;
+  /** Structured source facts declared by the adapter's extension schema. */
+  readonly extensions: TExtensions;
   readonly cleanResult: CleanContentResult;
   readonly captureScope: JsonObject;
   readonly extraMissing?:
     | readonly { readonly path: string; readonly reason: string }[]
     | undefined;
-  readonly relations?: SourceAdapterArchiveSubmission["relations"];
+  readonly relations?: SourceAdapterArchiveSubmission<TExtensions>["relations"];
   readonly mediaOptions?: MediaFetchOptions | undefined;
 };
 
@@ -240,10 +249,17 @@ export type SubmitCleanedArticleResult = UploadedCleanMediaResult & {
   readonly commit: ArchiveCommit;
 };
 
-/** Uploads media, renders binny://resource/<id> references into Markdown/text, and submits the item without HTML body copy. */
-export async function submitCleanedArticle(
-  context: Pick<SourceAdapterContext, "signal" | "resources" | "archive">,
-  input: SubmitCleanedArticleInput,
+/**
+ * Uploads media, renders `binny://resource/<id>` references into Markdown/text,
+ * and submits the item without an HTML body copy. A failed formal submission
+ * rejects with the same archive error as `context.archive.submit`.
+ */
+export async function submitCleanedArticle<TExtensions extends object>(
+  context: Pick<
+    SourceAdapterContext<unknown, never, TExtensions>,
+    "signal" | "resources" | "archive"
+  >,
+  input: SubmitCleanedArticleInput<TExtensions>,
 ): Promise<SubmitCleanedArticleResult> {
   const mediaResult = await uploadCleanedMedia(
     context,
@@ -266,29 +282,13 @@ export async function submitCleanedArticle(
     cleanedText.length > 0 ||
     searchText.length > 0;
 
-  let normalizedModifiedAt: string | undefined;
-  if (input.sourceModifiedAt !== undefined) {
-    // Only set sourceModifiedAt when it is a full timestamp with explicit timezone offset or Z.
-    if (
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/iu.test(
-        input.sourceModifiedAt.trim(),
-      )
-    ) {
-      const parsed = Date.parse(input.sourceModifiedAt);
-      if (Number.isFinite(parsed)) {
-        normalizedModifiedAt = new Date(parsed).toISOString();
-      }
-    }
-  }
-
-  const item: SourceAdapterArchiveSubmission["items"][number] = {
+  const item: SourceAdapterArchiveSubmission<TExtensions>["items"][number] = {
     sourceKey: input.sourceKey,
-    sourceRef: input.sourceRef,
-    ...(normalizedModifiedAt === undefined
-      ? {}
-      : { sourceModifiedAt: normalizedModifiedAt }),
-    ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
-    ...(input.properties === undefined ? {} : { properties: input.properties }),
+    ...(input.sourceRef === undefined ? {} : { sourceRef: input.sourceRef }),
+    title: input.title,
+    sourcePublishedAt: input.sourcePublishedAt,
+    sourceModifiedAt: input.sourceModifiedAt,
+    extensions: input.extensions,
     ...(hasBody
       ? {
           body: {

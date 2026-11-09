@@ -7,6 +7,7 @@ import { z } from "zod";
 import { sampleActionDescription } from "./helper.ts";
 
 const configSchema = z.object({ section: z.string() });
+const extensionsSchema = z.object({}).strict();
 const diagnosticOutputSchema = z.object({
   availability: z.enum(["available", "unavailable", "unknown"]),
   scope: z.array(z.string()),
@@ -29,8 +30,9 @@ export default defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "说明轻量测试环境未配置真实信源。",
       params: z.object({}),
       output: diagnosticOutputSchema,
@@ -51,7 +53,7 @@ export default defineSourceAdapter({
         };
       },
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "运行轻量测试采集动作。",
       params: z.object({}),
       output: z.object({ completedScopes: z.array(z.string()) }),
@@ -59,7 +61,7 @@ export default defineSourceAdapter({
         return { completedScopes: ["sample"] };
       },
     }),
-    sample: defineSourceAdapterAction(configSchema, {
+    sample: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: sampleActionDescription,
       params: z.object({ limit: z.int().min(1) }),
       output: z.object({ sampled: z.boolean() }),

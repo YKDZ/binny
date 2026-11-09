@@ -511,7 +511,11 @@ async function executeRun(
       },
     };
     const result = await action.execute(
-      createSourceAdapterContext(client, context),
+      createSourceAdapterContext(
+        client,
+        context,
+        activeSourceAdapter.extensionsSchema,
+      ),
       parsed.data,
     );
     const checked = action.output.safeParse(result);

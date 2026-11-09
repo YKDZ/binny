@@ -8,6 +8,7 @@ import { chromium, type Page } from "patchright-core";
 import { z } from "zod";
 
 const configSchema = z.object({ baseUrl: z.url() });
+const extensionsSchema = z.object({}).strict();
 const collectParamsSchema = z.object({
   gateId: z.string().uuid().optional(),
 });
@@ -79,8 +80,9 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: true, profileReuseAfterRestart: true },
   },
   configSchema,
+  extensionsSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "检查持久浏览器是否能读取受控保护页面。",
       params: z.object({}),
       output: diagnosticOutputSchema,
@@ -119,11 +121,11 @@ export const sourceAdapter = defineSourceAdapter({
         };
       },
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "读取受控保护页面并通过正式 SDK 提交归档。",
       params: collectParamsSchema,
       output: collectOutputSchema,
-      async execute(context: SourceAdapterContext<BrowserConfig>, params) {
+      async execute(context, params) {
         const baseUrl = baseUrlFrom(context);
         const result = await withSharedPage(
           context,
@@ -168,6 +170,10 @@ export const sourceAdapter = defineSourceAdapter({
                 namespace: "binny-browser.browser-session-fixture",
                 key: `${context.binId}:${context.runId}`,
               },
+              title: null,
+              sourcePublishedAt: null,
+              sourceModifiedAt: null,
+              extensions: {},
               body: { text: result.content, searchText: result.content },
               capture: {
                 scope: { finalUrl: result.url, status: result.status },

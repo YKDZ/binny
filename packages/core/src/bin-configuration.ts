@@ -61,6 +61,7 @@ const sourceAdapterValidatorCacheLimit = 32;
 
 type CompiledSourceAdapterValidators = {
   readonly configuration: ValidateFunction;
+  readonly extensions: ValidateFunction;
   readonly actions: Readonly<Record<string, ValidateFunction>>;
   // Ajv 持有 schema 对象强引用；淘汰条目时一并释放整个编译器。
   readonly compiler: Ajv2020;
@@ -136,7 +137,8 @@ function createDynamicSchema(
       validator: undefined,
       error: {
         code: "invalid_manifest",
-        message: "信源适配器声明的 JSON Schema 无效或包含不支持的关键字。",
+        message:
+          "The source adapter JSON Schema is invalid or uses an unsupported keyword.",
         path: [...path],
       },
     };
@@ -147,7 +149,11 @@ function dynamicSchemaCacheKey(sourceAdapter: SourceAdapterManifest): string {
   const actions = Object.entries(sourceAdapter.actions)
     .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([name, action]) => [name, action.params, action.output]);
-  return JSON.stringify({ config: sourceAdapter.configSchema, actions });
+  return JSON.stringify({
+    config: sourceAdapter.configSchema,
+    extensions: sourceAdapter.extensionsSchema,
+    actions,
+  });
 }
 
 function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
@@ -172,6 +178,14 @@ function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
   if (config.error !== undefined)
     return { validators: undefined, error: config.error };
 
+  const extensions = createDynamicSchema(
+    sourceAdapter.extensionsSchema,
+    ["sourceAdapter", "extensionsSchema"],
+    compiler,
+  );
+  if (extensions.error !== undefined)
+    return { validators: undefined, error: extensions.error };
+
   const actions: Record<string, ValidateFunction> = {};
   for (const [name, action] of Object.entries(sourceAdapter.actions)) {
     const result = createDynamicSchema(
@@ -193,6 +207,7 @@ function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
 
   const validators = {
     configuration: config.validator!,
+    extensions: extensions.validator!,
     actions,
     compiler,
   };
@@ -202,6 +217,37 @@ function compileSourceAdapterValidators(sourceAdapter: SourceAdapterManifest): {
     if (!oldestKey.done) sourceAdapterValidatorCache.delete(oldestKey.value);
   }
   return { validators, error: undefined };
+}
+
+/** Validate an archive extension object against the schema registered by its source adapter. */
+export function validateSourceAdapterExtensions(
+  sourceAdapter: SourceAdapterManifest,
+  extensions: JsonObject,
+): BinError | undefined {
+  const checked = sourceAdapterManifestStoredSchema.safeParse(sourceAdapter);
+  if (!checked.success) {
+    const issue = checked.error.issues[0];
+    return {
+      code: "invalid_manifest",
+      message: issue?.message ?? "信源适配器声明格式无效。",
+      ...(issue === undefined
+        ? {}
+        : { path: schemaIssuePath(["sourceAdapter"], issue.path) }),
+    };
+  }
+
+  const built = compileSourceAdapterValidators(checked.data);
+  if (built.error !== undefined) return built.error;
+  if (built.validators!.extensions(extensions)) return undefined;
+
+  const issue = built.validators!.extensions.errors?.[0];
+  return {
+    code: "invalid_input",
+    message: "Archive extensions do not match the source adapter schema.",
+    ...(issue === undefined
+      ? {}
+      : { path: ["extensions", ...dynamicSchemaPath(issue)] }),
+  };
 }
 
 export function validateSourceAdapterConfiguration(

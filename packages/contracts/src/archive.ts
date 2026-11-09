@@ -313,6 +313,140 @@ const timestampSchema = z.iso
   .datetime({ offset: true })
   .overwrite((value) => new Date(value).toISOString());
 
+function isValidSourceTimeZone(value: string): boolean {
+  if (value === "UTC") return true;
+  const offset = /^([+-])([01]\d|2[0-3]):([0-5]\d)$/u.exec(value);
+  if (offset !== null) {
+    const hours = Number(offset[2]);
+    const minutes = Number(offset[3]);
+    return hours < 14 || (hours === 14 && minutes === 0);
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const sourceTimeZoneSchema = z
+  .string()
+  .min(1, "Source time zone cannot be empty.")
+  .refine(
+    isValidSourceTimeZone,
+    "Time zone must be a valid IANA zone or UTC offset.",
+  );
+
+const sourceTimeFields = {
+  timeZone: sourceTimeZoneSchema.optional(),
+};
+
+const sourceTimeValueSchemas = [
+  z
+    .object({
+      precision: z.literal("instant"),
+      value: z.iso.datetime({ offset: true }),
+      ...sourceTimeFields,
+    })
+    .strict(),
+  z
+    .object({
+      precision: z.literal("day"),
+      value: z.iso.date(),
+      ...sourceTimeFields,
+    })
+    .strict(),
+  z
+    .object({
+      precision: z.literal("month"),
+      value: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/u),
+      ...sourceTimeFields,
+    })
+    .strict(),
+  z
+    .object({
+      precision: z.literal("year"),
+      value: z.string().regex(/^\d{4}$/u),
+      ...sourceTimeFields,
+    })
+    .strict(),
+] as const;
+
+function sourceTimeZoneOffsetAt(
+  epochMs: number,
+  timeZone: string,
+): number | undefined {
+  const fixedOffset = /^([+-])(\d{2}):(\d{2})$/u.exec(timeZone);
+  if (fixedOffset !== null) {
+    const direction = fixedOffset[1] === "+" ? 1 : -1;
+    return direction * (Number(fixedOffset[2]) * 60 + Number(fixedOffset[3]));
+  }
+
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(epochMs);
+    const values = Object.fromEntries(
+      parts
+        .filter(({ type }) => type !== "literal")
+        .map(({ type, value }) => [type, Number(value)]),
+    );
+    const localTime = new Date(0);
+    localTime.setUTCFullYear(values.year!, values.month! - 1, values.day!);
+    localTime.setUTCHours(values.hour!, values.minute!, values.second!, 0);
+    return Math.round((localTime.getTime() - epochMs) / 60_000);
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceTimeValueOffset(value: string): number {
+  const offset = /([+-])(\d{2}):(\d{2})$/u.exec(value);
+  if (offset === null) return 0;
+  const direction = offset[1] === "+" ? 1 : -1;
+  return direction * (Number(offset[2]) * 60 + Number(offset[3]));
+}
+
+/**
+ * A source-supplied time that retains its original precision and known time zone.
+ * `instant` values require an ISO 8601 offset; day, month, and year values stay
+ * at their stated precision. A supplied zone must agree with an instant's
+ * numeric offset, and a missing zone is never inferred.
+ */
+export const sourceTimeSchema = z
+  .discriminatedUnion("precision", sourceTimeValueSchemas)
+  .superRefine((sourceTime, context) => {
+    if (
+      sourceTime.precision !== "instant" ||
+      sourceTime.timeZone === undefined
+    ) {
+      return;
+    }
+    const epochMs = new Date(sourceTime.value).getTime();
+    const zoneOffset = sourceTimeZoneOffsetAt(epochMs, sourceTime.timeZone);
+    if (
+      zoneOffset !== undefined &&
+      zoneOffset !== sourceTimeValueOffset(sourceTime.value)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["timeZone"],
+        message:
+          "Source time zone does not match the offset in the instant value.",
+      });
+    }
+  });
+
+/** A source timestamp can be exact or retain day, month, or year precision. */
+export type SourceTime = z.infer<typeof sourceTimeSchema>;
+
 export const archiveResourceReferenceSchema = z
   .object({ resourceId: z.string().uuid() })
   .strict();
@@ -320,12 +454,37 @@ export type ArchiveResourceReference = z.infer<
   typeof archiveResourceReferenceSchema
 >;
 
+const archiveItemExtensionsSchema = jsonObjectSchema.describe(
+  "Structured source facts validated by the registered adapter extension schema.",
+);
+// `describe()` clones this custom node, so its JSON Schema projection must be registered too.
+registerPostgresJsonSchemaProjection(
+  archiveItemExtensionsSchema,
+  archiveItemExtensionsSchema,
+  jsonObjectProjectionSchema.describe(
+    "Structured source facts validated by the registered adapter extension schema.",
+  ),
+);
+
 const archiveItemFieldsSchema = z
   .object({
+    title: nonEmptyText
+      .nullable()
+      .describe(
+        "Source-supplied title, or null when the source provided none.",
+      ),
+    sourcePublishedAt: sourceTimeSchema
+      .nullable()
+      .describe(
+        "Source publication time at its known precision, or null if absent.",
+      ),
+    sourceModifiedAt: sourceTimeSchema
+      .nullable()
+      .describe(
+        "Source modification time at its known precision, or null if absent.",
+      ),
     sourceRef: nonEmptyText.optional(),
-    sourceModifiedAt: timestampSchema.optional(),
-    metadata: jsonObjectSchema.optional(),
-    properties: jsonObjectSchema.optional(),
+    extensions: archiveItemExtensionsSchema,
     body: archiveBodySchema.optional(),
     resources: z
       .array(archiveResourceReferenceSchema)
@@ -348,25 +507,26 @@ const archiveItemFieldsSchema = z
   .strict();
 
 function hasReceivedMaterial(item: {
-  readonly metadata?: Record<string, unknown> | undefined;
-  readonly properties?: Record<string, unknown> | undefined;
+  readonly title: string | null;
+  readonly sourcePublishedAt: SourceTime | null;
+  readonly sourceModifiedAt: SourceTime | null;
+  readonly extensions: Record<string, unknown>;
   readonly body?: object | undefined;
   readonly resources?: readonly unknown[] | undefined;
 }): boolean {
-  const hasMetadata =
-    item.metadata !== undefined && Object.keys(item.metadata).length > 0;
-  const hasProperties =
-    item.properties !== undefined && Object.keys(item.properties).length > 0;
-  // sourceRef 只定位出处，不能让未取得资料的失败形成空版本。
+  const hasExtensions = Object.keys(item.extensions).length > 0;
+  // A source reference only identifies the origin; it cannot make a failed capture a content revision.
   return (
-    hasMetadata ||
-    hasProperties ||
+    item.title !== null ||
+    item.sourcePublishedAt !== null ||
+    item.sourceModifiedAt !== null ||
+    hasExtensions ||
     item.body !== undefined ||
     (item.resources?.length ?? 0) > 0
   );
 }
 
-/** 保存已整理的资料状态；采集上下文和诊断不会因此生成新版本。 */
+/** An immutable source state; capture context and diagnostics do not create revisions. */
 export const archiveItemStateSchema = withArchiveJsonSchemaProjection(
   archiveItemFieldsSchema.refine(hasReceivedMaterial, {
     path: ["body"],
@@ -374,7 +534,7 @@ export const archiveItemStateSchema = withArchiveJsonSchemaProjection(
   }),
 );
 
-/** 单对象提交必须携带稳定信源键，不能从正文推测身份。 */
+/** Submit one source item under its stable source key; identity is never inferred from its body. */
 export const archiveItemInputSchema = withArchiveJsonSchemaProjection(
   archiveItemFieldsSchema
     .extend({
@@ -388,10 +548,46 @@ export const archiveItemInputSchema = withArchiveJsonSchemaProjection(
     }),
 );
 
-export type ArchiveItemState = z.infer<typeof archiveItemStateSchema>;
-export type ArchiveItemInput = z.infer<typeof archiveItemInputSchema>;
+type ArchiveItemStateFromSchema = z.infer<typeof archiveItemStateSchema>;
+type ArchiveItemInputFromSchema = z.infer<typeof archiveItemInputSchema>;
 
-/** 提交标识全局唯一；相同标识不得用于不同业务负载。 */
+/** Public facts supplied by the source for each captured item. */
+export type ArchiveItemPublicFacts = {
+  /** The source's title, or `null` when it did not provide one. */
+  readonly title: string | null;
+  /** The source's publication time at its known precision, or `null` if absent. */
+  readonly sourcePublishedAt: SourceTime | null;
+  /** The source's modification time at its known precision, or `null` if absent. */
+  readonly sourceModifiedAt: SourceTime | null;
+};
+
+/** A complete, immutable item revision with adapter-owned extension data. */
+export type ArchiveItemState<
+  TExtensions extends object = ArchiveItemStateFromSchema["extensions"],
+> = Omit<
+  ArchiveItemStateFromSchema,
+  "title" | "sourcePublishedAt" | "sourceModifiedAt" | "extensions"
+> & {
+  readonly title: ArchiveItemPublicFacts["title"];
+  readonly sourcePublishedAt: ArchiveItemPublicFacts["sourcePublishedAt"];
+  readonly sourceModifiedAt: ArchiveItemPublicFacts["sourceModifiedAt"];
+  readonly extensions: TExtensions;
+};
+
+/** An item submitted under its stable source key. */
+export type ArchiveItemInput<
+  TExtensions extends object = ArchiveItemInputFromSchema["extensions"],
+> = Omit<
+  ArchiveItemInputFromSchema,
+  "title" | "sourcePublishedAt" | "sourceModifiedAt" | "extensions"
+> & {
+  readonly title: ArchiveItemPublicFacts["title"];
+  readonly sourcePublishedAt: ArchiveItemPublicFacts["sourcePublishedAt"];
+  readonly sourceModifiedAt: ArchiveItemPublicFacts["sourceModifiedAt"];
+  readonly extensions: TExtensions;
+};
+
+/** A batch submission uses one globally unique request ID; a retry reuses its original commit. */
 export const archiveSubmissionInputSchema = withArchiveJsonSchemaProjection(
   z
     .object({
@@ -443,9 +639,16 @@ export const archiveSubmissionInputSchema = withArchiveJsonSchemaProjection(
     }),
 );
 
-export type ArchiveSubmissionInput = z.infer<
+type ArchiveSubmissionInputFromSchema = z.infer<
   typeof archiveSubmissionInputSchema
 >;
+
+/** A batch of content and relation observations accepted by the archive API. */
+export type ArchiveSubmissionInput<
+  TExtensions extends object = ArchiveItemInputFromSchema["extensions"],
+> = Omit<ArchiveSubmissionInputFromSchema, "items"> & {
+  readonly items: ArchiveItemInput<TExtensions>[];
+};
 
 export const archiveIdentifierSchema = z.string().uuid();
 const archiveIdSchema = archiveIdentifierSchema;
@@ -514,7 +717,9 @@ export const archiveResourceResolveResultSchema =
       .strict(),
   );
 
-export type ArchiveItemSubmissionInput = ArchiveItemState;
+export type ArchiveItemSubmissionInput<
+  TExtensions extends object = ArchiveItemStateFromSchema["extensions"],
+> = ArchiveItemState<TExtensions>;
 export type ArchiveResourceResolveInput = z.infer<
   typeof archiveResourceResolveInputSchema
 >;
@@ -604,7 +809,7 @@ export const archiveObservationSchema = z
     runId: nonEmptyText.max(128).optional(),
     sourceAdapterVersion: nonEmptyText.max(256).optional(),
     revisionId: archiveIdSchema,
-    sourceModifiedAt: timestampSchema.optional(),
+    sourceModifiedAt: sourceTimeSchema.nullable(),
     observedAt: timestampSchema,
     recordedAt: timestampSchema,
     diagnostics: z.array(archiveDiagnosticSchema).optional(),
@@ -705,9 +910,10 @@ const archiveRevisionDiffFieldSchema = z.discriminatedUnion("status", [
 ]);
 
 /**
- * 比较同一条目的两个完整状态。正文作为整体字段返回，包含其全部表示；JSON 对象键顺序不影响差异，
- * 数组按位置比较。缺失字段用 present=false 表示，JSON null 保留为 present=true 的值。
- * 资源清单按无序资源 ID 集合比较，结果中的新增与移除 ID 按字典序排列。
+ * Compare two complete item revisions. Public facts and declared extensions are
+ * reported as fields; JSON object key order is ignored and arrays compare by
+ * position. Missing values use `present: false`, while JSON null stays present.
+ * Resource IDs compare as an unordered set and added or removed IDs are sorted.
  */
 export const archiveRevisionDiffSchema = withArchiveJsonSchemaProjection(
   z
@@ -717,10 +923,11 @@ export const archiveRevisionDiffSchema = withArchiveJsonSchemaProjection(
       secondRevisionId: archiveIdSchema,
       fields: z
         .object({
+          title: archiveRevisionDiffFieldSchema,
+          sourcePublishedAt: archiveRevisionDiffFieldSchema,
           sourceRef: archiveRevisionDiffFieldSchema,
           sourceModifiedAt: archiveRevisionDiffFieldSchema,
-          metadata: archiveRevisionDiffFieldSchema,
-          properties: archiveRevisionDiffFieldSchema,
+          extensions: archiveRevisionDiffFieldSchema,
           body: archiveRevisionDiffFieldSchema,
           capture: archiveRevisionDiffFieldSchema,
         })

@@ -20,6 +20,14 @@ const configurationSchema = z
     path: ["section"],
     message: "该板块不可用。",
   });
+const extensionsSchema = z
+  .object({
+    section: z.string().optional(),
+    adapterLabel: z.string().optional(),
+    actionLabel: z.string().optional(),
+    referenceTime: z.string().optional(),
+  })
+  .strict();
 const sourceResultSchema = z.object({
   disposition: z.enum(["material", "manual", "empty", "partial", "slow"]),
   sourceKey: z.string(),
@@ -50,6 +58,9 @@ const collectParamsSchema = z
       .default("collect")
       .transform((value) => value + "!"),
     invalidOutput: z.boolean().optional(),
+    archiveModelVariant: z
+      .enum(["baseline", "public-change", "extension-change"])
+      .optional(),
     waitBeforeSourceMs: z.int().min(0).max(60_000).optional(),
     waitAfterCommitMs: z.int().min(0).max(60_000).optional(),
     validationDelayMs: z.int().min(0).max(10_000).optional(),
@@ -69,8 +80,9 @@ export default defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema: configurationSchema,
+  extensionsSchema,
   actions: {
-    check: defineSourceAdapterAction(configurationSchema, {
+    check: defineSourceAdapterAction(configurationSchema, extensionsSchema, {
       description: "检查受控信源并返回当前可用性诊断。",
       params: z.object({
         sourceUrl: z.url(),
@@ -114,6 +126,10 @@ export default defineSourceAdapter({
                   namespace: "binny-runs.check-fixture",
                   key: params.sourceKey,
                 },
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: {},
                 body: { text: "检查动作提交的归档" },
                 capture: {
                   scope: { gateKey: params.gateKey },
@@ -127,13 +143,63 @@ export default defineSourceAdapter({
         return diagnostic;
       },
     }),
-    collect: defineSourceAdapterAction(configurationSchema, {
+    collect: defineSourceAdapterAction(configurationSchema, extensionsSchema, {
       description: "从受控信源解析并提交资料。",
       params: collectParamsSchema,
       output: z.object({ completedScopes: z.array(z.string()) }),
       async execute(context, params) {
         if (params.waitBeforeSourceMs !== undefined)
           await delay(params.waitBeforeSourceMs);
+        if (params.archiveModelVariant !== undefined) {
+          const publicFactsChanged = params.archiveModelVariant !== "baseline";
+          const extensionChange =
+            params.archiveModelVariant === "extension-change";
+          const submission = {
+            requestId: "binny-runs:typed-archive-model:" + context.runId,
+            items: [
+              {
+                sourceKey: {
+                  namespace: "binny-runs.typed-archive-model",
+                  key: "stable-item",
+                },
+                title: publicFactsChanged
+                  ? "Typed archive public change"
+                  : "Typed archive baseline",
+                sourcePublishedAt: publicFactsChanged
+                  ? { precision: "day", value: "2026-11-08" }
+                  : { precision: "month", value: "2026-11" },
+                sourceModifiedAt: publicFactsChanged
+                  ? {
+                      precision: "instant",
+                      value: "2026-11-08T12:30:00+01:00",
+                      timeZone: "Europe/Paris",
+                    }
+                  : {
+                      precision: "instant",
+                      value: "2026-11-08T12:00:00+02:00",
+                      timeZone: "+02:00",
+                    },
+                extensions: {
+                  section: extensionChange
+                    ? "archive-model-extension-change"
+                    : "archive-model",
+                  adapterLabel: context.config.label,
+                  actionLabel: params.actionLabel,
+                },
+                body: { text: "Typed archive stable body" },
+                capture: {
+                  scope: { fixture: "archive-model" },
+                  completeness: "complete",
+                  missing: [],
+                },
+              },
+            ],
+          } satisfies SourceAdapterArchiveSubmission<
+            z.output<typeof extensionsSchema>
+          >;
+          await context.archive.submit(submission);
+          return { completedScopes: ["archive/typed-version"] };
+        }
         const response = await fetch(
           new URL("/source/collect", params.sourceUrl),
           {
@@ -187,8 +253,14 @@ export default defineSourceAdapter({
                 namespace: "binny-runs.controlled-source",
                 key: source.sourceKey,
               },
-              metadata: {
-                title: source.title,
+              title: source.title,
+              sourcePublishedAt: { precision: "month", value: "2026-11" },
+              sourceModifiedAt: {
+                precision: "instant",
+                value: context.referenceTime,
+                timeZone: "UTC",
+              },
+              extensions: {
                 section: context.config.section,
                 adapterLabel: context.config.label,
                 actionLabel: params.actionLabel,
@@ -202,7 +274,9 @@ export default defineSourceAdapter({
               },
             },
           ],
-        } satisfies SourceAdapterArchiveSubmission;
+        } satisfies SourceAdapterArchiveSubmission<
+          z.output<typeof extensionsSchema>
+        >;
         await context.archive.submit(submission);
         if (source.disposition === "slow") {
           const marker = await fetch(
@@ -258,7 +332,7 @@ export default defineSourceAdapter({
           : { completedScopes };
       },
     }),
-    discover: defineSourceAdapterAction(configurationSchema, {
+    discover: defineSourceAdapterAction(configurationSchema, extensionsSchema, {
       description: "返回本地受控适配器提供的普通发现结果。",
       params: z.object({
         prefix: z
