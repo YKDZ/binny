@@ -17,11 +17,17 @@ import type {
 import {
   createSourceAdapterContext,
   isSourceAdapterActionError,
+  sourceAdapterManifest,
 } from "@binny/source-adapter-sdk";
+import { z } from "zod";
 
 import { extractArticle } from "../src/html-extractor.ts";
 import sourceAdapter from "../src/index.ts";
 import type { HuggingFaceConfig } from "../src/source-adapter.ts";
+
+type HuggingFaceExtensions = z.output<typeof sourceAdapter.extensionsSchema>;
+type HuggingFaceSubmission =
+  SourceAdapterArchiveSubmission<HuggingFaceExtensions>;
 
 void test("Hugging Face blog source adapter manifest and defaults", () => {
   assert.equal(sourceAdapter.id, "huggingface");
@@ -30,6 +36,16 @@ void test("Hugging Face blog source adapter manifest and defaults", () => {
   const parsedConfig = sourceAdapter.configSchema.parse({});
   assert.equal(parsedConfig.feedUrl, "https://huggingface.co/blog/feed.xml");
   assert.equal(parsedConfig.defaultCollectMaxItems, 20);
+
+  const manifest = sourceAdapterManifest(sourceAdapter);
+  assert.equal(manifest.extensionsSchema.additionalProperties, false);
+  const extensionFields = manifest.extensionsSchema.properties as Record<
+    string,
+    { readonly description?: string }
+  >;
+  for (const field of Object.values(extensionFields)) {
+    assert.ok(field.description);
+  }
 });
 
 void test("Hugging Face blog incremental sync, content extraction, and collection", async () => {
@@ -44,7 +60,7 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
   };
 
   const requestLog: string[] = [];
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: HuggingFaceSubmission[] = [];
   const uploadedResources: ArchiveResourceMetadata[] = [];
   let commitSequence = 0;
 
@@ -79,12 +95,16 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
       }
 
       for (let i = 1; i <= feedItemsCount; i += 1) {
+        const publishedDate =
+          i === 1
+            ? "Mon, 01 Jan 2024 00:00:00 +0530"
+            : "Mon, 01 Jan 2024 00:00:00 GMT";
         items.push(`
           <item>
             <title>Historical Post ${i}</title>
             <link>${origin}/blog/history-${i}</link>
             <guid>urn:hf:blog:history-${i}</guid>
-            <pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+            <pubDate>${publishedDate}</pubDate>
             <category>research</category>
           </item>
         `);
@@ -126,7 +146,7 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
               <div class="authors">
                 <a href="/sylvaing">Sylvain Gugger</a>
               </div>
-              <time datetime="2024-05-10">May 10, 2024</time>
+              <time datetime="2024-05-10T16:00:00+02:00">May 10, 2024</time>
             </header>
             <div class="blog-content">
               <p>We are introducing a new diffusion model.</p>
@@ -209,7 +229,7 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
 
   const client = {
     archives: {
-      async $post({ json }: { json: SourceAdapterArchiveSubmission }) {
+      async $post({ json }: { json: HuggingFaceSubmission }) {
         submissions.push(json);
         commitSequence += 1;
         return {
@@ -285,7 +305,11 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
     report: async () => {},
   };
 
-  const context = createSourceAdapterContext(client, runContext);
+  const context = createSourceAdapterContext(
+    client,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
 
   try {
     // -------------------------------------------------------------
@@ -332,6 +356,9 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
         `history-${i} should exist in baseline`,
       );
       assert.equal(itemEntry.archivedCompleteness, "baseline");
+      if (i === 1) {
+        assert.equal(itemEntry.publishedAt, "Mon, 01 Jan 2024 00:00:00 +0530");
+      }
     }
 
     // -------------------------------------------------------------
@@ -402,34 +429,29 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
     assert.equal(markdown.includes("Upvote"), false);
     assert.equal(markdown.includes("Footer copyright"), false);
 
-    // Factual metadata preservation: authors, categories, dates
-    const metadata = submittedItem.metadata as {
-      title?: string;
-      authors: Array<{ name: string; handle?: string; url?: string }>;
-      categories: string[];
-      articlePublishedAt: string;
-      feedPublishedAt: string;
-      region: string;
-      language: string;
-    };
-    assert.equal(metadata.title, "New Diffusion Model Release");
-    assert.ok(Array.isArray(metadata.authors));
-    assert.equal(metadata.authors.length, 1);
-    assert.deepEqual(metadata.authors[0], {
+    assert.equal(submittedItem.title, "New Diffusion Model Release");
+    assert.deepEqual(submittedItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2024-05-10T16:00:00+02:00",
+    });
+    assert.equal(submittedItem.sourceModifiedAt, null);
+    assert.ok(Array.isArray(submittedItem.extensions.authors));
+    assert.equal(submittedItem.extensions.authors.length, 1);
+    assert.deepEqual(submittedItem.extensions.authors[0], {
       name: "Sylvain Gugger",
       handle: "sylvaing",
       url: "https://huggingface.co/sylvaing",
     });
 
-    assert.ok(metadata.categories.includes("nlp"));
-    assert.ok(metadata.categories.includes("diffusion"));
-    assert.ok(metadata.categories.includes("deep-learning"));
-
-    // Exact date precision preserved without fabricated fake 00:00:00Z
-    assert.equal(metadata.articlePublishedAt, "2024-05-10");
-    assert.equal(metadata.feedPublishedAt, "2024-05-10T14:00:00.000Z");
-    assert.equal(metadata.region, "international");
-    assert.equal(metadata.language, "en");
+    assert.ok(submittedItem.extensions.categories.includes("nlp"));
+    assert.ok(submittedItem.extensions.categories.includes("diffusion"));
+    assert.ok(submittedItem.extensions.categories.includes("deep-learning"));
+    assert.equal(submittedItem.extensions.region, "international");
+    assert.equal(submittedItem.extensions.language, "en");
+    assert.equal(
+      Object.hasOwn(submittedItem.extensions, "articlePublishedAt"),
+      false,
+    );
 
     // Media resources verification
     assert.equal(submittedItem.resources?.length, 1);
@@ -528,13 +550,17 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
     // -------------------------------------------------------------
     // Test 10: Check failure when feed is unreachable
     // -------------------------------------------------------------
-    const brokenContext = createSourceAdapterContext(client, {
-      ...runContext,
-      config: {
-        feedUrl: `http://127.0.0.1:59999/blog/feed.xml`,
-        defaultCollectMaxItems: 20,
+    const brokenContext = createSourceAdapterContext(
+      client,
+      {
+        ...runContext,
+        config: {
+          feedUrl: `http://127.0.0.1:59999/blog/feed.xml`,
+          defaultCollectMaxItems: 20,
+        },
       },
-    });
+      sourceAdapter.extensionsSchema,
+    );
     const brokenCheckResult = await sourceAdapter.actions.check.execute(
       brokenContext,
       {},
