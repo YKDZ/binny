@@ -3162,7 +3162,7 @@ async function searchRssArchive(
 ): Promise<
   readonly {
     readonly itemId: string;
-    readonly sourceKey?: { readonly namespace: string; readonly key: string };
+    readonly sourceKey: { readonly namespace: string; readonly key: string };
   }[]
 > {
   const results: {
@@ -3208,7 +3208,7 @@ async function readRssArchive(
   const results = await searchRssArchive(baseUrl, binId, text);
   assert.equal(results.length, 1, `归档正文检索「${text}」应命中一项。`);
   const result = results[0];
-  assert.ok(result?.sourceKey !== undefined);
+  assert.ok(result !== undefined);
   const item = cliData<RssArchiveRead>(
     await cli(baseUrl, ["archive", "item", result.itemId, "--bin", binId]),
     "found",
@@ -7544,8 +7544,16 @@ async function runRssAcceptance(
     await searchRssArchive(baseUrl, "binny-rss-one", "没有对应资料的词"),
     [],
   );
+  const caseInsensitiveTitleResults = await searchRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "rss 全文测试文章",
+  );
   assert.deepEqual(
-    await searchRssArchive(baseUrl, "binny-rss-one", "rss 全文测试文章"),
+    caseInsensitiveTitleResults.map(({ itemId, sourceKey }) => ({
+      itemId,
+      sourceKey,
+    })),
     [{ itemId: rssItemV1.itemId, sourceKey: rssItemV1.sourceKey }],
     "literal search matches title text without case sensitivity.",
   );
