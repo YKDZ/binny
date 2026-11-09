@@ -6,7 +6,6 @@ import type {
   ArchiveResourceResolveItem,
   ArchiveResourceResolveRequest,
   ArchiveResourceResolveResult,
-  SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import type { APIRequestContext, Page } from "patchright-core";
 
@@ -80,13 +79,17 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
   const post = {
     id: 1001,
     post_number: 1,
+    title: "Linux.do 架构探讨",
+    created_at: "2026-10-28T00:00:00.000Z",
+    username: "fixture-author",
+    name: "示例作者",
     cooked: "<p>主帖正文内容</p>",
     updated_at: "2026-10-28T00:00:00.000Z",
     version: 1,
   };
 
   const verifiedResource: ArchiveResourceMetadata = {
-    resourceId: "00000000-0000-0000-0000-000000000001",
+    resourceId: "00000000-0000-4000-8000-000000000001",
     sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     mediaType: "image/png",
     size: 1024,
@@ -96,23 +99,30 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
     sourceKey: { namespace: "linuxdo", key: "post:1001" },
     state: {
       sourceRef: "https://linux.do/t/linuxdo-architecture/100/1",
-      sourceModifiedAt: "2026-10-28T00:00:00.000Z",
-      metadata: {
+      title: "Linux.do 架构探讨",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      sourceModifiedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      extensions: {
         topicId: 100,
-        postId: 1001,
         postNumber: 1,
+        categoryId: 4,
+        tags: ["tech", "core"],
+        authorUsername: "fixture-author",
+        authorName: "示例作者",
         postVersion: 1,
         cookedHash: hashContent("<p>主帖正文内容</p>"),
-        topic: {
-          title: "Linux.do 架构探讨",
-          slug: "linuxdo-architecture",
-          categoryId: 4,
-          tags: ["tech", "core"],
-        },
+        media: [],
+        topic: { slug: "linuxdo-architecture", createdAt: null },
       },
       body: {
         markdown:
-          "主帖正文内容：![封面](binny://resource/00000000-0000-0000-0000-000000000001)",
+          "主帖正文内容：![封面](binny://resource/00000000-0000-4000-8000-000000000001)",
         text: "主帖正文内容",
         searchText: "Linux.do 架构探讨\n主帖正文内容",
       },
@@ -134,6 +144,10 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
     isOpUnchanged({ ...topic, title: "标题已更新" }, post, archivedOp),
     false,
   );
+  assert.equal(
+    isOpUnchanged(topic, { ...post, title: "帖子标题已更新" }, archivedOp),
+    false,
+  );
 
   // 3. Category changed
   assert.equal(
@@ -144,6 +158,27 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
   // 4. Tags changed
   assert.equal(
     isOpUnchanged({ ...topic, tags: ["new-tag"] }, post, archivedOp),
+    false,
+  );
+
+  assert.equal(
+    isOpUnchanged(
+      topic,
+      { ...post, created_at: "2026-10-28T01:00:00.000Z" },
+      archivedOp,
+    ),
+    false,
+  );
+  assert.equal(
+    isOpUnchanged(
+      { ...topic, created_at: "2026-10-28T01:00:00.000Z" },
+      post,
+      archivedOp,
+    ),
+    false,
+  );
+  assert.equal(
+    isOpUnchanged(topic, { ...post, username: "another-author" }, archivedOp),
     false,
   );
 
@@ -257,7 +292,7 @@ function createMockPage(
 
 void test("Unchanged OP context in sync and collect reuses Core-verified resources without re-requesting OP media", async () => {
   const verifiedResource: ArchiveResourceMetadata = {
-    resourceId: "11111111-1111-1111-1111-111111111111",
+    resourceId: "11111111-1111-4111-8111-111111111111",
     sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     mediaType: "image/png",
     size: 2048,
@@ -267,22 +302,28 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
     sourceKey: { namespace: "linuxdo", key: "post:2001" },
     state: {
       sourceRef: "https://linux.do/t/test/200/1",
-      sourceModifiedAt: "2026-10-28T00:00:00.000Z",
-      metadata: {
+      title: "测试主题",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      sourceModifiedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      extensions: {
         topicId: 200,
-        postId: 2001,
         postNumber: 1,
+        categoryId: 1,
+        tags: ["test"],
+        authorUsername: null,
+        authorName: null,
         postVersion: 1,
         cookedHash: hashContent("<p>旧主帖正文</p>"),
         media: [
           { url: immutableUrl1, resourceId: verifiedResource.resourceId },
         ],
-        topic: {
-          title: "测试主题",
-          slug: "test",
-          categoryId: 1,
-          tags: ["test"],
-        },
+        topic: { slug: "test", createdAt: null },
       },
       body: {
         markdown: `旧主帖正文：![封面](binny://resource/${verifiedResource.resourceId})`,
@@ -333,7 +374,7 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage({
     html: `<p>旧主帖正文：<img src="${immutableUrl1}"></p>`,
@@ -374,6 +415,8 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
     {
       id: 2001,
       post_number: 1,
+      title: "测试主题",
+      created_at: "2026-10-28T00:00:00.000Z",
       cooked: "<p>旧主帖正文</p>",
       updated_at: "2026-10-28T00:00:00.000Z",
       version: 1,
@@ -406,13 +449,13 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
 
 void test("Unchanged OP post with mutable media URL does not skip source download while immutable media is reused", async () => {
   const verifiedImmutableResource: ArchiveResourceMetadata = {
-    resourceId: "11111111-1111-1111-1111-111111111111",
+    resourceId: "11111111-1111-4111-8111-111111111111",
     sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     mediaType: "image/png",
     size: 2048,
   };
   const uploadedMutableResource: ArchiveResourceMetadata = {
-    resourceId: "22222222-2222-2222-2222-222222222222",
+    resourceId: "22222222-2222-4222-8222-222222222222",
     sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     mediaType: "image/png",
     size: 4096,
@@ -425,11 +468,22 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
     sourceKey: { namespace: "linuxdo", key: "post:2002" },
     state: {
       sourceRef: "https://linux.do/t/test/200/1",
-      sourceModifiedAt: "2026-10-28T00:00:00.000Z",
-      metadata: {
+      title: "测试主题",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      sourceModifiedAt: {
+        precision: "instant",
+        value: "2026-10-28T00:00:00.000Z",
+      },
+      extensions: {
         topicId: 200,
-        postId: 2002,
         postNumber: 1,
+        categoryId: 1,
+        tags: ["test"],
+        authorUsername: null,
+        authorName: null,
         postVersion: 1,
         cookedHash: hashContent(opCooked),
         media: [
@@ -439,12 +493,7 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
           },
           { url: mutableUrl, resourceId: oldMutableResourceId },
         ],
-        topic: {
-          title: "测试主题",
-          slug: "test",
-          categoryId: 1,
-          tags: ["test"],
-        },
+        topic: { slug: "test", createdAt: null },
       },
       body: {
         markdown: `旧主帖正文：![不可变](binny://resource/${verifiedImmutableResource.resourceId})![可变](binny://resource/${oldMutableResourceId})`,
@@ -485,6 +534,8 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
   const post = {
     id: 2002,
     post_number: 1,
+    title: "测试主题",
+    created_at: "2026-10-28T00:00:00.000Z",
     cooked: opCooked,
     updated_at: "2026-10-28T00:00:00.000Z",
     version: 1,
@@ -529,7 +580,7 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage(
     {
@@ -606,7 +657,7 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
 
 void test("Immutable 40-hex SHA-1 Discourse upload URLs reuse Core-verified ArchiveResourceMetadata without re-downloading", async () => {
   const verifiedResource: ArchiveResourceMetadata = {
-    resourceId: "22222222-2222-2222-2222-222222222222",
+    resourceId: "22222222-2222-4222-8222-222222222222",
     sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     mediaType: "image/png",
     size: 4096,
@@ -648,7 +699,7 @@ void test("Immutable 40-hex SHA-1 Discourse upload URLs reuse Core-verified Arch
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage({
     html: `<p>回复配图：<img data-binny-media-index="0" src="${immutableUrl1}"></p>`,
@@ -714,7 +765,7 @@ void test("Immutable 40-hex SHA-1 Discourse upload URLs reuse Core-verified Arch
       `binny://resource/${verifiedResource.resourceId}`,
     ),
   );
-  assert.deepEqual(result.state.metadata?.media, [
+  assert.deepEqual(result.state.extensions.media, [
     { url: immutableUrl1, resourceId: verifiedResource.resourceId },
   ]);
 });
@@ -725,7 +776,7 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
   let uploadCount = 0;
 
   const uploadedResource: ArchiveResourceMetadata = {
-    resourceId: "33333333-3333-3333-3333-333333333333",
+    resourceId: "33333333-3333-4333-8333-333333333333",
     sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     mediaType: "image/png",
     size: 512,
@@ -760,7 +811,7 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage(
     {
@@ -807,14 +858,17 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
       id: 400,
       title: "可变媒体主题",
       slug: "mutable-topic",
+      created_at: "2026-10-28T00:00:00.000Z",
       category_id: 1,
-      tags: [],
+      tags: ["linuxdo-fixture"],
       post_stream: { posts: [] },
     },
     {
       id: 4001,
       post_number: 1,
+      title: "可变媒体主题",
       cooked: `<p>编辑后的可变封面：<img src="${mutableUrl}"></p>`,
+      created_at: "2026-10-28T03:00:00.000Z",
       updated_at: "2026-10-28T03:00:00.000Z",
       version: 2,
       reply_to_post_number: null,
@@ -833,12 +887,35 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
   assert.deepEqual(result.state.resources, [
     { resourceId: uploadedResource.resourceId },
   ]);
+  assert.equal(result.state.title, "可变媒体主题");
+  assert.deepEqual(result.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T03:00:00.000Z",
+  });
+  assert.deepEqual(result.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T03:00:00.000Z",
+  });
+  assert.deepEqual(result.state.extensions, {
+    topicId: 400,
+    postNumber: 1,
+    categoryId: 1,
+    tags: ["linuxdo-fixture"],
+    authorUsername: null,
+    authorName: null,
+    postVersion: 2,
+    cookedHash: hashContent(
+      `<p>编辑后的可变封面：<img src="${mutableUrl}"></p>`,
+    ),
+    media: [{ url: mutableUrl, resourceId: uploadedResource.resourceId }],
+    topic: { slug: "mutable-topic", createdAt: "2026-10-28T00:00:00.000Z" },
+  });
   assert.ok(
     result.state.body?.markdown?.includes(
       `binny://resource/${uploadedResource.resourceId}`,
     ),
   );
-  assert.deepEqual(result.state.metadata?.media, [
+  assert.deepEqual(result.state.extensions.media, [
     { url: mutableUrl, resourceId: uploadedResource.resourceId },
   ]);
 });
@@ -848,7 +925,7 @@ void test("When Core reports resource is missing or disk file unavailable, adapt
   let uploadCount = 0;
 
   const freshlyUploadedResource: ArchiveResourceMetadata = {
-    resourceId: "44444444-4444-4444-4444-444444444444",
+    resourceId: "44444444-4444-4444-8444-444444444444",
     sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     mediaType: "image/png",
     size: 1000,
@@ -882,7 +959,7 @@ void test("When Core reports resource is missing or disk file unavailable, adapt
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage(
     {
@@ -960,7 +1037,7 @@ void test("When Core reports resource is missing or disk file unavailable, adapt
   assert.deepEqual(result.state.resources, [
     { resourceId: freshlyUploadedResource.resourceId },
   ]);
-  assert.deepEqual(result.state.metadata?.media, [
+  assert.deepEqual(result.state.extensions.media, [
     { url: immutableUrl1, resourceId: freshlyUploadedResource.resourceId },
   ]);
 });
@@ -971,7 +1048,7 @@ void test("Cross-origin external media downloads via request.get and uploads to 
   let uploadCount = 0;
 
   const uploadedResource: ArchiveResourceMetadata = {
-    resourceId: "55555555-5555-5555-5555-555555555555",
+    resourceId: "55555555-5555-4555-8555-555555555555",
     sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     mediaType: "image/png",
     size: 2000,
@@ -1000,7 +1077,7 @@ void test("Cross-origin external media downloads via request.get and uploads to 
         throw new Error("未调用");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = createMockPage({
     html: `<p>外链图片：<img data-binny-media-index="0" src="${externalUrl}"></p>`,
@@ -1070,7 +1147,7 @@ void test("Cross-origin external media downloads via request.get and uploads to 
   assert.deepEqual(result.state.resources, [
     { resourceId: uploadedResource.resourceId },
   ]);
-  assert.deepEqual(result.state.metadata?.media, [
+  assert.deepEqual(result.state.extensions.media, [
     { url: externalUrl, resourceId: uploadedResource.resourceId },
   ]);
 });

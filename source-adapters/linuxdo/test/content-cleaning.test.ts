@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type {
-  ArchiveResourceMetadata,
-  SourceAdapterContext,
-} from "@binny/source-adapter-sdk";
+import type { ArchiveResourceMetadata } from "@binny/source-adapter-sdk";
 import type { APIRequestContext, Page } from "patchright-core";
 
 import {
@@ -55,7 +52,7 @@ function createMockEnvironment(options?: {
         throw new Error("archive.submit should not be called directly");
       },
     },
-  } as unknown as SourceAdapterContext;
+  } as unknown as Parameters<typeof archivePost>[2];
 
   const mockPage = {
     url() {

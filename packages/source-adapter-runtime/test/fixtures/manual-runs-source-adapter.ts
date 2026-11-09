@@ -22,7 +22,37 @@ const configurationSchema = z
   });
 const extensionsSchema = z
   .object({
-    section: z.string().optional(),
+    category: z
+      .enum(["post", "comment"])
+      .describe("The category assigned to this archived item.")
+      .optional(),
+    section: z
+      .string()
+      .describe("The source section assigned to this archived item.")
+      .optional(),
+    floor: z
+      .number()
+      .int()
+      .describe("The source floor number assigned to this archived item.")
+      .optional(),
+    labels: z
+      .array(z.string())
+      .describe("Labels assigned to this archived item.")
+      .optional(),
+    featured: z
+      .boolean()
+      .describe("Whether the source marks this archived item as featured.")
+      .optional(),
+    nullableCategory: z
+      .string()
+      .nullable()
+      .describe("The category assigned to this archived item.")
+      .optional(),
+    nullableLabels: z
+      .array(z.string())
+      .nullable()
+      .describe("Labels assigned to this archived item.")
+      .optional(),
     adapterLabel: z.string().optional(),
     actionLabel: z.string().optional(),
     referenceTime: z.string().optional(),
@@ -67,6 +97,7 @@ const collectParamsSchema = z
     archiveModelVariant: z
       .enum(["baseline", "public-change", "extension-change"])
       .optional(),
+    extensionSearchFixture: z.boolean().optional(),
     waitBeforeSourceMs: z.int().min(0).max(60_000).optional(),
     waitAfterCommitMs: z.int().min(0).max(60_000).optional(),
     validationDelayMs: z.int().min(0).max(10_000).optional(),
@@ -156,6 +187,87 @@ export default defineSourceAdapter({
       async execute(context, params) {
         if (params.waitBeforeSourceMs !== undefined)
           await delay(params.waitBeforeSourceMs);
+        if (params.extensionSearchFixture === true) {
+          const isCommentView = context.binId === "binny-runs-two";
+          const submission = {
+            requestId: "binny-runs:extension-search-fixture:" + context.binId,
+            items: [
+              {
+                sourceKey: {
+                  namespace: "binny-runs.extension-search-fixture",
+                  key: "multi-view-item",
+                },
+                title: isCommentView
+                  ? "Extension comment view"
+                  : "Extension post view",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: isCommentView
+                  ? {
+                      category: "comment",
+                      floor: 8,
+                      labels: ["reply"],
+                      featured: false,
+                    }
+                  : {
+                      category: "post",
+                      floor: 7,
+                      labels: ["release", "news"],
+                      featured: true,
+                    },
+                body: {
+                  text: isCommentView
+                    ? "release details"
+                    : "model announcement",
+                },
+                capture: {
+                  scope: { fixture: "extension-search" },
+                  completeness: "complete" as const,
+                  missing: [],
+                },
+              },
+              {
+                sourceKey: {
+                  namespace: "binny-runs.extension-search-fixture",
+                  key: "missing-fields",
+                },
+                title: "Extension fields missing",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: {},
+                body: { text: "optional extension fields are absent" },
+                capture: {
+                  scope: { fixture: "extension-search" },
+                  completeness: "complete" as const,
+                  missing: [],
+                },
+              },
+              {
+                sourceKey: {
+                  namespace: "binny-runs.extension-search-fixture",
+                  key: "nullable-fields",
+                },
+                title: "Extension fields null",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: {
+                  nullableCategory: null,
+                  nullableLabels: null,
+                },
+                body: { text: "optional extension fields are null" },
+                capture: {
+                  scope: { fixture: "extension-search" },
+                  completeness: "complete" as const,
+                  missing: [],
+                },
+              },
+            ],
+          } satisfies SourceAdapterArchiveSubmission<
+            z.output<typeof extensionsSchema>
+          >;
+          await context.archive.submit(submission);
+          return { completedScopes: ["archive/extension-search"] };
+        }
         if (params.archiveModelVariant !== undefined) {
           const publicFactsChanged = params.archiveModelVariant !== "baseline";
           const extensionChange =

@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import type { ArchiveSubmissionInput } from "@binny/contracts";
 import {
   closeLinuxdoHumanSession,
   linuxdoUserJourney,
@@ -31,6 +32,12 @@ type ProcessResult = {
   readonly stderr: string;
 };
 
+type ArchiveSourceTimeRead = {
+  readonly precision: "instant" | "day" | "month" | "year";
+  readonly value: string;
+  readonly timeZone?: string;
+};
+
 type ManagedProcess = {
   readonly child: ChildProcessWithoutNullStreams;
   readonly stdout: () => string;
@@ -47,7 +54,12 @@ type HeartbeatDelayProxy = {
     readonly heldAt: number;
     readonly runtimeId: string;
   }>;
-  readonly waitUntilRequestBodyResponse: () => Promise<number>;
+  readonly forwardUnrelatedRequest: () => Promise<number>;
+  readonly waitUntilRequestBodyResponse: () => Promise<{
+    readonly statusCode: number;
+    readonly latestForwardedStatusCode?: number;
+    readonly error?: string;
+  }>;
   readonly waitUntilHeld: () => Promise<{
     readonly heldAt: number;
     readonly runtimeId: string;
@@ -64,6 +76,8 @@ type HeartbeatDelayProxy = {
 type HeartbeatDelayProxyStatus = {
   readonly held: boolean;
   readonly heldForRequestBody?: boolean;
+  readonly heldRequestBodyStatusCode?: number;
+  readonly heldRequestBodyError?: string;
   readonly heldAt?: number;
   readonly clientClosedAt?: number;
   readonly heldRuntimeId?: string;
@@ -122,12 +136,14 @@ const scheduledRunsOnly = internalStep === "scheduled-runs";
 const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const archiveModelOnly = internalStep === "archive-model";
 const archiveSearchOnly = internalStep === "archive-search";
+const rssLinuxdoOnly = internalStep === "rss-linuxdo";
 const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const articleAdaptersOnly = internalStep === "article-adapters";
 const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
 const manualRunsOnly =
   scheduleOnly || archiveModelJourney || articleAdaptersOnly;
-const useHeartbeatProxy = !manualRunsOnly || scheduledRunsOnly;
+const useHeartbeatProxy =
+  (!manualRunsOnly || scheduledRunsOnly) && !rssLinuxdoOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -135,6 +151,8 @@ const projectName = isFullCapacityRun
   : "binny-archive-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
+const schemaVariantRuntimeImageName =
+  projectName + "-schema-two-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
@@ -162,7 +180,10 @@ let linuxdoSourcePort = 0;
 let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
 let installedCliConsumer: IsolatedCliConsumer | undefined;
 
-function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
+function createHeartbeatDelayProxy(
+  controlPort: number,
+  runtimePort: number,
+): HeartbeatDelayProxy {
   const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const controlUrl = `http://${host}:${String(controlPort)}`;
 
@@ -207,14 +228,30 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
       assert.ok(status.heldRuntimeId !== undefined);
       return { heldAt: status.heldAt, runtimeId: status.heldRuntimeId };
     },
+    async forwardUnrelatedRequest() {
+      const response = await fetch(
+        `http://${host}:${String(runtimePort)}/health`,
+        { signal: AbortSignal.timeout(3_000) },
+      );
+      await response.arrayBuffer();
+      return response.status;
+    },
     async waitUntilRequestBodyResponse() {
       const status = await waitFor(
         readStatus,
-        (current) => typeof current.forwardedStatusCode === "number",
+        (current) => typeof current.heldRequestBodyStatusCode === "number",
         "server completed the held heartbeat request",
       );
-      assert.ok(status.forwardedStatusCode !== undefined);
-      return status.forwardedStatusCode;
+      assert.ok(status.heldRequestBodyStatusCode !== undefined);
+      return {
+        statusCode: status.heldRequestBodyStatusCode,
+        ...(status.forwardedStatusCode === undefined
+          ? {}
+          : { latestForwardedStatusCode: status.forwardedStatusCode }),
+        ...(status.heldRequestBodyError === undefined
+          ? {}
+          : { error: status.heldRequestBodyError }),
+      };
     },
     async waitUntilHeld() {
       const status = await waitFor(
@@ -288,6 +325,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: activeServerImage,
     BINNY_BROWSER_CAPACITY_LIMIT: "1",
     BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
+    BINNY_TEST_RUNNER_SCHEMA_IMAGE: schemaVariantRuntimeImageName,
     BINNY_LIFECYCLE_STOP_GRACE_MS: "1500",
     BINNY_RSS_IMAGE: activeRssRuntimeImage,
     BINNY_ARTICLE_OPENAI_IMAGE: articleAdapterRuntimeImageNames.openai,
@@ -521,6 +559,9 @@ async function archiveHttpStep(
     {
       env: {
         ...(state === undefined ? {} : { BINNY_E2E_ARCHIVE_STATE: state }),
+        ...(stage === "fixed-search" && archiveModelJourney
+          ? { BINNY_E2E_ARCHIVE_EXTENSION_FIXTURES: "1" }
+          : {}),
         ...(sdkResourceState === undefined
           ? {}
           : { BINNY_E2E_SDK_RESOURCE_STATE: sdkResourceState }),
@@ -533,6 +574,131 @@ async function archiveHttpStep(
 
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const binId = "binny-runs-one";
+  if (archiveModelJourney) {
+    const discovered = cliData<{
+      readonly sourceAdapterId: string;
+      readonly fields: Readonly<
+        Record<string, { readonly operations: readonly string[] }>
+      >;
+    }>(await cli(baseUrl, ["bin", "extension-fields", binId]), "discovered");
+    assert.equal(discovered.sourceAdapterId, "binny-runs.manual-run-fixture");
+    assert.deepEqual(discovered.fields.labels?.operations, ["has", "hasAny"]);
+    const discoveryText = await cli(baseUrl, [
+      "bin",
+      "extension-fields",
+      binId,
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(discoveryText.code, 0, discoveryText.stderr);
+    assert.match(discoveryText.stdout, /- category: string/u);
+    assert.match(discoveryText.stdout, /Operations: has, hasAny/u);
+
+    const extensionQuery = {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: { category: { op: "eq", value: "post" } },
+      },
+      limit: 20,
+    };
+    const extensionResults = cliData<{
+      readonly results: readonly {
+        readonly title: string | null;
+        readonly matches: readonly { readonly binId: string }[];
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify(extensionQuery),
+      ]),
+      "found",
+    );
+    assert.equal(extensionResults.results.length, 1);
+    assert.equal(extensionResults.results[0]?.title, "Extension post view");
+    assert.deepEqual(
+      extensionResults.results[0]?.matches.map(
+        ({ binId: matchedBinId }) => matchedBinId,
+      ),
+      ["binny-runs-one"],
+    );
+
+    const listQuery = {
+      ...extensionQuery,
+      extensions: {
+        ...extensionQuery.extensions,
+        filters: { labels: { op: "hasAny", values: ["reply", "release"] } },
+      },
+    };
+    const extensionText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(listQuery),
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(extensionText.code, 0, extensionText.stderr);
+    assert.match(extensionText.stdout, /- Extension post view/u);
+    assert.match(
+      extensionText.stdout,
+      /Views: binny-runs-one, binny-runs-two/u,
+    );
+    assert.doesNotMatch(extensionText.stdout, /"kind"\s*:/u);
+
+    const mixedAdapterFailure = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one", "binny-rss-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { category: { op: "eq", value: "post" } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(mixedAdapterFailure.path, ["bins"]);
+    assert.match(mixedAdapterFailure.message, /declared source adapter only/u);
+
+    const invalidOperationFailure = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: {
+              section: { op: "gt", value: "archive-model" },
+            },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(invalidOperationFailure.path, [
+      "extensions",
+      "filters",
+      "section",
+      "op",
+    ]);
+    assert.match(invalidOperationFailure.message, /eq.*in.*has.*hasAny/u);
+  }
   const query = {
     bins: [binId],
     text: { groups: [["Needle"], ["release"]] },
@@ -1216,13 +1382,18 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
   assert.match(resourceId, /^[0-9a-f-]{36}$/u);
   const requestId = "e2e:resource-interrupted-reference:" + randomUUID();
   const sourceKey = "resource-interrupted-reference:" + randomUUID();
-  const request = JSON.stringify({
+  const submission: ArchiveSubmissionInput = {
     requestId,
     binId: "binny-runs-one",
+    relations: [],
     items: [
       {
         sourceKey: { namespace: "e2e", key: sourceKey },
+        title: "Interrupted resource reference",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
         body: { text: "引用登记被进程中断" },
+        extensions: {},
         resources: [{ resourceId }],
         capture: {
           scope: { case: "interrupted-resource-reference" },
@@ -1231,7 +1402,8 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
         },
       },
     ],
-  });
+  };
+  const request = JSON.stringify(submission);
   const program = [
     'process.stdout.write("BINNY_RESOURCES_REFERENCE_STARTED\\n");',
     `const response = await fetch("http://127.0.0.1:3000/archives", { method: "POST", headers: { "content-type": "application/json" }, body: ${JSON.stringify(request)} });`,
@@ -2022,28 +2194,27 @@ async function verifyLinuxdoArchiveJourney(
     runOutput(journey.firstCollection)?.completedScopes?.includes("topic:2401"),
   );
 
-  const searchTopic = async (text: string) =>
-    cliData<{
-      readonly results: readonly {
+  const readCollectedItem = async (sourceKey: string) => {
+    for (const itemId of journey.itemIds) {
+      const item = cliData<{
         readonly itemId: string;
         readonly sourceKey: {
           readonly namespace: string;
           readonly key: string;
         };
-      }[];
-    }>(
-      await cliForLinuxdo([
-        "archive",
-        "search",
-        "--query",
-        JSON.stringify({
-          bins: [binId],
-          text: { groups: [[text]] },
-          limit: 10,
-        }),
-      ]),
-      "found",
-    );
+      }>(
+        await cliForLinuxdo(["archive", "item", itemId, "--bin", binId]),
+        "found",
+      );
+      if (
+        item.sourceKey.namespace === namespace &&
+        item.sourceKey.key === sourceKey
+      ) {
+        return item;
+      }
+    }
+    assert.fail("Initial Linux.do run did not return " + sourceKey + ".");
+  };
 
   const rssItem = cliData<{
     readonly itemId: string;
@@ -2134,10 +2305,8 @@ async function verifyLinuxdoArchiveJourney(
     assert.ok((await response.arrayBuffer()).byteLength > 0);
   }
 
-  const initialSearch = await searchTopic("主题正文版本 1");
-  assert.equal(initialSearch.results.length, 1);
-  const rootItemId = initialSearch.results[0]?.itemId;
-  assert.ok(rootItemId !== undefined);
+  const rootLocator = await readCollectedItem("post:240001");
+  const rootItemId = rootLocator.itemId;
   assert.ok(journey.itemIds.includes(rootItemId));
   const rootItem = cliData<{
     readonly itemId: string;
@@ -2146,6 +2315,22 @@ async function verifyLinuxdoArchiveJourney(
       readonly binId: string;
       readonly revisionId: string;
       readonly state: {
+        readonly title: string | null;
+        readonly sourcePublishedAt: ArchiveSourceTimeRead | null;
+        readonly sourceModifiedAt: ArchiveSourceTimeRead | null;
+        readonly extensions: {
+          readonly topicId: number;
+          readonly postNumber: number;
+          readonly categoryId: number | null;
+          readonly tags: readonly string[];
+          readonly authorUsername: string | null;
+          readonly authorName: string | null;
+          readonly topic: {
+            readonly slug: string | null;
+            readonly createdAt: string | null;
+            readonly title?: string;
+          };
+        };
         readonly body?: {
           readonly html?: string;
           readonly markdown?: string;
@@ -2169,6 +2354,54 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(originalRootView !== undefined);
   assert.equal(originalRootView.state.capture.completeness, "complete");
+  const originalRootState = originalRootView.state;
+  assert.equal(originalRootState.title, "受控主题标题版本 1");
+  assert.deepEqual(originalRootState.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
+  assert.deepEqual(originalRootState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:01.000Z",
+  });
+  assert.equal(originalRootState.extensions.topicId, 2401);
+  assert.equal(originalRootState.extensions.postNumber, 1);
+  assert.equal(originalRootState.extensions.categoryId, 42);
+  assert.deepEqual(originalRootState.extensions.tags, ["受控", "归档"]);
+  assert.equal(originalRootState.extensions.authorUsername, "fixture-author");
+  assert.equal(originalRootState.extensions.authorName, "Linux.do 示例作者");
+  assert.deepEqual(originalRootState.extensions.topic, {
+    slug: "controlled-linuxdo-topic",
+    createdAt: "2026-10-28T00:00:00.000Z",
+  });
+
+  const firstReplyLocator = await readCollectedItem("post:240002");
+  const firstReplyItemId = firstReplyLocator.itemId;
+  assert.ok(journey.itemIds.includes(firstReplyItemId));
+  const firstReplyItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", firstReplyItemId, "--bin", binId]),
+    "found",
+  );
+  const firstReplyView = firstReplyItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(firstReplyView !== undefined);
+  assert.equal(firstReplyItem.sourceKey.key, "post:240002");
+  assert.equal(firstReplyView.state.title, null);
+  assert.deepEqual(firstReplyView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T02:00:00.000Z",
+  });
+  assert.deepEqual(firstReplyView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:01.000Z",
+  });
+  assert.equal(firstReplyView.state.extensions.topicId, 2401);
+  assert.equal(firstReplyView.state.extensions.postNumber, 2);
+  assert.equal(
+    firstReplyView.state.extensions.topic.title,
+    "受控主题标题版本 1",
+  );
   const firstRunCommitLocator = journey.firstCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
   );
@@ -2300,9 +2533,6 @@ async function verifyLinuxdoArchiveJourney(
   assert.ok(
     runOutput(secondCollection)?.completedScopes?.includes("topic:2401"),
   );
-  const updatedSearch = await searchTopic("主题正文版本 2");
-  assert.equal(updatedSearch.results.length, 1);
-  assert.equal(updatedSearch.results[0]?.itemId, rootItemId);
   const updatedItem = cliData<typeof rootItem>(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "found",
@@ -2312,8 +2542,41 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(updatedRootView !== undefined);
   assert.equal(updatedRootView.state.capture.completeness, "complete");
+  assert.equal(updatedRootView.state.title, "受控主题标题版本 2");
+  assert.deepEqual(updatedRootView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
+  assert.deepEqual(updatedRootView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:02.000Z",
+  });
+  assert.match(updatedRootView.state.body?.markdown ?? "", /主题正文版本 2/u);
+  assert.equal("title" in updatedRootView.state.extensions.topic, false);
   assert.ok(updatedItem.revisions.length >= 2);
   assert.notEqual(updatedRootView.revisionId, firstRevisionId);
+  const updatedReplyItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", firstReplyItemId, "--bin", binId]),
+    "found",
+  );
+  const updatedReplyView = updatedReplyItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(updatedReplyView !== undefined);
+  assert.equal(updatedReplyView.state.title, null);
+  assert.deepEqual(updatedReplyView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T02:00:00.000Z",
+  });
+  assert.deepEqual(updatedReplyView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:02.000Z",
+  });
+  assert.equal(
+    updatedReplyView.state.extensions.topic.title,
+    "受控主题标题版本 2",
+  );
+  assert.match(updatedReplyView.state.body?.markdown ?? "", /回复正文版本 2/u);
   const secondRunCommitLocator = secondCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
   );
@@ -2352,9 +2615,6 @@ async function verifyLinuxdoArchiveJourney(
     runOutput(partialCollection)?.completedScopes?.includes("topic:2401"),
     false,
   );
-  const currentPartialSearch = await searchTopic("主题正文版本 3");
-  assert.equal(currentPartialSearch.results.length, 1);
-  assert.equal(currentPartialSearch.results[0]?.itemId, rootItemId);
   const partialItem = cliData<typeof rootItem>(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "found",
@@ -2364,6 +2624,12 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(partialRootView !== undefined);
   assert.equal(partialRootView.state.capture.completeness, "partial");
+  assert.equal(partialRootView.state.title, "受控主题标题版本 3");
+  assert.deepEqual(partialRootView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:03.000Z",
+  });
+  assert.match(partialRootView.state.body?.markdown ?? "", /主题正文版本 3/u);
   assert.ok(
     partialRootView.state.capture.missing.some(
       ({ path }) => path === "body.images[0]",
@@ -2498,8 +2764,6 @@ async function verifyLinuxdoArchiveJourney(
     deletedItemIds.toSorted(),
   );
   assert.equal(deletion.deleted, true);
-  const noDeletedSearch = await searchTopic("主题正文版本 3");
-  assert.deepEqual(noDeletedSearch.results, []);
   cliFailure(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "item_deleted",
@@ -3044,20 +3308,24 @@ type RssArchiveRead = {
     readonly archiveSeq: string;
     readonly revisionId: string;
     readonly state: {
+      readonly title: string | null;
+      readonly sourcePublishedAt: ArchiveSourceTimeRead | null;
+      readonly sourceModifiedAt: ArchiveSourceTimeRead | null;
+      readonly extensions: Record<string, unknown> & {
+        readonly authors?: readonly string[];
+        readonly categories?: readonly string[];
+        readonly item?: {
+          readonly bodyType?: string;
+          readonly bodySource?: string;
+          readonly authors?: readonly unknown[];
+          readonly categories?: readonly unknown[];
+        } | null;
+      };
       readonly body?: {
         readonly html?: string;
         readonly markdown?: string;
         readonly text?: string;
         readonly searchText?: string;
-      };
-      readonly metadata?: Record<string, unknown> & {
-        readonly item?: {
-          readonly bodyType?: string;
-          readonly bodySource?: string;
-          readonly bodyUrl?: string;
-          readonly bodyFinalUrl?: string;
-          readonly bodyTitle?: string | null;
-        } | null;
       };
       readonly resources?: readonly { readonly resourceId: string }[];
       readonly capture: {
@@ -3088,7 +3356,7 @@ async function searchRssArchive(
 ): Promise<
   readonly {
     readonly itemId: string;
-    readonly sourceKey?: { readonly namespace: string; readonly key: string };
+    readonly sourceKey: { readonly namespace: string; readonly key: string };
   }[]
 > {
   const results: {
@@ -3134,7 +3402,7 @@ async function readRssArchive(
   const results = await searchRssArchive(baseUrl, binId, text);
   assert.equal(results.length, 1, `归档正文检索「${text}」应命中一项。`);
   const result = results[0];
-  assert.ok(result?.sourceKey !== undefined);
+  assert.ok(result !== undefined);
   const item = cliData<RssArchiveRead>(
     await cli(baseUrl, ["archive", "item", result.itemId, "--bin", binId]),
     "found",
@@ -3822,6 +4090,35 @@ async function configureManualRunBins(
     waitForRuntime(baseUrl, "binny-runs-one"),
     waitForRuntime(baseUrl, "binny-runs-two"),
   ]);
+}
+
+async function configureExtensionScopeBins(baseUrl: string): Promise<void> {
+  const schemaVariant = await waitForBinRegistration(
+    baseUrl,
+    "binny-runs-schema-two",
+  );
+  assert.equal(schemaVariant.sourceAdapterId, "binny-runs.manual-run-fixture");
+  assert.equal(schemaVariant.sourceAdapterVersion, "2.0.0");
+  const configuredSchemaVariant = cliData<{ readonly id: string }>(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny-runs-schema-two",
+      "--identity",
+      "binny-runs-schema-two-identity",
+      "--config",
+      JSON.stringify({ section: "initial" }),
+    ]),
+    "updated",
+  );
+  assert.equal(configuredSchemaVariant.id, "binny-runs-schema-two");
+  await waitForRuntime(baseUrl, "binny-runs-schema-two");
+
+  const rssManifest = await createRssManifest();
+  await createRssBin(baseUrl, "binny-rss-one", rssManifest, {
+    feeds: [{ id: "extension-scope", url: "https://example.test/rss" }],
+  });
+  await waitForRuntime(baseUrl, "binny-rss-one");
 }
 
 async function manualRunsCliStep(
@@ -5223,11 +5520,18 @@ async function scheduledRunsStep(
   await stopPromise;
   const shortOutageStoppedAt = stopCompletedAt ?? Date.now();
   if (signalError !== undefined) throw signalError;
-  const heartbeatStatus = await heartbeatProxy.waitUntilRequestBodyResponse();
+  const unrelatedRequestStatus = await heartbeatProxy.forwardUnrelatedRequest();
+  const heartbeatResponse = await heartbeatProxy.waitUntilRequestBodyResponse();
   process.stdout.write(
-    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; heartbeat HTTP ${String(heartbeatStatus)}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
+    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; held heartbeat HTTP ${String(heartbeatResponse.statusCode)}; unrelated proxy request HTTP ${String(unrelatedRequestStatus)}; latest forwarded HTTP ${String(heartbeatResponse.latestForwardedStatusCode)}; held error ${heartbeatResponse.error ?? "none"}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
   );
-  assert.equal(heartbeatStatus, 200);
+  assert.equal(unrelatedRequestStatus, 502);
+  assert.equal(heartbeatResponse.latestForwardedStatusCode, 502);
+  assert.equal(
+    heartbeatResponse.statusCode,
+    200,
+    `Held heartbeat failed: ${heartbeatResponse.error ?? "no upstream error"}`,
+  );
   assert.ok(
     shortOutageScheduledAt - shortOutageStoppedAt > 500,
     `所有 server 停止时应距离触发仍超过0.5秒，实际 ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms。`,
@@ -7439,6 +7743,20 @@ async function runRssAcceptance(
   assert.ok(initialRssView !== undefined);
   const rssV1 = rssArchiveView(rssItemV1, "binny-rss-one");
   assert.equal(rssV1.capture.completeness, "complete");
+  assert.equal(rssV1.title, "RSS 全文测试文章");
+  assert.deepEqual(rssV1.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:23:45+02:00",
+  });
+  assert.deepEqual(rssV1.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-30T12:34:56-03:00",
+  });
+  assert.deepEqual(rssV1.extensions.authors, ["作者"]);
+  assert.deepEqual(rssV1.extensions.categories, ["工程"]);
+  assert.equal("title" in rssV1.extensions, false);
+  assert.equal("published" in rssV1.extensions, false);
+  assert.equal("updated" in rssV1.extensions, false);
   assert.equal(rssV1.body?.html, undefined);
   assert.match(rssV1.body?.markdown ?? "", /RSS 正文版本 1/u);
   assert.doesNotMatch(rssV1.body?.markdown ?? "", /RSS 摘要版本 1/u);
@@ -7456,8 +7774,16 @@ async function runRssAcceptance(
     await searchRssArchive(baseUrl, "binny-rss-one", "没有对应资料的词"),
     [],
   );
+  const caseInsensitiveTitleResults = await searchRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "rss 全文测试文章",
+  );
   assert.deepEqual(
-    await searchRssArchive(baseUrl, "binny-rss-one", "rss 全文测试文章"),
+    caseInsensitiveTitleResults.map(({ itemId, sourceKey }) => ({
+      itemId,
+      sourceKey,
+    })),
     [{ itemId: rssItemV1.itemId, sourceKey: rssItemV1.sourceKey }],
     "literal search matches title text without case sensitivity.",
   );
@@ -7479,6 +7805,10 @@ async function runRssAcceptance(
   );
   assert.equal(titleOnlyState.capture.completeness, "complete");
   assert.deepEqual(titleOnlyState.capture.missing, []);
+  assert.equal(titleOnlyState.title, "RSS 仅标题資料🌿");
+  assert.equal(titleOnlyState.sourcePublishedAt, null);
+  assert.equal(titleOnlyState.sourceModifiedAt, null);
+  assert.equal("title" in titleOnlyState.extensions, false);
 
   const titleOnlySearch = cliData<{
     readonly results: readonly {
@@ -7610,6 +7940,20 @@ async function runRssAcceptance(
   );
   const atomV1 = rssArchiveView(atomItemV1, "binny-rss-one");
   assert.equal(atomV1.capture.completeness, "complete");
+  assert.equal(atomV1.title, "Atom 全文测试文章");
+  assert.deepEqual(atomV1.sourcePublishedAt, {
+    precision: "day",
+    value: "2026-10-27",
+  });
+  assert.deepEqual(atomV1.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T12:34:56-05:00",
+  });
+  assert.deepEqual(atomV1.extensions.authors, ["作者乙"]);
+  assert.deepEqual(atomV1.extensions.categories, ["测试"]);
+  assert.equal("title" in atomV1.extensions, false);
+  assert.equal("published" in atomV1.extensions, false);
+  assert.equal("updated" in atomV1.extensions, false);
   assert.equal(atomV1.body?.html, undefined);
   assert.match(atomV1.body?.markdown ?? "", /Atom 全文版本 1/u);
   assert.match(atomV1.body?.text ?? "", /Atom 全文版本 1/u);
@@ -7670,9 +8014,10 @@ async function runRssAcceptance(
     assert.equal(state.body?.html, undefined);
     assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.ok(
-      typeof state.metadata?.item === "object" && state.metadata.item !== null,
+      typeof state.extensions?.item === "object" &&
+        state.extensions.item !== null,
     );
-    assert.equal(state.metadata?.item?.bodyType, "text");
+    assert.equal(state.extensions?.item?.bodyType, "text");
   }
   const rssLiteralItem = literalWidgetItemsByKey.get(
     "id:urn:binny:rss:rss-item",
@@ -7687,7 +8032,7 @@ async function runRssAcceptance(
   );
   assert.equal(rssLiteralState.body?.html, undefined);
   assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
-  assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
+  assert.equal(rssLiteralState.extensions?.item?.bodyType, "html");
   const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
     "id:urn:binny:rss:rss-item-escaped",
   );
@@ -7704,7 +8049,7 @@ async function runRssAcceptance(
   );
   assert.equal(rssEscapedLiteralState.body?.html, undefined);
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
-  assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
+  assert.equal(rssEscapedLiteralState.extensions?.item?.bodyType, "html");
   for (const [key, bodyType] of [
     ["id:tag:example.test,2026:binny-rss-atom", "xhtml"],
     ["id:tag:example.test,2026:atom-html-literal", "html"],
@@ -7717,25 +8062,23 @@ async function runRssAcceptance(
     assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
     assert.equal(state.body?.html, undefined);
     assert.match(state.body?.markdown ?? "", /&lt;widget&gt;/u);
-    assert.equal(state.metadata?.item?.bodyType, bodyType);
+    assert.equal(state.extensions?.item?.bodyType, bodyType);
   }
   const atomEntityTextMatches = await searchRssArchive(
     baseUrl,
     "binny-rss-one",
     "&lt;widget&gt;",
   );
-  assert.equal(atomEntityTextMatches.length, 1);
-  const atomEntityTextMatch = atomEntityTextMatches[0];
-  assert.ok(atomEntityTextMatch !== undefined);
-  const atomEntityTextItem = cliData<RssArchiveRead>(
-    await cli(baseUrl, [
-      "archive",
-      "item",
-      atomEntityTextMatch.itemId,
-      "--bin",
-      "binny-rss-one",
-    ]),
-    "found",
+  const atomEntityTextItem = await readRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "Atom 纯文本中的实体字面值",
+  );
+  assert.ok(
+    atomEntityTextMatches.some(
+      ({ itemId }) => itemId === atomEntityTextItem.itemId,
+    ),
+    "escaped entity text search should include the Atom entity-text item.",
   );
   const atomEntityTextState = rssArchiveView(
     atomEntityTextItem,
@@ -7762,7 +8105,7 @@ async function runRssAcceptance(
   );
   assert.equal(atomModeTextV1.revisions.length, 1);
   assert.equal(
-    rssArchiveView(atomModeTextV1, "binny-rss-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeTextV1, "binny-rss-one").extensions?.item?.bodyType,
     "text",
   );
 
@@ -7916,7 +8259,7 @@ async function runRssAcceptance(
     "Atom 正文同值从 text 切换到 html 时应形成新的归档状态。",
   );
   assert.equal(
-    rssArchiveView(atomModeHtmlV2, "binny-rss-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeHtmlV2, "binny-rss-one").extensions?.item?.bodyType,
     "html",
   );
   const stableItem = await readRssArchive(
@@ -9175,19 +9518,23 @@ async function main(): Promise<void> {
     await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
-    if (!articleAdaptersOnly) {
+    if (!articleAdaptersOnly && !rssLinuxdoOnly) {
       await compose(["build", "runtime-fifteen-one"]);
       builtImages.add(runtimeImageName);
     }
-    if (!manualRunsOnly) {
+    if (!manualRunsOnly || archiveModelJourney) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
+    }
+    if (archiveModelJourney) {
+      await compose(["build", "runtime-fifteen-schema-two"]);
+      builtImages.add(schemaVariantRuntimeImageName);
     }
     if (runFunctionalJourney) {
       await compose(["build", "runtime-linuxdo"]);
       builtImages.add(linuxdoRuntimeImageName);
     }
-    if (runFunctionalJourney || articleAdaptersOnly) {
+    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
       await compose(["build", ...articleAdapterRuntimeServices]);
       for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
         builtImages.add(imageName);
@@ -9229,25 +9576,46 @@ async function main(): Promise<void> {
             "manual-runs-source",
             "runtime-fifteen-one",
             ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-            ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
+            ...(archiveModelJourney
+              ? [
+                  "runtime-fifteen-two",
+                  "runtime-fifteen-schema-two",
+                  "runtime-rss",
+                ]
+              : []),
           ]
-        : [
-            "postgres",
-            "server",
-            "manual-runs-source",
-            "rss-e2e-source",
-            "runtime-fifteen-one",
-            "runtime-fifteen-two",
-            "runtime-rss",
-            "runtime-rss-two",
-            "heartbeat-proxy",
-          ];
-    if (runFunctionalJourney) {
+        : rssLinuxdoOnly
+          ? [
+              "postgres",
+              "server",
+              "rss-e2e-source",
+              "runtime-rss",
+              "runtime-rss-two",
+            ]
+          : [
+              "postgres",
+              "server",
+              "manual-runs-source",
+              "rss-e2e-source",
+              "runtime-fifteen-one",
+              "runtime-fifteen-two",
+              "runtime-rss",
+              "runtime-rss-two",
+              "heartbeat-proxy",
+            ];
+    if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
         "runtime-linuxdo-two",
         "linuxdo-e2e-source",
         ...articleAdapterRuntimeServices,
+      );
+    }
+    if (runFunctionalJourney && rssLinuxdoOnly) {
+      e2eServices.push(
+        "runtime-linuxdo",
+        "runtime-linuxdo-two",
+        "linuxdo-e2e-source",
       );
     }
     await compose([
@@ -9260,7 +9628,7 @@ async function main(): Promise<void> {
       ...e2eServices,
     ]);
     composePort = await publishedPort("server", 3000);
-    if (!articleAdaptersOnly) {
+    if (!articleAdaptersOnly && !rssLinuxdoOnly) {
       manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
     }
     if (runFunctionalJourney) {
@@ -9270,6 +9638,7 @@ async function main(): Promise<void> {
     if (useHeartbeatProxy) {
       activeHeartbeatProxy = createHeartbeatDelayProxy(
         await publishedPort("heartbeat-proxy", 8083),
+        await publishedPort("heartbeat-proxy", 8082),
       );
       heartbeatProxy = activeHeartbeatProxy;
     }
@@ -9311,6 +9680,7 @@ async function main(): Promise<void> {
     } else if (archiveModelJourney) {
       const manifest = await createRuntimeFixtureManifest();
       await configureManualRunBins(baseUrl, manifest);
+      await configureExtensionScopeBins(baseUrl);
       await waitForManualRunSource();
       const itemId = await manualRunsHttpStep(baseUrl, manifest);
       assert.ok(itemId);
@@ -9326,6 +9696,10 @@ async function main(): Promise<void> {
         await verifyArchiveSearchPoolWaitBudget(
           baseUrl,
           archiveStateReference.itemId,
+        );
+        baseUrl = await verifyResourceStorageInterruptions(
+          baseUrl,
+          archiveState,
         );
         const sdkResourceState = await sdkResourceStep(baseUrl);
         await waitForUnreferencedResourceAge();
@@ -9359,40 +9733,48 @@ async function main(): Promise<void> {
       });
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
-      assert.ok(installedCliConsumer !== undefined);
-      assert.ok(activeHeartbeatProxy !== undefined);
       assert.ok(rssControlSource !== undefined);
-      await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
-      await verifyConfigurationJourney(baseUrl, manualRunSourceControlUrl());
-      const manualRunManifest = await createRuntimeFixtureManifest();
-      await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
-      await manualRunControllerPartitionStep();
-      await manualRunsHttpStep(baseUrl, manualRunManifest);
-      await verifyGlobalOperationsCli(baseUrl);
-      baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
+      if (!rssLinuxdoOnly) {
+        assert.ok(installedCliConsumer !== undefined);
+        assert.ok(activeHeartbeatProxy !== undefined);
+        await installedCliConsumer.verifyRemoteUrlSelection(baseUrl);
+        await verifyConfigurationJourney(baseUrl, manualRunSourceControlUrl());
+        const manualRunManifest = await createRuntimeFixtureManifest();
+        await manualRunsCliStep(
+          baseUrl,
+          manualRunManifest,
+          activeHeartbeatProxy,
+        );
+        await manualRunControllerPartitionStep();
+        await manualRunsHttpStep(baseUrl, manualRunManifest);
+        await verifyGlobalOperationsCli(baseUrl);
+        baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
+      }
       const rssAcceptance = await runRssAcceptance(
         baseUrl,
         rssControlSource,
         rssImageUpdate,
       );
-      await runArticleAdaptersJourney({
-        baseUrl,
-        articleSource: rssControlSource,
-        cli: (args) => cli(baseUrl, args),
-        compose,
-        fetchRegisteredBin: waitForBinRegistration,
-        waitForRuntime,
-        waitForRuntimeHealth,
-      });
-      await archiveHttpStep("fixed-search", baseUrl);
-      const archive = await archiveHttpStep("submit", baseUrl);
-      await archiveSearchCliStep(baseUrl);
-      const sdkResource = await sdkResourceStep(baseUrl);
-      baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
-      baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
-      process.stdout.write(
-        "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
-      );
+      if (!rssLinuxdoOnly) {
+        await runArticleAdaptersJourney({
+          baseUrl,
+          articleSource: rssControlSource,
+          cli: (args) => cli(baseUrl, args),
+          compose,
+          fetchRegisteredBin: waitForBinRegistration,
+          waitForRuntime,
+          waitForRuntimeHealth,
+        });
+        await archiveHttpStep("fixed-search", baseUrl);
+        const archive = await archiveHttpStep("submit", baseUrl);
+        await archiveSearchCliStep(baseUrl);
+        const sdkResource = await sdkResourceStep(baseUrl);
+        baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
+        baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
+        process.stdout.write(
+          "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
+        );
+      }
       await createLinuxdoBin(baseUrl);
       await createLinuxdoBin(
         baseUrl,
@@ -9441,9 +9823,15 @@ async function main(): Promise<void> {
         linuxdoJourney,
         rssAcceptance,
       );
-      await verifyLinuxdoCapacityJourney(baseUrl);
+      if (rssLinuxdoOnly) {
+        process.stdout.write(
+          "RSS/Atom、Linux.do 来源映射、媒体复用与公开历史读回通过。\n",
+        );
+      } else {
+        await verifyLinuxdoCapacityJourney(baseUrl);
+      }
     }
-    if (!manualRunsOnly) {
+    if (!manualRunsOnly && !rssLinuxdoOnly) {
       await runCapacityAcceptance(baseUrl);
     }
   } catch (error) {

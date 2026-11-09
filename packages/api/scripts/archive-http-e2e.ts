@@ -68,6 +68,43 @@ type SdkResourceJourney = {
   readonly resourceId: string;
 };
 
+async function submitExtensionSearchFixture(
+  client: ArchiveClient,
+  binId: string,
+): Promise<void> {
+  const queuedResponse = await client.bins[":binId"].runs.$post({
+    param: { binId },
+    json: {
+      action: "collect",
+      params: {
+        sourceUrl: "https://example.test/feed",
+        gateKey: "extension-search-" + binId,
+        sourceKey: "extension-search-" + binId,
+        extensionSearchFixture: true,
+      },
+    },
+  });
+  assert.equal(queuedResponse.status, 202);
+  if (queuedResponse.status !== 202) return;
+  const queued = await queuedResponse.json();
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const runResponse = await client.bins[":binId"].runs[":runId"].$get({
+      param: { binId, runId: queued.runId },
+    });
+    assert.equal(runResponse.status, 200);
+    if (runResponse.status !== 200) return;
+    const run = await runResponse.json();
+    if (run.status === "completed") {
+      assert.ok(run.result?.commits.some(({ items }) => items.length > 0));
+      return;
+    }
+    assert.notEqual(run.status, "failed");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`Extension search fixture run did not complete for ${binId}.`);
+}
+
 function compileJsonSchema(document: unknown) {
   const ajv = new Ajv2020({ strict: false });
   addFormats(ajv);
@@ -2515,10 +2552,414 @@ async function verifyArchiveReadErrors(
 
 async function verifyFixedSearch(baseUrl: string): Promise<void> {
   const client = createApiClient(baseUrl);
+  if (process.env.BINNY_E2E_ARCHIVE_EXTENSION_FIXTURES === "1") {
+    await Promise.all(
+      ["binny-runs-one", "binny-runs-two"].map((binId) =>
+        submitExtensionSearchFixture(client, binId),
+      ),
+    );
+    const schemaVariantResponse = await fetch(
+      new URL("/bins/binny-runs-schema-two/extension-fields", baseUrl),
+    );
+    assert.equal(schemaVariantResponse.status, 200);
+    if (schemaVariantResponse.status === 200) {
+      const schemaVariant = (await schemaVariantResponse.json()) as {
+        readonly sourceAdapterVersion: string;
+        readonly fields: Readonly<
+          Record<string, { readonly allowedValues?: readonly string[] }>
+        >;
+      };
+      assert.equal(schemaVariant.sourceAdapterVersion, "2.0.0");
+      assert.deepEqual(schemaVariant.fields.category?.allowedValues, [
+        "comment",
+      ]);
+    }
+  }
+  const extensionFieldsResponse = await fetch(
+    new URL("/bins/binny-runs-one/extension-fields", baseUrl),
+  );
+  assert.equal(extensionFieldsResponse.status, 200);
+  if (extensionFieldsResponse.status === 200) {
+    const extensionFields = (await extensionFieldsResponse.json()) as {
+      readonly sourceAdapterId: string;
+      readonly fields: Readonly<
+        Record<
+          string,
+          {
+            readonly type: string;
+            readonly description?: string;
+            readonly operations: readonly string[];
+          }
+        >
+      >;
+    };
+    assert.equal(
+      extensionFields.sourceAdapterId,
+      "binny-runs.manual-run-fixture",
+    );
+    assert.deepEqual(extensionFields.fields.section, {
+      type: "string",
+      nullable: false,
+      required: false,
+      description: "The source section assigned to this archived item.",
+      operations: ["eq", "in"],
+    });
+    assert.deepEqual(extensionFields.fields.category, {
+      type: "string",
+      nullable: false,
+      required: false,
+      description: "The category assigned to this archived item.",
+      allowedValues: ["post", "comment"],
+      operations: ["eq", "in"],
+    });
+    assert.deepEqual(extensionFields.fields.floor, {
+      type: "integer",
+      nullable: false,
+      required: false,
+      description: "The source floor number assigned to this archived item.",
+      operations: ["eq", "in"],
+    });
+    assert.deepEqual(extensionFields.fields.labels, {
+      type: "array",
+      nullable: false,
+      required: false,
+      description: "Labels assigned to this archived item.",
+      itemType: "string",
+      operations: ["has", "hasAny"],
+    });
+    assert.deepEqual(extensionFields.fields.featured, {
+      type: "boolean",
+      nullable: false,
+      required: false,
+      description: "Whether the source marks this archived item as featured.",
+      operations: ["eq", "in"],
+    });
+    assert.deepEqual(extensionFields.fields.nullableCategory, {
+      type: "string",
+      nullable: true,
+      required: false,
+      description: "The category assigned to this archived item.",
+      operations: ["eq", "in"],
+    });
+    assert.deepEqual(extensionFields.fields.nullableLabels, {
+      type: "array",
+      nullable: true,
+      required: false,
+      description: "Labels assigned to this archived item.",
+      itemType: "string",
+      operations: ["has", "hasAny"],
+    });
+  }
   const discovery = await discoverArchiveQueryContract(baseUrl);
   const searchContract = discovery.queryContract.operations.search;
   const searchInput = compileJsonSchema(archiveApiSchemas.searchInput);
   const searchOutput = compileJsonSchema(archiveApiSchemas.searchPage);
+  assert.equal(
+    searchInput({
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: {
+          section: { op: "eq", value: "archive-model-extension-change" },
+        },
+      },
+    } as const),
+    false,
+  );
+
+  const extensionScalarQuery = {
+    bins: ["binny-runs-one"],
+    extensions: {
+      sourceAdapterId: "binny-runs.manual-run-fixture",
+      filters: {
+        section: { op: "eq", value: "archive-model-extension-change" },
+      },
+    },
+    text: { groups: [["Typed archive stable body"]] },
+    limit: 10,
+  } as const;
+  assert.equal(searchInput(extensionScalarQuery), true);
+  const extensionScalarPage = archiveSearchPageSchema.parse(
+    await postDiscoveredSearch(baseUrl, searchContract, extensionScalarQuery),
+  );
+  assert.equal(extensionScalarPage.results.length, 1);
+  assert.equal(
+    extensionScalarPage.results[0]?.title,
+    "Typed archive public change",
+  );
+  assert.deepEqual(
+    extensionScalarPage.results[0]?.matches.map(({ binId }) => binId),
+    ["binny-runs-one"],
+  );
+  const unmatchedExtensionQuery = {
+    ...extensionScalarQuery,
+    extensions: {
+      ...extensionScalarQuery.extensions,
+      filters: {
+        section: { op: "eq" as const, value: "not-the-declared-section" },
+      },
+    },
+  };
+  const unmatchedExtensionPage = archiveSearchPageSchema.parse(
+    await postDiscoveredSearch(
+      baseUrl,
+      searchContract,
+      unmatchedExtensionQuery,
+    ),
+  );
+  assert.equal(unmatchedExtensionPage.results.length, 0);
+
+  const implicitExtensionScope = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ extensions: extensionScalarQuery.extensions }),
+    },
+  );
+  assert.equal(implicitExtensionScope.status, 400);
+  if (implicitExtensionScope.status === 400) {
+    const error = (
+      (await implicitExtensionScope.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["bins"]);
+    assert.match(error.message, /explicit bin scope/u);
+  }
+  const invalidExtensionOperation = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bins: ["binny-runs-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: {
+            section: { op: "gt", value: "archive-model" },
+          },
+        },
+      }),
+    },
+  );
+  assert.equal(invalidExtensionOperation.status, 400);
+  if (invalidExtensionOperation.status === 400) {
+    const error = (
+      (await invalidExtensionOperation.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["extensions", "filters", "section", "op"]);
+    assert.match(error.message, /eq.*in.*has.*hasAny/u);
+  }
+
+  const invalidExtensionFilterShape = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bins: ["binny-runs-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: [],
+        },
+      }),
+    },
+  );
+  assert.equal(invalidExtensionFilterShape.status, 400);
+  if (invalidExtensionFilterShape.status === 400) {
+    const error = (
+      (await invalidExtensionFilterShape.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["extensions", "filters"]);
+    assert.match(error.message, /expected record/u);
+  }
+
+  if (process.env.BINNY_E2E_ARCHIVE_EXTENSION_FIXTURES === "1") {
+    const extensionSearch = async (query: Record<string, unknown>) =>
+      archiveSearchPageSchema.parse(
+        await postDiscoveredSearch(baseUrl, searchContract, query),
+      );
+    const multiBinScope = ["binny-runs-one", "binny-runs-two"];
+    const scopedExtensionQuery = (filters: Record<string, unknown>) => ({
+      bins: multiBinScope,
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters,
+      },
+      limit: 20,
+    });
+    const postCategoryPage = await extensionSearch(
+      scopedExtensionQuery({ category: { op: "eq", value: "post" } }),
+    );
+    assert.deepEqual(
+      postCategoryPage.results.map(({ sourceKey }) => sourceKey),
+      [
+        {
+          namespace: "binny-runs.extension-search-fixture",
+          key: "multi-view-item",
+        },
+      ],
+    );
+    assert.deepEqual(
+      postCategoryPage.results[0]?.matches.map(({ binId }) => binId),
+      ["binny-runs-one"],
+    );
+
+    const floorInPage = await extensionSearch(
+      scopedExtensionQuery({ floor: { op: "in", values: [7, 8] } }),
+    );
+    assert.deepEqual(
+      floorInPage.results[0]?.matches.map(({ binId }) => binId),
+      ["binny-runs-one", "binny-runs-two"],
+    );
+    const featuredPage = await extensionSearch(
+      scopedExtensionQuery({ featured: { op: "eq", value: true } }),
+    );
+    assert.deepEqual(
+      featuredPage.results[0]?.matches.map(({ binId }) => binId),
+      ["binny-runs-one"],
+    );
+    const hasNewsPage = await extensionSearch(
+      scopedExtensionQuery({ labels: { op: "has", value: "news" } }),
+    );
+    assert.deepEqual(
+      hasNewsPage.results[0]?.matches.map(({ binId }) => binId),
+      ["binny-runs-one"],
+    );
+    const hasAnyPage = await extensionSearch(
+      scopedExtensionQuery({
+        labels: { op: "hasAny", values: ["reply", "release"] },
+      }),
+    );
+    assert.deepEqual(
+      hasAnyPage.results[0]?.matches.map(({ binId }) => binId),
+      ["binny-runs-one", "binny-runs-two"],
+    );
+
+    const sameViewMiss = await extensionSearch({
+      ...scopedExtensionQuery({ category: { op: "eq", value: "post" } }),
+      text: { groups: [["release"]] },
+    });
+    assert.equal(sameViewMiss.results.length, 0);
+    for (const query of [
+      scopedExtensionQuery({ category: { op: "eq", value: "post" } }),
+      scopedExtensionQuery({ labels: { op: "has", value: "news" } }),
+      scopedExtensionQuery({ nullableCategory: { op: "eq", value: "post" } }),
+      scopedExtensionQuery({ nullableLabels: { op: "has", value: "news" } }),
+    ]) {
+      const page = await extensionSearch(query);
+      assert.equal(
+        page.results.some(({ sourceKey }) =>
+          ["missing-fields", "nullable-fields"].includes(sourceKey.key),
+        ),
+        false,
+      );
+    }
+
+    const invalidExtensionQueries = [
+      {
+        query: scopedExtensionQuery({ undeclared: { op: "eq", value: "x" } }),
+        path: ["extensions", "filters", "undeclared"],
+        message: /does not declare/u,
+      },
+      {
+        query: scopedExtensionQuery({
+          "sourceDetails.category": { op: "eq", value: "post" },
+        }),
+        path: ["extensions", "filters", "sourceDetails.category"],
+        message: /top-level/u,
+      },
+      {
+        query: scopedExtensionQuery({ floor: { op: "eq", value: "7" } }),
+        path: ["extensions", "filters", "floor", "value"],
+        message: /declared integer type/u,
+      },
+      {
+        query: scopedExtensionQuery({
+          category: { op: "has", value: "post" },
+        }),
+        path: ["extensions", "filters", "category", "op"],
+        message: /allowed operations: eq, in/u,
+      },
+      {
+        query: scopedExtensionQuery({
+          category: { op: "in", values: ["post", "unknown"] },
+        }),
+        path: ["extensions", "filters", "category", "values", 1],
+        message: /allowed values \["post","comment"\]/u,
+      },
+    ] as const;
+    for (const { query, path, message } of invalidExtensionQueries) {
+      const response = await client.archives.search.$post({
+        json: query as never,
+      });
+      assert.equal(response.status, 400);
+      if (response.status !== 400) continue;
+      const error = (await response.json()).error;
+      assert.equal(error.code, "invalid_input");
+      assert.deepEqual(error.path, path);
+      assert.match(error.message, message);
+    }
+
+    const mixedAdapterRange = await client.archives.search.$post({
+      json: {
+        bins: ["binny-runs-one", "binny-rss-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: { category: { op: "eq", value: "post" } },
+        },
+      } as never,
+    });
+    assert.equal(mixedAdapterRange.status, 400);
+    if (mixedAdapterRange.status === 400) {
+      const error = (await mixedAdapterRange.json()).error;
+      assert.equal(error.code, "invalid_input");
+      assert.deepEqual(error.path, ["bins"]);
+      assert.match(error.message, /declared source adapter only/u);
+    }
+
+    const schemaMismatchRange = await client.archives.search.$post({
+      json: {
+        bins: ["binny-runs-one", "binny-runs-schema-two"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: { category: { op: "eq", value: "post" } },
+        },
+      } as never,
+    });
+    assert.equal(schemaMismatchRange.status, 400);
+    if (schemaMismatchRange.status === 400) {
+      const error = (await schemaMismatchRange.json()).error;
+      assert.equal(error.code, "invalid_input");
+      assert.deepEqual(error.path, [
+        "extensions",
+        "filters",
+        "category",
+        "value",
+      ]);
+      assert.match(error.message, /allowed values \["comment"\]/u);
+    }
+  }
+
   const runId = randomUUID();
   const prefix = "fixed-search:" + runId + ":";
   const makeItem = (key: string, title: string | null, text: string) => ({

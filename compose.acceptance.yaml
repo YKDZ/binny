@@ -206,6 +206,30 @@ services:
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
     restart: unless-stopped
 
+  runtime-fifteen-schema-two:
+    image: ${BINNY_TEST_RUNNER_SCHEMA_IMAGE:-binny/runner-schema-fixture:local}
+    profiles: [binny-runs]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
+        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-schema-v2-source-adapter.js
+        BINNY_BUILD_FIXTURE: "1"
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-fifteen-schema-two:8080
+      BINNY_BIN_ID: binny-runs-schema-two
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+      BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   runtime-rss:
     image: ${BINNY_RSS_IMAGE:-binny/rss:local}
     profiles: [binny-rss]
