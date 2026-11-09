@@ -886,6 +886,85 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   assert.match(timeWindowReadable.stdout, /Undetermined items: 0/u);
   assert.match(timeWindowReadable.stdout, /Time review: certain/u);
 
+  const sourceTimeQuery = {
+    bins: [binId],
+    text: { in: "title", groups: [["Beijing window"]] },
+    timeWindow: {
+      field: "sourcePublishedAt",
+      from: "2026-11-08",
+      until: "2026-11-09",
+      timeZone: "Asia/Shanghai",
+    },
+    limit: 20,
+  };
+  const certainSourceTimeReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(sourceTimeQuery),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(
+    certainSourceTimeReadable.code,
+    0,
+    certainSourceTimeReadable.stderr,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Source published: 2026-11-08T20:00:00\+08:00 \(precision=instant; timeZone=Asia\/Shanghai\)/u,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Source published: 2026-11-08 \(precision=day; timeZone=Asia\/Shanghai\)/u,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Time match binny-runs-one: certain/u,
+  );
+
+  const undeterminedSourceTimeReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify({
+      ...sourceTimeQuery,
+      timeWindow: { ...sourceTimeQuery.timeWindow, review: "undetermined" },
+    }),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(
+    undeterminedSourceTimeReadable.code,
+    0,
+    undeterminedSourceTimeReadable.stderr,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: null/u,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: 2026-11-08 \(precision=day\)/u,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: 2026-11 \(precision=month; timeZone=Asia\/Shanghai\)/u,
+  );
+  for (const reason of [
+    "missingTime",
+    "missingTimeZone",
+    "precisionOverlapsBoundary",
+  ]) {
+    assert.match(
+      undeterminedSourceTimeReadable.stdout,
+      new RegExp(
+        `Time match binny-runs-one: undetermined \\(${reason}\\)`,
+        "u",
+      ),
+    );
+  }
+
   for (const invalidQuery of [
     { unsupportedFilter: true },
     { budgetMs: 1 },
