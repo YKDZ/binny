@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false"
   },
   "devDependencies": {
+    "@binny/contracts": "workspace:*",
     "@binny/source-adapter-linuxdo": "workspace:*",
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",

@@ -3,18 +3,39 @@ import { Buffer } from "node:buffer";
 import {
   cleanContent,
   validateMediaResponse,
+  type ArchiveItemSubmissionInput,
   type CleanContentMediaCandidate,
   type CleanContentResult,
 } from "@binny/source-adapter-sdk";
 import { parseFeed } from "@rowanmanning/feed-parser";
+import { z } from "zod";
 
 type FeedParserJson = ReturnType<ReturnType<typeof parseFeed>["toJSON"]>;
 type FeedParserItem = ReturnType<typeof parseFeed>["items"][number];
 type FeedParserElement = FeedParserItem["element"];
+type SourceTime = NonNullable<ArchiveItemSubmissionInput["sourcePublishedAt"]>;
+const sourceDateSchema = z.iso.date();
+const sourceInstantSchema = z.iso.datetime({ offset: true });
+const rfc822MonthNames = [
+  "jan",
+  "feb",
+  "mar",
+  "apr",
+  "may",
+  "jun",
+  "jul",
+  "aug",
+  "sep",
+  "oct",
+  "nov",
+  "dec",
+];
 
 export type ParsedFeedItem = FeedParserJson["items"][number] & {
   readonly contentType?: string;
   readonly descriptionType?: string;
+  readonly sourcePublishedAt: SourceTime | null;
+  readonly sourceModifiedAt: SourceTime | null;
 };
 
 export type ParsedFeed = Omit<FeedParserJson, "items"> & {
@@ -82,12 +103,132 @@ function atomTextConstructValue(
   return construct.textContent;
 }
 
+function rawDateText(item: FeedParserItem, name: string): string | undefined {
+  // Read XML text before feed-parser's Date conversion drops offsets and applies fallbacks.
+  const value = item.element.findElementWithName(name)?.textContent.trim();
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function sourceTime(value: string | undefined): SourceTime | null {
+  if (value === undefined) return null;
+  if (/^\d{4}$/u.test(value)) return { precision: "year", value };
+  if (/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(value)) {
+    return { precision: "month", value };
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    return sourceDateSchema.safeParse(value).success
+      ? { precision: "day", value }
+      : null;
+  }
+
+  // Offset-free timestamps do not identify an instant or a local time zone.
+  const isoDateTime =
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})$/iu.exec(
+      value,
+    );
+  if (isoDateTime !== null) {
+    const offset = isoDateTime[2]!.replace(/([+-]\d{2})(\d{2})$/u, "$1:$2");
+    const normalized = `${isoDateTime[1]}${offset}`;
+    if (!sourceInstantSchema.safeParse(normalized).success) return null;
+    return {
+      precision: "instant",
+      value: normalized,
+    };
+  }
+
+  const rfc822Date =
+    /^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+(GMT|UTC|UT|[+-]\d{4}|[+-]\d{2}:\d{2})$/iu.exec(
+      value,
+    );
+  if (rfc822Date === null) return null;
+  const day = Number(rfc822Date[1]);
+  const month = rfc822MonthNames.indexOf(rfc822Date[2]!.toLowerCase());
+  const year = Number(rfc822Date[3]);
+  const hour = Number(rfc822Date[4]);
+  const minute = Number(rfc822Date[5]);
+  const second = Number(rfc822Date[6]);
+  const daysInMonth = [
+    31,
+    year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  // Validate the calendar fields before normalizing them to ISO text.
+  if (month < 0 || year < 1 || day < 1 || day > daysInMonth[month]!) {
+    return null;
+  }
+  if (hour > 23 || minute > 59 || second > 59) return null;
+
+  const rawOffset = rfc822Date[7]!.toUpperCase();
+  const offset =
+    rawOffset === "GMT" || rawOffset === "UTC" || rawOffset === "UT"
+      ? "+00:00"
+      : rawOffset.replace(/([+-]\d{2})(\d{2})$/u, "$1:$2");
+  const offsetHour = Number(offset.slice(1, 3));
+  const offsetMinute = Number(offset.slice(4, 6));
+  if (offsetHour > 23 || offsetMinute > 59) return null;
+  const normalized =
+    String(year).padStart(4, "0") +
+    "-" +
+    String(month + 1).padStart(2, "0") +
+    "-" +
+    String(day).padStart(2, "0") +
+    "T" +
+    String(hour).padStart(2, "0") +
+    ":" +
+    String(minute).padStart(2, "0") +
+    ":" +
+    String(second).padStart(2, "0") +
+    offset;
+  return sourceInstantSchema.safeParse(normalized).success
+    ? { precision: "instant", value: normalized }
+    : null;
+}
+
+function rssSourceTimes(item: FeedParserItem): {
+  readonly sourcePublishedAt: SourceTime | null;
+  readonly sourceModifiedAt: SourceTime | null;
+} {
+  const pubDate = rawDateText(item, "pubdate");
+  const legacyDate = rawDateText(item, "date");
+  const explicitModified =
+    rawDateText(item, "updated") ?? rawDateText(item, "modified");
+  // RSS/DC date records a general date and does not establish when the item was modified.
+  return {
+    sourcePublishedAt: sourceTime(pubDate ?? legacyDate),
+    sourceModifiedAt: sourceTime(explicitModified),
+  };
+}
+
+function atomSourceTimes(item: FeedParserItem): {
+  readonly sourcePublishedAt: SourceTime | null;
+  readonly sourceModifiedAt: SourceTime | null;
+} {
+  return {
+    sourcePublishedAt: sourceTime(
+      rawDateText(item, "published") ?? rawDateText(item, "issued"),
+    ),
+    sourceModifiedAt: sourceTime(
+      rawDateText(item, "modified") ?? rawDateText(item, "updated"),
+    ),
+  };
+}
+
 function parsedRssItem(item: FeedParserItem): ParsedFeedItem {
   const value = item.toJSON();
   const encodedContent = item.element.findElementWithName("encoded");
   const description = item.element.findElementWithName("description");
   return {
     ...value,
+    ...rssSourceTimes(item),
     content:
       encodedContent?.namespace === "content" &&
       encodedContent.textContent.length > 0
@@ -115,7 +256,16 @@ function parsedFeedWithBodyTypes(source: string): ParsedFeed {
   if (parsed.meta.type === "rss") {
     return { ...json, items: parsed.items.map(parsedRssItem) };
   }
-  if (parsed.meta.type !== "atom") return json;
+  if (parsed.meta.type !== "atom") {
+    return {
+      ...json,
+      items: parsed.items.map((item) => ({
+        ...item.toJSON(),
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+      })),
+    };
+  }
   return {
     ...json,
     items: parsed.items.map((item) => {
@@ -124,6 +274,7 @@ function parsedFeedWithBodyTypes(source: string): ParsedFeed {
       const descriptionType = atomTextConstructType(item, "summary");
       return {
         ...value,
+        ...atomSourceTimes(item),
         content: atomTextConstructValue(item, "content"),
         description:
           atomTextConstructValue(item, "summary") ?? value.description,
