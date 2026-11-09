@@ -1174,6 +1174,7 @@ function createCliContract(identity: CliCommandIdentity) {
         commandPlaceholder: "命令",
         choices: "候选：{choices}",
         default: "默认：{value}",
+        countAtLeast: "Provide at least {min} of: {fields}",
       },
     }),
     version: versionCapability({
@@ -1635,22 +1636,21 @@ function createCliContract(identity: CliCommandIdentity) {
               "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
           },
         },
+        usageConstraints: [
+          {
+            kind: "count",
+            fields: ["identityId", "config", "browserIdleTimeoutSeconds"],
+            min: 1,
+          },
+        ],
         input: withPostgresJsonSchemaProjection(
-          z
-            .object({
-              id: binIdSchema,
-              identityId: identityIdSchema.optional(),
-              config: jsonObjectTextSchema.optional(),
-              browserIdleTimeoutSeconds:
-                browserIdleTimeoutOptionSchema.optional(),
-            })
-            .refine(
-              ({ identityId, config, browserIdleTimeoutSeconds }) =>
-                identityId !== undefined ||
-                config !== undefined ||
-                browserIdleTimeoutSeconds !== undefined,
-              { message: "至少提供一个需要修改的字段。" },
-            ),
+          z.object({
+            id: binIdSchema,
+            identityId: identityIdSchema.optional(),
+            config: jsonObjectTextSchema.optional(),
+            browserIdleTimeoutSeconds:
+              browserIdleTimeoutOptionSchema.optional(),
+          }),
         ),
         success: {
           kind: "data",
