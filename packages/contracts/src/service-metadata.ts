@@ -2,8 +2,8 @@ import * as z from "zod";
 
 import { postgresTextSchema } from "./postgres-text.ts";
 
-/** 公开 HTTP 路由兼容协议版本，与运行器控制协议分开递增。 */
-export const publicApiProtocolVersion = 2;
+/** Public HTTP route compatibility version, independent of the runtime protocol. */
+export const publicApiProtocolVersion = 3;
 
 /** 搜索与聚合输入、输出契约的版本。 */
 export const archiveQueryContractVersion = 1;
@@ -15,7 +15,10 @@ export const serviceCapabilities = {
   archiveQueryContract: "archive.query-contract",
 } as const;
 
-/** 独立 HTTP 消费者用于判断公开路由兼容性和发现查询契约。 */
+/**
+ * Compact service discovery metadata. Contract paths point to endpoints that
+ * can be fetched separately when their complete declarations are needed.
+ */
 export const serviceMetadataSchema = z
   .object({
     product: z

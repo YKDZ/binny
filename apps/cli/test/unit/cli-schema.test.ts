@@ -20,8 +20,8 @@ async function run(args: readonly string[]) {
   return { exitCode, output, requestCount };
 }
 
-void describe("离线 CLI 命令契约", () => {
-  void it("列出原生命令目录并按命令路径投影语法与数据契约", async () => {
+void describe("offline CLI command contract", () => {
+  void it("lists commands and projects their contracts by path", async () => {
     const directory = await run(["schema"]);
 
     assert.equal(directory.exitCode, 0);
@@ -83,22 +83,37 @@ void describe("离线 CLI 命令契约", () => {
     assert.equal(command.input.inputSchema.properties.query?.type, "string");
   });
 
-  void it("普通帮助指向 schema、动作、配置和归档查询契约入口", async () => {
+  void it("help points to schema, action, configuration, and query discovery", async () => {
     const rootHelp = await run(["--help"]);
     assert.equal(rootHelp.exitCode, 0);
     assert.match(rootHelp.output, /binny schema/u);
 
     const configHelp = await run(["bin", "update", "--help"]);
     assert.equal(configHelp.exitCode, 0);
-    assert.match(configHelp.output, /bin get/u);
+    assert.match(configHelp.output, /bin config-schema/u);
+
+    const binGroupHelp = await run(["bin", "--help"]);
+    assert.equal(binGroupHelp.exitCode, 0);
+    assert.match(binGroupHelp.output, /binny bin list/u);
+    assert.match(binGroupHelp.output, /binny bin get rss-main/u);
+    assert.match(binGroupHelp.output, /binny bin config-schema rss-main/u);
+    assert.match(binGroupHelp.output, /binny bin actions rss-main collect/u);
+
+    const configSchemaHelp = await run(["bin", "config-schema", "--help"]);
+    assert.equal(configSchemaHelp.exitCode, 0);
+    assert.match(configSchemaHelp.output, /does not contact the source/u);
 
     const actionHelp = await run(["run", "trigger", "--help"]);
     assert.equal(actionHelp.exitCode, 0);
     assert.match(actionHelp.output, /bin actions/u);
+    assert.match(actionHelp.output, /network requests/u);
+    assert.match(actionHelp.output, /archived content/u);
 
     const actionsHelp = await run(["bin", "actions", "--help"]);
     assert.equal(actionsHelp.exitCode, 0);
     assert.match(actionsHelp.output, /bin actions <id> \[<action>\]/u);
+    assert.match(actionsHelp.output, /saved declarations only/u);
+    assert.match(actionsHelp.output, /may access their source/u);
 
     const runGroupHelp = await run(["run", "--help"]);
     assert.equal(runGroupHelp.exitCode, 0);
@@ -112,7 +127,7 @@ void describe("离线 CLI 命令契约", () => {
     assert.equal(scheduleHelp.exitCode, 0);
     assert.match(
       scheduleHelp.output,
-      /已声明的信源适配器动作；可用动作见 bin actions/u,
+      /Declared action name; discover actions with bin actions/u,
     );
 
     const archiveHelp = await run(["archive", "search", "--help"]);
@@ -121,7 +136,7 @@ void describe("离线 CLI 命令契约", () => {
     assert.match(archiveHelp.output, /JSON 字符串/u);
   });
 
-  void it("计划创建和修改契约公开重叠策略选项", async () => {
+  void it("schedule creation and updates expose the overlap policy option", async () => {
     const create = await run(["schema", "schedule", "create"]);
     const update = await run(["schema", "schedule", "update"]);
 
@@ -201,7 +216,7 @@ void describe("离线 CLI 命令契约", () => {
     assert.equal(invalidPolicy.requestCount, 0);
   });
 
-  void it("schema 使用 argv 字符串契约，提供同一数据的文本展示并拒绝未知路径", async () => {
+  void it("schema uses argv strings, renders text, and rejects unknown paths", async () => {
     const commandHelp = await run(["schema", "--help"]);
     assert.equal(commandHelp.exitCode, 0);
     assert.doesNotMatch(commandHelp.output, /--url/u);

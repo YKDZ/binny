@@ -317,6 +317,7 @@ export async function createIsolatedCliConsumer({
       assert.equal(listed.variant, "document");
       assert.ok(listed.data.grammar.nodes.some(({ id }) => id === "cliSchema"));
       assert.ok("archiveSearch" in listed.data.manifest.commands);
+      assert.ok("binConfigSchema" in listed.data.manifest.commands);
 
       const selected = await runChecked(
         binary,
@@ -409,6 +410,19 @@ export async function createIsolatedCliConsumer({
           `显式 --url 应覆盖错误环境地址：\n${explicit.stdout}${explicit.stderr}`,
         );
         assert.match(explicit.stdout, /archive\.query-contract/u);
+        const serviceInfo = JSON.parse(explicit.stdout) as {
+          readonly data: {
+            readonly contracts: {
+              readonly archiveQuery: { readonly path: string };
+            };
+            readonly queryContract?: unknown;
+          };
+        };
+        assert.equal(
+          serviceInfo.data.contracts.archiveQuery.path,
+          "/meta/query",
+        );
+        assert.equal(Object.hasOwn(serviceInfo.data, "queryContract"), false);
 
         const environment = await invoke(["service", "info"], {
           environmentApiUrl: apiUrl,
