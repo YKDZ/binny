@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import type { ArchiveSubmissionInput } from "@binny/contracts";
 import {
   closeLinuxdoHumanSession,
   linuxdoUserJourney,
@@ -1250,13 +1251,18 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
   assert.match(resourceId, /^[0-9a-f-]{36}$/u);
   const requestId = "e2e:resource-interrupted-reference:" + randomUUID();
   const sourceKey = "resource-interrupted-reference:" + randomUUID();
-  const request = JSON.stringify({
+  const submission: ArchiveSubmissionInput = {
     requestId,
     binId: "binny-runs-one",
+    relations: [],
     items: [
       {
         sourceKey: { namespace: "e2e", key: sourceKey },
+        title: "Interrupted resource reference",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
         body: { text: "引用登记被进程中断" },
+        extensions: {},
         resources: [{ resourceId }],
         capture: {
           scope: { case: "interrupted-resource-reference" },
@@ -1265,7 +1271,8 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
         },
       },
     ],
-  });
+  };
+  const request = JSON.stringify(submission);
   const program = [
     'process.stdout.write("BINNY_RESOURCES_REFERENCE_STARTED\\n");',
     `const response = await fetch("http://127.0.0.1:3000/archives", { method: "POST", headers: { "content-type": "application/json" }, body: ${JSON.stringify(request)} });`,
@@ -9518,6 +9525,10 @@ async function main(): Promise<void> {
         await verifyArchiveSearchPoolWaitBudget(
           baseUrl,
           archiveStateReference.itemId,
+        );
+        baseUrl = await verifyResourceStorageInterruptions(
+          baseUrl,
+          archiveState,
         );
         const sdkResourceState = await sdkResourceStep(baseUrl);
         await waitForUnreferencedResourceAge();
