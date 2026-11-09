@@ -11,6 +11,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -20,7 +21,7 @@ import {
 import { parseFeed } from "@rowanmanning/feed-parser";
 import { z } from "zod";
 
-import { extractArticle, toFullIsoTimestamp } from "./article-extractor.ts";
+import { extractArticle } from "./article-extractor.ts";
 
 export const defaultSources = [
   {
@@ -117,6 +118,39 @@ export type GoogleParams = z.output<typeof paramsSchema>;
 export type GoogleSourceDefinition = z.output<
   typeof googleSourceDefinitionSchema
 >;
+
+const extensionsSchema = z
+  .object({
+    sourceId: z
+      .string()
+      .describe("Configured Google publication feed that supplied this page."),
+    region: z
+      .string()
+      .describe("Geographic region assigned to this Google publication."),
+    language: z.string().describe("Language used by the published article."),
+    authors: z
+      .array(z.string())
+      .describe("Author names shown by the article or its feed."),
+    categories: z
+      .array(z.string())
+      .describe("Categories or tags assigned to the article by its source."),
+  })
+  .strict();
+
+type GoogleExtensions = z.output<typeof extensionsSchema>;
+
+type FeedItem = ReturnType<typeof parseFeed>["items"][number];
+
+function rawFeedDate(
+  item: FeedItem,
+  names: readonly string[],
+): string | undefined {
+  for (const name of names) {
+    const value = item.element.findElementWithName(name)?.textContentNormalized;
+    if (value !== undefined && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
 
 interface ParsedFeedItemData {
   readonly itemKey: string;
@@ -246,14 +280,13 @@ async function fetchFeed(
     if (!itemKey) continue;
 
     const title = (rawItem.title ?? itemJson.title ?? "").trim();
-    const published =
-      itemJson.published ??
-      (rawItem.published
-        ? new Date(rawItem.published).toISOString()
-        : undefined);
-    const updated =
-      itemJson.updated ??
-      (rawItem.updated ? new Date(rawItem.updated).toISOString() : undefined);
+    const published = rawFeedDate(rawItem, [
+      "pubdate",
+      "published",
+      "issued",
+      "date",
+    ]);
+    const updated = rawFeedDate(rawItem, ["updated", "modified"]);
 
     const authors = (itemJson.authors ?? [])
       .map((a: unknown) =>
@@ -352,7 +385,7 @@ function failureFromProblems(
 }
 
 async function check(
-  context: SourceAdapterContext<GoogleConfig>,
+  context: SourceAdapterContext<GoogleConfig, never, GoogleExtensions>,
   params: GoogleParams,
 ) {
   const selected = selectSources(context.config, params);
@@ -466,7 +499,7 @@ async function check(
 }
 
 async function sync(
-  context: SourceAdapterContext<GoogleConfig>,
+  context: SourceAdapterContext<GoogleConfig, never, GoogleExtensions>,
   params: GoogleParams,
 ) {
   const selected = selectSources(context.config, params);
@@ -621,22 +654,18 @@ async function sync(
         new Set([...extracted.pageMetadata.categories, ...item.categories]),
       );
 
-      const sourceModifiedAt =
-        toFullIsoTimestamp(extracted.pageMetadata.articleUpdatedAt) ??
-        toFullIsoTimestamp(extracted.pageMetadata.articlePublishedAt);
-
       try {
         const submitResult = await submitCleanedArticle(context, {
           sourceKey: { namespace: `google:${source.id}`, key: item.itemKey },
           sourceRef: item.articleUrl,
-          title: extracted.pageMetadata.title ?? item.title ?? undefined,
-          sourceModifiedAt,
-          metadata: {
-            feedPublishedAt: item.published ?? undefined,
-            articlePublishedAt:
-              extracted.pageMetadata.articlePublishedAt ?? undefined,
-            articleUpdatedAt:
-              extracted.pageMetadata.articleUpdatedAt ?? undefined,
+          title: extracted.pageMetadata.title ?? item.title ?? null,
+          sourcePublishedAt: sourceTimeFrom(
+            extracted.pageMetadata.articlePublishedAt ?? item.published,
+          ),
+          sourceModifiedAt: sourceTimeFrom(
+            extracted.pageMetadata.articleUpdatedAt,
+          ),
+          extensions: {
             sourceId: source.id,
             region: "international",
             language: "en",
@@ -688,7 +717,7 @@ async function sync(
 }
 
 async function collect(
-  context: SourceAdapterContext<GoogleConfig>,
+  context: SourceAdapterContext<GoogleConfig, never, GoogleExtensions>,
   params: GoogleParams,
 ) {
   const selected = selectSources(context.config, params);
@@ -823,22 +852,18 @@ async function collect(
         new Set([...extracted.pageMetadata.categories, ...item.categories]),
       );
 
-      const sourceModifiedAt =
-        toFullIsoTimestamp(extracted.pageMetadata.articleUpdatedAt) ??
-        toFullIsoTimestamp(extracted.pageMetadata.articlePublishedAt);
-
       try {
         const submitResult = await submitCleanedArticle(context, {
           sourceKey: { namespace: `google:${source.id}`, key: item.itemKey },
           sourceRef: item.articleUrl,
-          title: extracted.pageMetadata.title ?? item.title ?? undefined,
-          sourceModifiedAt,
-          metadata: {
-            feedPublishedAt: item.published ?? undefined,
-            articlePublishedAt:
-              extracted.pageMetadata.articlePublishedAt ?? undefined,
-            articleUpdatedAt:
-              extracted.pageMetadata.articleUpdatedAt ?? undefined,
+          title: extracted.pageMetadata.title ?? item.title ?? null,
+          sourcePublishedAt: sourceTimeFrom(
+            extracted.pageMetadata.articlePublishedAt ?? item.published,
+          ),
+          sourceModifiedAt: sourceTimeFrom(
+            extracted.pageMetadata.articleUpdatedAt,
+          ),
+          extensions: {
             sourceId: source.id,
             region: "international",
             language: "en",
@@ -893,21 +918,22 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Check Google AI and DeepMind sources availability.",
       params: paramsSchema,
       output: checkOutputSchema,
       execute: check,
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Incrementally sync Google AI and DeepMind articles.",
       params: paramsSchema,
       output: syncOutputSchema,
       execute: sync,
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Collect and archive Google AI and DeepMind articles.",
       params: paramsSchema,
       output: collectOutputSchema,

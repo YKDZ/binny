@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { sourceTimeFrom } from "@binny/source-adapter-sdk";
 import { parse, serialize } from "parse5";
 import type { DefaultTreeAdapterMap } from "parse5";
 
@@ -648,80 +649,15 @@ export type ParsedDatePrecision = {
 };
 
 /** Preserves dates at their true precision without fabricating timestamps. */
-export function parseDatePrecision(raw: string): ParsedDatePrecision {
-  const trimmed = raw.trim();
-  if (
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i.test(
-      trimmed,
-    )
-  ) {
-    const d = new Date(trimmed);
-    if (!Number.isNaN(d.getTime())) {
-      return {
-        publishedDate: d.toISOString(),
-        datePrecision: "second",
-        fullIso: d.toISOString(),
-      };
-    }
-  }
-
-  const ymd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (ymd) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "day",
-    };
-  }
-
-  const monthNames: Record<string, string> = {
-    jan: "01",
-    january: "01",
-    feb: "02",
-    february: "02",
-    mar: "03",
-    march: "03",
-    apr: "04",
-    april: "04",
-    may: "05",
-    jun: "06",
-    june: "06",
-    jul: "07",
-    july: "07",
-    aug: "08",
-    august: "08",
-    sep: "09",
-    september: "09",
-    oct: "10",
-    october: "10",
-    nov: "11",
-    november: "11",
-    dec: "12",
-    december: "12",
-  };
-  const mdy = trimmed.match(/^([a-zA-Z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
-  if (mdy && mdy[1] && mdy[2] && mdy[3]) {
-    const month = monthNames[mdy[1].toLowerCase()];
-    if (month) {
-      const day = mdy[2].padStart(2, "0");
-      const year = mdy[3];
-      return {
-        publishedDate: `${year}-${month}-${day}`,
-        datePrecision: "day",
-      };
-    }
-  }
-
-  const ym = trimmed.match(/^(\d{4})-(\d{2})$/);
-  if (ym) {
-    return {
-      publishedDate: trimmed,
-      datePrecision: "month",
-    };
-  }
-
+export function parseDatePrecision(raw: string): ParsedDatePrecision | null {
+  const parsed = sourceTimeFrom(raw);
+  if (parsed === null) return null;
+  const datePrecision =
+    parsed.precision === "instant" ? "second" : parsed.precision;
   return {
-    publishedDate: trimmed,
-    datePrecision: "day",
+    publishedDate: parsed.value,
+    datePrecision,
+    ...(parsed.precision === "instant" ? { fullIso: parsed.value } : {}),
   };
 }
 

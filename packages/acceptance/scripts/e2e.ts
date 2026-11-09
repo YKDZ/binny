@@ -15,6 +15,7 @@ import {
   type LinuxdoUserJourney,
 } from "@binny/source-adapter-linuxdo/acceptance";
 
+import { runArticleAdaptersJourney } from "./article-adapters-journey.ts";
 import {
   copyImageBuildContext,
   setBuildContextSourceAdapterVersion,
@@ -122,8 +123,10 @@ const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const archiveModelOnly = internalStep === "archive-model";
 const archiveSearchOnly = internalStep === "archive-search";
 const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
+const articleAdaptersOnly = internalStep === "article-adapters";
 const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
-const manualRunsOnly = scheduleOnly || archiveModelJourney;
+const manualRunsOnly =
+  scheduleOnly || archiveModelJourney || articleAdaptersOnly;
 const useHeartbeatProxy = !manualRunsOnly || scheduledRunsOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
@@ -135,6 +138,20 @@ const runtimeImageName = projectName + "-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
+const articleAdapterRuntimeImageNames = {
+  openai: projectName + "-article-openai:local",
+  anthropic: projectName + "-article-anthropic:local",
+  google: projectName + "-article-google:local",
+  huggingface: projectName + "-article-huggingface:local",
+  mistral: projectName + "-article-mistral:local",
+} as const;
+const articleAdapterRuntimeServices = [
+  "runtime-article-openai",
+  "runtime-article-anthropic",
+  "runtime-article-google",
+  "runtime-article-huggingface",
+  "runtime-article-mistral",
+] as const;
 let activeServerImage = imageName;
 let activeRssRuntimeImage = rssRuntimeImageName;
 let composeOverrideFile = "";
@@ -273,6 +290,12 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
     BINNY_LIFECYCLE_STOP_GRACE_MS: "1500",
     BINNY_RSS_IMAGE: activeRssRuntimeImage,
+    BINNY_ARTICLE_OPENAI_IMAGE: articleAdapterRuntimeImageNames.openai,
+    BINNY_ARTICLE_ANTHROPIC_IMAGE: articleAdapterRuntimeImageNames.anthropic,
+    BINNY_ARTICLE_GOOGLE_IMAGE: articleAdapterRuntimeImageNames.google,
+    BINNY_ARTICLE_HUGGINGFACE_IMAGE:
+      articleAdapterRuntimeImageNames.huggingface,
+    BINNY_ARTICLE_MISTRAL_IMAGE: articleAdapterRuntimeImageNames.mistral,
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
     BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
     BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
@@ -1510,6 +1533,7 @@ type RssControlState = {
   readonly requests: readonly RssRequestRecord[];
   readonly photoBytes: string;
   readonly audioBytes: string;
+  readonly articleVersion: number;
   readonly heldFeedPath?: string;
 };
 
@@ -1522,6 +1546,7 @@ type RssControlSource = {
   }>;
   readonly setRssVersion: (version: number) => Promise<void>;
   readonly setAtomVersion: (version: number) => Promise<void>;
+  readonly setArticleVersion: (version: 1 | 2) => Promise<void>;
   readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
   readonly setPhotoAvailable: (available: boolean) => Promise<void>;
@@ -1593,6 +1618,9 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     },
     async setAtomVersion(version) {
       await updateState({ atomVersion: version });
+    },
+    async setArticleVersion(version) {
+      await updateState({ articleVersion: version });
     },
     async setAtomTextMode(mode) {
       await updateState({ atomTextMode: mode });
@@ -9147,8 +9175,10 @@ async function main(): Promise<void> {
     await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
-    await compose(["build", "runtime-fifteen-one"]);
-    builtImages.add(runtimeImageName);
+    if (!articleAdaptersOnly) {
+      await compose(["build", "runtime-fifteen-one"]);
+      builtImages.add(runtimeImageName);
+    }
     if (!manualRunsOnly) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
@@ -9156,6 +9186,12 @@ async function main(): Promise<void> {
     if (runFunctionalJourney) {
       await compose(["build", "runtime-linuxdo"]);
       builtImages.add(linuxdoRuntimeImageName);
+    }
+    if (runFunctionalJourney || articleAdaptersOnly) {
+      await compose(["build", ...articleAdapterRuntimeServices]);
+      for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
+        builtImages.add(imageName);
+      }
     }
     if (runFunctionalJourney) {
       rssImageUpdate = await buildRssImageUpdate(
@@ -9179,31 +9215,39 @@ async function main(): Promise<void> {
     await waitForApiAndDatabase(baseUrl);
     await verifyEmptyBinList(baseUrl);
 
-    const e2eServices = manualRunsOnly
+    const e2eServices = articleAdaptersOnly
       ? [
           "postgres",
           "server",
-          "manual-runs-source",
-          "runtime-fifteen-one",
-          ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-          ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
-        ]
-      : [
-          "postgres",
-          "server",
-          "manual-runs-source",
           "rss-e2e-source",
-          "runtime-fifteen-one",
-          "runtime-fifteen-two",
-          "runtime-rss",
-          "runtime-rss-two",
-          "heartbeat-proxy",
-        ];
+          ...articleAdapterRuntimeServices,
+        ]
+      : manualRunsOnly
+        ? [
+            "postgres",
+            "server",
+            "manual-runs-source",
+            "runtime-fifteen-one",
+            ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+            ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
+          ]
+        : [
+            "postgres",
+            "server",
+            "manual-runs-source",
+            "rss-e2e-source",
+            "runtime-fifteen-one",
+            "runtime-fifteen-two",
+            "runtime-rss",
+            "runtime-rss-two",
+            "heartbeat-proxy",
+          ];
     if (runFunctionalJourney) {
       e2eServices.push(
         "runtime-linuxdo",
         "runtime-linuxdo-two",
         "linuxdo-e2e-source",
+        ...articleAdapterRuntimeServices,
       );
     }
     await compose([
@@ -9216,7 +9260,9 @@ async function main(): Promise<void> {
       ...e2eServices,
     ]);
     composePort = await publishedPort("server", 3000);
-    manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    if (!articleAdaptersOnly) {
+      manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
+    }
     if (runFunctionalJourney) {
       linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
     }
@@ -9226,11 +9272,11 @@ async function main(): Promise<void> {
         await publishedPort("heartbeat-proxy", 8083),
       );
       heartbeatProxy = activeHeartbeatProxy;
-      if (!manualRunsOnly) {
-        rssControlSource = await createRssControlSource(
-          await publishedPort("rss-e2e-source", 8081),
-        );
-      }
+    }
+    if (articleAdaptersOnly || runFunctionalJourney) {
+      rssControlSource = await createRssControlSource(
+        await publishedPort("rss-e2e-source", 8081),
+      );
     }
     baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
@@ -9300,6 +9346,17 @@ async function main(): Promise<void> {
           "SDK/运行器/HTTP/数据库归档模型及重启后公开读回通过。\n",
         );
       }
+    } else if (articleAdaptersOnly) {
+      assert.ok(rssControlSource !== undefined);
+      await runArticleAdaptersJourney({
+        baseUrl,
+        articleSource: rssControlSource,
+        cli: (args) => cli(baseUrl, args),
+        compose,
+        fetchRegisteredBin: waitForBinRegistration,
+        waitForRuntime,
+        waitForRuntimeHealth,
+      });
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(installedCliConsumer !== undefined);
@@ -9318,6 +9375,15 @@ async function main(): Promise<void> {
         rssControlSource,
         rssImageUpdate,
       );
+      await runArticleAdaptersJourney({
+        baseUrl,
+        articleSource: rssControlSource,
+        cli: (args) => cli(baseUrl, args),
+        compose,
+        fetchRegisteredBin: waitForBinRegistration,
+        waitForRuntime,
+        waitForRuntimeHealth,
+      });
       await archiveHttpStep("fixed-search", baseUrl);
       const archive = await archiveHttpStep("submit", baseUrl);
       await archiveSearchCliStep(baseUrl);
@@ -9436,6 +9502,8 @@ async function main(): Promise<void> {
           "binny-linuxdo",
           "--profile",
           "linuxdo-e2e",
+          "--profile",
+          "binny-articles",
           "down",
           "--volumes",
           "--remove-orphans",

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   isSourceAdapterActionError,
+  sourceAdapterManifest,
   type ArchiveCommit,
   type ArchiveResourceMetadata,
   type ArchiveResourceUpload,
@@ -13,8 +14,27 @@ import {
   type SourceAdapterArchiveSubmission,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
+import { z } from "zod";
 
+import { parseDatePrecision } from "../src/extractor.ts";
 import { sourceAdapter, type OpenAIConfig } from "../src/source-adapter.ts";
+
+type OpenAIExtensions = z.output<typeof sourceAdapter.extensionsSchema>;
+type OpenAIArchiveSubmission = SourceAdapterArchiveSubmission<OpenAIExtensions>;
+type OpenAIContext = SourceAdapterContext<
+  OpenAIConfig,
+  never,
+  OpenAIExtensions
+>;
+
+void test("OpenAI source date parsing preserves offset and rejects invalid dates", () => {
+  assert.deepEqual(parseDatePrecision("2026-11-08T12:00:00+08:00"), {
+    publishedDate: "2026-11-08T12:00:00+08:00",
+    datePrecision: "second",
+    fullIso: "2026-11-08T12:00:00+08:00",
+  });
+  assert.equal(parseDatePrecision("2026-02-30"), null);
+});
 
 export function createSourceAdapterContext(
   config: OpenAIConfig,
@@ -23,9 +43,7 @@ export function createSourceAdapterContext(
       load(): Promise<Record<string, unknown> | undefined>;
       save(state: unknown): Promise<void>;
     };
-    archiveSubmit?: (
-      input: SourceAdapterArchiveSubmission,
-    ) => Promise<ArchiveCommit>;
+    archiveSubmit?: (input: OpenAIArchiveSubmission) => Promise<ArchiveCommit>;
     resourceUpload?: (
       body: BodyInit,
       mediaType: string,
@@ -33,7 +51,7 @@ export function createSourceAdapterContext(
     signal?: AbortSignal;
     referenceTime?: string;
   } = {},
-): SourceAdapterContext<OpenAIConfig> {
+): OpenAIContext {
   const runId = randomUUID();
   let commitSeq = 0;
   return {
@@ -94,7 +112,7 @@ export function createSourceAdapterContext(
   };
 }
 
-await test("OpenAI adapter exports manifest id and configuration defaults", () => {
+await test("OpenAI adapter exports typed extension facts in its runtime manifest", () => {
   assert.equal(sourceAdapter.id, "openai");
   assert.equal(sourceAdapter.environment.browser.required, false);
 
@@ -108,11 +126,21 @@ await test("OpenAI adapter exports manifest id and configuration defaults", () =
     "https://developers.openai.com/blog",
   );
   assert.equal(parsed.developersBlog.preferMarkdown, true);
+
+  const manifest = sourceAdapterManifest(sourceAdapter);
+  assert.equal(manifest.extensionsSchema.additionalProperties, false);
+  const fields = manifest.extensionsSchema.properties as Record<
+    string,
+    { readonly description?: string }
+  >;
+  for (const field of Object.values(fields)) {
+    assert.ok(field.description);
+  }
 });
 
 await test("OpenAI News RSS discovery, Node fetch with Chrome UA, body extraction, and stripping noise", async () => {
   const recordedHeaders: Record<string, string | string[] | undefined>[] = [];
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: OpenAIArchiveSubmission[] = [];
   const uploadedResources: ArchiveResourceMetadata[] = [];
 
   const server = createServer((req, res) => {
@@ -134,7 +162,7 @@ await test("OpenAI News RSS discovery, Node fetch with Chrome UA, body extractio
       <title>Scaling Git at OpenAI</title>
       <link>${origin}/index/scaling-git-at-openai/</link>
       <description>RSS description summary that MUST NOT be used as article body.</description>
-      <pubDate>Wed, 21 Oct 2026 17:00:00 GMT</pubDate>
+      <pubDate>Wed, 21 Oct 2026 17:00:00 +0000</pubDate>
       <category>Engineering</category>
     </item>
   </channel>
@@ -150,8 +178,8 @@ await test("OpenAI News RSS discovery, Node fetch with Chrome UA, body extractio
   <title>Scaling Git at OpenAI | OpenAI</title>
   <link rel="canonical" href="${origin}/index/scaling-git-at-openai/" />
   <meta property="og:title" content="Scaling Git at OpenAI" />
-  <meta property="article:published_time" content="2026-10-21T17:00:00.000Z" />
-  <meta property="article:modified_time" content="2026-10-22T08:30:00.000Z" />
+  <meta property="article:published_time" content="2026-10-22T01:00:00+08:00" />
+  <meta property="article:modified_time" content="2026-10-23T16:30:00-07:00" />
   <meta name="author" content="OpenAI Infra Team" />
 </head>
 <body>
@@ -288,17 +316,21 @@ await test("OpenAI News RSS discovery, Node fetch with Chrome UA, body extractio
       key: "/index/scaling-git-at-openai/",
     });
     assert.equal(item.sourceRef, `${origin}/index/scaling-git-at-openai/`);
-    assert.equal(item.sourceModifiedAt, "2026-10-22T08:30:00.000Z");
-
-    const metadata = item.metadata as Record<string, unknown>;
-    assert.equal(metadata.region, "international");
-    assert.equal(metadata.language, "en");
-    assert.equal(metadata.section, "news");
-    assert.deepEqual(metadata.categories, ["Engineering"]);
-    assert.equal(metadata.feedPublishedAt, "2026-10-21T17:00:00.000Z");
-    assert.equal(metadata.publishedAt, "2026-10-21T17:00:00.000Z");
-    assert.equal(metadata.updatedAt, "2026-10-22T08:30:00.000Z");
-    assert.deepEqual(metadata.authors, ["OpenAI Infra Team"]);
+    assert.deepEqual(item.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-22T01:00:00+08:00",
+    });
+    assert.deepEqual(item.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-10-23T16:30:00-07:00",
+    });
+    assert.deepEqual(item.extensions, {
+      region: "international",
+      language: "en",
+      section: "news",
+      categories: ["Engineering"],
+      authors: ["OpenAI Infra Team"],
+    });
 
     // 3. Verify body content, indentation, table, media, and absence of body.html
     const markdown = item.body?.markdown ?? "";
@@ -340,7 +372,7 @@ await test("OpenAI News RSS discovery, Node fetch with Chrome UA, body extractio
 });
 
 await test("OpenAI News rejects 403, Cloudflare challenge, redirect to index, and missing body without RSS fallback", async () => {
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: OpenAIArchiveSubmission[] = [];
   let scenario:
     | "403"
     | "cf-challenge"
@@ -559,7 +591,7 @@ await test("OpenAI News rejects 403, Cloudflare challenge, redirect to index, an
 });
 
 await test("OpenAI News allows valid HTTP 200 article page with passive challenge beacon", async () => {
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: OpenAIArchiveSubmission[] = [];
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -681,7 +713,7 @@ await test("OpenAI News allows valid HTTP 200 article page with passive challeng
 });
 
 await test("OpenAI Developers Blog list discovery, .md and HTML extraction, day-precision date preservation", async () => {
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: OpenAIArchiveSubmission[] = [];
   const uploadedResources: ArchiveResourceMetadata[] = [];
 
   const server = createServer((req, res) => {
@@ -697,7 +729,7 @@ await test("OpenAI Developers Blog list discovery, .md and HTML extraction, day-
     <div class="posts-list">
       <article class="post-card">
         <h2><a href="/blog/designing-failover">Designing Failover Across OpenAI Model Providers</a></h2>
-        <time datetime="2026-10-14">Oct 14, 2026</time>
+        <time datetime="2026-10-14T08:00:00+08:00">Oct 14, 2026</time>
         <span class="category">Reliability</span>
         <span class="author">Alex Dev</span>
       </article>
@@ -855,17 +887,18 @@ def execute_with_failover(prompt):
     });
     assert.equal(post1.sourceRef, `${origin}/blog/designing-failover`);
     // Crucial: sourceModifiedAt must NOT be fabricated when day-precision date is present
-    assert.equal(
-      post1.sourceModifiedAt,
-      undefined,
-      "sourceModifiedAt must not be fabricated for day-precision dates",
-    );
-    const post1Meta = post1.metadata as Record<string, unknown>;
-    assert.equal(post1Meta.publishedDate, "2026-10-14");
-    assert.equal(post1Meta.datePrecision, "day");
-    assert.equal(post1Meta.section, "developers-blog");
-    assert.deepEqual(post1Meta.categories, ["Reliability"]);
-    assert.deepEqual(post1Meta.authors, ["Alex Dev"]);
+    assert.deepEqual(post1.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-14T08:00:00+08:00",
+    });
+    assert.equal(post1.sourceModifiedAt, null);
+    assert.deepEqual(post1.extensions, {
+      region: "international",
+      language: "en",
+      section: "developers-blog",
+      categories: ["Reliability"],
+      authors: ["Alex Dev"],
+    });
 
     const post1Markdown = post1.body?.markdown ?? "";
     assert.ok(post1Markdown.includes("Failover patterns are essential"));
@@ -880,16 +913,18 @@ def execute_with_failover(prompt):
       key: "maintaining-software",
     });
     assert.equal(post2.sourceRef, `${origin}/blog/maintaining-software`);
-    assert.equal(
-      post2.sourceModifiedAt,
-      undefined,
-      "sourceModifiedAt must not be fabricated for day-precision dates",
-    );
-    const post2Meta = post2.metadata as Record<string, unknown>;
-    assert.equal(post2Meta.publishedDate, "2026-10-14");
-    assert.equal(post2Meta.datePrecision, "day");
-    assert.deepEqual(post2Meta.categories, ["Tooling"]);
-    assert.deepEqual(post2Meta.authors, ["Taylor Eng"]);
+    assert.deepEqual(post2.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-10-14",
+    });
+    assert.equal(post2.sourceModifiedAt, null);
+    assert.deepEqual(post2.extensions, {
+      region: "international",
+      language: "en",
+      section: "developers-blog",
+      categories: ["Tooling"],
+      authors: ["Taylor Eng"],
+    });
 
     const post2Markdown = post2.body?.markdown ?? "";
     assert.ok(
@@ -911,7 +946,7 @@ def execute_with_failover(prompt):
 
 await test("OpenAI sync establishes initial baseline with zero detail requests, skips unchanged, and archives new", async () => {
   const requestedUrls: string[] = [];
-  const submissions: SourceAdapterArchiveSubmission[] = [];
+  const submissions: OpenAIArchiveSubmission[] = [];
 
   let newsItemsXml = `<item>
     <guid>urn:openai:item-base</guid>

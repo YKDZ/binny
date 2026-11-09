@@ -12,6 +12,7 @@ import {
   type ArchiveResourceMetadata,
   type IncrementalSyncState,
   type SourceAdapterApiClient,
+  sourceAdapterManifest,
   type SourceAdapterRunContext,
 } from "@binny/source-adapter-sdk";
 import type { z } from "zod";
@@ -199,7 +200,7 @@ void test("Mistral News source adapter end-to-end actions and extraction", async
       <link>${origin}/news/article-media-fail</link>
       <guid isPermaLink="true">${origin}/news/article-media-fail</guid>
       <description>Media failure description.</description>
-      <pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+      <pubDate>Mon, 02 Nov 2026 10:00:00 +0230</pubDate>
     </item>
   </channel>
 </rss>`);
@@ -497,9 +498,10 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
       signal: new AbortController().signal,
       persistentState,
     };
-    return createSourceAdapterContext<MistralConfig, never>(
+    return createSourceAdapterContext(
       mockApiClient,
       runContext,
+      sourceAdapter.extensionsSchema,
     );
   }
 
@@ -513,6 +515,16 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
       assert.ok(sourceAdapter.actions.check);
       assert.ok(sourceAdapter.actions.collect);
       assert.ok(sourceAdapter.actions.sync);
+
+      const manifest = sourceAdapterManifest(sourceAdapter);
+      assert.equal(manifest.extensionsSchema.additionalProperties, false);
+      const extensionFields = manifest.extensionsSchema.properties as Record<
+        string,
+        { readonly description?: string }
+      >;
+      for (const field of Object.values(extensionFields)) {
+        assert.ok(field.description);
+      }
 
       // Verify default configSchema accepts {}
       const parsedConfig = sourceAdapter.configSchema.parse({});
@@ -556,6 +568,29 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
           key: "article-rich",
         });
         assert.equal(item.sourceRef, `${origin}/news/article-rich`);
+        assert.equal(item.title, "Mistral Rich Article");
+        assert.deepEqual(item.sourcePublishedAt, {
+          precision: "instant",
+          value: "2026-10-29T12:00:00.000Z",
+        });
+        assert.deepEqual(item.sourceModifiedAt, {
+          precision: "instant",
+          value: "2026-10-29T14:30:00.000Z",
+        });
+        const extensions = item.extensions as {
+          readonly region: string;
+          readonly language: string;
+          readonly categories: readonly string[];
+          readonly authors: readonly string[];
+          readonly rssDescription?: string;
+        };
+        assert.deepEqual(extensions, {
+          region: "international",
+          language: "en",
+          categories: ["Engineering"],
+          authors: ["Arthur Mensch"],
+          rssDescription: "Rich article summary description in RSS feed.",
+        });
 
         // NO body.html allowed!
         assert.equal((item.body as Record<string, unknown>).html, undefined);
@@ -598,9 +633,9 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
       },
     );
 
-    // Test 4: Preserves conflicting RSS pubDate vs page JSON-LD datePublished / dateModified separately
+    // Test 4: Public date fields follow page JSON-LD publication and modification dates
     await t.test(
-      "preserves conflicting RSS pubDate and page JSON-LD datePublished/dateModified separately in metadata",
+      "uses page JSON-LD publication and modification dates without duplicating dates in extensions",
       async () => {
         submissions.length = 0;
         const result = await sourceAdapter.actions.collect.execute(
@@ -615,26 +650,29 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
 
         const item = submissions[0]?.items[0];
         assert.ok(item);
-        const metadata = item.metadata ?? {};
-
-        // Conflicting dates from RSS feed vs page JSON-LD
-        assert.equal(metadata.feedPublishedAt, "2026-10-29T12:00:07.000Z");
-        assert.equal(metadata.articlePublishedAt, "2026-10-31T09:00:00+02:00");
-        assert.equal(metadata.articleUpdatedAt, "2026-11-01T15:30:00+02:00");
-        assert.equal(metadata.visibleDate, "2026-10-31");
-
-        // Metadata dimensions
-        assert.equal(metadata.region, "international");
-        assert.equal(metadata.language, "en");
-        assert.ok(Array.isArray(metadata.categories));
-        assert.ok((metadata.categories as string[]).includes("Models"));
-        assert.ok(
-          (metadata.categories as string[]).includes("Product Announcements"),
-        );
-        assert.ok(Array.isArray(metadata.authors));
-        assert.ok(
-          (metadata.authors as string[]).includes("Mistral Speech Team"),
-        );
+        assert.equal(item.title, "Mistral Date Conflict Article");
+        assert.deepEqual(item.sourcePublishedAt, {
+          precision: "instant",
+          value: "2026-10-31T09:00:00+02:00",
+        });
+        assert.deepEqual(item.sourceModifiedAt, {
+          precision: "instant",
+          value: "2026-11-01T15:30:00+02:00",
+        });
+        const extensions = item.extensions as {
+          readonly region: string;
+          readonly language: string;
+          readonly categories: readonly string[];
+          readonly authors: readonly string[];
+        };
+        assert.deepEqual(extensions.region, "international");
+        assert.deepEqual(extensions.language, "en");
+        assert.ok(extensions.categories.includes("Models"));
+        assert.ok(extensions.categories.includes("Product Announcements"));
+        assert.ok(extensions.authors.includes("Mistral Speech Team"));
+        assert.equal("articlePublishedAt" in extensions, false);
+        assert.equal("articleUpdatedAt" in extensions, false);
+        assert.equal("visibleDate" in extensions, false);
       },
     );
 
@@ -805,6 +843,12 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
 
         const item = submissions[0]?.items[0];
         assert.ok(item);
+        assert.equal(item.title, "Article with Media Failure");
+        assert.deepEqual(item.sourcePublishedAt, {
+          precision: "instant",
+          value: "2026-11-02T10:00:00+02:30",
+        });
+        assert.equal(item.sourceModifiedAt, null);
         assert.equal(item.capture.completeness, "partial");
         assert.ok(item.capture.missing.length >= 1);
         assert.ok(

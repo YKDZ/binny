@@ -182,8 +182,6 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   runtime-fifteen-two:
@@ -206,8 +204,6 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   runtime-rss:
@@ -256,6 +252,110 @@ services:
       - "host.docker.internal:host-gateway"
     develop:
       watch: *binny-runtime-watch
+    restart: unless-stopped
+
+  runtime-article-openai:
+    image: ${BINNY_ARTICLE_OPENAI_IMAGE:-binny/article-openai:local}
+    profiles: [binny-articles]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-openai"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-article-openai:8080
+      BINNY_BIN_ID: binny-article-openai
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-article-anthropic:
+    image: ${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/article-anthropic:local}
+    profiles: [binny-articles]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-anthropic"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-article-anthropic:8080
+      BINNY_BIN_ID: binny-article-anthropic
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-article-google:
+    image: ${BINNY_ARTICLE_GOOGLE_IMAGE:-binny/article-google:local}
+    profiles: [binny-articles]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-google"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-article-google:8080
+      BINNY_BIN_ID: binny-article-google
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    restart: unless-stopped
+
+  runtime-article-huggingface:
+    image: ${BINNY_ARTICLE_HUGGINGFACE_IMAGE:-binny/article-huggingface:local}
+    profiles: [binny-articles]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-huggingface"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-article-huggingface:8080
+      BINNY_BIN_ID: binny-article-huggingface
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  runtime-article-mistral:
+    image: ${BINNY_ARTICLE_MISTRAL_IMAGE:-binny/article-mistral:local}
+    profiles: [binny-articles]
+    build:
+      context: .
+      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
+      args:
+        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-mistral"
+        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-article-mistral:8080
+      BINNY_BIN_ID: binny-article-mistral
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   browser-one:
