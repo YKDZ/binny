@@ -16,6 +16,7 @@ import {
   archiveResourceMetadataSchema,
   archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
+  archiveSearchInputIssue,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
@@ -26,6 +27,7 @@ import {
   serviceMetadataSchema,
   archiveTimelinePageSchema,
   binConfigSchemaDiscoverySchema,
+  sourceAdapterExtensionFieldsDiscoverySchema,
   binDetailsSchema,
   binListSchema,
   sourceAdapterActionDiscoverySchema,
@@ -1218,6 +1220,33 @@ function createCliContract(identity: CliCommandIdentity) {
     });
     return text.lines([lines[0]!, ...lines.slice(1)]);
   };
+  const extensionFieldsText = (
+    discovery: z.infer<typeof sourceAdapterExtensionFieldsDiscoverySchema>,
+  ) => {
+    const fields = Object.entries(discovery.fields);
+    return text.lines([
+      `Source adapter: ${discovery.sourceAdapterId}@${discovery.sourceAdapterVersion}`,
+      ...(fields.length === 0
+        ? ["No extension fields declared."]
+        : [
+            "Extension fields:",
+            ...fields.flatMap(([name, field]) => [
+              `- ${name}: ${field.type}${field.nullable ? " (nullable)" : ""}${field.required ? " (required)" : ""}`,
+              ...(field.description === undefined
+                ? []
+                : [`  Meaning: ${field.description}`]),
+              `  Operations: ${field.operations.join(", ") || "none"}`,
+              ...(field.itemType === undefined
+                ? []
+                : [`  Item type: ${field.itemType}`]),
+              ...(field.allowedValues === undefined
+                ? []
+                : [`  Allowed values: ${JSON.stringify(field.allowedValues)}`]),
+            ]),
+          ]),
+      "Missing and null extension values do not match filters.",
+    ]);
+  };
   let getCliSchemaDocument: (
     commandPath: readonly string[],
     part?: CliSchemaPart,
@@ -1424,7 +1453,13 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          'Search archived items with literal keyword groups. Example: binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
+          'Search archived items with literal keyword groups and declared extension filters. Discover fields with binny bin extension-fields <bin-id>; extension filters require an explicit bin scope. Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"category":{"op":"eq","value":"post"},"tags":{"op":"hasAny","values":["release","model"]}}},"limit":20}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
+        helpSupplement: text.lines([
+          "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
+          "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
+          'Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"floor":{"op":"in","values":[8,9]}}}}\'.',
+          "Every selected bin must use the declared adapter and schema. Missing and null extension values do not match.",
+        ]),
         fields: {
           query: {
             kind: "valueOption",
@@ -1460,8 +1495,15 @@ function createCliContract(identity: CliCommandIdentity) {
           }
           const checked = archiveSearchInputSchema.safeParse(request);
           if (!checked.success) {
+            const issue = archiveSearchInputIssue(
+              request,
+              checked.error.issues,
+            );
             return outcome.failure.apiError(
-              validationFailure(checked.error.issues).error,
+              validationFailure(
+                issue === undefined ? checked.error.issues : [issue],
+                { preserveOriginalMessage: true },
+              ).error,
             );
           }
           const compatibilityFailure = await queryCompatibilityFailure(
@@ -1582,6 +1624,44 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 404)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的动作查询状态。");
+        },
+      }),
+      ...command("binExtensionFields")({
+        kind: "command",
+        parent: "bin",
+        name: "extension-fields",
+        description: "Discover one bin adapter's declared extension fields.",
+        helpSupplement: text.lines([
+          "This reads the saved adapter declaration and does not contact the source.",
+          "Use the returned top-level field names and operations in archive search with an explicit bin scope.",
+        ]),
+        fields: { id: { kind: "positional", description: "Bin identifier" } },
+        input: z.object({ id: binIdSchema }),
+        success: {
+          kind: "data",
+          variants: {
+            discovered: {
+              description: "Declared extension fields and supported operations",
+              exitCode: 0,
+              schema: sourceAdapterExtensionFieldsDiscoverySchema,
+              text: extensionFieldsText,
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          const response = await dependencies
+            .createClient()
+            .bins[":binId"]["extension-fields"].$get({
+              param: { binId: input.id },
+            });
+          if (response.status === 200)
+            return outcome.data.discovered(await response.json());
+          if (response.status === 400 || response.status === 404)
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error(
+            "The service returned an undeclared extension-field status.",
+          );
         },
       }),
       ...command("binConfigSchema")({

@@ -129,6 +129,7 @@ export type {
   ArchiveResourceResolveItem,
   ArchiveResourceResolveRequest,
   ArchiveResourceResolveResult,
+  ArchiveSearchRequestFor,
   ArchiveSubmissionInput,
 } from "@binny/contracts";
 
