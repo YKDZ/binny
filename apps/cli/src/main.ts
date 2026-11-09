@@ -46,6 +46,7 @@ import {
   manualRunListQuerySchema,
   manualRunSchema,
   type ManualRun,
+  type SourceTime,
   postgresTextSchema,
   scheduleCreateInputSchema,
   scheduleDeleteResultSchema,
@@ -1077,6 +1078,14 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  const sourceTimeText = (sourceTime: SourceTime | null) =>
+    sourceTime === null
+      ? "null"
+      : `${sourceTime.value} (precision=${sourceTime.precision}${
+          sourceTime.timeZone === undefined
+            ? ""
+            : `; timeZone=${sourceTime.timeZone}`
+        })`;
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
   ) =>
@@ -1089,10 +1098,23 @@ function createCliContract(identity: CliCommandIdentity) {
             `- ${result.title ?? result.sourceKey.key}`,
             `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
             `  Observed: ${result.observedAt}`,
+            `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+            `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
             ...(result.timeStatus === undefined
               ? []
               : [`  Time review: ${result.timeStatus}`]),
             `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+            ...result.matches.flatMap(({ binId, timeMatch }) =>
+              timeMatch === undefined
+                ? []
+                : [
+                    `  Time match ${binId}: ${timeMatch.status}${
+                      timeMatch.status === "undetermined"
+                        ? ` (${timeMatch.reason})`
+                        : ""
+                    }`,
+                  ],
+            ),
           ])),
       ...(page.timeSummary === undefined
         ? []
