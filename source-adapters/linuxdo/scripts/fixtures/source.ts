@@ -286,6 +286,9 @@ function post(
     id,
     topic_id: 2401,
     post_number: postNumber,
+    ...(postNumber === 1
+      ? { title: `受控主题标题版本 ${String(activeState.topicVersion)}` }
+      : {}),
     username:
       postNumber === 1 ? "fixture-author" : `fixture-reply-${postNumber}`,
     name: postNumber === 1 ? "Linux.do 示例作者" : `示例回复 ${postNumber}`,
@@ -694,7 +697,7 @@ function discoveredTopic(topicId: number): Record<string, unknown> {
       title: `受控主题标题版本 ${String(activeState.topicVersion)}`,
       slug: "controlled-linuxdo-topic",
       created_at: createdAt,
-      updated_at: `2026-10-28T00:00:0${String(activeState.topicVersion)}.000Z`,
+      updated_at: `2026-10-28T00:30:0${String(activeState.topicVersion)}.000Z`,
       posts_count: availablePosts.length,
       reply_count: availablePosts.length - 1,
       category_id: categoryId,

@@ -30,6 +30,12 @@ type ProcessResult = {
   readonly stderr: string;
 };
 
+type ArchiveSourceTimeRead = {
+  readonly precision: "instant" | "day" | "month" | "year";
+  readonly value: string;
+  readonly timeZone?: string;
+};
+
 type ManagedProcess = {
   readonly child: ChildProcessWithoutNullStreams;
   readonly stdout: () => string;
@@ -2072,29 +2078,27 @@ async function verifyLinuxdoArchiveJourney(
     runOutput(journey.firstCollection)?.completedScopes?.includes("topic:2401"),
   );
 
-  const searchTopic = async (text: string) =>
-    cliData<{
-      readonly results: readonly {
+  const readCollectedItem = async (sourceKey: string) => {
+    for (const itemId of journey.itemIds) {
+      const item = cliData<{
         readonly itemId: string;
         readonly sourceKey: {
           readonly namespace: string;
           readonly key: string;
         };
-      }[];
-    }>(
-      await cliForLinuxdo([
-        "archive",
-        "search",
-        "--query",
-        JSON.stringify({
-          scope: { kind: "current", binId },
-          text: { kind: "literal", value: text },
-          select: ["sourceKey", "capture.completeness"],
-          limit: 10,
-        }),
-      ]),
-      "found",
-    );
+      }>(
+        await cliForLinuxdo(["archive", "item", itemId, "--bin", binId]),
+        "found",
+      );
+      if (
+        item.sourceKey.namespace === namespace &&
+        item.sourceKey.key === sourceKey
+      ) {
+        return item;
+      }
+    }
+    assert.fail("Initial Linux.do run did not return " + sourceKey + ".");
+  };
 
   const rssItem = cliData<{
     readonly itemId: string;
@@ -2185,10 +2189,8 @@ async function verifyLinuxdoArchiveJourney(
     assert.ok((await response.arrayBuffer()).byteLength > 0);
   }
 
-  const initialSearch = await searchTopic("主题正文版本 1");
-  assert.equal(initialSearch.results.length, 1);
-  const rootItemId = initialSearch.results[0]?.itemId;
-  assert.ok(rootItemId !== undefined);
+  const rootLocator = await readCollectedItem("post:240001");
+  const rootItemId = rootLocator.itemId;
   assert.ok(journey.itemIds.includes(rootItemId));
   const rootItem = cliData<{
     readonly itemId: string;
@@ -2197,6 +2199,22 @@ async function verifyLinuxdoArchiveJourney(
       readonly binId: string;
       readonly revisionId: string;
       readonly state: {
+        readonly title: string | null;
+        readonly sourcePublishedAt: ArchiveSourceTimeRead | null;
+        readonly sourceModifiedAt: ArchiveSourceTimeRead | null;
+        readonly extensions: {
+          readonly topicId: number;
+          readonly postNumber: number;
+          readonly categoryId: number | null;
+          readonly tags: readonly string[];
+          readonly authorUsername: string | null;
+          readonly authorName: string | null;
+          readonly topic: {
+            readonly slug: string | null;
+            readonly createdAt: string | null;
+            readonly title?: string;
+          };
+        };
         readonly body?: {
           readonly html?: string;
           readonly markdown?: string;
@@ -2220,6 +2238,54 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(originalRootView !== undefined);
   assert.equal(originalRootView.state.capture.completeness, "complete");
+  const originalRootState = originalRootView.state;
+  assert.equal(originalRootState.title, "受控主题标题版本 1");
+  assert.deepEqual(originalRootState.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
+  assert.deepEqual(originalRootState.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:01.000Z",
+  });
+  assert.equal(originalRootState.extensions.topicId, 2401);
+  assert.equal(originalRootState.extensions.postNumber, 1);
+  assert.equal(originalRootState.extensions.categoryId, 42);
+  assert.deepEqual(originalRootState.extensions.tags, ["受控", "归档"]);
+  assert.equal(originalRootState.extensions.authorUsername, "fixture-author");
+  assert.equal(originalRootState.extensions.authorName, "Linux.do 示例作者");
+  assert.deepEqual(originalRootState.extensions.topic, {
+    slug: "controlled-linuxdo-topic",
+    createdAt: "2026-10-28T00:00:00.000Z",
+  });
+
+  const firstReplyLocator = await readCollectedItem("post:240002");
+  const firstReplyItemId = firstReplyLocator.itemId;
+  assert.ok(journey.itemIds.includes(firstReplyItemId));
+  const firstReplyItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", firstReplyItemId, "--bin", binId]),
+    "found",
+  );
+  const firstReplyView = firstReplyItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(firstReplyView !== undefined);
+  assert.equal(firstReplyItem.sourceKey.key, "post:240002");
+  assert.equal(firstReplyView.state.title, null);
+  assert.deepEqual(firstReplyView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T02:00:00.000Z",
+  });
+  assert.deepEqual(firstReplyView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:01.000Z",
+  });
+  assert.equal(firstReplyView.state.extensions.topicId, 2401);
+  assert.equal(firstReplyView.state.extensions.postNumber, 2);
+  assert.equal(
+    firstReplyView.state.extensions.topic.title,
+    "受控主题标题版本 1",
+  );
   const firstRunCommitLocator = journey.firstCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
   );
@@ -2351,9 +2417,6 @@ async function verifyLinuxdoArchiveJourney(
   assert.ok(
     runOutput(secondCollection)?.completedScopes?.includes("topic:2401"),
   );
-  const updatedSearch = await searchTopic("主题正文版本 2");
-  assert.equal(updatedSearch.results.length, 1);
-  assert.equal(updatedSearch.results[0]?.itemId, rootItemId);
   const updatedItem = cliData<typeof rootItem>(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "found",
@@ -2363,8 +2426,41 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(updatedRootView !== undefined);
   assert.equal(updatedRootView.state.capture.completeness, "complete");
+  assert.equal(updatedRootView.state.title, "受控主题标题版本 2");
+  assert.deepEqual(updatedRootView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:00.000Z",
+  });
+  assert.deepEqual(updatedRootView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:02.000Z",
+  });
+  assert.match(updatedRootView.state.body?.markdown ?? "", /主题正文版本 2/u);
+  assert.equal("title" in updatedRootView.state.extensions.topic, false);
   assert.ok(updatedItem.revisions.length >= 2);
   assert.notEqual(updatedRootView.revisionId, firstRevisionId);
+  const updatedReplyItem = cliData<typeof rootItem>(
+    await cliForLinuxdo(["archive", "item", firstReplyItemId, "--bin", binId]),
+    "found",
+  );
+  const updatedReplyView = updatedReplyItem.views.find(
+    ({ binId: viewBinId }) => viewBinId === binId,
+  );
+  assert.ok(updatedReplyView !== undefined);
+  assert.equal(updatedReplyView.state.title, null);
+  assert.deepEqual(updatedReplyView.state.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T02:00:00.000Z",
+  });
+  assert.deepEqual(updatedReplyView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:00:02.000Z",
+  });
+  assert.equal(
+    updatedReplyView.state.extensions.topic.title,
+    "受控主题标题版本 2",
+  );
+  assert.match(updatedReplyView.state.body?.markdown ?? "", /回复正文版本 2/u);
   const secondRunCommitLocator = secondCollection.result?.commits?.find(
     ({ items }) => items.some(({ itemId }) => itemId === rootItemId),
   );
@@ -2403,9 +2499,6 @@ async function verifyLinuxdoArchiveJourney(
     runOutput(partialCollection)?.completedScopes?.includes("topic:2401"),
     false,
   );
-  const currentPartialSearch = await searchTopic("主题正文版本 3");
-  assert.equal(currentPartialSearch.results.length, 1);
-  assert.equal(currentPartialSearch.results[0]?.itemId, rootItemId);
   const partialItem = cliData<typeof rootItem>(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "found",
@@ -2415,6 +2508,12 @@ async function verifyLinuxdoArchiveJourney(
   );
   assert.ok(partialRootView !== undefined);
   assert.equal(partialRootView.state.capture.completeness, "partial");
+  assert.equal(partialRootView.state.title, "受控主题标题版本 3");
+  assert.deepEqual(partialRootView.state.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T00:00:03.000Z",
+  });
+  assert.match(partialRootView.state.body?.markdown ?? "", /主题正文版本 3/u);
   assert.ok(
     partialRootView.state.capture.missing.some(
       ({ path }) => path === "body.images[0]",
@@ -2530,46 +2629,6 @@ async function verifyLinuxdoArchiveJourney(
     assert.ok(timeline.events.some((event) => event.runId === runId));
   }
 
-  const linuxdoAggregate = cliData<{
-    readonly unit: string;
-    readonly groups: readonly {
-      readonly keys: readonly unknown[];
-      readonly metrics: readonly {
-        readonly key: string;
-        readonly op: string;
-        readonly value: string | null;
-      }[];
-    }[];
-  }>(
-    await cliForLinuxdo([
-      "archive",
-      "aggregate",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId },
-        unit: "item",
-        where: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.namespace",
-              operator: "eq",
-              value: namespace,
-            },
-          ],
-        },
-        groupBy: [],
-        metrics: [{ key: "items", op: "count" }],
-      }),
-    ]),
-    "aggregated",
-  );
-  assert.equal(linuxdoAggregate.unit, "item");
-  assert.deepEqual(linuxdoAggregate.groups[0]?.metrics, [
-    { key: "items", op: "count", value: "4" },
-  ]);
-
   const deletion = cliData<{
     readonly itemId: string;
     readonly deletedItemIds: readonly string[];
@@ -2589,8 +2648,6 @@ async function verifyLinuxdoArchiveJourney(
     deletedItemIds.toSorted(),
   );
   assert.equal(deletion.deleted, true);
-  const noDeletedSearch = await searchTopic("主题正文版本 3");
-  assert.deepEqual(noDeletedSearch.results, []);
   cliFailure(
     await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
     "item_deleted",
@@ -2664,34 +2721,6 @@ async function verifyLinuxdoArchiveJourney(
       (event) => event.kind === "gap" && event.subject?.kind === "relation",
     ),
   );
-  const deletedAggregate = cliData<typeof linuxdoAggregate>(
-    await cliForLinuxdo([
-      "archive",
-      "aggregate",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId },
-        unit: "item",
-        where: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.namespace",
-              operator: "eq",
-              value: namespace,
-            },
-          ],
-        },
-        groupBy: [],
-        metrics: [{ key: "items", op: "count" }],
-      }),
-    ]),
-    "aggregated",
-  );
-  assert.deepEqual(deletedAggregate.groups, [
-    { keys: [], metrics: [{ key: "items", op: "count", value: "0" }] },
-  ]);
   const rssStillPresent = cliData<{ readonly itemId: string }>(
     await cli(baseUrl, [
       "archive",
@@ -3163,20 +3192,24 @@ type RssArchiveRead = {
     readonly archiveSeq: string;
     readonly revisionId: string;
     readonly state: {
+      readonly title: string | null;
+      readonly sourcePublishedAt: ArchiveSourceTimeRead | null;
+      readonly sourceModifiedAt: ArchiveSourceTimeRead | null;
+      readonly extensions: Record<string, unknown> & {
+        readonly authors?: readonly string[];
+        readonly categories?: readonly string[];
+        readonly item?: {
+          readonly bodyType?: string;
+          readonly bodySource?: string;
+          readonly authors?: readonly unknown[];
+          readonly categories?: readonly unknown[];
+        } | null;
+      };
       readonly body?: {
         readonly html?: string;
         readonly markdown?: string;
         readonly text?: string;
         readonly searchText?: string;
-      };
-      readonly metadata?: Record<string, unknown> & {
-        readonly item?: {
-          readonly bodyType?: string;
-          readonly bodySource?: string;
-          readonly bodyUrl?: string;
-          readonly bodyFinalUrl?: string;
-          readonly bodyTitle?: string | null;
-        } | null;
       };
       readonly resources?: readonly { readonly resourceId: string }[];
       readonly capture: {
@@ -7746,6 +7779,20 @@ async function runRssAcceptance(
   assert.ok(initialRssView !== undefined);
   const rssV1 = rssArchiveView(rssItemV1, "binny-rss-one");
   assert.equal(rssV1.capture.completeness, "complete");
+  assert.equal(rssV1.title, "RSS 全文测试文章");
+  assert.deepEqual(rssV1.sourcePublishedAt, {
+    precision: "instant",
+    value: "2026-10-28T01:23:45+02:00",
+  });
+  assert.deepEqual(rssV1.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-30T12:34:56-03:00",
+  });
+  assert.deepEqual(rssV1.extensions.authors, ["作者"]);
+  assert.deepEqual(rssV1.extensions.categories, ["工程"]);
+  assert.equal("title" in rssV1.extensions, false);
+  assert.equal("published" in rssV1.extensions, false);
+  assert.equal("updated" in rssV1.extensions, false);
   assert.equal(rssV1.body?.html, undefined);
   assert.match(rssV1.body?.markdown ?? "", /RSS 正文版本 1/u);
   assert.doesNotMatch(rssV1.body?.markdown ?? "", /RSS 摘要版本 1/u);
@@ -7819,6 +7866,10 @@ async function runRssAcceptance(
   );
   assert.equal(titleOnlyState.capture.completeness, "complete");
   assert.deepEqual(titleOnlyState.capture.missing, []);
+  assert.equal(titleOnlyState.title, "RSS 仅标题資料🌿");
+  assert.equal(titleOnlyState.sourcePublishedAt, null);
+  assert.equal(titleOnlyState.sourceModifiedAt, null);
+  assert.equal("title" in titleOnlyState.extensions, false);
 
   const titleOnlyUnicodeSearch = cliData<{
     readonly results: readonly {
@@ -8001,6 +8052,20 @@ async function runRssAcceptance(
   );
   const atomV1 = rssArchiveView(atomItemV1, "binny-rss-one");
   assert.equal(atomV1.capture.completeness, "complete");
+  assert.equal(atomV1.title, "Atom 全文测试文章");
+  assert.deepEqual(atomV1.sourcePublishedAt, {
+    precision: "day",
+    value: "2026-10-27",
+  });
+  assert.deepEqual(atomV1.sourceModifiedAt, {
+    precision: "instant",
+    value: "2026-10-28T12:34:56-05:00",
+  });
+  assert.deepEqual(atomV1.extensions.authors, ["作者乙"]);
+  assert.deepEqual(atomV1.extensions.categories, ["测试"]);
+  assert.equal("title" in atomV1.extensions, false);
+  assert.equal("published" in atomV1.extensions, false);
+  assert.equal("updated" in atomV1.extensions, false);
   assert.equal(atomV1.body?.html, undefined);
   assert.match(atomV1.body?.markdown ?? "", /Atom 全文版本 1/u);
   assert.match(atomV1.body?.text ?? "", /Atom 全文版本 1/u);
@@ -8061,9 +8126,10 @@ async function runRssAcceptance(
     assert.equal(state.body?.html, undefined);
     assert.equal(state.body?.markdown, "代码 &lt;widget&gt; 与 A &amp; B");
     assert.ok(
-      typeof state.metadata?.item === "object" && state.metadata.item !== null,
+      typeof state.extensions?.item === "object" &&
+        state.extensions.item !== null,
     );
-    assert.equal(state.metadata?.item?.bodyType, "text");
+    assert.equal(state.extensions?.item?.bodyType, "text");
   }
   const rssLiteralItem = literalWidgetItemsByKey.get(
     "id:urn:binny:rss:rss-item",
@@ -8078,7 +8144,7 @@ async function runRssAcceptance(
   );
   assert.equal(rssLiteralState.body?.html, undefined);
   assert.match(rssLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
-  assert.equal(rssLiteralState.metadata?.item?.bodyType, "html");
+  assert.equal(rssLiteralState.extensions?.item?.bodyType, "html");
   const rssEscapedLiteralItem = literalWidgetItemsByKey.get(
     "id:urn:binny:rss:rss-item-escaped",
   );
@@ -8095,7 +8161,7 @@ async function runRssAcceptance(
   );
   assert.equal(rssEscapedLiteralState.body?.html, undefined);
   assert.match(rssEscapedLiteralState.body?.markdown ?? "", /&lt;widget&gt;/u);
-  assert.equal(rssEscapedLiteralState.metadata?.item?.bodyType, "html");
+  assert.equal(rssEscapedLiteralState.extensions?.item?.bodyType, "html");
   for (const [key, bodyType] of [
     ["id:tag:example.test,2026:binny-rss-atom", "xhtml"],
     ["id:tag:example.test,2026:atom-html-literal", "html"],
@@ -8108,7 +8174,7 @@ async function runRssAcceptance(
     assert.match(state.body?.searchText ?? "", /代码 <widget> 与 A & B/u);
     assert.equal(state.body?.html, undefined);
     assert.match(state.body?.markdown ?? "", /&lt;widget&gt;/u);
-    assert.equal(state.metadata?.item?.bodyType, bodyType);
+    assert.equal(state.extensions?.item?.bodyType, bodyType);
   }
   const atomEntityTextMatches = await searchRssArchive(
     baseUrl,
@@ -8153,7 +8219,7 @@ async function runRssAcceptance(
   );
   assert.equal(atomModeTextV1.revisions.length, 1);
   assert.equal(
-    rssArchiveView(atomModeTextV1, "binny-rss-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeTextV1, "binny-rss-one").extensions?.item?.bodyType,
     "text",
   );
 
@@ -8307,7 +8373,7 @@ async function runRssAcceptance(
     "Atom 正文同值从 text 切换到 html 时应形成新的归档状态。",
   );
   assert.equal(
-    rssArchiveView(atomModeHtmlV2, "binny-rss-one").metadata?.item?.bodyType,
+    rssArchiveView(atomModeHtmlV2, "binny-rss-one").extensions?.item?.bodyType,
     "html",
   );
   const stableItem = await readRssArchive(

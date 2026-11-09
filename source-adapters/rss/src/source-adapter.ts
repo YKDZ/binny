@@ -101,8 +101,89 @@ const actionParamsSchema = z
     }
   });
 
+const feedAuthorSchema = z
+  .object({
+    name: z.string().nullable(),
+    email: z.string().nullable(),
+    url: z.string().nullable(),
+  })
+  .strict();
+const feedCategorySchema = z
+  .object({
+    label: z.string().nullable(),
+    term: z.string(),
+    url: z.string().nullable(),
+  })
+  .strict();
+const feedImageSchema = z
+  .object({ title: z.string().nullable(), url: z.string() })
+  .strict();
+const feedExtensionsSchema = z
+  .object({
+    feed: z
+      .object({
+        id: feedIdSchema,
+        url: feedUrlSchema,
+        title: z.string().nullable(),
+        description: z.string().nullable(),
+        link: z.string().nullable(),
+        language: z.string().nullable(),
+        format: z
+          .object({ type: z.string(), version: z.string().nullable() })
+          .strict(),
+        generator: z
+          .object({
+            label: z.string().nullable(),
+            version: z.string().nullable(),
+            url: z.string().nullable(),
+          })
+          .strict()
+          .nullable(),
+      })
+      .strict()
+      .describe("Feed-level context from the configured RSS/Atom source."),
+    authors: z
+      .array(z.string())
+      .describe(
+        "Entry author names, using the source email when no name is supplied.",
+      ),
+    categories: z
+      .array(z.string())
+      .describe("Entry category terms supplied by the RSS/Atom source."),
+    item: z
+      .object({
+        id: z.string().nullable(),
+        url: z.string().nullable(),
+        bodyType: z.string(),
+        bodySource: z.enum(["content", "summary", "none"]),
+        authors: z.array(feedAuthorSchema),
+        categories: z.array(feedCategorySchema),
+        image: feedImageSchema.nullable(),
+      })
+      .strict()
+      .describe("Structured entry details that are not public item facts."),
+    media: z
+      .array(
+        z
+          .object({
+            url: z.string(),
+            mediaType: z.string().nullable(),
+            title: z.string().nullable(),
+          })
+          .strict(),
+      )
+      .describe("Entry media candidates found in content or enclosures."),
+  })
+  .strict();
+
 type SourceAdapterConfig = z.output<typeof sourceAdapterConfigSchema>;
 type ActionParams = z.output<typeof actionParamsSchema>;
+type FeedExtensions = z.output<typeof feedExtensionsSchema>;
+type RssContext<TReport extends z.ZodType = never> = SourceAdapterContext<
+  SourceAdapterConfig,
+  TReport,
+  FeedExtensions
+>;
 const checkOutputSchema = z
   .object({
     availability: z.enum(["available", "unavailable", "unknown"]),
@@ -207,8 +288,8 @@ function contentFingerprint(
       title: item.title,
       description: item.description,
       content: item.content,
-      published: item.published,
-      updated: item.updated,
+      sourcePublishedAt: item.sourcePublishedAt,
+      sourceModifiedAt: item.sourceModifiedAt,
       authors: item.authors,
       categories: item.categories,
       image: item.image,
@@ -226,12 +307,12 @@ function contentFingerprint(
   return createHash("sha256").update(snapshot).digest("hex");
 }
 
-function entryMetadata(
+function entryExtensions(
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
   prepared: PreparedFeedItem,
-): Record<string, unknown> {
+): FeedExtensions {
   return {
     feed: {
       id: feed.id,
@@ -243,12 +324,13 @@ function entryMetadata(
       format: parsedFeed.feed.meta,
       generator: parsedFeed.feed.generator,
     },
+    authors: item.authors
+      .map(({ name, email }) => name ?? email)
+      .filter((author): author is string => author !== null),
+    categories: item.categories.map(({ term }) => term),
     item: {
       id: item.id,
       url: item.url,
-      title: item.title,
-      published: item.published,
-      updated: item.updated,
       bodyType: prepared.bodyType,
       bodySource: prepared.bodySource,
       authors: item.authors,
@@ -264,7 +346,7 @@ function entryMetadata(
 }
 
 async function submitEntry(
-  context: SourceAdapterContext,
+  context: RssContext,
   feed: FeedDefinition,
   parsedFeed: FeedRequestResult & { readonly status: "ok" },
   item: ParsedFeedItem,
@@ -315,7 +397,6 @@ async function submitEntry(
 
   const bodyWithResources = prepared.cleanResult.renderArchiveBody(uploaded);
   const resources = [...archiveResourceManifest([...uploaded.values()])];
-  const sourceModifiedAt = item.updated ?? item.published ?? undefined;
   const renderedMarkdown = bodyWithResources.markdown;
   const cleanedText = prepared.cleanResult.text;
   const searchText = [item.title?.trim(), cleanedText.trim()]
@@ -329,8 +410,10 @@ async function submitEntry(
   const state = {
     sourceKey: { namespace: `rss:${feed.id}`, key },
     sourceRef: sourceRef(feed, item),
-    ...(sourceModifiedAt === undefined ? {} : { sourceModifiedAt }),
-    metadata: entryMetadata(feed, parsedFeed, item, prepared),
+    title: item.title?.trim() || null,
+    sourcePublishedAt: item.sourcePublishedAt,
+    sourceModifiedAt: item.sourceModifiedAt,
+    extensions: entryExtensions(feed, parsedFeed, item, prepared),
     ...(hasBodyRepresentation
       ? {
           body: {
@@ -426,10 +509,7 @@ function feedReadFailure(
   };
 }
 
-async function checkFeeds(
-  context: SourceAdapterContext<SourceAdapterConfig>,
-  params: ActionParams,
-) {
+async function checkFeeds(context: RssContext, params: ActionParams) {
   const selected = selectedFeeds(context.config, params);
   const problems = selected.missing.map((feedId) =>
     feedProblem(
@@ -561,7 +641,7 @@ function failureFromProblems(
 }
 
 async function collectFeeds(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: RssContext,
   params: ActionParams,
 ): Promise<{ readonly completedScopes: readonly string[] }> {
   const selected = selectedFeeds(context.config, params);
@@ -679,10 +759,6 @@ async function collectFeeds(
         );
         const entryRecord: IncrementalEntryRecord = {
           fingerprint,
-          ...(entry.item.updated ? { updatedAt: entry.item.updated } : {}),
-          ...(entry.item.published
-            ? { publishedAt: entry.item.published }
-            : {}),
           archivedCompleteness: archived.hasMediaFailures
             ? "partial"
             : "complete",
@@ -739,7 +815,7 @@ async function collectFeeds(
 }
 
 async function syncFeeds(
-  context: SourceAdapterContext<SourceAdapterConfig>,
+  context: RssContext,
   params: ActionParams,
 ): Promise<z.infer<typeof syncOutputSchema>> {
   const selected = selectedFeeds(context.config, params);
@@ -832,10 +908,6 @@ async function syncFeeds(
         );
         baselineEntries[entry.key] = {
           fingerprint,
-          ...(entry.item.updated ? { updatedAt: entry.item.updated } : {}),
-          ...(entry.item.published
-            ? { publishedAt: entry.item.published }
-            : {}),
           archivedCompleteness: "baseline",
         };
       }
@@ -958,10 +1030,6 @@ async function syncFeeds(
         );
         const record: IncrementalEntryRecord = {
           fingerprint,
-          ...(entry.item.updated ? { updatedAt: entry.item.updated } : {}),
-          ...(entry.item.published
-            ? { publishedAt: entry.item.published }
-            : {}),
           archivedCompleteness: archived.hasMediaFailures
             ? "partial"
             : "complete",
@@ -1009,31 +1077,44 @@ async function syncFeeds(
 
 export const sourceAdapter = defineSourceAdapter({
   id: "rss-atom",
-  version: "1.0.1",
+  version: "1.0.2",
   description: "读取多个 RSS/Atom feed，保存直接提供的正文、结构和可取得媒体。",
   environment: {
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema: sourceAdapterConfigSchema,
+  extensionsSchema: feedExtensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "检查所选 RSS/Atom feed 的可达性、条目身份和正文范围。",
-      params: actionParamsSchema,
-      output: checkOutputSchema,
-      execute: checkFeeds,
-    }),
-    collect: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "读取所选 feed 的新内容和编辑，并归档正文与可取得媒体。",
-      params: actionParamsSchema,
-      output: collectOutputSchema,
-      execute: collectFeeds,
-    }),
-    sync: defineSourceAdapterAction(sourceAdapterConfigSchema, {
-      description: "增量同步所选 feed 的新内容和变更；首次运行仅建立基线。",
-      params: actionParamsSchema,
-      output: syncOutputSchema,
-      execute: syncFeeds,
-    }),
+    check: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      feedExtensionsSchema,
+      {
+        description: "检查所选 RSS/Atom feed 的可达性、条目身份和正文范围。",
+        params: actionParamsSchema,
+        output: checkOutputSchema,
+        execute: checkFeeds,
+      },
+    ),
+    collect: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      feedExtensionsSchema,
+      {
+        description: "读取所选 feed 的新内容和编辑，并归档正文与可取得媒体。",
+        params: actionParamsSchema,
+        output: collectOutputSchema,
+        execute: collectFeeds,
+      },
+    ),
+    sync: defineSourceAdapterAction(
+      sourceAdapterConfigSchema,
+      feedExtensionsSchema,
+      {
+        description: "增量同步所选 feed 的新内容和变更；首次运行仅建立基线。",
+        params: actionParamsSchema,
+        output: syncOutputSchema,
+        execute: syncFeeds,
+      },
+    ),
   },
 });

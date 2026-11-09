@@ -9,13 +9,13 @@ import type {
   ArchiveCommit,
   ArchiveResourceMetadata,
   IncrementalSyncState,
-  SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
-import { z } from "zod";
 
 import sourceAdapter from "../src/index.ts";
 
-type RssConfig = z.output<typeof sourceAdapter.configSchema>;
+type RssActionContext = Parameters<
+  typeof sourceAdapter.actions.collect.execute
+>[0];
 
 void test("RSS/Atom clean content, full-text selection, attachments, and incremental collection", async () => {
   let storedPersistentState: IncrementalSyncState | undefined;
@@ -33,9 +33,8 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
   let syncMediaFeedVersion = 1;
   let failOnceAvailable = false;
   const mediaRequests: string[] = [];
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+  const submissions: Parameters<RssActionContext["archive"]["submit"]>[0][] =
+    [];
 
   const server = createServer((request, response) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -51,7 +50,16 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         etag,
       });
       response.end(
-        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>RSS 来源</title><link>${origin}/</link><item><guid>urn:binny:rss:item-1</guid><title>RSS 文章</title><link>${origin}/story/1</link><description>文章摘要</description><content:encoded><![CDATA[<p>RSS 全文版本 ${rssVersion}</p><img src="/media/photo.png" alt="文章图片" />]]></content:encoded><enclosure url="/media/audio.mp3" length="4" type="audio/mpeg" /><category>工程</category><author>作者甲</author></item></channel></rss>`,
+        `<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>RSS 来源</title><link>${origin}/</link><item><guid>urn:binny:rss:item-1</guid><title>RSS 文章</title><pubDate>Wed, 28 Oct 2026 01:23:45 +0200</pubDate><dc:date>2026-10-29</dc:date><updated>2026-10-30T12:34:56-03:00</updated><link>${origin}/story/1</link><description>文章摘要</description><content:encoded><![CDATA[<p>RSS 全文版本 ${rssVersion}</p><img src="/media/photo.png" alt="文章图片" />]]></content:encoded><enclosure url="/media/audio.mp3" length="4" type="audio/mpeg" /><category>工程</category><author>作者甲</author></item></channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/date-semantics") {
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      response.end(
+        `<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel><title>通用日期语义来源</title><item><guid>urn:binny:rss:item-with-ambiguous-date</guid><title>只有通用日期</title><pubDate>Wed, 28 Oct 2026 01:23:45 +0200</pubDate><dc:date>2026-10-29</dc:date><link>${origin}/story/ambiguous-date</link><description>没有明确修改证据</description></item><item><guid>urn:binny:rss:item-without-title-or-date</guid><link>${origin}/story/without-title</link><description>无标题无时间</description></item><item><guid>urn:binny:rss:item-with-invalid-rfc-date</guid><title>非法RFC822日期</title><pubDate>Mon, 30 Feb 2026 12:00:00 +0000</pubDate><link>${origin}/story/invalid-rfc-date</link><description>无效日历日期不得自动改写</description></item></channel></rss>`,
       );
       return;
     }
@@ -61,7 +69,7 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         etag: '"atom-1"',
       });
       response.end(
-        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:atom:feed</id><title>Atom 来源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:atom-item-1</id><title>Atom 文章</title><link href="${origin}/story/atom-1" /><summary>Atom 摘要</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 完整正文</p><img src="/media/atom.png" alt="Atom 图片" /></div></content><author><name>作者乙</name></author><category term="资料" /></entry></feed>`,
+        `<feed xmlns="http://www.w3.org/2005/Atom"><id>urn:binny:atom:feed</id><title>Atom 来源</title><updated>2026-10-28T00:00:00Z</updated><entry><id>tag:example.test,2026:atom-item-1</id><title>Atom 文章</title><published>2026-10-27</published><updated>2026-10-28T00:00:00-05:00</updated><link href="${origin}/story/atom-1" /><summary>Atom 摘要</summary><content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>Atom 完整正文</p><img src="/media/atom.png" alt="Atom 图片" /></div></content><author><name>作者乙</name></author><category term="资料" /></entry></feed>`,
       );
       return;
     }
@@ -70,7 +78,7 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         "content-type": "application/rss+xml; charset=utf-8",
       });
       response.end(
-        `<rss version="2.0"><channel><title>摘要全文来源</title><item><guid>urn:binny:summary:item-1</guid><title>摘要全文文章</title><link>${origin}/story/summary-1</link><description><![CDATA[<p>这是在 description 中的完整正文第一段。</p><p>第二段正文。</p>]]></description></item></channel></rss>`,
+        `<rss version="2.0"><channel><title>摘要全文来源</title><item><guid>urn:binny:summary:item-1</guid><title>摘要全文文章</title><pubDate>2026-10-28T01:23:45</pubDate><link>${origin}/story/summary-1</link><description><![CDATA[<p>这是在 description 中的完整正文第一段。</p><p>第二段正文。</p>]]></description></item></channel></rss>`,
       );
       return;
     }
@@ -255,7 +263,7 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
   let commitSequence = 0;
   const runId = randomUUID();
 
-  const context: SourceAdapterContext<RssConfig> = {
+  const context: RssActionContext = {
     binId: "rss-test-bin",
     identityId: "rss-test-identity",
     runId,
@@ -266,6 +274,7 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         { id: "rss-main", url: `${origin}/rss`, title: "RSS 来源" },
         { id: "atom-main", url: `${origin}/atom`, title: "Atom 来源" },
         { id: "summary-full", url: `${origin}/summary-full` },
+        { id: "date-semantics", url: `${origin}/date-semantics` },
         {
           id: "summary-forced",
           url: `${origin}/summary-forced`,
@@ -352,6 +361,23 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
 
     const rssItem = submissions[0]?.items[0];
     assert.ok(rssItem);
+    assert.equal(rssItem.title, "RSS 文章");
+    assert.deepEqual(rssItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-28T01:23:45+02:00",
+    });
+    assert.deepEqual(rssItem.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-10-30T12:34:56-03:00",
+    });
+    assert.equal("title" in rssItem.extensions, false);
+    assert.equal("published" in rssItem.extensions, false);
+    assert.equal("updated" in rssItem.extensions, false);
+    assert.deepEqual(rssItem.extensions.authors, ["作者甲"]);
+    assert.deepEqual(rssItem.extensions.categories, ["工程"]);
+    assert.deepEqual(rssItem.extensions.item.categories, [
+      { label: "工程", term: "工程", url: null },
+    ]);
     assert.deepEqual(rssItem.sourceKey, {
       namespace: "rss:rss-main",
       key: "id:urn:binny:rss:item-1",
@@ -363,13 +389,21 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     assert.equal(rssItem.body?.searchText?.includes("RSS 全文版本 1"), true);
     assert.equal(rssItem.capture.completeness, "complete");
     assert.equal(rssItem.resources?.length, 2);
-    const rssMetadata = rssItem.metadata?.item;
-    assert.ok(typeof rssMetadata === "object" && rssMetadata !== null);
-    assert.equal("authors" in rssMetadata, true);
-    assert.equal("categories" in rssMetadata, true);
+    assert.equal("title" in rssItem.extensions.item, false);
+    assert.equal("published" in rssItem.extensions.item, false);
+    assert.equal("updated" in rssItem.extensions.item, false);
+    assert.equal("authors" in rssItem.extensions.item, true);
 
     const atomItem = submissions[1]?.items[0];
     assert.ok(atomItem);
+    assert.deepEqual(atomItem.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-10-27",
+    });
+    assert.deepEqual(atomItem.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-10-28T00:00:00-05:00",
+    });
     assert.equal(atomItem.sourceKey.namespace, "rss:atom-main");
     assert.equal(
       atomItem.sourceKey.key,
@@ -381,6 +415,8 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
 
     const summaryFullItem = submissions[2]?.items[0];
     assert.ok(summaryFullItem);
+    assert.equal(summaryFullItem.sourcePublishedAt, null);
+    assert.equal(summaryFullItem.sourceModifiedAt, null);
     assert.equal(summaryFullItem.body?.html, undefined);
     assert.equal(
       summaryFullItem.body?.markdown?.includes(
@@ -660,6 +696,10 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     assert.equal(submissions.length, beforeSyncSubmissions + 1);
     const newSyncItem = submissions[beforeSyncSubmissions]?.items[0];
     assert.equal(newSyncItem?.sourceKey.key, "id:urn:binny:sync:item-2");
+    assert.equal(newSyncItem?.title, "Sync 新增条目 2");
+    assert.equal(newSyncItem?.sourcePublishedAt, null);
+    assert.equal(newSyncItem?.sourceModifiedAt, null);
+    assert.equal("title" in (newSyncItem?.extensions ?? {}), false);
     assert.equal(newSyncItem?.capture.completeness, "complete");
 
     // Modified item in feed: sync archives updated revision
@@ -674,6 +714,9 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
     assert.equal(submissions.length, beforeSyncSubmissions + 2);
     const modifiedSyncItem = submissions[beforeSyncSubmissions + 1]?.items[0];
     assert.equal(modifiedSyncItem?.sourceKey.key, "id:urn:binny:sync:item-2");
+    assert.equal(modifiedSyncItem?.title, "Sync 新增条目 2");
+    assert.equal(modifiedSyncItem?.sourcePublishedAt, null);
+    assert.equal(modifiedSyncItem?.sourceModifiedAt, null);
     assert.ok(modifiedSyncItem?.body?.markdown?.includes("新增条目 2 更新版"));
 
     // Subsequent sync fails when feed contains entry missing body and does not archive partial item
@@ -801,6 +844,43 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
       beforeBackfillSubmissions + 2,
       "Second collect skipped unchanged complete items.",
     );
+
+    const beforeDateSemanticsSubmissions = submissions.length;
+    const dateSemantics = await collect.execute(context, {
+      feedIds: ["date-semantics"],
+    });
+    assert.deepEqual(dateSemantics, {
+      completedScopes: ["feed:date-semantics"],
+    });
+    assert.equal(submissions.length, beforeDateSemanticsSubmissions + 3);
+    const ambiguousDateItem =
+      submissions[beforeDateSemanticsSubmissions]?.items[0];
+    assert.equal(
+      ambiguousDateItem?.sourceKey.key,
+      "id:urn:binny:rss:item-with-ambiguous-date",
+    );
+    assert.deepEqual(ambiguousDateItem?.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-28T01:23:45+02:00",
+    });
+    assert.equal(ambiguousDateItem?.sourceModifiedAt, null);
+    const untitledItem =
+      submissions[beforeDateSemanticsSubmissions + 1]?.items[0];
+    assert.equal(
+      untitledItem?.sourceKey.key,
+      "id:urn:binny:rss:item-without-title-or-date",
+    );
+    assert.equal(untitledItem?.title, null);
+    assert.equal(untitledItem?.sourcePublishedAt, null);
+    assert.equal(untitledItem?.sourceModifiedAt, null);
+    const invalidRfcDateItem =
+      submissions[beforeDateSemanticsSubmissions + 2]?.items[0];
+    assert.equal(
+      invalidRfcDateItem?.sourceKey.key,
+      "id:urn:binny:rss:item-with-invalid-rfc-date",
+    );
+    assert.equal(invalidRfcDateItem?.sourcePublishedAt, null);
+    assert.equal(invalidRfcDateItem?.sourceModifiedAt, null);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) =>
