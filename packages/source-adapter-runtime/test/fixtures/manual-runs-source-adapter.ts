@@ -206,13 +206,13 @@ export default defineSourceAdapter({
                   ? {
                       category: "comment",
                       floor: 8,
-                      labels: ["reply"],
+                      labels: ["reply", "release"],
                       featured: false,
                     }
                   : {
                       category: "post",
                       floor: 7,
-                      labels: ["release", "news"],
+                      labels: ["release", "news", "release"],
                       featured: true,
                     },
                 body: {
@@ -255,6 +255,22 @@ export default defineSourceAdapter({
                   nullableLabels: null,
                 },
                 body: { text: "optional extension fields are null" },
+                capture: {
+                  scope: { fixture: "extension-search" },
+                  completeness: "complete" as const,
+                  missing: [],
+                },
+              },
+              {
+                sourceKey: {
+                  namespace: "binny-runs.extension-search-fixture",
+                  key: "empty-list-fields",
+                },
+                title: "Extension fields empty",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: { labels: [] },
+                body: { text: "optional extension list is empty" },
                 capture: {
                   scope: { fixture: "extension-search" },
                   completeness: "complete" as const,

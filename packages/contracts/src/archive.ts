@@ -1081,44 +1081,55 @@ const archiveSearchDistributionPageInputFields = {
   cursor: postgresTextSchema.min(1).max(4096).optional(),
 };
 
-/** One independently paginated distribution over the complete match set. */
+const archiveSearchBinDistributionRequestSchema = z
+  .object({
+    by: z.literal("bin"),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+const archiveSearchDateDistributionRequestSchema = z
+  .object({
+    by: z.literal("date"),
+    field: z
+      .enum(["sourcePublishedAt", "sourceModifiedAt", "observedAt"])
+      .describe("The source or archive time fact used for the date groups."),
+    period: z
+      .enum(["day", "month", "year"])
+      .default("day")
+      .describe("The local calendar period represented by each date group."),
+    timeZone: archiveTimeZoneSchema.describe(
+      "Required time zone used to form local calendar groups.",
+    ),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+const archiveSearchExtensionDistributionRequestSchema = z
+  .object({
+    by: z.literal("extension"),
+    sourceAdapterId: sourceAdapterIdSchema,
+    field: postgresTextSchema.min(1).max(128),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+
+/**
+ * One independently paginated distribution over the complete match set.
+ * Date periods use local calendar boundaries in the required time zone; a day
+ * follows the calendar and may not be exactly 24 elapsed hours across DST.
+ */
 export const archiveSearchDistributionRequestSchema =
   withArchiveJsonSchemaProjection(
     z.discriminatedUnion("by", [
-      z
-        .object({
-          by: z.literal("bin"),
-          ...archiveSearchDistributionPageInputFields,
-        })
-        .strict(),
-      z
-        .object({
-          by: z.literal("date"),
-          field: z
-            .enum(["sourcePublishedAt", "sourceModifiedAt", "observedAt"])
-            .describe(
-              "The source or archive time fact used for the date groups.",
-            ),
-          period: z
-            .enum(["day", "month", "year"])
-            .default("day")
-            .describe(
-              "The local calendar period represented by each date group.",
-            ),
-          timeZone: archiveTimeZoneSchema.describe(
-            "Required time zone used to form local calendar groups.",
-          ),
-          ...archiveSearchDistributionPageInputFields,
-        })
-        .strict(),
-      z
-        .object({
-          by: z.literal("extension"),
-          sourceAdapterId: sourceAdapterIdSchema,
-          field: postgresTextSchema.min(1).max(128),
-          ...archiveSearchDistributionPageInputFields,
-        })
-        .strict(),
+      archiveSearchBinDistributionRequestSchema,
+      archiveSearchDateDistributionRequestSchema,
+      archiveSearchExtensionDistributionRequestSchema,
+    ]),
+  );
+const archiveSearchNonExtensionDistributionRequestSchema =
+  withArchiveJsonSchemaProjection(
+    z.discriminatedUnion("by", [
+      archiveSearchBinDistributionRequestSchema,
+      archiveSearchDateDistributionRequestSchema,
     ]),
   );
 export type ArchiveSearchDistributionRequest = z.input<
@@ -1251,22 +1262,46 @@ function archiveSearchBinsSchema(requiredExtensionScope = false) {
     });
 }
 
-const archiveSearchInputCommonFields = {
+const archiveSearchInputSharedFields = {
   text: archiveSearchTextSchema.optional(),
   timeWindow: archiveSearchTimeWindowSchema.optional(),
-  includeCandidates: z.boolean().default(true),
-  distribution: archiveSearchDistributionRequestSchema.optional(),
+  includeCandidates: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Return candidate item results alongside an optional distribution.",
+    ),
   asOf: archiveSnapshotSequenceSchema.optional(),
   limit: z.number().int().min(1).max(100).default(50),
   cursor: postgresTextSchema.min(1).max(4096).optional(),
 };
-const archiveSearchWithoutExtensionsSchema = z
-  .object({
-    bins: archiveSearchBinsSchema().optional(),
-    ...archiveSearchInputCommonFields,
-    extensions: z.never().optional(),
-  })
-  .strict();
+const archiveSearchInputCommonFields = {
+  ...archiveSearchInputSharedFields,
+  distribution: archiveSearchDistributionRequestSchema
+    .optional()
+    .describe(
+      "An independent complete-match distribution by bin, local date period, or declared extension field.",
+    ),
+};
+const archiveSearchWithoutExtensionsSchema = z.union([
+  z
+    .object({
+      bins: archiveSearchBinsSchema().optional(),
+      ...archiveSearchInputSharedFields,
+      distribution:
+        archiveSearchNonExtensionDistributionRequestSchema.optional(),
+      extensions: z.never().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      bins: archiveSearchBinsSchema(true),
+      ...archiveSearchInputSharedFields,
+      distribution: archiveSearchExtensionDistributionRequestSchema,
+      extensions: z.never().optional(),
+    })
+    .strict(),
+]);
 const archiveSearchWithExtensionsSchema = z
   .object({
     bins: archiveSearchBinsSchema(true),
@@ -1280,6 +1315,10 @@ const archiveSearchWithExtensionsSchema = z
  * snapshot. Extension filters require an explicit `bins` list. Every selected
  * bin must use the declared adapter and schema; all filters are evaluated on
  * the same latest bin view. Missing or null extension values do not match.
+ * A request may include one complete-match distribution by bin, date period,
+ * or declared top-level extension field. Candidate and distribution cursors
+ * and page sizes advance independently; set `includeCandidates` to false for
+ * distribution-only pages.
  */
 export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
   z
@@ -1407,7 +1446,11 @@ const archiveSearchResultSchema = z
  * both. `hasMore` and `nextCursor` describe the candidate page. If candidates
  * are omitted, `results` is empty and `hasMore` is false. A requested
  * distribution covers the complete matching set and has its own continuation
- * cursor and page size. Neither page size nor cursor changes the other page.
+ * cursor and page size. Date groups include a source-time fact only when its
+ * complete represented interval fits one local calendar period; other facts
+ * are grouped by their undetermined reason. Extension list values and matching
+ * views are deduplicated within each group, and absent/null/empty values share
+ * one missing group. Neither page size nor cursor changes the other page.
  */
 export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
   z

@@ -600,6 +600,55 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await fixedSearch.json()).error.path;
   }
 
+  const distributionSearch = await client.archives.search.$post({
+    json: {
+      bins: ["rss-main"],
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "rss-atom",
+        field: "categories",
+        limit: 10,
+      },
+    },
+  });
+  if (distributionSearch.status === 200) {
+    const page = await distributionSearch.json();
+    void page.candidatesIncluded;
+    void page.distribution?.totalItems;
+    if (page.distribution?.by === "extension") {
+      void page.distribution.hasMore;
+      const group = page.distribution.groups[0];
+      if (group?.kind === "extension") {
+        const scalar: string | number | boolean = group.value;
+        void scalar;
+      }
+      if (group?.kind === "missing") void group.itemCount;
+    }
+  }
+
+  void client.archives.search.$post({
+    // @ts-expect-error Extension distributions require an explicit bin scope.
+    json: {
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "rss-atom",
+        field: "categories",
+      },
+    },
+  });
+  void client.archives.search.$post({
+    json: {
+      distribution: {
+        by: "date",
+        // @ts-expect-error Date distributions use a declared archive time field.
+        field: "title",
+        timeZone: "UTC",
+      },
+    },
+  });
+
   void client.archives.search.$post({
     json: {
       bins: ["rss-main"],

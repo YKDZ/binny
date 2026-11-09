@@ -453,6 +453,93 @@ function dateDistributionCtes(
   )`;
 }
 
+function extensionDistributionCtes(
+  distribution: Extract<
+    NonNullable<SearchInput["distribution"]>,
+    { by: "extension" }
+  >,
+  cursor: SearchDistributionCursor | undefined,
+) {
+  const extensionValue = sql`selected_views.state_data->'extensions'->${distribution.field}`;
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  return sql`extension_values AS (
+    SELECT selected_views.item_id, extension_value.value AS group_value
+    FROM selected_views
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(${extensionValue}) = 'array' THEN ${extensionValue}
+        WHEN ${extensionValue} IS NULL OR ${extensionValue} = 'null'::jsonb
+        THEN '[]'::jsonb
+        ELSE jsonb_build_array(${extensionValue})
+      END
+    ) AS extension_value(value)
+  ), extension_counts AS (
+    SELECT group_value, count(DISTINCT item_id)::text AS item_count
+    FROM extension_values
+    GROUP BY group_value
+  ), extension_missing AS (
+    SELECT DISTINCT selected_views.item_id
+    FROM selected_views
+    WHERE ${extensionValue} IS NULL
+      OR ${extensionValue} = 'null'::jsonb
+      OR CASE
+        WHEN jsonb_typeof(${extensionValue}) = 'array'
+        THEN jsonb_array_length(${extensionValue}) = 0
+        ELSE false
+      END
+  ), distribution_base AS (
+    SELECT
+      ('extension:' || group_value::text) COLLATE "C" AS group_key,
+      'extension'::text AS group_kind,
+      group_value,
+      item_count
+    FROM extension_counts
+    UNION ALL
+    SELECT
+      'missing:'::text COLLATE "C" AS group_key,
+      'missing'::text AS group_kind,
+      NULL::jsonb AS group_value,
+      count(DISTINCT item_id)::text AS item_count
+    FROM extension_missing
+    HAVING count(DISTINCT item_id) > 0
+  ), distribution_total AS (
+    SELECT count(DISTINCT item_id)::text AS total_items
+    FROM selected_views
+  ), distribution_selected AS (
+    SELECT distribution_base.*
+    FROM distribution_base
+    WHERE ${afterCursor}
+    ORDER BY group_key COLLATE "C" ASC
+    LIMIT ${distribution.limit + 1}
+  ), distribution_groups AS (
+    SELECT coalesce(
+      jsonb_agg(
+        CASE group_kind
+          WHEN 'extension' THEN jsonb_build_object(
+            'kind', 'extension'::text,
+            'value', group_value,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+          ELSE jsonb_build_object(
+            'kind', 'missing'::text,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+        END ORDER BY group_key COLLATE "C" ASC
+      ),
+      '[]'::jsonb
+    ) AS groups
+    FROM distribution_selected
+  ), distribution_summary AS (
+    SELECT distribution_total.total_items, distribution_groups.groups
+    FROM distribution_total CROSS JOIN distribution_groups
+  )`;
+}
+
 function decodeJsonValue(value: unknown): unknown {
   return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
 }
@@ -516,12 +603,19 @@ function validateExtensionScope(
   value: unknown,
 ): ArchiveSearchOperation<never> | undefined {
   const extensions = input.extensions;
-  if (extensions === undefined) return undefined;
+  const distribution =
+    input.distribution?.by === "extension" ? input.distribution : undefined;
+  const sourceAdapterId =
+    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId;
+  if (sourceAdapterId === undefined) return undefined;
+  const adapterPath =
+    extensions === undefined
+      ? (["distribution", "sourceAdapterId"] as const)
+      : (["extensions", "sourceAdapterId"] as const);
   const bins = extensionScopeBins(value);
   if (bins.length === 0) {
     return invalidInput("No configured bin uses the selected source adapter.", [
-      "extensions",
-      "sourceAdapterId",
+      ...adapterPath,
     ]);
   }
   if (input.bins !== undefined && bins.length !== input.bins.length) {
@@ -532,9 +626,9 @@ function validateExtensionScope(
   }
 
   for (const bin of bins) {
-    if (bin.sourceAdapter.id !== extensions.sourceAdapterId) {
+    if (bin.sourceAdapter.id !== sourceAdapterId) {
       return invalidInput(
-        "Extension filters require bins from the declared source adapter only.",
+        "Extension operations require bins from the declared source adapter only.",
         ["bins"],
       );
     }
@@ -543,38 +637,56 @@ function validateExtensionScope(
       sourceAdapterVersion: bin.sourceAdapter.version,
       extensionsSchema: bin.sourceAdapter.extensionsSchema,
     }).fields;
-    for (const [fieldName, filter] of Object.entries(extensions.filters)) {
-      const path = ["extensions", "filters", fieldName] as const;
-      const field = fields[fieldName];
+    if (extensions !== undefined) {
+      for (const [fieldName, filter] of Object.entries(extensions.filters)) {
+        const path = ["extensions", "filters", fieldName] as const;
+        const field = fields[fieldName];
+        if (field === undefined) {
+          return invalidInput(
+            `The selected adapter does not declare the top-level extension field "${fieldName}".`,
+            path,
+          );
+        }
+        if (!field.operations.includes(filter.op)) {
+          return invalidInput(
+            `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
+            [...path, "op"],
+          );
+        }
+        const type =
+          filter.op === "has" || filter.op === "hasAny"
+            ? field.itemType
+            : field.type;
+        const allowedValues =
+          filter.op === "has" || filter.op === "hasAny"
+            ? field.allowedItemValues
+            : field.allowedValues;
+        for (const candidate of extensionFilterValues(filter)) {
+          if (
+            !extensionFilterValueMatches(candidate.value, type, allowedValues)
+          ) {
+            return invalidInput(
+              `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
+              [...path, ...candidate.path],
+            );
+          }
+        }
+      }
+    }
+    if (distribution !== undefined) {
+      const path = ["distribution", "field"] as const;
+      const field = fields[distribution.field];
       if (field === undefined) {
         return invalidInput(
-          `The selected adapter does not declare the top-level extension field "${fieldName}".`,
+          `The selected adapter does not declare the top-level extension field "${distribution.field}".`,
           path,
         );
       }
-      if (!field.operations.includes(filter.op)) {
+      if (field.operations.length === 0) {
         return invalidInput(
-          `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
-          [...path, "op"],
+          `The extension field "${distribution.field}" is not a scalar or scalar list.`,
+          path,
         );
-      }
-      const type =
-        filter.op === "has" || filter.op === "hasAny"
-          ? field.itemType
-          : field.type;
-      const allowedValues =
-        filter.op === "has" || filter.op === "hasAny"
-          ? field.allowedItemValues
-          : field.allowedValues;
-      for (const candidate of extensionFilterValues(filter)) {
-        if (
-          !extensionFilterValueMatches(candidate.value, type, allowedValues)
-        ) {
-          return invalidInput(
-            `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
-            [...path, ...candidate.path],
-          );
-        }
       }
     }
   }
@@ -710,9 +822,7 @@ function pageQuery(
         )`
         : distribution.by === "date"
           ? dateDistributionCtes(distribution, distributionCursor, aliases)
-          : sql`distribution_summary AS (
-          SELECT NULL::text AS total_items, '[]'::jsonb AS groups
-        )`;
+          : extensionDistributionCtes(distribution, distributionCursor);
   const classificationFields =
     decision === undefined
       ? sql`, NULL::text AS time_status, NULL::text AS time_reason, NULL::timestamptz AS sort_value`

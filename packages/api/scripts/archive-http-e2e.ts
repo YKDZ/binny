@@ -2794,6 +2794,69 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     assert.match(error.message, /expected record/u);
   }
 
+  const implicitExtensionDistributionScope = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "category",
+        },
+      }),
+    },
+  );
+  assert.equal(implicitExtensionDistributionScope.status, 400);
+  if (implicitExtensionDistributionScope.status === 400) {
+    const error = (
+      (await implicitExtensionDistributionScope.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["bins"]);
+    assert.match(error.message, /explicit bin scope/u);
+  }
+
+  const objectExtensionDistribution = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bins: ["binny-runs-one"],
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "sourceDetails",
+        },
+      }),
+    },
+  );
+  assert.equal(objectExtensionDistribution.status, 400);
+  if (objectExtensionDistribution.status === 400) {
+    const error = (
+      (await objectExtensionDistribution.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["distribution", "field"]);
+    assert.match(error.message, /scalar or scalar list/u);
+  }
+
   if (process.env.BINNY_E2E_ARCHIVE_EXTENSION_FIXTURES === "1") {
     const extensionSearch = async (query: Record<string, unknown>) =>
       archiveSearchPageSchema.parse(
@@ -2856,6 +2919,113 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       ["binny-runs-one", "binny-runs-two"],
     );
 
+    const labelDistribution = await extensionSearch({
+      bins: multiBinScope,
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: {
+          labels: { op: "hasAny", values: ["release", "reply"] },
+        },
+      },
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        limit: 1,
+      },
+    });
+    assert.equal(labelDistribution.candidatesIncluded, false);
+    assert.deepEqual(labelDistribution.results, []);
+    assert.ok(labelDistribution.distribution);
+    if (labelDistribution.distribution?.by !== "extension") {
+      throw new Error("Expected an extension distribution page.");
+    }
+    assert.equal(labelDistribution.distribution.totalItems, "1");
+    assert.deepEqual(labelDistribution.distribution.groups, [
+      { kind: "extension", value: "news", itemCount: "1" },
+    ]);
+    assert.equal(labelDistribution.distribution.hasMore, true);
+    assert.ok(labelDistribution.distribution.nextCursor);
+
+    const labelDistributionNext = await extensionSearch({
+      bins: multiBinScope,
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: {
+          labels: { op: "hasAny", values: ["release", "reply"] },
+        },
+      },
+      includeCandidates: false,
+      limit: 1,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        limit: 5,
+        cursor: labelDistribution.distribution.nextCursor,
+      },
+    });
+    assert.ok(labelDistributionNext.distribution);
+    if (labelDistributionNext.distribution?.by !== "extension") {
+      throw new Error("Expected a continued extension distribution page.");
+    }
+    assert.equal(
+      labelDistributionNext.distribution.totalItems,
+      labelDistribution.distribution.totalItems,
+    );
+    assert.deepEqual(labelDistributionNext.distribution.groups, [
+      { kind: "extension", value: "release", itemCount: "1" },
+      { kind: "extension", value: "reply", itemCount: "1" },
+    ]);
+    assert.equal(labelDistributionNext.distribution.hasMore, false);
+    assert.equal(labelDistributionNext.distribution.nextCursor, undefined);
+
+    const categoryDistribution = await extensionSearch({
+      bins: multiBinScope,
+      text: { in: "title", groups: [["Extension"]] },
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "category",
+        limit: 10,
+      },
+    });
+    assert.ok(categoryDistribution.distribution);
+    if (categoryDistribution.distribution?.by !== "extension") {
+      throw new Error("Expected a category distribution page.");
+    }
+    assert.equal(categoryDistribution.distribution.totalItems, "4");
+    assert.deepEqual(categoryDistribution.distribution.groups, [
+      { kind: "extension", value: "comment", itemCount: "1" },
+      { kind: "extension", value: "post", itemCount: "1" },
+      { kind: "missing", itemCount: "3" },
+    ]);
+
+    const allLabelValuesDistribution = await extensionSearch({
+      bins: multiBinScope,
+      text: { in: "title", groups: [["Extension"]] },
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        limit: 10,
+      },
+    });
+    assert.ok(allLabelValuesDistribution.distribution);
+    if (allLabelValuesDistribution.distribution?.by !== "extension") {
+      throw new Error("Expected a label distribution page.");
+    }
+    assert.equal(allLabelValuesDistribution.distribution.totalItems, "4");
+    assert.deepEqual(allLabelValuesDistribution.distribution.groups, [
+      { kind: "extension", value: "news", itemCount: "1" },
+      { kind: "extension", value: "release", itemCount: "1" },
+      { kind: "extension", value: "reply", itemCount: "1" },
+      { kind: "missing", itemCount: "3" },
+    ]);
+
     const sameViewMiss = await extensionSearch({
       ...scopedExtensionQuery({ category: { op: "eq", value: "post" } }),
       text: { groups: [["release"]] },
@@ -2870,7 +3040,9 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       const page = await extensionSearch(query);
       assert.equal(
         page.results.some(({ sourceKey }) =>
-          ["missing-fields", "nullable-fields"].includes(sourceKey.key),
+          ["missing-fields", "nullable-fields", "empty-list-fields"].includes(
+            sourceKey.key,
+          ),
         ),
         false,
       );
@@ -3170,6 +3342,11 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       text: binDistributionQuery.text,
       cursor: binDistribution.nextCursor,
       limit: 10,
+      distribution: {
+        by: "bin",
+        limit: 5,
+        cursor: binDistribution.distribution.nextCursor,
+      },
     },
   });
   assert.equal(candidateContinuationResponse.status, 200);
@@ -3186,6 +3363,34 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     ["Distribution primary"],
   );
   assert.equal(candidateContinuation.hasMore, false);
+  assert.ok(candidateContinuation.distribution);
+  if (candidateContinuation.distribution?.by !== "bin") {
+    throw new Error("Expected a continued bin distribution page.");
+  }
+  assert.equal(candidateContinuation.distribution.totalItems, "2");
+  assert.deepEqual(candidateContinuation.distribution.groups, [
+    { kind: "bin", binId: "binny-runs-two", itemCount: "1" },
+  ]);
+  assert.equal(candidateContinuation.distribution.hasMore, false);
+
+  const mismatchedDistributionCursor = await client.archives.search.$post({
+    json: {
+      bins: binDistributionQuery.bins,
+      text: { in: "title", groups: [["different distribution"]] },
+      includeCandidates: false,
+      distribution: {
+        by: "bin",
+        cursor: binDistribution.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(mismatchedDistributionCursor.status, 400);
+  if (mismatchedDistributionCursor.status === 400) {
+    assert.deepEqual((await mismatchedDistributionCursor.json()).error.path, [
+      "distribution",
+      "cursor",
+    ]);
+  }
 
   const crossView = await client.archives.search.$post({
     json: {
@@ -3903,7 +4108,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     bins: ["binny-runs-one", "binny-runs-two"],
     text: { in: "body", groups: [[token]] },
     asOf: snapshotAsOf,
-    limit: 5,
+    limit: 6,
     timeWindow: {
       field: "sourcePublishedAt",
       from: "2026-11-08",
@@ -3925,7 +4130,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     certainItems: "4",
     undeterminedItems: "7",
   });
-  assert.equal(undetermined.results.length, 5);
+  assert.equal(undetermined.results.length, 6);
   assert.equal(undetermined.hasMore, true);
   assert.equal(undetermined.hasMore, undetermined.nextCursor !== undefined);
   assert.ok(undetermined.nextCursor);
@@ -3954,7 +4159,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     undeterminedNextPage.nextCursor !== undefined,
   );
   assert.equal(undeterminedNextPage.nextCursor, undefined);
-  assert.equal(undeterminedNextPage.results.length, 2);
+  assert.equal(undeterminedNextPage.results.length, 1);
   assert.equal(undeterminedNextPage.results[0]?.sourcePublishedAt, null);
   const undeterminedResults = [
     ...undetermined.results,
