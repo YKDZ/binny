@@ -1270,7 +1270,15 @@ export type ArchiveOperations = {
   searchArchive(
     input: ArchiveSearchRequest,
   ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;
-  /** Read exact item, bin, revision, and observation references in one bounded request. */
+  /**
+   * Read exact item, bin, revision, and observation references selected from
+   * search. Repeated inputs retain separate result indices, while deleted,
+   * absent, and mismatched references return per-item unreadable results.
+   * Readable revisions include the complete stored body and report resource
+   * availability independently. A request accepts at most 50 references and
+   * rejects as a whole if its complete response exceeds 16 MiB or its shared
+   * server request budget expires.
+   */
   readArchiveBatch(
     input: ArchiveBatchReadRequest,
   ): Promise<ArchiveBatchReadOperation<ArchiveBatchReadResponse>>;

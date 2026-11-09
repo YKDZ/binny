@@ -9,6 +9,13 @@ import {
 } from "./archive.ts";
 import { binIdSchema } from "./bin-configuration.ts";
 
+const archiveBatchReadArchiveSequenceSchema = archiveSequenceSchema.refine(
+  (value) =>
+    value.length < 19 ||
+    (value.length === 19 && value <= "9223372036854775807"),
+  "Archive sequence exceeds PostgreSQL bigint range.",
+);
+
 /** Maximum number of selected archive views accepted by one batch request. */
 export const archiveBatchReadMaxReferences = 50;
 
@@ -22,7 +29,7 @@ export const archiveBatchReadReferenceSchema = withArchiveJsonSchemaProjection(
       itemId: archiveIdentifierSchema,
       binId: binIdSchema,
       revisionId: archiveIdentifierSchema,
-      archiveSeq: archiveSequenceSchema,
+      archiveSeq: archiveBatchReadArchiveSequenceSchema,
     })
     .strict(),
 );

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { createApiClient } from "@binny/api/client";
 import {
+  archiveBatchReadMaxResponseBytes,
   archiveBatchReadMaxReferences,
   archiveBatchReadResponseSchema,
   type ArchiveBatchReadReference,
@@ -27,11 +28,19 @@ async function readBatch(
   );
 }
 
-async function verifyArchiveBatchRead(baseUrl: string): Promise<void> {
+async function verifyArchiveBatchRead(baseUrl: string): Promise<{
+  readonly reference: ArchiveBatchReadReference;
+  readonly oversizedReference: ArchiveBatchReadReference;
+  readonly bodyLength: number;
+  readonly bodySuffix: string;
+  readonly resourceId: string;
+}> {
   const client = createApiClient(baseUrl);
   const runId = randomUUID();
   const token = "batch-read-" + runId;
-  const bodyText = "Exact selected content " + token;
+  const bodyPrefix = "Exact selected content " + token + "\n";
+  const bodySuffix = "Batch read full body suffix " + token;
+  const bodyText = bodyPrefix + "x".repeat(1024 * 1024) + "\n" + bodySuffix;
   const sourceKey = { namespace: "e2e", key: token };
   const resourceUpload = await fetch(baseUrl + "/resources", {
     method: "POST",
@@ -281,6 +290,28 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<void> {
     assert.deepEqual(error.path, ["references", 0, "archiveSeq"]);
   }
 
+  const outOfRangeSequence = await client.archives["batch-read"].$post({
+    json: {
+      references: [
+        {
+          ...firstBinReference,
+          archiveSeq: "9223372036854775808",
+        },
+      ],
+    },
+  });
+  assert.equal(
+    outOfRangeSequence.status,
+    400,
+    await outOfRangeSequence.clone().text(),
+  );
+  if (outOfRangeSequence.status === 400) {
+    const error = (await outOfRangeSequence.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["references", 0, "archiveSeq"]);
+    assert.match(error.message, /PostgreSQL bigint range/u);
+  }
+
   const tooManyReferences = await client.archives["batch-read"].$post({
     json: {
       references: Array.from(
@@ -296,13 +327,93 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<void> {
     assert.deepEqual(error.path, ["references"]);
     assert.match(error.message, /Read at most 50 references.*another request/u);
   }
+
+  const oversizedToken = token + ":oversized";
+  const oversizedSubmission = await client.archives.$post({
+    json: {
+      requestId: "e2e:archive-batch-read:oversized:" + runId,
+      binId: "binny-runs-one",
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: oversizedToken },
+          title: "Oversized batch response " + oversizedToken,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {},
+          body: {
+            text:
+              "Oversized response body " +
+              oversizedToken +
+              "\n" +
+              "x".repeat(archiveBatchReadMaxResponseBytes + 1_024),
+          },
+          capture: {
+            scope: { case: "archive-batch-read-oversized" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    },
+  });
+  assert.equal(oversizedSubmission.status, 201);
+
+  const oversizedSearch = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "title", groups: [[oversizedToken]] },
+      limit: 10,
+    },
+  });
+  assert.equal(oversizedSearch.status, 200);
+  if (oversizedSearch.status !== 200) {
+    throw new Error("Search for oversized archive fixture failed.");
+  }
+  const oversizedCandidate = (await oversizedSearch.json()).results.find(
+    ({ sourceKey }) => sourceKey.key === oversizedToken,
+  );
+  assert.ok(oversizedCandidate !== undefined);
+  const oversizedMatch = oversizedCandidate.matches.find(
+    ({ binId }) => binId === "binny-runs-one",
+  );
+  assert.ok(oversizedMatch !== undefined);
+  const oversizedReference: ArchiveBatchReadReference = {
+    itemId: oversizedCandidate.itemId,
+    binId: oversizedMatch.binId,
+    revisionId: oversizedMatch.revisionId,
+    archiveSeq: oversizedMatch.archiveSeq,
+  };
+  const oversizedRead = await client.archives["batch-read"].$post({
+    json: { references: [oversizedReference] },
+  });
+  assert.equal(oversizedRead.status, 413, await oversizedRead.clone().text());
+  if (oversizedRead.status === 413) {
+    const error = (await oversizedRead.json()).error;
+    assert.equal(error.code, "payload_too_large");
+    assert.match(
+      error.message,
+      new RegExp(
+        `complete batch response exceeds ${String(archiveBatchReadMaxResponseBytes)} bytes`,
+        "u",
+      ),
+    );
+    assert.match(error.message, /Split the references into smaller requests/u);
+    assert.match(error.message, /archive revision <revision-id>/u);
+  }
+
+  return {
+    reference: firstBinReference,
+    oversizedReference,
+    bodyLength: bodyText.length,
+    bodySuffix,
+    resourceId: uppercaseResourceId,
+  };
 }
 
 const [baseUrl] = process.argv.slice(2);
 if (baseUrl === undefined || baseUrl.length === 0) {
   throw new Error("Archive batch-read verification requires a base URL.");
 }
-await verifyArchiveBatchRead(baseUrl);
 process.stdout.write(
-  "Exact archive batch-read reference verification passed.\n",
+  JSON.stringify(await verifyArchiveBatchRead(baseUrl)) + "\n",
 );
