@@ -16,6 +16,7 @@ const timestampSchema = z.iso.datetime({ offset: true });
 export const manualRunListQuerySchema = withPostgresJsonSchemaProjection(
   z
     .object({
+      binId: binIdSchema.optional(),
       action: sourceAdapterActionNameSchema.optional(),
       status: manualRunStatusSchema.optional(),
       createdFrom: timestampSchema.optional(),
@@ -36,14 +37,17 @@ export const manualRunListQuerySchema = withPostgresJsonSchemaProjection(
         context.addIssue({
           code: "custom",
           path: ["createdBefore"],
-          message: "运行创建时间上界必须晚于下界。",
+          message:
+            "The run creation-time upper bound must be later than the lower bound.",
         });
       }
     }),
 );
 
+/** List projection; parameters, reports, and results remain on run detail. */
 export const manualRunListSummarySchema = manualRunSchema.pick({
   runId: true,
+  binId: true,
   action: true,
   status: true,
   createdAt: true,
@@ -62,6 +66,7 @@ export const manualRunListPageSchema = withPostgresJsonSchemaProjection(
 
 const manualRunListCursorFilterSchema = z
   .object({
+    binId: binIdSchema.optional(),
     action: sourceAdapterActionNameSchema.optional(),
     status: manualRunStatusSchema.optional(),
     createdFrom: timestampSchema.optional(),
@@ -73,11 +78,11 @@ const manualRunListCursorFilterSchema = z
 export const manualRunListCursorSchema = z
   .object({
     version: z.literal(1),
-    binId: binIdSchema,
     filter: manualRunListCursorFilterSchema,
     before: z
       .object({
         createdAt: timestampSchema,
+        binId: binIdSchema,
         runId: z.string().uuid(),
       })
       .strict(),
@@ -101,8 +106,14 @@ export type ManualRunListOperation<T> =
     };
 
 export type ManualRunListOperations = {
+  /**
+   * List every bin by default in pages of 20 (maximum 100). Combine optional
+   * bin, action, status, and creation-time filters with AND. Order is createdAt,
+   * binId, and runId descending. `createdFrom` is inclusive and
+   * `createdBefore` is exclusive. A cursor continues the same filters and page
+   * size; invalid filters or mismatched cursors return a 400 input error.
+   */
   listRuns(
-    binId: string,
     input: ManualRunListQuery,
   ): Promise<ManualRunListOperation<ManualRunListPage>>;
 };

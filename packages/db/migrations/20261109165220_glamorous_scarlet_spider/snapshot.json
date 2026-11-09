@@ -1,0 +1,131 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "50614202-4951-4573-8d22-ea9976f8d417",
+  "prevIds": ["9355d89d-bf61-433d-bf16-c87c86695592"],
+  "footprints": [
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "manual_runs",
+        "manual_runs_global_history_idx"
+      ],
+      "writes": [
+        "s|idx|public.manual_runs_global_history_idx",
+        "n|idx|public.manual_runs_global_history_idx",
+        "e|idx|public.manual_runs_global_history_idx",
+        "n|rel|public.manual_runs_global_history_idx"
+      ],
+      "reads": [
+        "n|tbl|public.manual_runs",
+        "n|sch|public",
+        "n|col|public.manual_runs.created_at",
+        "n|col|public.manual_runs.bin_id",
+        "n|col|public.manual_runs.run_id"
+      ]
+    },
+    {
+      "statementType": "create_index",
+      "statementTarget": [
+        "index",
+        "public",
+        "schedules",
+        "schedules_global_history_idx"
+      ],
+      "writes": [
+        "s|idx|public.schedules_global_history_idx",
+        "n|idx|public.schedules_global_history_idx",
+        "e|idx|public.schedules_global_history_idx",
+        "n|rel|public.schedules_global_history_idx"
+      ],
+      "reads": [
+        "n|tbl|public.schedules",
+        "n|sch|public",
+        "n|col|public.schedules.created_at",
+        "n|col|public.schedules.bin_id",
+        "n|col|public.schedules.schedule_id"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "manual_runs",
+        "name": "manual_runs_global_history_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "created_at",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "run_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "schedules",
+        "name": "schedules_global_history_idx",
+        "nameExplicit": true,
+        "columns": [
+          {
+            "value": "created_at",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "bin_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          },
+          {
+            "value": "schedule_id",
+            "isExpression": false,
+            "asc": true,
+            "nullsFirst": false,
+            "opclass": null
+          }
+        ],
+        "isUnique": false,
+        "where": null,
+        "with": "",
+        "method": "btree",
+        "concurrently": false,
+        "entityType": "indexes"
+      }
+    }
+  ]
+}

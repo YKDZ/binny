@@ -625,6 +625,11 @@ export const schedules = pgTable(
     index("schedules_due_idx")
       .on(table.nextDueAt, table.binId, table.scheduleId)
       .where(eq(table.enabled, true)),
+    index("schedules_global_history_idx").on(
+      table.createdAt,
+      table.binId,
+      table.scheduleId,
+    ),
   ],
 );
 
@@ -696,6 +701,11 @@ export const manualRuns = pgTable(
     index("manual_runs_bin_history_idx").on(
       table.binId,
       table.createdAt,
+      table.runId,
+    ),
+    index("manual_runs_global_history_idx").on(
+      table.createdAt,
+      table.binId,
       table.runId,
     ),
     uniqueIndex("manual_runs_one_executing_bin_idx")

@@ -10,4 +10,5 @@ export * from "./manual-run-list.ts";
 export * from "./postgres-text.ts";
 export * from "./runtime-human-session.ts";
 export * from "./schedule.ts";
+export * from "./schedule-list.ts";
 export * from "./service-metadata.ts";

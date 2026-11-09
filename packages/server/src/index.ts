@@ -15,6 +15,7 @@ import {
   createHumanSessionStore,
   createManualRunListStore,
   createManualRunStore,
+  createScheduleListStore,
   createRuntimeConnectionStore,
   createScheduleStore,
   startScheduleDispatcher,
@@ -91,6 +92,7 @@ export async function createServerRuntime(options: {
   const runs = createManualRunStore(database, browserCapacity);
   const runListings = createManualRunListStore(database);
   const schedules = createScheduleStore(database);
+  const scheduleListings = createScheduleListStore(database);
   const humanSessions = createHumanSessionStore(database, browserCapacity);
   const viewerWaitMs = environmentMilliseconds(
     "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
@@ -212,6 +214,7 @@ export async function createServerRuntime(options: {
       runs,
       runListings,
       schedules,
+      scheduleListings,
       archives,
       humanSessions: humanOperations,
     },

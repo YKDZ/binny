@@ -1,0 +1,2 @@
+CREATE INDEX "manual_runs_global_history_idx" ON "manual_runs" ("created_at","bin_id","run_id");--> statement-breakpoint
+CREATE INDEX "schedules_global_history_idx" ON "schedules" ("created_at","bin_id","schedule_id");
