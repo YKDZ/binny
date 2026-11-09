@@ -43,6 +43,7 @@ import {
   sql,
 } from "drizzle-orm";
 
+import { createArchiveBatchReadOperation } from "./archive-batch-read.ts";
 import { canonicalJson, failure, validationFailure } from "./archive-common.ts";
 import {
   advanceArchiveSequence,
@@ -417,6 +418,11 @@ export function createArchiveStore(
   });
   const readOperations = createArchiveReadOperations(database);
   const searchOperations = createArchiveSearchOperation(
+    options.executeCancellableSearchQuery,
+    options.archiveSearchBudgetMs ?? 10_000,
+  );
+  const batchReadOperations = createArchiveBatchReadOperation(
+    resourceStorage,
     options.executeCancellableSearchQuery,
     options.archiveSearchBudgetMs ?? 10_000,
   );
@@ -940,6 +946,7 @@ export function createArchiveStore(
     },
 
     ...searchOperations,
+    ...batchReadOperations,
 
     ...readOperations,
   };

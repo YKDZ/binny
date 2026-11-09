@@ -378,6 +378,74 @@ void checkPublicScheduleContract;
 async function checkPublicArchiveContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
 
+  const batchRead = await client.archives["batch-read"].$post({
+    json: {
+      references: [
+        {
+          itemId: "650e8400-e29b-41d4-a716-446655440000",
+          binId: "rss-main",
+          revisionId: "750e8400-e29b-41d4-a716-446655440000",
+          archiveSeq: "12",
+        },
+      ],
+    },
+  });
+  if (batchRead.status === 200) {
+    const result = (await batchRead.json()).results[0];
+    if (result?.status === "readable") {
+      const bodyText: string | undefined = result.revision.state.body?.text;
+      void bodyText;
+      void (result.resources[0]?.status satisfies
+        | "available"
+        | "missing"
+        | undefined);
+    } else if (result?.status === "unreadable") {
+      void (result.reason satisfies
+        | "deleted"
+        | "not_found"
+        | "reference_mismatch");
+      // @ts-expect-error An unreadable result has no revision payload.
+      void result.revision;
+    }
+  } else if (
+    batchRead.status === 400 ||
+    batchRead.status === 413 ||
+    batchRead.status === 422 ||
+    batchRead.status === 503
+  ) {
+    const failure = await batchRead.json();
+    void (failure.error.code satisfies string);
+    void failure.error.path;
+  }
+
+  void client.archives["batch-read"].$post({
+    json: {
+      references: [
+        // @ts-expect-error Every exact reference requires its observation archive sequence.
+        {
+          itemId: "650e8400-e29b-41d4-a716-446655440000",
+          binId: "rss-main",
+          revisionId: "750e8400-e29b-41d4-a716-446655440000",
+        },
+      ],
+    },
+  });
+
+  void client.archives["batch-read"].$post({
+    json: {
+      references: [
+        {
+          itemId: "650e8400-e29b-41d4-a716-446655440000",
+          binId: "rss-main",
+          revisionId: "750e8400-e29b-41d4-a716-446655440000",
+          archiveSeq: "12",
+        },
+      ],
+      // @ts-expect-error Request budgets are configured by the service.
+      budgetMs: 1,
+    },
+  });
+
   const revisionDiffResponse = await client.archives.revisions[
     ":firstRevisionId"
   ].diff[":secondRevisionId"].$get({
