@@ -41,6 +41,12 @@ type ManagedProcess = {
 
 type HeartbeatDelayProxy = {
   readonly arm: (stoppedRunId: string) => Promise<void>;
+  readonly armRequestBody: () => Promise<void>;
+  readonly waitUntilRequestBodyHeld: () => Promise<{
+    readonly heldAt: number;
+    readonly runtimeId: string;
+  }>;
+  readonly waitUntilRequestBodyResponse: () => Promise<number>;
   readonly waitUntilHeld: () => Promise<{
     readonly heldAt: number;
     readonly runtimeId: string;
@@ -56,6 +62,7 @@ type HeartbeatDelayProxy = {
 
 type HeartbeatDelayProxyStatus = {
   readonly held: boolean;
+  readonly heldForRequestBody?: boolean;
   readonly heldAt?: number;
   readonly clientClosedAt?: number;
   readonly heldRuntimeId?: string;
@@ -63,6 +70,7 @@ type HeartbeatDelayProxyStatus = {
   readonly heldStoppedRunId?: string;
   readonly forwardedRuntimeId?: string;
   readonly forwardedOwnerGeneration?: string;
+  readonly forwardedStatusCode?: number;
 };
 
 type RssImageUpdate = {
@@ -155,6 +163,38 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
         signal: AbortSignal.timeout(3_000),
       });
       assert.equal(response.status, 200);
+    },
+    async armRequestBody() {
+      const response = await fetch(controlUrl + "/control/arm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ binId: "binny-runs-one", requestBody: true }),
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async waitUntilRequestBodyHeld() {
+      const status = await waitFor(
+        readStatus,
+        (current) =>
+          current.held &&
+          current.heldForRequestBody === true &&
+          typeof current.heldAt === "number" &&
+          typeof current.heldRuntimeId === "string",
+        "server accepted an incomplete real heartbeat request body",
+      );
+      assert.ok(status.heldAt !== undefined);
+      assert.ok(status.heldRuntimeId !== undefined);
+      return { heldAt: status.heldAt, runtimeId: status.heldRuntimeId };
+    },
+    async waitUntilRequestBodyResponse() {
+      const status = await waitFor(
+        readStatus,
+        (current) => typeof current.forwardedStatusCode === "number",
+        "server completed the held heartbeat request",
+      );
+      assert.ok(status.forwardedStatusCode !== undefined);
+      return status.forwardedStatusCode;
     },
     async waitUntilHeld() {
       const status = await waitFor(
@@ -5225,7 +5265,10 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
   }
 }
 
-async function scheduledRunsStep(baseUrl: string): Promise<string> {
+async function scheduledRunsStep(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+): Promise<string> {
   const binId = "binny-runs-one";
   const sourceControlUrl = manualRunSourceControlUrl();
   const sourceUrl = manualRunSourceRuntimeUrl();
@@ -5283,10 +5326,53 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   );
   assert.ok(shortOutageScheduledAt - Date.now() > 15_000);
 
+  await wait(Math.max(0, shortOutageScheduledAt - Date.now() - 8_500));
+  await heartbeatProxy.armRequestBody();
+  const heldHeartbeat = await heartbeatProxy.waitUntilRequestBodyHeld();
+  assert.ok(heldHeartbeat.heldAt < shortOutageScheduledAt - 4_500);
+  const serverContainerId = (await compose(["ps", "-q", "server"])).stdout
+    .trim()
+    .split("\n")[0];
+  assert.ok(serverContainerId !== undefined && serverContainerId.length > 0);
+  const signalEvents = startManagedProcess("docker", [
+    "events",
+    "--filter",
+    `container=${serverContainerId}`,
+    "--filter",
+    "event=kill",
+    "--format",
+    "{{.Actor.Attributes.signal}}",
+  ]);
   await wait(Math.max(0, shortOutageScheduledAt - Date.now() - 4_500));
   const shortOutageStartedAt = Date.now();
-  await compose(["stop", "server"]);
-  const shortOutageStoppedAt = Date.now();
+  let stopCompletedAt: number | undefined;
+  const stopPromise = compose(["stop", "server"]).then((result) => {
+    stopCompletedAt = Date.now();
+    return result;
+  });
+  let signalObservedAt: number | undefined;
+  let requestBodyReleasedAt: number | undefined;
+  let signalError: unknown;
+  try {
+    await signalEvents.waitForMarker("15");
+    signalObservedAt = Date.now();
+    await wait(2_000);
+  } catch (error) {
+    signalError = error;
+  } finally {
+    signalEvents.child.kill("SIGTERM");
+    await signalEvents.waitForClose();
+    requestBodyReleasedAt = Date.now();
+    await heartbeatProxy.release();
+  }
+  await stopPromise;
+  const shortOutageStoppedAt = stopCompletedAt ?? Date.now();
+  if (signalError !== undefined) throw signalError;
+  const heartbeatStatus = await heartbeatProxy.waitUntilRequestBodyResponse();
+  process.stdout.write(
+    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; heartbeat HTTP ${String(heartbeatStatus)}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
+  );
+  assert.equal(heartbeatStatus, 200);
   assert.ok(
     shortOutageScheduledAt - shortOutageStoppedAt > 500,
     `所有 server 停止时应距离触发仍超过0.5秒，实际 ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms。`,
@@ -9680,7 +9766,8 @@ async function main(): Promise<void> {
       if (scheduleOverlapOnly) {
         await verifyScheduleOverlapPolicy(baseUrl);
       } else {
-        baseUrl = await scheduledRunsStep(baseUrl);
+        assert.ok(activeHeartbeatProxy !== undefined);
+        baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
       }
     } else if (archiveModelOnly) {
       const manifest = await createRuntimeFixtureManifest();
@@ -9710,7 +9797,7 @@ async function main(): Promise<void> {
       await manualRunControllerPartitionStep();
       await manualRunsHttpStep(baseUrl, manualRunManifest);
       await verifyGlobalOperationsCli(baseUrl);
-      baseUrl = await scheduledRunsStep(baseUrl);
+      baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
       const rssAcceptance = await runRssAcceptance(
         baseUrl,
         rssControlSource,
