@@ -572,6 +572,20 @@ async function archiveHttpStep(
   return result.stdout.trim();
 }
 
+async function archiveBatchReadHttpStep(baseUrl: string): Promise<void> {
+  const result = await run("pnpm", [
+    "--silent",
+    "--filter",
+    "@binny/api",
+    "exec",
+    "node",
+    "--conditions=source",
+    "scripts/archive-batch-read-e2e.ts",
+    baseUrl,
+  ]);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+}
+
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const binId = "binny-runs-one";
   if (archiveModelJourney) {
@@ -9685,6 +9699,7 @@ async function main(): Promise<void> {
       const itemId = await manualRunsHttpStep(baseUrl, manifest);
       assert.ok(itemId);
       await archiveHttpStep("fixed-search", baseUrl);
+      await archiveBatchReadHttpStep(baseUrl);
       await archiveSearchCliStep(baseUrl);
       if (archiveSearchOnly) {
         process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
@@ -9766,6 +9781,7 @@ async function main(): Promise<void> {
           waitForRuntimeHealth,
         });
         await archiveHttpStep("fixed-search", baseUrl);
+        await archiveBatchReadHttpStep(baseUrl);
         const archive = await archiveHttpStep("submit", baseUrl);
         await archiveSearchCliStep(baseUrl);
         const sdkResource = await sdkResourceStep(baseUrl);

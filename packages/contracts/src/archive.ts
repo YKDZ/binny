@@ -1,5 +1,10 @@
 import * as z from "zod";
 
+import type {
+  ArchiveBatchReadOperation,
+  ArchiveBatchReadRequest,
+  ArchiveBatchReadResponse,
+} from "./archive-batch-read.ts";
 import {
   archiveSearchExtensionsSchema,
   type ArchiveExtensionScalar,
@@ -966,6 +971,7 @@ export const archiveErrorSchema = z
           "resource_storage_unavailable",
           "commit_not_found",
           "query_budget_exceeded",
+          "payload_too_large",
           "relation_not_found",
           "relation_endpoint_conflict",
         ]),
@@ -1264,5 +1270,9 @@ export type ArchiveOperations = {
   searchArchive(
     input: ArchiveSearchRequest,
   ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;
+  /** Read exact item, bin, revision, and observation references in one bounded request. */
+  readArchiveBatch(
+    input: ArchiveBatchReadRequest,
+  ): Promise<ArchiveBatchReadOperation<ArchiveBatchReadResponse>>;
 } & ArchiveHistoryOperations &
   ArchiveRelationsOperations;

@@ -5,12 +5,13 @@ import { postgresTextSchema } from "./postgres-text.ts";
 /** Public HTTP route compatibility version, independent of the runtime protocol. */
 export const publicApiProtocolVersion = 4;
 
-/** Fixed archive search input and output contract version. */
-export const archiveQueryContractVersion = 2;
+/** Fixed archive search and batch-read contract version. */
+export const archiveQueryContractVersion = 3;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {
   archiveSearch: "archives.search",
+  archiveBatchRead: "archives.batch-read",
   archiveQueryContract: "archive.query-contract",
 } as const;
 
