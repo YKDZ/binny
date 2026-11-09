@@ -454,6 +454,18 @@ export type ArchiveResourceReference = z.infer<
   typeof archiveResourceReferenceSchema
 >;
 
+const archiveItemExtensionsSchema = jsonObjectSchema.describe(
+  "Structured source facts validated by the registered adapter extension schema.",
+);
+// `describe()` clones this custom node, so its JSON Schema projection must be registered too.
+registerPostgresJsonSchemaProjection(
+  archiveItemExtensionsSchema,
+  archiveItemExtensionsSchema,
+  jsonObjectProjectionSchema.describe(
+    "Structured source facts validated by the registered adapter extension schema.",
+  ),
+);
+
 const archiveItemFieldsSchema = z
   .object({
     title: nonEmptyText
@@ -472,9 +484,7 @@ const archiveItemFieldsSchema = z
         "Source modification time at its known precision, or null if absent.",
       ),
     sourceRef: nonEmptyText.optional(),
-    extensions: jsonObjectSchema.describe(
-      "Structured source facts validated by the registered adapter extension schema.",
-    ),
+    extensions: archiveItemExtensionsSchema,
     body: archiveBodySchema.optional(),
     resources: z
       .array(archiveResourceReferenceSchema)

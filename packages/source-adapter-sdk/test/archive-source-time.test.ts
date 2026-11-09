@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { sourceTimeSchema } from "@binny/contracts";
+import {
+  archiveItemReadSchema,
+  archiveRevisionReadSchema,
+  sourceTimeSchema,
+} from "@binny/contracts";
 
 void test("source time keeps its declared precision and known time zone", () => {
   const values = [
@@ -42,5 +46,16 @@ void test("source time rejects invalid dates and inconsistent zones", () => {
 
   for (const value of invalidValues) {
     assert.equal(sourceTimeSchema.safeParse(value).success, false);
+  }
+});
+
+void test("archive item and revision read schemas export both projections", () => {
+  for (const schema of [archiveItemReadSchema, archiveRevisionReadSchema]) {
+    assert.ok(
+      schema["~standard"].jsonSchema.input({ target: "draft-2020-12" }),
+    );
+    assert.ok(
+      schema["~standard"].jsonSchema.output({ target: "draft-2020-12" }),
+    );
   }
 });
