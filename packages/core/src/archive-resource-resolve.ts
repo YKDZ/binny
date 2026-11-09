@@ -26,7 +26,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Verify and resolve reusable archived resources, unchanged item states,
- * and immutable media from core storage and database.
+ * and immutable media URLs mapped by declared `extensions.media` entries.
  */
 export async function resolveArchiveResources(
   database: Database,
@@ -238,8 +238,7 @@ export async function resolveArchiveResources(
             const uniqueUrls = [...new Set(urls)];
             const conditions = uniqueUrls.map((url) => {
               const filter = JSON.stringify([{ url }]);
-              const hrefFilter = JSON.stringify([{ href: url }]);
-              return sql`(${archiveRevisions.stateData}->'metadata'->'media' @> ${filter}::text::jsonb OR ${archiveRevisions.stateData}->'metadata'->'media' @> ${hrefFilter}::text::jsonb OR ${archiveRevisions.stateData}->'metadata'->'media' ? ${url} OR ${archiveRevisions.stateData}->'capture'->'media' @> ${filter}::text::jsonb OR ${archiveRevisions.stateData}->'capture'->'media' @> ${hrefFilter}::text::jsonb)`;
+              return sql`${archiveRevisions.stateData}->'extensions'->'media' @> ${filter}::text::jsonb`;
             });
 
             const matchingRevs = await transaction
@@ -263,42 +262,20 @@ export async function resolveArchiveResources(
                   : null;
                 if (!stateData) continue;
 
-                // Check metadata.media (array or map)
-                const metadata = isRecord(stateData.metadata)
-                  ? stateData.metadata
+                // Match the declared adapter media extension used by source adapters.
+                const extensions = isRecord(stateData.extensions)
+                  ? stateData.extensions
                   : undefined;
-                const media = metadata?.media;
+                const media = extensions?.media;
                 if (Array.isArray(media)) {
                   for (const entry of media) {
                     if (
                       isRecord(entry) &&
-                      (entry.url === url || entry.href === url) &&
+                      entry.url === url &&
                       typeof entry.resourceId === "string"
                     ) {
                       targetResourceId = entry.resourceId;
                       break;
-                    }
-                  }
-                } else if (isRecord(media)) {
-                  const val = media[url];
-                  if (typeof val === "string") {
-                    targetResourceId = val;
-                  }
-                }
-
-                // Check capture.media
-                if (!targetResourceId && isRecord(stateData.capture)) {
-                  const captureMedia = stateData.capture.media;
-                  if (Array.isArray(captureMedia)) {
-                    for (const entry of captureMedia) {
-                      if (
-                        isRecord(entry) &&
-                        (entry.url === url || entry.href === url) &&
-                        typeof entry.resourceId === "string"
-                      ) {
-                        targetResourceId = entry.resourceId;
-                        break;
-                      }
                     }
                   }
                 }
