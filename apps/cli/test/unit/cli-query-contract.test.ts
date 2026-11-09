@@ -107,6 +107,29 @@ function fakeService(options: {
         sourceAdapterVersion: "1.0.0",
         configSchema: { type: "object", properties: {} },
       });
+    if (url.pathname === "/bins/rss-main/extension-fields")
+      return Response.json({
+        sourceAdapterId: "rss",
+        sourceAdapterVersion: "1.0.0",
+        fields: {
+          category: {
+            type: "string",
+            nullable: false,
+            required: false,
+            description: "The item's category.",
+            allowedValues: ["post", "reply"],
+            operations: ["eq", "in"],
+          },
+          labels: {
+            type: "array",
+            nullable: true,
+            required: false,
+            description: "Labels on the item.",
+            itemType: "string",
+            operations: ["has", "hasAny"],
+          },
+        },
+      });
     if (url.pathname === "/bins") return Response.json({ bins: [] });
     return new Response("Not found", { status: 404 });
   };
@@ -166,6 +189,53 @@ void describe("查询服务发现", () => {
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
     assert.match(result.output, /Archive query v2: \/meta\/query/u);
+    assert.doesNotMatch(result.output, /"kind"\s*:/u);
+  });
+
+  void it("reads one adapter's declared extension fields as structured data", async () => {
+    const service = fakeService({});
+    const result = await run(
+      ["bin", "extension-fields", "rss-main"],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 0, result.output);
+    const wire = JSON.parse(result.output) as {
+      readonly data: {
+        readonly sourceAdapterId: string;
+        readonly fields: Readonly<
+          Record<string, { readonly operations: readonly string[] }>
+        >;
+      };
+    };
+    assert.equal(wire.data.sourceAdapterId, "rss");
+    assert.deepEqual(wire.data.fields.labels?.operations, ["has", "hasAny"]);
+    assert.deepEqual(
+      service.requests.map(({ method, path }) => [method, path]),
+      [
+        ["GET", "/meta"],
+        ["GET", "/bins/rss-main/extension-fields"],
+      ],
+    );
+  });
+
+  void it("renders extension-field discovery as concise readable text", async () => {
+    const service = fakeService({});
+    const result = await run(
+      ["bin", "extension-fields", "rss-main", "--output-format", "text"],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 0, result.output);
+    assert.match(result.output, /Source adapter: rss@1\.0\.0/u);
+    assert.match(result.output, /- category: string/u);
+    assert.match(result.output, /Allowed values: \["post","reply"\]/u);
+    assert.match(result.output, /- labels: array \(nullable\)/u);
+    assert.match(result.output, /Operations: has, hasAny/u);
+    assert.match(
+      result.output,
+      /Missing and null extension values do not match filters\./u,
+    );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 

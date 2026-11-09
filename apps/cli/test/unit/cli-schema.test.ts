@@ -438,6 +438,14 @@ void describe("offline CLI command contract", () => {
     assert.equal(archiveHelp.exitCode, 0);
     assert.match(archiveHelp.output, /literal keyword groups/u);
     assert.match(archiveHelp.output, /model/u);
+    assert.match(archiveHelp.output, /extension-fields <bin-id>/u);
+    assert.match(archiveHelp.output, /explicit bin scope/u);
+    assert.match(archiveHelp.output, /hasAny/u);
+
+    const extensionHelp = await run(["bin", "extension-fields", "--help"]);
+    assert.equal(extensionHelp.exitCode, 0);
+    assert.match(extensionHelp.output, /declared extension fields/u);
+    assert.match(extensionHelp.output, /archive search/u);
   });
 
   void it("exposes schedule field choices in the selected input contract", async () => {
@@ -556,6 +564,8 @@ void describe("offline CLI command contract", () => {
     assert.match(textOutput.output, /--query/u);
     assert.match(textOutput.output, /literal keyword groups/u);
     assert.match(textOutput.output, /previous response's nextCursor/u);
+    assert.match(textOutput.output, /extension-fields/u);
+    assert.match(textOutput.output, /explicit bin scope/u);
     assert.match(
       textOutput.output,
       /--output-format <structured\|text> — default structured/u,

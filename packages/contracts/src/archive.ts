@@ -1,5 +1,9 @@
 import * as z from "zod";
 
+import {
+  archiveSearchExtensionsSchema,
+  type ArchiveExtensionScalar,
+} from "./archive-extensions.ts";
 import type { ArchiveHistoryOperations } from "./archive-history.ts";
 import type { ArchiveRelationsOperations } from "./archive-relations.ts";
 import { binIdSchema } from "./bin-configuration.ts";
@@ -1005,36 +1009,105 @@ export const archiveSearchTextSchema = withArchiveJsonSchemaProjection(
 );
 export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
-const archiveSearchBinsSchema = z
-  .array(binIdSchema)
-  .min(1)
-  .max(100)
-  .superRefine((bins, context) => {
-    const seen = new Set<string>();
-    for (const [index, binId] of bins.entries()) {
-      if (seen.has(binId)) {
-        context.addIssue({
-          code: "custom",
-          path: [index],
-          message: "A bin can appear only once.",
-        });
-      }
-      seen.add(binId);
-    }
-  });
-
-/** Search the latest matching view in each selected bin at one archive snapshot. */
-export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
-  z
-    .object({
-      bins: archiveSearchBinsSchema.optional(),
-      text: archiveSearchTextSchema.optional(),
-      asOf: archiveSnapshotSequenceSchema.optional(),
-      limit: z.number().int().min(1).max(100).default(50),
-      cursor: postgresTextSchema.min(1).max(4096).optional(),
+function archiveSearchBinsSchema(requiredExtensionScope = false) {
+  return z
+    .array(binIdSchema, {
+      error: (issue) =>
+        requiredExtensionScope && issue.input === undefined
+          ? "Extension filters require an explicit bin scope."
+          : undefined,
     })
-    .strict(),
+    .min(1)
+    .max(100)
+    .superRefine((bins, context) => {
+      const seen = new Set<string>();
+      for (const [index, binId] of bins.entries()) {
+        if (seen.has(binId)) {
+          context.addIssue({
+            code: "custom",
+            path: [index],
+            message: "A bin can appear only once.",
+          });
+        }
+        seen.add(binId);
+      }
+    });
+}
+
+const archiveSearchInputCommonFields = {
+  text: archiveSearchTextSchema.optional(),
+  asOf: archiveSnapshotSequenceSchema.optional(),
+  limit: z.number().int().min(1).max(100).default(50),
+  cursor: postgresTextSchema.min(1).max(4096).optional(),
+};
+const archiveSearchWithoutExtensionsSchema = z
+  .object({
+    bins: archiveSearchBinsSchema().optional(),
+    ...archiveSearchInputCommonFields,
+    extensions: z.never().optional(),
+  })
+  .strict();
+const archiveSearchWithExtensionsSchema = z
+  .object({
+    bins: archiveSearchBinsSchema(true),
+    ...archiveSearchInputCommonFields,
+    extensions: archiveSearchExtensionsSchema,
+  })
+  .strict();
+
+/**
+ * Search the latest matching view in each selected bin at one archive
+ * snapshot. Extension filters require an explicit `bins` list. Every selected
+ * bin must use the declared adapter and schema; all filters are evaluated on
+ * the same latest bin view. Missing or null extension values do not match.
+ */
+export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
+  z.union([
+    archiveSearchWithExtensionsSchema,
+    archiveSearchWithoutExtensionsSchema,
+  ]),
 );
+
+function nestedArchiveSearchIssues(
+  issues: readonly z.core.$ZodIssue[],
+  prefix: readonly PropertyKey[] = [],
+): readonly z.core.$ZodIssue[] {
+  return issues.flatMap((issue) => {
+    const path = [...prefix, ...issue.path];
+    if (issue.code === "invalid_union" && issue.errors.length > 0) {
+      return nestedArchiveSearchIssues(issue.errors.flat(), path);
+    }
+    return [{ ...issue, path } as z.core.$ZodIssue];
+  });
+}
+
+/** Select the most specific issue from the search input union branch that applies. */
+export function archiveSearchInputIssue(
+  input: unknown,
+  issues: readonly z.core.$ZodIssue[],
+): z.core.$ZodIssue | undefined {
+  const unionIssue = issues.find(
+    (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
+  );
+  if (unionIssue?.code !== "invalid_union") return issues[0];
+
+  const hasExtensionScope =
+    typeof input === "object" &&
+    input !== null &&
+    Object.hasOwn(input, "extensions");
+  const branchIndex = hasExtensionScope ? 0 : 1;
+  const branchIssues = unionIssue.errors[branchIndex];
+  if (branchIssues === undefined) return issues[0];
+
+  const candidates = nestedArchiveSearchIssues(branchIssues.flat());
+  return candidates.reduce<z.core.$ZodIssue | undefined>(
+    (selected, candidate) =>
+      selected === undefined || candidate.path.length > selected.path.length
+        ? candidate
+        : selected,
+    undefined,
+  );
+}
 
 const archiveSearchMatchSchema = z
   .object({
@@ -1083,6 +1156,47 @@ export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
 export type ArchiveSearchInput = z.infer<typeof archiveSearchInputSchema>;
 export type ArchiveSearchRequest = z.input<typeof archiveSearchInputSchema>;
 export type ArchiveSearchPage = z.infer<typeof archiveSearchPageSchema>;
+type ExtensionFilterFor<Value> =
+  NonNullable<Value> extends readonly (infer Item)[]
+    ? [Item] extends [ArchiveExtensionScalar]
+      ?
+          | { readonly op: "has"; readonly value: Item }
+          | { readonly op: "hasAny"; readonly values: readonly Item[] }
+      : never
+    : NonNullable<Value> extends ArchiveExtensionScalar
+      ?
+          | { readonly op: "eq"; readonly value: NonNullable<Value> }
+          | {
+              readonly op: "in";
+              readonly values: readonly NonNullable<Value>[];
+            }
+      : never;
+type ExtensionFiltersFor<TExtensions extends object> = {
+  readonly [Field in keyof TExtensions]?: ExtensionFilterFor<
+    TExtensions[Field]
+  >;
+};
+type AtLeastOne<T, Keys extends keyof T = keyof T> = Keys extends keyof T
+  ? Pick<T, Keys> & Partial<Omit<T, Keys>>
+  : never;
+
+/**
+ * A type-only search request for an adapter's declared extension properties.
+ * Callers must supply at least one bin; runtime validation confirms that every
+ * selected bin still uses the adapter and schema described by the request.
+ * Scalar fields use `eq` or `in`; scalar arrays use `has` or `hasAny`. Missing
+ * and null values do not match.
+ */
+export type ArchiveSearchRequestFor<
+  TExtensions extends object,
+  TSourceAdapterId extends string = string,
+> = Omit<ArchiveSearchRequest, "bins" | "extensions"> & {
+  readonly bins: NonNullable<ArchiveSearchRequest["bins"]>;
+  readonly extensions: {
+    readonly sourceAdapterId: TSourceAdapterId;
+    readonly filters: AtLeastOne<ExtensionFiltersFor<TExtensions>>;
+  };
+};
 export type ArchiveSearchOperation<T> =
   | { readonly ok: true; readonly value: T }
   | {

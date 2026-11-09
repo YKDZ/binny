@@ -8,24 +8,48 @@ export type ValidationFailure = {
   };
 };
 
-/**
- * 将契约校验问题转换成统一的中文 API 错误，同时保留字段路径和已有业务说明。
- */
+export type ValidationFailureOptions = {
+  readonly preserveOriginalMessage?: boolean;
+};
+
+function nestedIssues(
+  issues: readonly z.core.$ZodIssue[],
+): readonly z.core.$ZodIssue[] {
+  return issues.flatMap((issue) =>
+    issue.code === "invalid_union" && issue.errors.length > 0
+      ? nestedIssues(issue.errors.flat())
+      : [issue],
+  );
+}
+
+/** Preserve field paths and actionable messages when reporting contract failures. */
 export function validationFailure(
   issues: readonly z.core.$ZodIssue[],
+  options: ValidationFailureOptions = {},
 ): ValidationFailure {
   const firstIssue = issues[0];
-  const path = firstIssue?.path.map((part) =>
+  const explicitExtensionScopeIssue = nestedIssues(issues).find(
+    (issue) =>
+      issue.path.length === 1 &&
+      issue.path[0] === "bins" &&
+      issue.message === "Extension filters require an explicit bin scope.",
+  );
+  const issue = explicitExtensionScopeIssue ?? firstIssue;
+  const path = issue?.path.map((part) =>
     typeof part === "symbol" ? String(part) : part,
   );
   const message =
-    firstIssue?.code === "unrecognized_keys"
-      ? "请求包含未支持的字段。"
-      : firstIssue?.code === "invalid_type"
-        ? "必填字段缺失或字段类型无效。"
-        : firstIssue?.message.includes("。") === true
-          ? firstIssue.message
-          : "字段值不符合要求。";
+    options.preserveOriginalMessage === true
+      ? (issue?.message ?? "字段值不符合要求。")
+      : (explicitExtensionScopeIssue?.message ??
+        (issue?.code === "unrecognized_keys"
+          ? "请求包含未支持的字段。"
+          : issue?.code === "invalid_type"
+            ? "必填字段缺失或字段类型无效。"
+            : issue?.message.includes("。") === true ||
+                issue?.message.endsWith(".") === true
+              ? issue.message
+              : "字段值不符合要求。"));
   return {
     error: {
       code: "invalid_input",

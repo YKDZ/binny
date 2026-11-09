@@ -132,6 +132,8 @@ const projectName = isFullCapacityRun
   : "binny-archive-revision-diff-" + process.pid.toString(10);
 const imageName = projectName + ":local";
 const runtimeImageName = projectName + "-lightweight:local";
+const schemaVariantRuntimeImageName =
+  projectName + "-schema-two-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
@@ -271,6 +273,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: activeServerImage,
     BINNY_BROWSER_CAPACITY_LIMIT: "1",
     BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
+    BINNY_TEST_RUNNER_SCHEMA_IMAGE: schemaVariantRuntimeImageName,
     BINNY_LIFECYCLE_STOP_GRACE_MS: "1500",
     BINNY_RSS_IMAGE: activeRssRuntimeImage,
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
@@ -498,6 +501,9 @@ async function archiveHttpStep(
     {
       env: {
         ...(state === undefined ? {} : { BINNY_E2E_ARCHIVE_STATE: state }),
+        ...(stage === "fixed-search" && archiveModelJourney
+          ? { BINNY_E2E_ARCHIVE_EXTENSION_FIXTURES: "1" }
+          : {}),
         ...(sdkResourceState === undefined
           ? {}
           : { BINNY_E2E_SDK_RESOURCE_STATE: sdkResourceState }),
@@ -510,6 +516,131 @@ async function archiveHttpStep(
 
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const binId = "binny-runs-one";
+  if (archiveModelJourney) {
+    const discovered = cliData<{
+      readonly sourceAdapterId: string;
+      readonly fields: Readonly<
+        Record<string, { readonly operations: readonly string[] }>
+      >;
+    }>(await cli(baseUrl, ["bin", "extension-fields", binId]), "discovered");
+    assert.equal(discovered.sourceAdapterId, "binny-runs.manual-run-fixture");
+    assert.deepEqual(discovered.fields.labels?.operations, ["has", "hasAny"]);
+    const discoveryText = await cli(baseUrl, [
+      "bin",
+      "extension-fields",
+      binId,
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(discoveryText.code, 0, discoveryText.stderr);
+    assert.match(discoveryText.stdout, /- category: string/u);
+    assert.match(discoveryText.stdout, /Operations: has, hasAny/u);
+
+    const extensionQuery = {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: { category: { op: "eq", value: "post" } },
+      },
+      limit: 20,
+    };
+    const extensionResults = cliData<{
+      readonly results: readonly {
+        readonly title: string | null;
+        readonly matches: readonly { readonly binId: string }[];
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify(extensionQuery),
+      ]),
+      "found",
+    );
+    assert.equal(extensionResults.results.length, 1);
+    assert.equal(extensionResults.results[0]?.title, "Extension post view");
+    assert.deepEqual(
+      extensionResults.results[0]?.matches.map(
+        ({ binId: matchedBinId }) => matchedBinId,
+      ),
+      ["binny-runs-one"],
+    );
+
+    const listQuery = {
+      ...extensionQuery,
+      extensions: {
+        ...extensionQuery.extensions,
+        filters: { labels: { op: "hasAny", values: ["reply", "release"] } },
+      },
+    };
+    const extensionText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(listQuery),
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(extensionText.code, 0, extensionText.stderr);
+    assert.match(extensionText.stdout, /- Extension post view/u);
+    assert.match(
+      extensionText.stdout,
+      /Views: binny-runs-one, binny-runs-two/u,
+    );
+    assert.doesNotMatch(extensionText.stdout, /"kind"\s*:/u);
+
+    const mixedAdapterFailure = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one", "binny-rss-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { category: { op: "eq", value: "post" } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(mixedAdapterFailure.path, ["bins"]);
+    assert.match(mixedAdapterFailure.message, /declared source adapter only/u);
+
+    const invalidOperationFailure = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: {
+              section: { op: "gt", value: "archive-model" },
+            },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(invalidOperationFailure.path, [
+      "extensions",
+      "filters",
+      "section",
+      "op",
+    ]);
+    assert.match(invalidOperationFailure.message, /eq.*in.*has.*hasAny/u);
+  }
   const query = {
     bins: [binId],
     text: { groups: [["Needle"], ["release"]] },
@@ -3794,6 +3925,35 @@ async function configureManualRunBins(
     waitForRuntime(baseUrl, "binny-runs-one"),
     waitForRuntime(baseUrl, "binny-runs-two"),
   ]);
+}
+
+async function configureExtensionScopeBins(baseUrl: string): Promise<void> {
+  const schemaVariant = await waitForBinRegistration(
+    baseUrl,
+    "binny-runs-schema-two",
+  );
+  assert.equal(schemaVariant.sourceAdapterId, "binny-runs.manual-run-fixture");
+  assert.equal(schemaVariant.sourceAdapterVersion, "2.0.0");
+  const configuredSchemaVariant = cliData<{ readonly id: string }>(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny-runs-schema-two",
+      "--identity",
+      "binny-runs-schema-two-identity",
+      "--config",
+      JSON.stringify({ section: "initial" }),
+    ]),
+    "updated",
+  );
+  assert.equal(configuredSchemaVariant.id, "binny-runs-schema-two");
+  await waitForRuntime(baseUrl, "binny-runs-schema-two");
+
+  const rssManifest = await createRssManifest();
+  await createRssBin(baseUrl, "binny-rss-one", rssManifest, {
+    feeds: [{ id: "extension-scope", url: "https://example.test/rss" }],
+  });
+  await waitForRuntime(baseUrl, "binny-rss-one");
 }
 
 async function manualRunsCliStep(
@@ -9149,9 +9309,13 @@ async function main(): Promise<void> {
     builtImages.add(imageName);
     await compose(["build", "runtime-fifteen-one"]);
     builtImages.add(runtimeImageName);
-    if (!manualRunsOnly) {
+    if (!manualRunsOnly || archiveModelJourney) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
+    }
+    if (archiveModelJourney) {
+      await compose(["build", "runtime-fifteen-schema-two"]);
+      builtImages.add(schemaVariantRuntimeImageName);
     }
     if (runFunctionalJourney) {
       await compose(["build", "runtime-linuxdo"]);
@@ -9186,7 +9350,13 @@ async function main(): Promise<void> {
           "manual-runs-source",
           "runtime-fifteen-one",
           ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-          ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
+          ...(archiveModelJourney
+            ? [
+                "runtime-fifteen-two",
+                "runtime-fifteen-schema-two",
+                "runtime-rss",
+              ]
+            : []),
         ]
       : [
           "postgres",
@@ -9265,6 +9435,7 @@ async function main(): Promise<void> {
     } else if (archiveModelJourney) {
       const manifest = await createRuntimeFixtureManifest();
       await configureManualRunBins(baseUrl, manifest);
+      await configureExtensionScopeBins(baseUrl);
       await waitForManualRunSource();
       const itemId = await manualRunsHttpStep(baseUrl, manifest);
       assert.ok(itemId);
