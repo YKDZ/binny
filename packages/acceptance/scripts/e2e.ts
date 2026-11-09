@@ -4356,7 +4356,7 @@ async function manualRunsCliStep(
 
   const invalidDateRange = await fetch(
     baseUrl +
-      "/bins/binny-runs-one/runs?createdFrom=2026-11-04T00%3A00%3A00Z&createdBefore=2026-11-03T00%3A00%3A00Z",
+      "/runs?binId=binny-runs-one&createdFrom=2026-11-04T00%3A00%3A00Z&createdBefore=2026-11-03T00%3A00%3A00Z",
   );
   assert.equal(invalidDateRange.status, 400);
   const invalidDateRangeBody = (await invalidDateRange.json()) as {
