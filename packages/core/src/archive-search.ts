@@ -5,11 +5,13 @@ import {
   archiveSearchInputSchema,
   archiveSearchInputIssue,
   archiveSearchPageSchema,
+  archiveSearchDistributionPageSchema,
   archiveSnapshotSchema,
   discoverSourceAdapterExtensionFields,
   sourceAdapterManifestStoredSchema,
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
+  type ArchiveSearchDistributionRequest,
   type ArchiveSearchOperation,
   type ArchiveSearchRequest,
   type SourceAdapterManifest,
@@ -40,6 +42,12 @@ type SearchCursor = {
   readonly timeSortValue?: string | null;
   readonly itemId: string;
 };
+type SearchDistributionCursor = {
+  readonly version: 1;
+  readonly queryHash: string;
+  readonly snapshot: ReturnType<typeof archiveSnapshotSchema.parse>;
+  readonly groupKey: string;
+};
 type SearchInput = ReturnType<typeof archiveSearchInputSchema.parse>;
 type SearchPageRow = {
   readonly snapshotAsOf: string;
@@ -49,6 +57,8 @@ type SearchPageRow = {
   readonly extensionBins: unknown;
   readonly certainItems?: string;
   readonly undeterminedItems?: string;
+  readonly distributionGroups: unknown;
+  readonly distributionTotalItems: string | null;
 };
 
 type ExtensionScopeBin = {
@@ -64,6 +74,12 @@ type SearchZoneRow = {
 };
 
 function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function encodeSearchDistributionCursor(
+  cursor: SearchDistributionCursor,
+): string {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
 }
 
@@ -121,6 +137,40 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
   }
 }
 
+function decodeSearchDistributionCursor(
+  cursor: string,
+): SearchDistributionCursor | undefined {
+  try {
+    const json = Buffer.from(cursor, "base64url").toString("utf8");
+    if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
+    const value: unknown = JSON.parse(json);
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("version" in value) ||
+      value.version !== 1 ||
+      !("queryHash" in value) ||
+      typeof value.queryHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.queryHash) ||
+      !("snapshot" in value) ||
+      !("groupKey" in value) ||
+      typeof value.groupKey !== "string"
+    ) {
+      return undefined;
+    }
+    const snapshot = archiveSnapshotSchema.safeParse(value.snapshot);
+    if (!snapshot.success) return undefined;
+    return {
+      version: 1,
+      queryHash: value.queryHash,
+      snapshot: snapshot.data,
+      groupKey: value.groupKey,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function invalidInput(message: string, path: readonly (string | number)[]) {
   return {
     ok: false as const,
@@ -150,6 +200,21 @@ function queryHash(input: SearchInput): string {
         ...(input.timeWindow === undefined
           ? {}
           : { timeWindow: input.timeWindow }),
+      }),
+    )
+    .digest("hex");
+}
+
+function distributionQueryHash(
+  input: SearchInput,
+  distribution: ArchiveSearchDistributionRequest,
+): string {
+  const { cursor: _cursor, limit: _limit, ...dimension } = distribution;
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        query: queryHash(input),
+        distribution: dimension,
       }),
     )
     .digest("hex");
@@ -349,6 +414,7 @@ function pageQuery(
   input: SearchInput,
   snapshot: SearchCursor["snapshot"] | undefined,
   cursor: SearchCursor | undefined,
+  distributionCursor: SearchDistributionCursor | undefined,
   aliases: ArchiveTimeZoneAliases,
 ) {
   const snapshotSequence =
@@ -358,7 +424,12 @@ function pageQuery(
   const snapshotMode = snapshot?.mode ?? "current";
   const extensionScopeBinFilter =
     input.extensions === undefined
-      ? sql`false`
+      ? input.distribution?.by === "extension"
+        ? sql`id IN (${sql.join(
+            input.bins!.map((binId) => sql`${binId}`),
+            sql`, `,
+          )})`
+        : sql`false`
       : input.bins === undefined
         ? sql`source_adapter->>'id' = ${input.extensions.sourceAdapterId}`
         : sql`id IN (${sql.join(
@@ -383,7 +454,7 @@ function pageQuery(
   }
 
   const afterCursor =
-    cursor === undefined
+    cursor === undefined || !input.includeCandidates
       ? sql`true`
       : input.timeWindow === undefined
         ? sql`(items.observed_at < ${new Date(cursor.observedAt)}::timestamptz OR (items.observed_at = ${new Date(cursor.observedAt)}::timestamptz AND items.item_id > ${cursor.itemId}::uuid))`
@@ -417,6 +488,53 @@ function pageQuery(
     input.timeWindow === undefined
       ? sql`selected.observed_at DESC, selected.item_id ASC`
       : sql`selected.sort_value DESC NULLS LAST, selected.item_id ASC`;
+  const distribution = input.distribution;
+  const afterDistributionCursor =
+    distributionCursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${distributionCursor.groupKey} COLLATE "C"`;
+  const distributionSql =
+    distribution === undefined
+      ? sql`distribution_summary AS (
+        SELECT NULL::text AS total_items, '[]'::jsonb AS groups
+      )`
+      : distribution.by === "bin"
+        ? sql`distribution_base AS (
+          SELECT
+            bin_id COLLATE "C" AS group_key,
+            bin_id,
+            count(DISTINCT item_id)::text AS item_count
+          FROM selected_views
+          GROUP BY bin_id
+        ), distribution_total AS (
+          SELECT count(DISTINCT item_id)::text AS total_items
+          FROM selected_views
+        ), distribution_selected AS (
+          SELECT distribution_base.*
+          FROM distribution_base
+          WHERE ${afterDistributionCursor}
+          ORDER BY distribution_base.group_key COLLATE "C" ASC
+          LIMIT ${distribution.limit + 1}
+        ), distribution_groups AS (
+          SELECT coalesce(
+            jsonb_agg(
+              jsonb_build_object(
+                'kind', 'bin'::text,
+                'binId', bin_id,
+                'itemCount', item_count,
+                '__distributionKey', group_key
+              ) ORDER BY group_key COLLATE "C" ASC
+            ),
+            '[]'::jsonb
+          ) AS groups
+          FROM distribution_selected
+        ), distribution_summary AS (
+          SELECT distribution_total.total_items, distribution_groups.groups
+          FROM distribution_total CROSS JOIN distribution_groups
+        )`
+        : sql`distribution_summary AS (
+          SELECT NULL::text AS total_items, '[]'::jsonb AS groups
+        )`;
   const classificationFields =
     decision === undefined
       ? sql`, NULL::text AS time_status, NULL::text AS time_reason, NULL::timestamptz AS sort_value`
@@ -527,7 +645,7 @@ function pageQuery(
       SELECT items.*
       FROM items
       CROSS JOIN fixed_snapshot
-      WHERE NOT fixed_snapshot.invalid AND ${afterCursor}
+      WHERE NOT fixed_snapshot.invalid AND ${input.includeCandidates ? afterCursor : sql`false`}
       ORDER BY ${sortOrder}
       LIMIT ${input.limit + 1}
     ), page AS (
@@ -555,7 +673,7 @@ function pageQuery(
         count(DISTINCT item_id) FILTER (WHERE time_status = 'certain')::text AS certain_items,
         count(DISTINCT item_id) FILTER (WHERE time_status = 'undetermined')::text AS undetermined_items
       FROM classified
-    )
+    ), ${distributionSql}
     SELECT
       fixed_snapshot.archive_sequence::text AS "snapshotAsOf",
       fixed_snapshot.mode AS "snapshotMode",
@@ -563,11 +681,14 @@ function pageQuery(
       page.results,
       extension_scope.bins AS "extensionBins",
       time_summary.certain_items AS "certainItems",
-      time_summary.undetermined_items AS "undeterminedItems"
+      time_summary.undetermined_items AS "undeterminedItems",
+      distribution_summary.groups AS "distributionGroups",
+      distribution_summary.total_items AS "distributionTotalItems"
     FROM fixed_snapshot
     CROSS JOIN page
     CROSS JOIN extension_scope
     CROSS JOIN time_summary
+    CROSS JOIN distribution_summary
   `;
 }
 
@@ -678,6 +799,16 @@ export function createArchiveSearchOperation(
         requestedCursor === undefined
           ? undefined
           : decodeSearchCursor(requestedCursor);
+      const distribution = input.distribution;
+      const requestedDistributionCursor = distribution?.cursor;
+      const distributionCursor =
+        requestedDistributionCursor === undefined
+          ? undefined
+          : decodeSearchDistributionCursor(requestedDistributionCursor);
+      const distributionHash =
+        distribution === undefined
+          ? undefined
+          : distributionQueryHash(input, distribution);
       if (
         requestedCursor !== undefined &&
         (cursor === undefined ||
@@ -692,9 +823,33 @@ export function createArchiveSearchOperation(
           ["cursor"],
         );
       }
+      if (
+        requestedDistributionCursor !== undefined &&
+        (distributionCursor === undefined ||
+          distributionHash === undefined ||
+          distributionCursor.queryHash !== distributionHash ||
+          (input.asOf !== undefined &&
+            distributionCursor.snapshot.asOf !== input.asOf))
+      ) {
+        return invalidInput(
+          "Distribution cursor is invalid or belongs to another query.",
+          ["distribution", "cursor"],
+        );
+      }
+      if (
+        cursor !== undefined &&
+        distributionCursor !== undefined &&
+        cursor.snapshot.asOf !== distributionCursor.snapshot.asOf
+      ) {
+        return invalidInput(
+          "Candidate and distribution cursors must use the same archive cut.",
+          ["distribution", "cursor"],
+        );
+      }
 
       const snapshot =
         cursor?.snapshot ??
+        distributionCursor?.snapshot ??
         (input.asOf === undefined
           ? undefined
           : { asOf: input.asOf, mode: "asOf" as const });
@@ -734,7 +889,13 @@ export function createArchiveSearchOperation(
         }
         const [row] = await executeArchiveQueryWithinDeadline<SearchPageRow>(
           executeQuery,
-          pageQuery(input, resolvedQuerySnapshot, cursor, aliases),
+          pageQuery(
+            input,
+            resolvedQuerySnapshot,
+            cursor,
+            distributionCursor,
+            aliases,
+          ),
           deadline,
         );
         if (row === undefined) {
@@ -758,8 +919,13 @@ export function createArchiveSearchOperation(
           mode: row.snapshotMode,
         });
         const rows = decodeSearchResults(row.results);
-        const hasMore = rows.length > input.limit;
-        const selectedRows = hasMore ? rows.slice(0, input.limit) : rows;
+        const candidateHasMore =
+          input.includeCandidates && rows.length > input.limit;
+        const selectedRows = candidateHasMore
+          ? rows.slice(0, input.limit)
+          : input.includeCandidates
+            ? rows
+            : [];
         const lastSelected = selectedRows.at(-1);
         const timeSortValue =
           input.timeWindow === undefined
@@ -791,6 +957,7 @@ export function createArchiveSearchOperation(
         });
         const page = archiveSearchPageSchema.parse({
           snapshot: resolvedSnapshot,
+          candidatesIncluded: input.includeCandidates,
           results: pageRows,
           ...(input.timeWindow === undefined
             ? {}
@@ -800,11 +967,11 @@ export function createArchiveSearchOperation(
                   undeterminedItems: row.undeterminedItems ?? "0",
                 },
               }),
-          hasMore,
+          hasMore: candidateHasMore,
         });
         const last = page.results.at(-1);
         const nextCursor =
-          hasMore && last !== undefined
+          candidateHasMore && last !== undefined
             ? encodeSearchCursor({
                 version: 1,
                 queryHash: hash,
@@ -816,9 +983,82 @@ export function createArchiveSearchOperation(
                 itemId: last.itemId,
               })
             : undefined;
+        const rawDistributionGroups = decodeSearchResults(
+          row.distributionGroups,
+        );
+        const distributionHasMore =
+          distribution !== undefined &&
+          rawDistributionGroups.length > distribution.limit;
+        const selectedDistributionGroups = distributionHasMore
+          ? rawDistributionGroups.slice(0, distribution!.limit)
+          : rawDistributionGroups;
+        let nextDistributionCursor: string | undefined;
+        const lastDistributionGroup = selectedDistributionGroups.at(-1);
+        const lastDistributionGroupKey =
+          typeof lastDistributionGroup === "object" &&
+          lastDistributionGroup !== null &&
+          !Array.isArray(lastDistributionGroup)
+            ? (lastDistributionGroup as Record<string, unknown>)[
+                "__distributionKey"
+              ]
+            : undefined;
+        if (
+          distributionHasMore &&
+          distributionHash !== undefined &&
+          typeof lastDistributionGroupKey === "string"
+        ) {
+          nextDistributionCursor = encodeSearchDistributionCursor({
+            version: 1,
+            queryHash: distributionHash,
+            snapshot: resolvedSnapshot,
+            groupKey: lastDistributionGroupKey,
+          });
+        }
+        const publicDistributionGroups = selectedDistributionGroups.map(
+          (group) => {
+            if (
+              typeof group !== "object" ||
+              group === null ||
+              Array.isArray(group)
+            ) {
+              return group;
+            }
+            const record = group as Record<string, unknown>;
+            const { __distributionKey: _internalKey, ...publicGroup } = record;
+            return publicGroup;
+          },
+        );
+        const completedDistribution =
+          distribution === undefined
+            ? undefined
+            : archiveSearchDistributionPageSchema.parse({
+                ...(distribution.by === "date"
+                  ? {
+                      by: distribution.by,
+                      field: distribution.field,
+                      period: distribution.period,
+                      timeZone: distribution.timeZone,
+                    }
+                  : distribution.by === "extension"
+                    ? {
+                        by: distribution.by,
+                        sourceAdapterId: distribution.sourceAdapterId,
+                        field: distribution.field,
+                      }
+                    : { by: distribution.by }),
+                totalItems: row.distributionTotalItems ?? "0",
+                groups: publicDistributionGroups,
+                hasMore: distributionHasMore,
+                ...(nextDistributionCursor === undefined
+                  ? {}
+                  : { nextCursor: nextDistributionCursor }),
+              });
         const completedPage = archiveSearchPageSchema.parse({
           ...page,
           ...(nextCursor === undefined ? {} : { nextCursor }),
+          ...(completedDistribution === undefined
+            ? {}
+            : { distribution: completedDistribution }),
         });
         remainingArchiveQueryBudgetMs(deadline);
         return { ok: true, value: completedPage };

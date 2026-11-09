@@ -3098,15 +3098,94 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     ],
   );
 
+  const binDistributionQuery: ArchiveSearchRequest = {
+    bins: ["binny-runs-one", "binny-runs-two"],
+    text: { in: "title", groups: [["Distribution"]] },
+    limit: 1,
+    distribution: { by: "bin", limit: 1 },
+  };
   const binDistributionResponse = await client.archives.search.$post({
-    json: {
-      bins: ["binny-runs-one", "binny-runs-two"],
-      text: { in: "title", groups: [["Distribution"]] },
-      limit: 1,
-      distribution: { by: "bin", limit: 1 },
-    } as never,
+    json: binDistributionQuery,
   });
   assert.equal(binDistributionResponse.status, 200);
+  if (binDistributionResponse.status !== 200) {
+    throw new Error("Bin distribution search failed.");
+  }
+  const binDistribution = await binDistributionResponse.json();
+  assert.equal(binDistribution.candidatesIncluded, true);
+  assert.deepEqual(
+    binDistribution.results.map(({ title }) => title),
+    ["Distribution shared"],
+  );
+  assert.equal(binDistribution.hasMore, true);
+  assert.ok(binDistribution.nextCursor);
+  assert.ok(binDistribution.distribution);
+  if (binDistribution.distribution?.by !== "bin") {
+    throw new Error("Expected a bin distribution page.");
+  }
+  assert.equal(binDistribution.distribution.totalItems, "2");
+  assert.deepEqual(binDistribution.distribution.groups, [
+    { kind: "bin", binId: "binny-runs-one", itemCount: "2" },
+  ]);
+  assert.equal(binDistribution.distribution.hasMore, true);
+  assert.ok(binDistribution.distribution.nextCursor);
+
+  const distributionOnlyResponse = await client.archives.search.$post({
+    json: {
+      bins: binDistributionQuery.bins,
+      text: binDistributionQuery.text,
+      includeCandidates: false,
+      limit: 9,
+      distribution: {
+        by: "bin",
+        limit: 5,
+        cursor: binDistribution.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(distributionOnlyResponse.status, 200);
+  if (distributionOnlyResponse.status !== 200) {
+    throw new Error("Distribution-only continuation failed.");
+  }
+  const distributionOnly = await distributionOnlyResponse.json();
+  assert.equal(distributionOnly.snapshot.asOf, binDistribution.snapshot.asOf);
+  assert.equal(distributionOnly.candidatesIncluded, false);
+  assert.deepEqual(distributionOnly.results, []);
+  assert.equal(distributionOnly.hasMore, false);
+  assert.equal(distributionOnly.nextCursor, undefined);
+  assert.ok(distributionOnly.distribution);
+  if (distributionOnly.distribution?.by !== "bin") {
+    throw new Error("Expected a bin distribution page.");
+  }
+  assert.equal(distributionOnly.distribution.totalItems, "2");
+  assert.deepEqual(distributionOnly.distribution.groups, [
+    { kind: "bin", binId: "binny-runs-two", itemCount: "1" },
+  ]);
+  assert.equal(distributionOnly.distribution.hasMore, false);
+  assert.equal(distributionOnly.distribution.nextCursor, undefined);
+
+  const candidateContinuationResponse = await client.archives.search.$post({
+    json: {
+      bins: binDistributionQuery.bins,
+      text: binDistributionQuery.text,
+      cursor: binDistribution.nextCursor,
+      limit: 10,
+    },
+  });
+  assert.equal(candidateContinuationResponse.status, 200);
+  if (candidateContinuationResponse.status !== 200) {
+    throw new Error("Candidate continuation after distribution failed.");
+  }
+  const candidateContinuation = await candidateContinuationResponse.json();
+  assert.equal(
+    candidateContinuation.snapshot.asOf,
+    binDistribution.snapshot.asOf,
+  );
+  assert.deepEqual(
+    candidateContinuation.results.map(({ title }) => title),
+    ["Distribution primary"],
+  );
+  assert.equal(candidateContinuation.hasMore, false);
 
   const crossView = await client.archives.search.$post({
     json: {
