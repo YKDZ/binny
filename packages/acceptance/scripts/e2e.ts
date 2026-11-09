@@ -5,7 +5,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { ArchiveSubmissionInput } from "@binny/contracts";
+import {
+  archiveBatchReadResponseSchema,
+  archiveBatchReadReferenceSchema,
+  type ArchiveBatchReadReference,
+  type ArchiveSubmissionInput,
+} from "@binny/contracts";
 import {
   closeLinuxdoHumanSession,
   linuxdoUserJourney,
@@ -599,6 +604,153 @@ async function archiveHttpStep(
   return result.stdout.trim();
 }
 
+type ArchiveBatchReadAcceptanceFixture = {
+  readonly reference: ArchiveBatchReadReference;
+  readonly oversizedReference: ArchiveBatchReadReference;
+  readonly bodyLength: number;
+  readonly bodySuffix: string;
+  readonly resourceId: string;
+};
+
+async function archiveBatchReadHttpStep(
+  baseUrl: string,
+): Promise<ArchiveBatchReadAcceptanceFixture> {
+  const result = await run("pnpm", [
+    "--silent",
+    "--filter",
+    "@binny/api",
+    "exec",
+    "node",
+    "--conditions=source",
+    "scripts/archive-batch-read-e2e.ts",
+    baseUrl,
+  ]);
+  assert.equal(result.code, 0, result.stderr + result.stdout);
+  const fixture: unknown = JSON.parse(result.stdout);
+  assert.ok(typeof fixture === "object" && fixture !== null);
+  assert.ok("reference" in fixture);
+  assert.ok("oversizedReference" in fixture);
+  assert.ok("bodyLength" in fixture && typeof fixture.bodyLength === "number");
+  assert.ok("bodySuffix" in fixture && typeof fixture.bodySuffix === "string");
+  assert.ok("resourceId" in fixture && typeof fixture.resourceId === "string");
+  assert.ok(Number.isSafeInteger(fixture.bodyLength) && fixture.bodyLength > 0);
+  return {
+    reference: archiveBatchReadReferenceSchema.parse(fixture.reference),
+    oversizedReference: archiveBatchReadReferenceSchema.parse(
+      fixture.oversizedReference,
+    ),
+    bodyLength: fixture.bodyLength,
+    bodySuffix: fixture.bodySuffix,
+    resourceId: fixture.resourceId,
+  };
+}
+
+async function archiveBatchReadMissingMediaHttpStep(
+  baseUrl: string,
+  fixture: ArchiveBatchReadAcceptanceFixture,
+): Promise<void> {
+  const response = await fetch(baseUrl + "/archives/batch-read", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ references: [fixture.reference] }),
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  const result = archiveBatchReadResponseSchema.parse(
+    (await response.json()) as unknown,
+  ).results[0];
+  assert.ok(result?.status === "readable");
+  assert.equal(result.revision.state.body?.text?.length, fixture.bodyLength);
+  assert.ok(result.revision.state.body?.text?.endsWith(fixture.bodySuffix));
+  assert.deepEqual(result.resources, [
+    { resourceId: fixture.resourceId, status: "missing" },
+  ]);
+}
+
+async function archiveBatchReadCliStep(
+  baseUrl: string,
+  fixture: ArchiveBatchReadAcceptanceFixture,
+): Promise<void> {
+  const args = [
+    "archive",
+    "batch-read",
+    "--references",
+    JSON.stringify([fixture.reference]),
+  ];
+  const structured = cliData<{
+    readonly results: readonly {
+      readonly index: number;
+      readonly status: string;
+      readonly resources: readonly {
+        readonly resourceId: string;
+        readonly status: string;
+      }[];
+      readonly revision?: {
+        readonly state: { readonly body?: { readonly text?: string } };
+      };
+    }[];
+  }>(await cli(baseUrl, args), "read");
+  assert.equal(structured.results.length, 1);
+  const result = structured.results[0];
+  assert.ok(result?.status === "readable");
+  assert.equal(result.index, 0);
+  const bodyText = result.revision?.state.body?.text;
+  assert.equal(bodyText?.length, fixture.bodyLength);
+  assert.ok(bodyText?.endsWith(fixture.bodySuffix));
+  assert.deepEqual(result.resources, [
+    { resourceId: fixture.resourceId, status: "missing" },
+  ]);
+
+  const readableText = await cli(baseUrl, [...args, "--output-format", "text"]);
+  assert.equal(readableText.code, 0, readableText.stderr);
+  assert.ok(readableText.stdout.includes(fixture.bodySuffix));
+  assert.ok(readableText.stdout.includes(fixture.resourceId + ": missing"));
+
+  const invalidJson = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+    readonly message: string;
+  }>(
+    await cli(baseUrl, ["archive", "batch-read", "--references", "not-json"]),
+    "invalid_input",
+  );
+  assert.deepEqual(invalidJson.path, ["references"]);
+  assert.match(invalidJson.message, /valid JSON/u);
+
+  const tooMany = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+    readonly message: string;
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify(Array.from({ length: 51 }, () => fixture.reference)),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(tooMany.path, ["references"]);
+  assert.match(tooMany.message, /Read at most 50 references.*another request/u);
+
+  const payloadFailure = cliFailure<{
+    readonly code: string;
+    readonly message: string;
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify([fixture.oversizedReference]),
+    ]),
+    "payload_too_large",
+  );
+  assert.match(
+    payloadFailure.message,
+    /Split the references into smaller requests/u,
+  );
+  assert.match(payloadFailure.message, /archive revision <revision-id>/u);
+}
+
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const binId = "binny-runs-one";
   if (archiveModelJourney) {
@@ -1067,6 +1219,64 @@ async function verifyArchiveSearchPoolWaitBudget(
   assert.equal(recoveredSearch.status, 200);
 }
 
+async function verifyArchiveBatchReadBudget(
+  baseUrl: string,
+  reference: ArchiveBatchReadReference,
+): Promise<void> {
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_resource IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD';\n",
+  );
+  await lock.waitForMarker("BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD");
+  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    lock.write("COMMIT;\n\\q\n");
+    const result = await lock.waitForClose();
+    assert.equal(result.code, 0, result.stderr);
+  };
+
+  try {
+    const startedAt = performance.now();
+    const responsePromise = fetch(baseUrl + "/archives/batch-read", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ references: [reference] }),
+      signal: AbortSignal.timeout(archiveSearchBudgetMs * 3),
+    });
+    await waitForManualRunLockWaiterBlockedBy(backendPid);
+    const response = await responsePromise;
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(response.status, 422);
+    const failure = (await response.json()) as {
+      readonly error: { readonly code: string; readonly message: string };
+    };
+    assert.equal(failure.error.code, "query_budget_exceeded");
+    assert.match(
+      failure.error.message,
+      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+    );
+    assert.match(failure.error.message, /no partial results were returned/u);
+    assert.ok(
+      elapsedMs < archiveSearchBudgetMs * 2,
+      `Batch read waited ${String(elapsedMs)} ms for resource storage metadata.`,
+    );
+  } finally {
+    await release();
+  }
+
+  const recovered = await fetch(baseUrl + "/archives/batch-read", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ references: [reference] }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+}
+
 async function capacityHttpStep(baseUrl: string): Promise<string> {
   const result = await run(
     "pnpm",
@@ -1470,6 +1680,41 @@ async function resourceFiles(): Promise<readonly string[]> {
   assert.ok(Array.isArray(files));
   assert.ok(files.every((file) => typeof file === "string"));
   return files;
+}
+
+async function removeResourceStorageFile(resourceId: string): Promise<void> {
+  assert.match(resourceId, /^[0-9a-f-]{36}$/iu);
+  const keyResult = await compose(
+    postgresExecArgs([
+      "-c",
+      `SELECT storage_key FROM archive_resource WHERE resource_id = '${resourceId.toLowerCase()}'::uuid;`,
+    ]).slice(composePrefix().length),
+  );
+  const storageKey = keyResult.stdout.trim();
+  assert.match(storageKey, /^[0-9a-f-]{36}$/u);
+  const fileName = storageKey + ".bin";
+  const beforeFiles = await resourceFiles();
+  assert.ok(beforeFiles.includes(fileName));
+  const filePath = "/var/lib/binny/resources/" + fileName;
+  const script = [
+    'import { stat, unlink } from "node:fs/promises";',
+    `const file = ${JSON.stringify(filePath)};`,
+    "const before = await stat(file);",
+    "await unlink(file);",
+    "process.stdout.write(String(before.size));",
+  ].join("\n");
+  const removal = await compose([
+    "exec",
+    "--no-TTY",
+    "server",
+    "node",
+    "--input-type=module",
+    "-e",
+    script,
+  ]);
+  assert.ok(Number(removal.stdout) > 0);
+  const afterFiles = await resourceFiles();
+  assert.ok(!afterFiles.includes(fileName));
 }
 
 async function waitFor<T>(
@@ -9884,6 +10129,11 @@ async function main(): Promise<void> {
       const itemId = await manualRunsHttpStep(baseUrl, manifest);
       assert.ok(itemId);
       await archiveHttpStep("fixed-search", baseUrl);
+      const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
+      await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
+      await removeResourceStorageFile(batchReadFixture.resourceId);
+      await archiveBatchReadMissingMediaHttpStep(baseUrl, batchReadFixture);
+      await archiveBatchReadCliStep(baseUrl, batchReadFixture);
       await archiveSearchCliStep(baseUrl);
       if (archiveSearchOnly) {
         process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
@@ -9997,6 +10247,10 @@ async function main(): Promise<void> {
           waitForRuntimeHealth,
         });
         await archiveHttpStep("fixed-search", baseUrl);
+        const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
+        await removeResourceStorageFile(batchReadFixture.resourceId);
+        await archiveBatchReadMissingMediaHttpStep(baseUrl, batchReadFixture);
+        await archiveBatchReadCliStep(baseUrl, batchReadFixture);
         const archive = await archiveHttpStep("submit", baseUrl);
         await archiveSearchCliStep(baseUrl);
         const sdkResource = await sdkResourceStep(baseUrl);

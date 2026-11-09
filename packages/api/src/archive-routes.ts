@@ -4,6 +4,8 @@ import {
   archiveIdentifierSchema,
   archiveItemReadSchema,
   archiveItemDeletionResultSchema,
+  archiveBatchReadInputSchema,
+  archiveBatchReadResponseSchema,
   archiveResourceMetadataSchema,
   archiveResourceResolveInputSchema,
   archiveResourceResolveResultSchema,
@@ -216,6 +218,35 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
               return c.json({ error: result.error }, 400);
             case 422:
               return c.json({ error: result.error }, 422);
+          }
+        }
+        return c.json(result.value, 200);
+      },
+    )
+    .post(
+      "/archives/batch-read",
+      zValidator("json", archiveBatchReadInputSchema, (result, c) => {
+        if (!result.success)
+          return c.json(
+            validationFailure(result.error.issues, {
+              preserveOriginalMessage: true,
+            }),
+            400,
+          );
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.readArchiveBatch(c.req.valid("json"));
+        if (!result.ok) {
+          switch (result.status) {
+            case 400:
+              return c.json({ error: result.error }, 400);
+            case 413:
+              return c.json({ error: result.error }, 413);
+            case 422:
+              return c.json({ error: result.error }, 422);
+            case 503:
+              return c.json({ error: result.error }, 503);
           }
         }
         return c.json(result.value, 200);
@@ -484,6 +515,8 @@ export const archiveApiSchemas: {
   readonly submitInput: Record<string, unknown>;
   readonly searchInput: Record<string, unknown>;
   readonly searchPage: Record<string, unknown>;
+  readonly batchReadInput: Record<string, unknown>;
+  readonly batchReadResponse: Record<string, unknown>;
   readonly commit: Record<string, unknown>;
   readonly itemQuery: Record<string, unknown>;
   readonly item: Record<string, unknown>;
@@ -502,6 +535,11 @@ export const archiveApiSchemas: {
   submitInput: toArchiveJsonSchema(archiveSubmissionInputSchema, "input"),
   searchInput: toArchiveJsonSchema(archiveSearchInputSchema, "input"),
   searchPage: toArchiveJsonSchema(archiveSearchPageSchema, "output"),
+  batchReadInput: toArchiveJsonSchema(archiveBatchReadInputSchema, "input"),
+  batchReadResponse: toArchiveJsonSchema(
+    archiveBatchReadResponseSchema,
+    "output",
+  ),
   commit: toArchiveJsonSchema(archiveCommitSchema, "output"),
   itemQuery: toArchiveJsonSchema(archiveItemReadQuerySchema, "input"),
   item: toArchiveJsonSchema(archiveItemReadSchema, "output"),
@@ -538,6 +576,14 @@ export const archiveQueryContract = {
         "在固定归档截点下按来源和不区分大小写的字面关键词组搜索资料，并稳定分页返回命中来源视图。",
       requestSchema: archiveApiSchemas.searchInput,
       responseSchema: archiveApiSchemas.searchPage,
+    },
+    batchRead: {
+      method: "POST",
+      path: "/archives/batch-read",
+      description:
+        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; complete responses are limited to 16 MiB.",
+      requestSchema: archiveApiSchemas.batchReadInput,
+      responseSchema: archiveApiSchemas.batchReadResponse,
     },
   },
 } as const;

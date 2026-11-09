@@ -14,14 +14,30 @@ import {
 import {
   archiveResources,
   archiveRevisionResources,
+  type CancellableQueryExecutor,
   type Database,
 } from "@binny/db";
 import { and, asc, eq, inArray, lte, notExists, sql } from "drizzle-orm";
 
 import { withArchiveWriteLock } from "./archive-lock.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
+import {
+  executeArchiveQueryWithinDeadline,
+  remainingArchiveQueryBudgetMs,
+} from "./archive-query-budget.ts";
 
 type ResourceRow = typeof archiveResources.$inferSelect;
+type ResourceAvailabilityRow = Pick<
+  ResourceRow,
+  "resourceId" | "sha256" | "mediaType" | "byteSize" | "storageKey"
+>;
+type ResourceAvailabilityQueryRow = {
+  readonly resourceId: string;
+  readonly sha256: string;
+  readonly mediaType: string;
+  readonly byteSize: string;
+  readonly storageKey: string;
+};
 
 type StorageOptions = {
   readonly directory: string;
@@ -44,6 +60,11 @@ export type ArchiveResourceStorage = {
     transaction: ArchiveTransaction,
     resourceId: string,
   ) => Promise<boolean>;
+  readonly inspectAvailability: (
+    resourceIds: readonly string[],
+    executeQuery: CancellableQueryExecutor,
+    deadline: number,
+  ) => Promise<ReadonlyMap<string, boolean>>;
   readonly collectUnreferencedResources: (
     resourceIds: readonly string[],
   ) => Promise<void>;
@@ -96,7 +117,7 @@ function resourcePath(directory: string, storageKey: string): string {
 }
 
 function metadataFromRow(
-  row: ResourceRow,
+  row: ResourceAvailabilityRow,
 ): ArchiveResourceMetadata | undefined {
   const size = Number(row.byteSize);
   if (!Number.isSafeInteger(size) || size < 0) return undefined;
@@ -107,6 +128,23 @@ function metadataFromRow(
     size,
   });
   return parsed.success ? parsed.data : undefined;
+}
+
+async function resourceFileIsAvailable(
+  directory: string,
+  row: ResourceAvailabilityRow,
+): Promise<boolean> {
+  const metadata = metadataFromRow(row);
+  if (metadata === undefined) return false;
+  try {
+    return (
+      (await stat(resourcePath(directory, row.storageKey))).size ===
+      metadata.size
+    );
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -257,7 +295,9 @@ export function createArchiveResourceStorage(
   async function collectUnreferencedResources(
     resourceIds: readonly string[],
   ): Promise<void> {
-    const uniqueResourceIds = [...new Set(resourceIds)];
+    const uniqueResourceIds = [
+      ...new Set(resourceIds.map((resourceId) => resourceId.toLowerCase())),
+    ];
     if (uniqueResourceIds.length === 0) return;
 
     const deleting = await withArchiveWriteLock(
@@ -603,18 +643,62 @@ export function createArchiveResourceStorage(
         ),
       );
     const row = rows[0];
-    if (row === undefined) return false;
-    const metadata = metadataFromRow(row);
-    if (metadata === undefined) return false;
-    try {
-      return (
-        (await stat(resourcePath(directory, row.storageKey))).size ===
-        metadata.size
-      );
-    } catch (error) {
-      if (isMissingFile(error)) return false;
-      throw error;
+    return row !== undefined && (await resourceFileIsAvailable(directory, row));
+  }
+
+  async function inspectAvailability(
+    resourceIds: readonly string[],
+    executeQuery: CancellableQueryExecutor,
+    deadline: number,
+  ): Promise<ReadonlyMap<string, boolean>> {
+    // PostgreSQL returns UUID text in lowercase even when the immutable state preserves source casing.
+    const uniqueResourceIds = [
+      ...new Set(resourceIds.map((resourceId) => resourceId.toLowerCase())),
+    ];
+    if (uniqueResourceIds.length === 0) return new Map();
+
+    remainingArchiveQueryBudgetMs(deadline);
+    const requestJson = JSON.stringify(uniqueResourceIds);
+    const rows = await executeArchiveQueryWithinDeadline(
+      executeQuery,
+      sql<ResourceAvailabilityQueryRow[]>`
+        SELECT
+          resource.resource_id::text AS "resourceId",
+          resource.sha256 AS "sha256",
+          resource.media_type AS "mediaType",
+          resource.byte_size::text AS "byteSize",
+          resource.storage_key::text AS "storageKey"
+        FROM jsonb_array_elements_text(${requestJson}::text::jsonb) AS requested(resource_id)
+        INNER JOIN archive_resource AS resource
+          ON resource.resource_id = requested.resource_id::uuid
+         AND resource.status = 'ready'
+      `,
+      deadline,
+    );
+    const rowsById = new Map<string, ResourceAvailabilityRow>();
+    for (const row of rows) {
+      rowsById.set(row.resourceId, {
+        resourceId: row.resourceId,
+        sha256: row.sha256,
+        mediaType: row.mediaType,
+        byteSize: BigInt(row.byteSize),
+        storageKey: row.storageKey,
+      });
     }
+
+    const availability = new Map<string, boolean>();
+    for (const resourceId of uniqueResourceIds) {
+      remainingArchiveQueryBudgetMs(deadline);
+      const row = rowsById.get(resourceId);
+      availability.set(
+        resourceId,
+        row === undefined
+          ? false
+          : await resourceFileIsAvailable(directory, row),
+      );
+      remainingArchiveQueryBudgetMs(deadline);
+    }
+    return availability;
   }
 
   async function initialize(): Promise<void> {
@@ -644,6 +728,7 @@ export function createArchiveResourceStorage(
     upload,
     get,
     isAvailable,
+    inspectAvailability,
     collectUnreferencedResources,
     initialize,
     close,
