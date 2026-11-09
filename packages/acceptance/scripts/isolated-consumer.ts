@@ -304,54 +304,72 @@ export async function createIsolatedCliConsumer({
         readonly kind: string;
         readonly variant: string;
         readonly data: {
-          readonly grammar: {
-            readonly nodes: readonly { readonly id: string }[];
-          };
-          readonly manifest: {
-            readonly commands: Readonly<Record<string, unknown>>;
-            readonly wire: Readonly<Record<string, unknown>>;
-          };
+          readonly kind: string;
+          readonly commands: readonly {
+            readonly path: readonly string[];
+            readonly kind: string;
+          }[];
         };
       };
       assert.equal(listed.kind, "data");
       assert.equal(listed.variant, "document");
-      assert.ok(listed.data.grammar.nodes.some(({ id }) => id === "cliSchema"));
-      assert.ok("archiveSearch" in listed.data.manifest.commands);
-      assert.ok("binConfigSchema" in listed.data.manifest.commands);
+      assert.equal(listed.data.kind, "directory");
+      assert.ok(
+        listed.data.commands.some(({ path }) => path.join(" ") === "schema"),
+      );
+      assert.ok(
+        listed.data.commands.some(
+          ({ path }) => path.join(" ") === "archive search",
+        ),
+      );
+
+      const catalogFull = await runChecked(
+        binary,
+        ["schema", "--part", "full"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const catalog = JSON.parse(catalogFull.stdout) as {
+        readonly data: {
+          readonly contract: {
+            readonly grammar: {
+              readonly nodes: readonly { readonly id: string }[];
+            };
+            readonly manifest: {
+              readonly commands: Readonly<Record<string, unknown>>;
+            };
+          };
+        };
+      };
+      assert.ok(
+        catalog.data.contract.grammar.nodes.some(
+          ({ id }) => id === "cliSchema",
+        ),
+      );
+      assert.ok("archiveSearch" in catalog.data.contract.manifest.commands);
+      assert.ok("binConfigSchema" in catalog.data.contract.manifest.commands);
 
       const selected = await runChecked(
         binary,
-        ["schema", "archive", "search"],
+        ["schema", "archive", "search", "--part", "input"],
         consumerDirectory,
         offlineEnvironment,
       );
       const detail = JSON.parse(selected.stdout) as {
         readonly data: {
-          readonly grammar: {
-            readonly nodes: readonly { readonly id: string }[];
-          };
-          readonly manifest: {
-            readonly commands: Readonly<{
-              readonly archiveSearch?: {
-                readonly input: {
-                  readonly inputSchema: {
-                    readonly properties: Readonly<
-                      Record<string, { readonly type?: string }>
-                    >;
-                  };
-                };
+          readonly contract: {
+            readonly input: {
+              readonly schema: {
+                readonly properties: Readonly<
+                  Record<string, { readonly type?: string }>
+                >;
               };
-            }>;
+            };
           };
         };
       };
-      assert.deepEqual(
-        detail.data.grammar.nodes.map(({ id }) => id),
-        ["archive", "archiveSearch"],
-      );
       assert.equal(
-        detail.data.manifest.commands.archiveSearch?.input.inputSchema
-          .properties.query?.type,
+        detail.data.contract.input.schema.properties.query?.type,
         "string",
       );
 
@@ -373,7 +391,7 @@ export async function createIsolatedCliConsumer({
       assert.equal(failure.kind, "failure");
       assert.equal(failure.variant, "unknownPath");
       assert.deepEqual(failure.data.path, ["archive", "unknown"]);
-      assert.match(failure.data.message, /不存在/u);
+      assert.match(failure.data.message, /does not exist/u);
     }
 
     const invoke = async (
