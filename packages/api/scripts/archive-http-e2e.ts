@@ -3337,6 +3337,11 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       sourceModifiedAt: null,
     },
     {
+      key: "missing-two",
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+    },
+    {
       key: "multi-view",
       sourcePublishedAt: instant("2026-11-08T10:00:00+08:00"),
       sourceModifiedAt: null,
@@ -3441,7 +3446,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   const certain = await certainResponse.json();
   assert.ok(certain.timeSummary);
   assert.equal(certain.timeSummary.certainItems, "4");
-  assert.equal(certain.timeSummary.undeterminedItems, "5");
+  assert.equal(certain.timeSummary.undeterminedItems, "6");
   assert.deepEqual(
     certain.results.map(({ itemId }) => itemId),
     [itemId("middle"), multiViewItemId],
@@ -3623,19 +3628,21 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   });
   assert.equal(invalidLocalDate.status, 400);
 
-  const undeterminedResponse = await client.archives.search.$post({
-    json: {
-      bins: ["binny-runs-one", "binny-runs-two"],
-      text: { in: "body", groups: [[token]] },
-      asOf: snapshotAsOf,
-      timeWindow: {
-        field: "sourcePublishedAt",
-        from: "2026-11-08",
-        until: "2026-11-09",
-        timeZone: "Asia/Shanghai",
-        review: "undetermined",
-      },
+  const undeterminedQuery: ArchiveSearchRequest = {
+    bins: ["binny-runs-one", "binny-runs-two"],
+    text: { in: "body", groups: [[token]] },
+    asOf: snapshotAsOf,
+    limit: 5,
+    timeWindow: {
+      field: "sourcePublishedAt",
+      from: "2026-11-08",
+      until: "2026-11-09",
+      timeZone: "Asia/Shanghai",
+      review: "undetermined",
     },
+  };
+  const undeterminedResponse = await client.archives.search.$post({
+    json: undeterminedQuery,
   });
   assert.equal(undeterminedResponse.status, 200);
   if (undeterminedResponse.status !== 200) {
@@ -3645,25 +3652,58 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   assert.equal(undetermined.snapshot.asOf, snapshotAsOf);
   assert.deepEqual(undetermined.timeSummary, {
     certainItems: "4",
-    undeterminedItems: "5",
+    undeterminedItems: "6",
   });
+  assert.equal(undetermined.results.length, 5);
+  assert.equal(undetermined.hasMore, true);
+  assert.equal(undetermined.hasMore, undetermined.nextCursor !== undefined);
+  assert.ok(undetermined.nextCursor);
+  assert.equal(
+    undetermined.results.at(-1)?.sourcePublishedAt,
+    null,
+    "The first undetermined page ends inside the null-time sort group.",
+  );
+  const undeterminedNextResponse = await client.archives.search.$post({
+    json: {
+      ...undeterminedQuery,
+      cursor: undetermined.nextCursor,
+      limit: 2,
+    },
+  });
+  assert.equal(undeterminedNextResponse.status, 200);
+  if (undeterminedNextResponse.status !== 200) {
+    throw new Error("Undetermined-time cursor page failed.");
+  }
+  const undeterminedNextPage = await undeterminedNextResponse.json();
+  assert.equal(undeterminedNextPage.snapshot.asOf, snapshotAsOf);
+  assert.deepEqual(undeterminedNextPage.timeSummary, undetermined.timeSummary);
+  assert.equal(undeterminedNextPage.hasMore, false);
+  assert.equal(
+    undeterminedNextPage.hasMore,
+    undeterminedNextPage.nextCursor !== undefined,
+  );
+  assert.equal(undeterminedNextPage.nextCursor, undefined);
+  assert.equal(undeterminedNextPage.results.length, 1);
+  assert.equal(undeterminedNextPage.results[0]?.sourcePublishedAt, null);
+  const undeterminedResults = [
+    ...undetermined.results,
+    ...undeterminedNextPage.results,
+  ];
+  const undeterminedIds = undeterminedResults.map(({ itemId }) => itemId);
+  assert.equal(new Set(undeterminedIds).size, undeterminedIds.length);
   assert.deepEqual(
-    undetermined.results.map(({ itemId: resultId }) => resultId).toSorted(),
+    undeterminedIds.toSorted(),
     [
       itemId("day-without-zone"),
       itemId("month-overlap"),
       itemId("year-overlap"),
       itemId("missing"),
+      itemId("missing-two"),
       multiViewItemId,
     ].toSorted(),
   );
-  assert.equal(
-    undetermined.results.at(-1)?.itemId,
-    itemId("missing"),
-    "Null SourceTime sorts after all non-null uncertain dates.",
-  );
   const unknownById = new Map(
-    undetermined.results.map((result) => [result.itemId, result]),
+    undeterminedResults.map((result) => [result.itemId, result]),
   );
   const timeReason = (resultId: string): string => {
     const timeMatch = unknownById.get(resultId)?.matches[0]?.timeMatch;
@@ -3675,6 +3715,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     return timeMatch.reason;
   };
   assert.equal(timeReason(itemId("missing")), "missingTime");
+  assert.equal(timeReason(itemId("missing-two")), "missingTime");
   assert.equal(timeReason(itemId("day-without-zone")), "missingTimeZone");
   assert.equal(
     timeReason(itemId("month-overlap")),
