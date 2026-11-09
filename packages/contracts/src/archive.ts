@@ -1158,11 +1158,19 @@ export type ArchiveSearchRequest = z.input<typeof archiveSearchInputSchema>;
 export type ArchiveSearchPage = z.infer<typeof archiveSearchPageSchema>;
 type ExtensionFilterFor<Value> =
   NonNullable<Value> extends readonly (infer Item)[]
-    ? [Item] extends [ArchiveExtensionScalar]
-      ?
-          | { readonly op: "has"; readonly value: Item }
-          | { readonly op: "hasAny"; readonly values: readonly Item[] }
-      : never
+    ? [NonNullable<Item>] extends [never]
+      ? never
+      : [NonNullable<Item>] extends [ArchiveExtensionScalar]
+        ?
+            | {
+                readonly op: "has";
+                readonly value: NonNullable<Item>;
+              }
+            | {
+                readonly op: "hasAny";
+                readonly values: readonly NonNullable<Item>[];
+              }
+        : never
     : NonNullable<Value> extends ArchiveExtensionScalar
       ?
           | { readonly op: "eq"; readonly value: NonNullable<Value> }

@@ -129,6 +129,7 @@ const typedExtensionsSchema = z
     floor: z.number().int(),
     labels: z.array(z.enum(["release", "news"])).optional(),
     nullableCategory: z.string().nullable().optional(),
+    nullableLabels: z.array(z.number().int().nullable()).nullable().optional(),
   })
   .strict();
 const typedExtensionSearch: ArchiveSearchRequestFor<
@@ -143,10 +144,39 @@ const typedExtensionSearch: ArchiveSearchRequestFor<
       floor: { op: "in", values: [2, 3] },
       labels: { op: "hasAny", values: ["news", "release"] },
       nullableCategory: { op: "eq", value: "comment" },
+      nullableLabels: { op: "has", value: 2 },
     },
   },
 };
 void typedExtensionSearch;
+const typedNullableArrayHasAny: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: { nullableLabels: { op: "hasAny", values: [2, 3] } },
+  },
+};
+void typedNullableArrayHasAny;
+const badNullableArrayQueryNull: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      nullableLabels: {
+        op: "has",
+        // @ts-expect-error Query values cannot be null even when array items allow null.
+        value: null,
+      },
+    },
+  },
+};
+void badNullableArrayQueryNull;
 // @ts-expect-error Adapter-scoped extension searches must select explicit bins.
 const badExtensionSearchWithoutBins: ArchiveSearchRequestFor<
   z.output<typeof typedExtensionsSchema>,
