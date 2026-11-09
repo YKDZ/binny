@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { publicApiProtocolVersion } from "@binny/contracts";
+
 import { runCli } from "../../src/main.ts";
 
-async function run(args: readonly string[]) {
+async function run(
+  args: readonly string[],
+  fetchImplementation?: typeof globalThis.fetch,
+) {
   let output = "";
   let requestCount = 0;
   const exitCode = await runCli({
     argv: ["node", "binny", ...args],
     identity: { commandName: "binny", version: "0.0.0" },
-    fetch: async () => {
+    fetch: async (input, init) => {
       requestCount += 1;
-      throw new Error("离线命令不应请求服务。");
+      if (fetchImplementation !== undefined)
+        return fetchImplementation(input, init);
+      throw new Error("Offline commands must not request the service.");
     },
     write: async ({ chunk }) => {
       output += chunk;
@@ -21,6 +28,125 @@ async function run(args: readonly string[]) {
 }
 
 void describe("offline CLI command contract", () => {
+  void it("projects bin update presence rules through resolvable schema references", async () => {
+    const input = await run(["schema", "bin", "update", "--part", "input"]);
+
+    assert.equal(input.exitCode, 0);
+    assert.equal(input.requestCount, 0);
+    const document = JSON.parse(input.output) as {
+      readonly data: {
+        readonly contract: {
+          readonly input: {
+            readonly schema: Readonly<Record<string, unknown>> & {
+              readonly $defs?: Readonly<Record<string, unknown>>;
+            };
+          };
+        };
+      };
+    };
+    const schema = document.data.contract.input.schema;
+    const definitions = schema.$defs;
+    assert.ok(definitions !== undefined);
+    assert.ok(Object.keys(definitions).length > 0);
+
+    const references: string[] = [];
+    const collectReferences = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const entry of value) collectReferences(entry);
+        return;
+      }
+      if (value === null || typeof value !== "object") return;
+      const reference = Reflect.get(value, "$ref");
+      if (typeof reference === "string") references.push(reference);
+      for (const entry of Object.values(value)) collectReferences(entry);
+    };
+    collectReferences(schema);
+    assert.ok(references.length > 0);
+
+    for (const reference of references) {
+      assert.match(reference, /^#\//u);
+      let resolved: unknown = schema;
+      for (const token of reference
+        .slice(2)
+        .split("/")
+        .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
+        if (resolved === null || typeof resolved !== "object") {
+          resolved = undefined;
+          break;
+        }
+        resolved = Reflect.get(resolved, token);
+      }
+      assert.notEqual(resolved, undefined, `${reference} must resolve locally`);
+    }
+
+    const missingChanges = await run(["bin", "update", "rss-main"]);
+    assert.equal(missingChanges.exitCode, 2);
+    assert.equal(missingChanges.requestCount, 0);
+    const onlyApiUrl = await run([
+      "bin",
+      "update",
+      "rss-main",
+      "--url",
+      "http://selected.test",
+    ]);
+    assert.equal(onlyApiUrl.exitCode, 2);
+    assert.equal(onlyApiUrl.requestCount, 0);
+
+    const requests: Request[] = [];
+    const validChange = await run(
+      [
+        "bin",
+        "update",
+        "rss-main",
+        "--identity",
+        "account-primary",
+        "--config",
+        JSON.stringify({ userAgent: "Binny E2E updated", key: "aaz" }),
+        "--browser-idle-timeout-seconds",
+        "0",
+      ],
+      async (inputRequest, init) => {
+        const request = new Request(inputRequest, init);
+        requests.push(request);
+        if (new URL(request.url).pathname === "/meta") {
+          return Response.json({
+            product: { name: "Binny", version: "1.2.3" },
+            protocols: { httpApi: publicApiProtocolVersion },
+            capabilities: [
+              "archives.search",
+              "archives.aggregate",
+              "archive.query-contract",
+            ],
+            contracts: { archiveQuery: { version: 1, path: "/meta/query" } },
+          });
+        }
+        return Response.json({
+          id: "rss-main",
+          sourceAdapterId: "rss",
+          identityId: "account-primary",
+          config: { userAgent: "Binny E2E updated", key: "aaz" },
+          browserIdleTimeoutSeconds: 0,
+          status: "active",
+          execution: { status: "offline", reason: "runtime_not_connected" },
+          sourceStateSnapshot: { freshness: "unknown" },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        });
+      },
+    );
+    assert.equal(validChange.exitCode, 0);
+    assert.equal(validChange.requestCount, 2);
+    assert.deepEqual(
+      requests.map((request) => new URL(request.url).pathname),
+      ["/meta", "/bins/rss-main"],
+    );
+    assert.deepEqual(await requests[1]?.clone().json(), {
+      identityId: "account-primary",
+      config: { userAgent: "Binny E2E updated", key: "aaz" },
+      browserIdleTimeoutSeconds: 0,
+    });
+  });
+
   void it("lists command groups and commands by path without expanding their schemas", async () => {
     const directory = await run(["schema"]);
 
@@ -266,6 +392,10 @@ void describe("offline CLI command contract", () => {
     const configHelp = await run(["bin", "update", "--help"]);
     assert.equal(configHelp.exitCode, 0);
     assert.match(configHelp.output, /bin config-schema/u);
+    assert.match(
+      configHelp.output,
+      /Provide at least 1 of: identityId, config, browserIdleTimeoutSeconds/u,
+    );
 
     const binGroupHelp = await run(["bin", "--help"]);
     assert.equal(binGroupHelp.exitCode, 0);
