@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { performance } from "node:perf_hooks";
 
 import {
   archiveIdentifierSchema,
@@ -16,9 +15,15 @@ import {
   type SourceAdapterManifest,
 } from "@binny/contracts";
 import { databaseErrorCode, type CancellableQueryExecutor } from "@binny/db";
-import { sql, type SQL } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import { canonicalJson } from "./archive-common.ts";
+import {
+  ArchiveQueryBudgetExceeded,
+  createArchiveQueryDeadline,
+  executeArchiveQueryWithinDeadline,
+  remainingArchiveQueryBudgetMs,
+} from "./archive-query-budget.ts";
 
 type SearchCursor = {
   readonly version: 1;
@@ -40,8 +45,6 @@ type ExtensionScopeBin = {
   readonly binId: string;
   readonly sourceAdapter: SourceAdapterManifest;
 };
-
-class SearchBudgetExceeded extends Error {}
 
 function encodeSearchCursor(cursor: SearchCursor): string {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
@@ -107,12 +110,6 @@ function budgetFailure(budgetMs: number): ArchiveSearchOperation<never> {
       message: `Search exceeded the server request budget of ${budgetMs} ms; no partial results were returned.`,
     },
   };
-}
-
-function remainingBudgetMs(deadline: number): number {
-  const remaining = Math.floor(deadline - performance.now());
-  if (remaining <= 0) throw new SearchBudgetExceeded();
-  return remaining;
 }
 
 function queryHash(input: SearchInput): string {
@@ -480,33 +477,6 @@ function decodeSearchResults(value: unknown): unknown[] {
   return decoded;
 }
 
-async function queryWithinBudget<Row extends Record<string, unknown>>(
-  executeQuery: CancellableQueryExecutor,
-  query: SQL<Row[]>,
-  deadline: number,
-): Promise<readonly Row[]> {
-  const remaining = remainingBudgetMs(deadline);
-  const pending = executeQuery<Row>(query);
-  let timeout: NodeJS.Timeout | undefined;
-  const outcome = await Promise.race([
-    pending.rows.then(
-      (rows) => ({ kind: "rows" as const, rows }),
-      (error: unknown) => ({ kind: "error" as const, error }),
-    ),
-    new Promise<{ readonly kind: "timeout" }>((resolve) => {
-      timeout = setTimeout(() => resolve({ kind: "timeout" }), remaining);
-    }),
-  ]);
-  if (timeout !== undefined) clearTimeout(timeout);
-  if (outcome.kind === "timeout") {
-    pending.cancel();
-    throw new SearchBudgetExceeded();
-  }
-  if (outcome.kind === "error") throw outcome.error;
-  remainingBudgetMs(deadline);
-  return outcome.rows as readonly Row[];
-}
-
 /** Build the fixed archive search operation with one server-side request budget. */
 export function createArchiveSearchOperation(
   executeQuery: CancellableQueryExecutor,
@@ -521,7 +491,7 @@ export function createArchiveSearchOperation(
     ): Promise<
       ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
     > {
-      const deadline = performance.now() + budgetMs;
+      const deadline = createArchiveQueryDeadline(budgetMs);
       const checked = archiveSearchInputSchema.safeParse(request);
       if (!checked.success) {
         const issue = archiveSearchInputIssue(request, checked.error.issues);
@@ -559,7 +529,7 @@ export function createArchiveSearchOperation(
           : { asOf: input.asOf, mode: "asOf" as const });
 
       try {
-        const [row] = await queryWithinBudget<SearchPageRow>(
+        const [row] = await executeArchiveQueryWithinDeadline<SearchPageRow>(
           executeQuery,
           pageQuery(input, snapshot, cursor),
           deadline,
@@ -607,11 +577,11 @@ export function createArchiveSearchOperation(
           ...page,
           ...(nextCursor === undefined ? {} : { nextCursor }),
         });
-        remainingBudgetMs(deadline);
+        remainingArchiveQueryBudgetMs(deadline);
         return { ok: true, value: completedPage };
       } catch (error) {
         if (
-          error instanceof SearchBudgetExceeded ||
+          error instanceof ArchiveQueryBudgetExceeded ||
           databaseErrorCode(error) === "57014"
         ) {
           return budgetFailure(budgetMs);
