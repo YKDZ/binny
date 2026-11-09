@@ -4,6 +4,7 @@ import {
   defineSourceAdapter,
   defineSourceAdapterAction,
   submitCleanedArticle,
+  type ArchiveSearchRequestFor,
   type SourceAdapterContext,
 } from "../src/index.ts";
 
@@ -123,8 +124,124 @@ const transformedParamsSchema = z.object({
   limit: z.string().transform(Number),
 });
 const typedExtensionsSchema = z
-  .object({ category: z.enum(["post", "comment"]), floor: z.number().int() })
+  .object({
+    category: z.enum(["post", "comment"]),
+    floor: z.number().int(),
+    labels: z.array(z.enum(["release", "news"])).optional(),
+    nullableCategory: z.string().nullable().optional(),
+    nullableLabels: z.array(z.number().int().nullable()).nullable().optional(),
+  })
   .strict();
+const typedExtensionSearch: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      category: { op: "eq", value: "post" },
+      floor: { op: "in", values: [2, 3] },
+      labels: { op: "hasAny", values: ["news", "release"] },
+      nullableCategory: { op: "eq", value: "comment" },
+      nullableLabels: { op: "has", value: 2 },
+    },
+  },
+};
+void typedExtensionSearch;
+const typedNullableArrayHasAny: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: { nullableLabels: { op: "hasAny", values: [2, 3] } },
+  },
+};
+void typedNullableArrayHasAny;
+const badNullableArrayQueryNull: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      nullableLabels: {
+        op: "has",
+        // @ts-expect-error Query values cannot be null even when array items allow null.
+        value: null,
+      },
+    },
+  },
+};
+void badNullableArrayQueryNull;
+// @ts-expect-error Adapter-scoped extension searches must select explicit bins.
+const badExtensionSearchWithoutBins: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: { category: { op: "eq", value: "post" } },
+  },
+};
+const badExtensionSearchField: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      // @ts-expect-error Search keys must be declared by the extension schema.
+      unknown: { op: "eq", value: "post" },
+    },
+  },
+};
+const badExtensionSearchType: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      // @ts-expect-error Scalar values must match the declared field type.
+      floor: { op: "eq", value: "2" },
+    },
+  },
+};
+const badExtensionSearchOperation: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    sourceAdapterId: "example.typed-actions",
+    filters: {
+      // @ts-expect-error Scalar fields support eq/in, not list operations.
+      category: { op: "has", value: "post" },
+    },
+  },
+};
+const badExtensionSearchAdapter: ArchiveSearchRequestFor<
+  z.output<typeof typedExtensionsSchema>,
+  "example.typed-actions"
+> = {
+  bins: ["example-bin"],
+  extensions: {
+    // @ts-expect-error The adapter scope is preserved as a literal type.
+    sourceAdapterId: "example.other-adapter",
+    filters: { category: { op: "eq", value: "post" } },
+  },
+};
+void badExtensionSearchField;
+void badExtensionSearchType;
+void badExtensionSearchOperation;
+void badExtensionSearchAdapter;
+void badExtensionSearchWithoutBins;
 type IsString<T> = [T] extends [string] ? true : false;
 type Expect<T extends true> = T;
 type TypedReferenceTimeIsString = Expect<

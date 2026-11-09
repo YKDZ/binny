@@ -6,6 +6,7 @@ import {
   binIdSchema,
   binListSchema,
   binUpdateInputSchema,
+  discoverSourceAdapterExtensionFields,
   type HumanSessionOperations,
   manualRunClaimInputSchema,
   manualRunCompleteInputSchema,
@@ -209,6 +210,27 @@ function makeApp(operations: ApiOperations, productVersion: string) {
             sourceAdapterId: result.value.sourceAdapter.id,
             sourceAdapterVersion: result.value.sourceAdapter.version,
             configSchema: result.value.sourceAdapter.configSchema,
+          }),
+          200,
+        );
+      },
+    )
+    .get(
+      "/bins/:binId/extension-fields",
+      zValidator("param", z.object({ binId: binIdSchema }), (result, c) => {
+        if (!result.success)
+          return c.json(validationFailure(result.error.issues), 400);
+        return undefined;
+      }),
+      async (c) => {
+        const result = await operations.bins.getBin(c.req.valid("param").binId);
+        if (!result.ok) return c.json({ error: result.error }, 404);
+        const { sourceAdapter } = result.value;
+        return c.json(
+          discoverSourceAdapterExtensionFields({
+            sourceAdapterId: sourceAdapter.id,
+            sourceAdapterVersion: sourceAdapter.version,
+            extensionsSchema: sourceAdapter.extensionsSchema,
           }),
           200,
         );

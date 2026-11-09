@@ -13,6 +13,7 @@ import {
   archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
   archiveSearchInputSchema,
+  archiveSearchInputIssue,
   archiveSearchPageSchema,
   archiveQueryContractVersion,
   archiveTimelinePageSchema,
@@ -193,9 +194,18 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
     )
     .post(
       "/archives/search",
-      zValidator("json", archiveSearchInputSchema, (result, c) => {
-        if (!result.success)
-          return c.json(validationFailure(result.error.issues), 400);
+      zValidator("json", archiveSearchInputSchema, async (result, c) => {
+        if (!result.success) {
+          const input = await c.req.json().catch(() => undefined);
+          const issue = archiveSearchInputIssue(input, result.error.issues);
+          return c.json(
+            validationFailure(
+              issue === undefined ? result.error.issues : [issue],
+              { preserveOriginalMessage: true },
+            ),
+            400,
+          );
+        }
         return undefined;
       }),
       async (c) => {

@@ -600,6 +600,26 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await fixedSearch.json()).error.path;
   }
 
+  void client.archives.search.$post({
+    json: {
+      bins: ["rss-main"],
+      extensions: {
+        sourceAdapterId: "rss-atom",
+        filters: { category: { op: "eq", value: "post" } },
+      },
+    },
+  });
+
+  void client.archives.search.$post({
+    // @ts-expect-error Extension filters require a non-empty explicit bin scope.
+    json: {
+      extensions: {
+        sourceAdapterId: "rss-atom",
+        filters: { category: { op: "eq", value: "post" } },
+      },
+    },
+  });
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",
