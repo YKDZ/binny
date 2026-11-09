@@ -208,9 +208,12 @@ function expectedStates(
           key: "news:news261108",
           title: (version) => "DeepSeek Research Update " + String(version),
           titleChanges: true,
-          publishedAt: () => ({
+          publishedAt: (version) => ({
             precision: "instant",
-            value: "2026-11-08T12:30:00+08:00",
+            value:
+              version === 1
+                ? "2026-11-08T12:30:00+08:00"
+                : "2026-11-08T13:30:00+08:00",
           }),
           modifiedAt: () => null,
           bodyMarker: "DeepSeek article body",
