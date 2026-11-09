@@ -141,12 +141,14 @@ const rssLinuxdoOnly = internalStep === "rss-linuxdo";
 const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const articleAdaptersOnly = internalStep === "article-adapters";
 const documentAdaptersOnly = internalStep === "document-adapters";
+const qoderAdapterOnly = internalStep === "qoder-adapter";
 const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
 const manualRunsOnly =
   scheduleOnly ||
   archiveModelJourney ||
   articleAdaptersOnly ||
-  documentAdaptersOnly;
+  documentAdaptersOnly ||
+  qoderAdapterOnly;
 const useHeartbeatProxy =
   (!manualRunsOnly || scheduledRunsOnly) && !rssLinuxdoOnly;
 const preserveCapacityProject =
@@ -180,12 +182,15 @@ const documentAdapterRuntimeImageNames = {
   qwen: projectName + "-document-qwen:local",
   kimi: projectName + "-document-kimi:local",
   minimax: projectName + "-document-minimax:local",
+  qoder: projectName + "-document-qoder:local",
 } as const;
+const qoderAdapterRuntimeService = "runtime-document-qoder";
 const documentAdapterRuntimeServices = [
   "runtime-document-deepseek",
   "runtime-document-qwen",
   "runtime-document-kimi",
   "runtime-document-minimax",
+  qoderAdapterRuntimeService,
 ] as const;
 let activeServerImage = imageName;
 let activeRssRuntimeImage = rssRuntimeImageName;
@@ -355,6 +360,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_DOCUMENT_QWEN_IMAGE: documentAdapterRuntimeImageNames.qwen,
     BINNY_DOCUMENT_KIMI_IMAGE: documentAdapterRuntimeImageNames.kimi,
     BINNY_DOCUMENT_MINIMAX_IMAGE: documentAdapterRuntimeImageNames.minimax,
+    BINNY_DOCUMENT_QODER_IMAGE: documentAdapterRuntimeImageNames.qoder,
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
     BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
     BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
@@ -9801,7 +9807,12 @@ async function main(): Promise<void> {
     await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
-    if (!articleAdaptersOnly && !documentAdaptersOnly && !rssLinuxdoOnly) {
+    if (
+      !articleAdaptersOnly &&
+      !documentAdaptersOnly &&
+      !qoderAdapterOnly &&
+      !rssLinuxdoOnly
+    ) {
       await compose(["build", "runtime-fifteen-one"]);
       builtImages.add(runtimeImageName);
     }
@@ -9822,6 +9833,10 @@ async function main(): Promise<void> {
       for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
         builtImages.add(imageName);
       }
+    }
+    if (qoderAdapterOnly) {
+      await compose(["build", qoderAdapterRuntimeService]);
+      builtImages.add(documentAdapterRuntimeImageNames.qoder);
     }
     if (documentAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
       await compose(["build", ...documentAdapterRuntimeServices]);
@@ -9858,47 +9873,49 @@ async function main(): Promise<void> {
           "rss-e2e-source",
           ...articleAdapterRuntimeServices,
         ]
-      : documentAdaptersOnly
-        ? [
-            "postgres",
-            "server",
-            "rss-e2e-source",
-            ...documentAdapterRuntimeServices,
-          ]
-        : manualRunsOnly
+      : qoderAdapterOnly
+        ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
+        : documentAdaptersOnly
           ? [
               "postgres",
               "server",
-              "manual-runs-source",
-              "runtime-fifteen-one",
-              ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-              ...(archiveModelJourney
-                ? [
-                    "runtime-fifteen-two",
-                    "runtime-fifteen-schema-two",
-                    "runtime-rss",
-                  ]
-                : []),
+              "rss-e2e-source",
+              ...documentAdapterRuntimeServices,
             ]
-          : rssLinuxdoOnly
+          : manualRunsOnly
             ? [
                 "postgres",
                 "server",
-                "rss-e2e-source",
-                "runtime-rss",
-                "runtime-rss-two",
-              ]
-            : [
-                "postgres",
-                "server",
                 "manual-runs-source",
-                "rss-e2e-source",
                 "runtime-fifteen-one",
-                "runtime-fifteen-two",
-                "runtime-rss",
-                "runtime-rss-two",
-                "heartbeat-proxy",
-              ];
+                ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+                ...(archiveModelJourney
+                  ? [
+                      "runtime-fifteen-two",
+                      "runtime-fifteen-schema-two",
+                      "runtime-rss",
+                    ]
+                  : []),
+              ]
+            : rssLinuxdoOnly
+              ? [
+                  "postgres",
+                  "server",
+                  "rss-e2e-source",
+                  "runtime-rss",
+                  "runtime-rss-two",
+                ]
+              : [
+                  "postgres",
+                  "server",
+                  "manual-runs-source",
+                  "rss-e2e-source",
+                  "runtime-fifteen-one",
+                  "runtime-fifteen-two",
+                  "runtime-rss",
+                  "runtime-rss-two",
+                  "heartbeat-proxy",
+                ];
     if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -9925,7 +9942,12 @@ async function main(): Promise<void> {
       ...e2eServices,
     ]);
     composePort = await publishedPort("server", 3000);
-    if (!articleAdaptersOnly && !documentAdaptersOnly && !rssLinuxdoOnly) {
+    if (
+      !articleAdaptersOnly &&
+      !documentAdaptersOnly &&
+      !qoderAdapterOnly &&
+      !rssLinuxdoOnly
+    ) {
       manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
     }
     if (runFunctionalJourney) {
@@ -9939,7 +9961,12 @@ async function main(): Promise<void> {
       );
       heartbeatProxy = activeHeartbeatProxy;
     }
-    if (articleAdaptersOnly || documentAdaptersOnly || runFunctionalJourney) {
+    if (
+      articleAdaptersOnly ||
+      documentAdaptersOnly ||
+      qoderAdapterOnly ||
+      runFunctionalJourney
+    ) {
       rssControlSource = await createRssControlSource(
         await publishedPort("rss-e2e-source", 8081),
       );
@@ -10027,6 +10054,18 @@ async function main(): Promise<void> {
         fetchRegisteredBin: waitForBinRegistration,
         waitForRuntime,
         waitForRuntimeHealth,
+      });
+    } else if (qoderAdapterOnly) {
+      assert.ok(rssControlSource !== undefined);
+      await runDocumentAdaptersJourney({
+        baseUrl,
+        source: rssControlSource,
+        cli: (args) => cli(baseUrl, args),
+        compose,
+        fetchRegisteredBin: waitForBinRegistration,
+        waitForRuntime,
+        waitForRuntimeHealth,
+        adapterIds: ["qoder"],
       });
     } else if (documentAdaptersOnly) {
       assert.ok(rssControlSource !== undefined);

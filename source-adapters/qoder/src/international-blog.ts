@@ -13,6 +13,7 @@ import {
   loadIncrementalSyncState,
   saveIncrementalSyncState,
   sourceAdapterActionError,
+  sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
   type CleanContentResult,
@@ -24,6 +25,7 @@ import type {
   QoderCollectOutput,
   QoderCollectParams,
   QoderConfig,
+  QoderExtensions,
   QoderSyncOutput,
 } from "./source-adapter.ts";
 
@@ -38,7 +40,7 @@ type ParentNode = parse5.DefaultTreeAdapterMap["parentNode"];
 export type DiscoveredBlogArticle = {
   readonly slug: string;
   readonly url: string;
-  readonly title: string;
+  readonly title: string | null;
   readonly publishedDate?: string | undefined;
   readonly category?: string | undefined;
   readonly summary?: string | undefined;
@@ -47,9 +49,9 @@ export type DiscoveredBlogArticle = {
 export type ExtractedBlogArticle = {
   readonly slug: string;
   readonly url: string;
-  readonly title: string;
-  readonly publishedDate?: string | undefined;
-  readonly sourceModifiedAt?: string | undefined;
+  readonly title: string | null;
+  readonly sourcePublishedAt: ReturnType<typeof sourceTimeFrom>;
+  readonly sourceModifiedAt: ReturnType<typeof sourceTimeFrom>;
   readonly canonicalUrl?: string | undefined;
   readonly authors?: readonly string[] | undefined;
   readonly categories?: readonly string[] | undefined;
@@ -149,7 +151,7 @@ export function buildNormalizedArticleUrl(
   return new URL(`/blog/${slug}`, base.origin).href;
 }
 
-/** Normalizes visible date to YYYY-MM-DD day precision. */
+/** Normalizes an unsupported display date to day precision for list matching. */
 export function normalizeDateToDay(rawDate: string): string | undefined {
   const trimmed = rawDate.trim();
   const ymdMatch = trimmed.match(/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b/);
@@ -200,30 +202,31 @@ export function normalizeDateToDay(rawDate: string): string | undefined {
   return undefined;
 }
 
-const fullIsoDatetimePattern =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
-
-/** Parses article date without fabricating timestamps. */
+/** Preserves source precision and offset while rejecting invalid calendar values. */
 export function parseArticleDate(raw: string): {
-  publishedDate?: string | undefined;
-  sourceModifiedAt?: string | undefined;
+  readonly sourcePublishedAt: ReturnType<typeof sourceTimeFrom>;
 } {
-  const trimmed = raw.trim();
-  const sourceModifiedAt = fullIsoDatetimePattern.test(trimmed)
-    ? trimmed
-    : undefined;
-  const publishedDate = normalizeDateToDay(trimmed);
-  return { publishedDate, sourceModifiedAt };
+  return {
+    sourcePublishedAt:
+      sourceTimeFrom(raw) ?? sourceTimeFrom(normalizeDateToDay(raw)),
+  };
+}
+
+/** Returns a validated source date for list fingerprints without adding precision. */
+function sourceDateValue(raw: string): string | undefined {
+  return (
+    sourceTimeFrom(raw)?.value ?? sourceTimeFrom(normalizeDateToDay(raw))?.value
+  );
 }
 
 /** Computes stable incremental fingerprint for an article card. */
 export function computeArticleFingerprint(
   slug: string,
-  title: string,
+  title: string | null,
   publishedDate?: string,
 ): string {
   return createHash("sha256")
-    .update(`${slug}\n${title}\n${publishedDate ?? ""}`)
+    .update(`${slug}\n${title ?? ""}\n${publishedDate ?? ""}`)
     .digest("hex");
 }
 
@@ -340,9 +343,7 @@ export function discoverInternationalBlogArticles(
     if (!title) {
       title = getText(anchor).trim();
     }
-    if (!title) {
-      title = slug.replace(/[-_]+/gu, " ");
-    }
+    const sourceTitle = title || null;
 
     let publishedDate: string | undefined;
     const timeEl = findFirstElement(
@@ -351,11 +352,11 @@ export function discoverInternationalBlogArticles(
     );
     if (timeEl) {
       const dt = getAttribute(timeEl, "datetime") ?? getText(timeEl);
-      publishedDate = normalizeDateToDay(dt);
+      publishedDate = sourceDateValue(dt);
     }
     if (!publishedDate) {
       const cardText = getText(cardContainer);
-      publishedDate = normalizeDateToDay(cardText);
+      publishedDate = sourceDateValue(cardText);
     }
 
     let category: string | undefined;
@@ -365,7 +366,7 @@ export function discoverInternationalBlogArticles(
     });
     if (catEl) {
       const text = getText(catEl).trim();
-      if (text && text !== title && text !== publishedDate) {
+      if (text && text !== sourceTitle && text !== publishedDate) {
         category = text;
       }
     }
@@ -377,7 +378,7 @@ export function discoverInternationalBlogArticles(
     );
     if (pEl) {
       const pText = getText(pEl).trim();
-      if (pText && pText !== title && pText !== publishedDate) {
+      if (pText && pText !== sourceTitle && pText !== publishedDate) {
         summary = pText;
       }
     }
@@ -387,7 +388,7 @@ export function discoverInternationalBlogArticles(
       discoveredMap.set(slug, {
         slug,
         url: articleUrl,
-        title,
+        title: sourceTitle,
         publishedDate,
         category,
         summary,
@@ -396,7 +397,7 @@ export function discoverInternationalBlogArticles(
       discoveredMap.set(slug, {
         slug,
         url: articleUrl,
-        title: existing.title || title,
+        title: existing.title ?? sourceTitle,
         publishedDate: existing.publishedDate ?? publishedDate,
         category: existing.category ?? category,
         summary: existing.summary ?? summary,
@@ -521,49 +522,88 @@ export function extractInternationalBlogArticle(
     }
   }
   if (!title) {
-    title = card?.title ?? slug.replace(/[-_]+/gu, " ");
+    title = card?.title ?? "";
   }
 
-  let publishedDate: string | undefined;
-  let sourceModifiedAt: string | undefined;
-
-  const dateMeta = findFirstElement(doc, (el) => {
-    if (el.tagName.toLowerCase() !== "meta") return false;
-    const prop = (
-      getAttribute(el, "property") ??
-      getAttribute(el, "name") ??
-      ""
-    ).toLowerCase();
-    return (
-      prop === "article:published_time" ||
-      prop === "og:published_time" ||
-      prop === "date"
-    );
-  });
-  if (dateMeta) {
-    const content = getAttribute(dateMeta, "content");
-    if (content) {
-      const parsed = parseArticleDate(content);
-      publishedDate = parsed.publishedDate;
-      sourceModifiedAt = parsed.sourceModifiedAt;
+  const metadataContent = (acceptedNames: ReadonlySet<string>) => {
+    for (const meta of findElements(doc, (el) => {
+      if (el.tagName.toLowerCase() !== "meta") return false;
+      const names = [
+        getAttribute(el, "property"),
+        getAttribute(el, "name"),
+        getAttribute(el, "itemprop"),
+      ];
+      return names.some((name) =>
+        acceptedNames.has(name?.trim().toLowerCase() ?? ""),
+      );
+    })) {
+      const content = getAttribute(meta, "content")?.trim();
+      if (content) return content;
     }
-  }
+    return undefined;
+  };
 
-  if (!publishedDate) {
-    const timeEl = findFirstElement(
+  const publishedMetadata = metadataContent(
+    new Set([
+      "article:published_time",
+      "og:published_time",
+      "date",
+      "datepublished",
+    ]),
+  );
+  let sourcePublishedAt = publishedMetadata
+    ? parseArticleDate(publishedMetadata).sourcePublishedAt
+    : null;
+  const modifiedMetadata = metadataContent(
+    new Set(["article:modified_time", "og:updated_time", "datemodified"]),
+  );
+  const sourceModifiedAt = modifiedMetadata
+    ? parseArticleDate(modifiedMetadata).sourcePublishedAt
+    : null;
+
+  if (publishedMetadata === undefined) {
+    const publicationTimes = findElements(
       doc,
       (el) => el.tagName.toLowerCase() === "time",
     );
-    if (timeEl) {
-      const dt = getAttribute(timeEl, "datetime") ?? getText(timeEl);
-      const parsed = parseArticleDate(dt);
-      publishedDate = parsed.publishedDate;
-      if (parsed.sourceModifiedAt) sourceModifiedAt = parsed.sourceModifiedAt;
+    const parentMap = new Map<Node, Element>();
+    function buildParents(node: Node | ChildNode) {
+      if (isElement(node) || "childNodes" in node) {
+        const parentElement = isElement(node) ? node : undefined;
+        for (const child of (node as ParentNode).childNodes) {
+          if (parentElement) parentMap.set(child, parentElement);
+          buildParents(child);
+        }
+      }
     }
-  }
-
-  if (!publishedDate && card?.publishedDate) {
-    publishedDate = card.publishedDate;
+    buildParents(doc);
+    const publicationTime = publicationTimes.find((time) => {
+      if (getAttribute(time, "itemprop")?.toLowerCase() === "datepublished") {
+        return true;
+      }
+      let parent: Element | undefined = parentMap.get(time);
+      while (parent) {
+        const className = getAttribute(parent, "class")?.toLowerCase() ?? "";
+        if (
+          /(?:post-meta|article-meta|publication|publish-date|published)/u.test(
+            className,
+          )
+        ) {
+          return true;
+        }
+        parent = parentMap.get(parent);
+      }
+      return false;
+    });
+    if (publicationTime) {
+      const rawDate =
+        getAttribute(publicationTime, "datetime") ?? getText(publicationTime);
+      sourcePublishedAt = parseArticleDate(rawDate).sourcePublishedAt;
+    } else if (card?.publishedDate) {
+      sourcePublishedAt = parseArticleDate(
+        card.publishedDate,
+      ).sourcePublishedAt;
+    }
   }
 
   const authors: string[] = [];
@@ -639,8 +679,8 @@ export function extractInternationalBlogArticle(
   return {
     slug,
     url: articleUrl,
-    title,
-    publishedDate,
+    title: title || null,
+    sourcePublishedAt,
     sourceModifiedAt,
     canonicalUrl,
     authors: authors.length > 0 ? authors : undefined,
@@ -699,7 +739,7 @@ function failureFromProblems(
 
 /** Checks Qoder international blog list and samples article body extraction. */
 export async function checkInternationalBlog(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderCheckOutput> {
   const blogListUrl =
     context.config.blogListUrl ?? DEFAULT_INTERNATIONAL_BLOG_URL;
@@ -784,7 +824,7 @@ export async function checkInternationalBlog(
 
 /** Synchronizes Qoder international blog incrementally. */
 export async function syncInternationalBlog(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderSyncOutput> {
   const blogListUrl =
     context.config.blogListUrl ?? DEFAULT_INTERNATIONAL_BLOG_URL;
@@ -860,22 +900,20 @@ export async function syncInternationalBlog(
         },
         sourceRef: card.url,
         title: extracted.title,
+        sourcePublishedAt: extracted.sourcePublishedAt,
         sourceModifiedAt: extracted.sourceModifiedAt,
-        metadata: {
+        extensions: {
           region: "international",
           language: "en",
-          title: extracted.title,
-          ...(extracted.publishedDate
-            ? { publishedDate: extracted.publishedDate }
-            : {}),
+          category: "blog",
           ...(extracted.canonicalUrl
             ? { canonicalUrl: extracted.canonicalUrl }
             : {}),
           ...(extracted.authors && extracted.authors.length > 0
-            ? { authors: extracted.authors }
+            ? { authors: [...extracted.authors] }
             : {}),
           ...(extracted.categories && extracted.categories.length > 0
-            ? { categories: extracted.categories }
+            ? { categories: [...extracted.categories] }
             : {}),
           ...(card.summary ? { summary: card.summary } : {}),
         },
@@ -892,9 +930,7 @@ export async function syncInternationalBlog(
         card.slug,
         {
           fingerprint,
-          ...(extracted.publishedDate
-            ? { publishedAt: extracted.publishedDate }
-            : {}),
+          ...(card.publishedDate ? { publishedAt: card.publishedDate } : {}),
           archivedCompleteness: submitResult.hasMediaFailures
             ? "partial"
             : "complete",
@@ -931,7 +967,7 @@ export async function syncInternationalBlog(
 
 /** Collects Qoder international blog articles. */
 export async function collectInternationalBlog(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
 ): Promise<QoderCollectOutput> {
   const blogListUrl =
@@ -987,22 +1023,20 @@ export async function collectInternationalBlog(
         },
         sourceRef: item.url,
         title: extracted.title,
+        sourcePublishedAt: extracted.sourcePublishedAt,
         sourceModifiedAt: extracted.sourceModifiedAt,
-        metadata: {
+        extensions: {
           region: "international",
           language: "en",
-          title: extracted.title,
-          ...(extracted.publishedDate
-            ? { publishedDate: extracted.publishedDate }
-            : {}),
+          category: "blog",
           ...(extracted.canonicalUrl
             ? { canonicalUrl: extracted.canonicalUrl }
             : {}),
           ...(extracted.authors && extracted.authors.length > 0
-            ? { authors: extracted.authors }
+            ? { authors: [...extracted.authors] }
             : {}),
           ...(extracted.categories && extracted.categories.length > 0
-            ? { categories: extracted.categories }
+            ? { categories: [...extracted.categories] }
             : {}),
           ...(item.card?.summary ? { summary: item.card.summary } : {}),
         },
@@ -1016,7 +1050,7 @@ export async function collectInternationalBlog(
       const fingerprint = computeArticleFingerprint(
         item.slug,
         extracted.title,
-        extracted.publishedDate,
+        extracted.sourcePublishedAt?.value,
       );
       upsertIncrementalScopeEntry(
         state,
@@ -1024,8 +1058,8 @@ export async function collectInternationalBlog(
         item.slug,
         {
           fingerprint,
-          ...(extracted.publishedDate
-            ? { publishedAt: extracted.publishedDate }
+          ...(extracted.sourcePublishedAt
+            ? { publishedAt: extracted.sourcePublishedAt.value }
             : {}),
           archivedCompleteness: submitResult.hasMediaFailures
             ? "partial"
