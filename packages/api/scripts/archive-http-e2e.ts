@@ -3263,41 +3263,127 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   const client = createApiClient(baseUrl);
   const runId = randomUUID();
   const token = "beijing-window-" + runId;
+  const instant = (value: string) => ({
+    precision: "instant" as const,
+    value,
+    timeZone: "Asia/Shanghai",
+  });
   const fixtures = [
     {
       key: "before",
-      sourcePublishedAt: {
-        precision: "instant",
-        value: "2026-11-07T23:59:59.999+08:00",
-        timeZone: "Asia/Shanghai",
-      },
+      sourcePublishedAt: instant("2026-11-07T23:59:59.999+08:00"),
+      sourceModifiedAt: null,
     },
     {
       key: "from",
-      sourcePublishedAt: {
-        precision: "instant",
-        value: "2026-11-08T00:00:00+08:00",
-        timeZone: "Asia/Shanghai",
-      },
+      sourcePublishedAt: instant("2026-11-08T00:00:00+08:00"),
+      sourceModifiedAt: null,
+    },
+    {
+      key: "middle",
+      sourcePublishedAt: instant("2026-11-08T20:00:00+08:00"),
+      sourceModifiedAt: null,
     },
     {
       key: "until",
+      sourcePublishedAt: instant("2026-11-09T00:00:00+08:00"),
+      sourceModifiedAt: null,
+    },
+    {
+      key: "day-known",
       sourcePublishedAt: {
-        precision: "instant",
-        value: "2026-11-09T00:00:00+08:00",
+        precision: "day",
+        value: "2026-11-08",
         timeZone: "Asia/Shanghai",
       },
+      sourceModifiedAt: null,
     },
-    { key: "missing", sourcePublishedAt: null },
+    {
+      key: "day-without-zone",
+      sourcePublishedAt: { precision: "day", value: "2026-11-08" },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "old-day-without-zone",
+      sourcePublishedAt: { precision: "day", value: "2020-01-01" },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "month-overlap",
+      sourcePublishedAt: {
+        precision: "month",
+        value: "2026-11",
+        timeZone: "Asia/Shanghai",
+      },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "year-overlap",
+      sourcePublishedAt: {
+        precision: "year",
+        value: "2026",
+        timeZone: "Asia/Shanghai",
+      },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "modified-only",
+      sourcePublishedAt: instant("2026-11-07T12:00:00+08:00"),
+      sourceModifiedAt: instant("2026-11-08T12:00:00+08:00"),
+    },
+    {
+      key: "missing",
+      sourcePublishedAt: null,
+      sourceModifiedAt: null,
+    },
+    {
+      key: "multi-view",
+      sourcePublishedAt: instant("2026-11-08T10:00:00+08:00"),
+      sourceModifiedAt: null,
+    },
+    {
+      key: "summer-cet-day",
+      sourcePublishedAt: {
+        precision: "day",
+        value: "2026-07-01",
+        timeZone: "CET",
+      },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "dst-day",
+      sourcePublishedAt: {
+        precision: "day",
+        value: "2026-03-29",
+        timeZone: "Europe/Brussels",
+      },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "dst-inside",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-03-29T21:30:00+00:00",
+      },
+      sourceModifiedAt: null,
+    },
+    {
+      key: "dst-outside",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-03-29T22:30:00+00:00",
+      },
+      sourceModifiedAt: null,
+    },
   ] as const;
   const committed = await submitArchive(client, {
     requestId: "e2e:time-window:first:" + runId,
     binId: "binny-runs-one",
-    items: fixtures.map(({ key, sourcePublishedAt }) => ({
+    items: fixtures.map(({ key, sourcePublishedAt, sourceModifiedAt }) => ({
       sourceKey: { namespace: "e2e", key: token + ":" + key },
       title: "Beijing window " + key,
       sourcePublishedAt,
-      sourceModifiedAt: null,
+      sourceModifiedAt,
       extensions: {},
       body: { text: token },
       capture: {
@@ -3310,14 +3396,37 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   const itemIds = new Map(
     committed.items.map(({ sourceKey, itemId }) => [sourceKey.key, itemId]),
   );
-  const fromItemId = itemIds.get(token + ":from");
-  const missingItemId = itemIds.get(token + ":missing");
-  assert.ok(fromItemId);
-  assert.ok(missingItemId);
+  const itemId = (key: string): string => {
+    const found = itemIds.get(token + ":" + key);
+    assert.ok(found);
+    return found;
+  };
+  const multiViewItemId = itemId("multi-view");
+  const secondaryView = await submitArchive(client, {
+    requestId: "e2e:time-window:secondary:" + runId,
+    binId: "binny-runs-two",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: token + ":multi-view" },
+        title: "Beijing window multi-view without zone",
+        sourcePublishedAt: { precision: "day", value: "2026-11-08" },
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: token },
+        capture: {
+          scope: { case: "time-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  assert.equal(secondaryView.items[0]?.itemId, multiViewItemId);
 
   const query: ArchiveSearchRequest = {
-    bins: ["binny-runs-one"],
+    bins: ["binny-runs-one", "binny-runs-two"],
     text: { in: "body", groups: [[token]] },
+    limit: 2,
     timeWindow: {
       field: "sourcePublishedAt",
       from: "2026-11-08",
@@ -3325,39 +3434,37 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       timeZone: "Asia/Shanghai",
     },
   };
-  const certainResponse = await client.archives.search.$post({
-    json: {
-      ...query,
-      text: { in: "body", groups: [[token]] },
-    },
-  });
+  const certainResponse = await client.archives.search.$post({ json: query });
   assert.equal(certainResponse.status, 200);
   if (certainResponse.status !== 200)
     throw new Error("Certain-time search failed.");
   const certain = await certainResponse.json();
   assert.ok(certain.timeSummary);
-  assert.equal(certain.timeSummary.certainItems, "1");
-  assert.equal(certain.timeSummary.undeterminedItems, "1");
+  assert.equal(certain.timeSummary.certainItems, "4");
+  assert.equal(certain.timeSummary.undeterminedItems, "5");
   assert.deepEqual(
     certain.results.map(({ itemId }) => itemId),
-    [fromItemId],
+    [itemId("middle"), multiViewItemId],
   );
   assert.equal(certain.results[0]?.timeStatus, "certain");
   assert.equal(certain.results[0]?.matches[0]?.timeMatch?.status, "certain");
+  assert.deepEqual(
+    certain.results[1]?.matches.map(({ binId }) => binId),
+    ["binny-runs-one"],
+  );
+  assert.equal(certain.hasMore, true);
+  assert.equal(certain.hasMore, certain.nextCursor !== undefined);
+  assert.ok(certain.nextCursor);
   const snapshotAsOf = certain.snapshot.asOf;
 
-  await submitArchive(client, {
+  const afterSnapshot = await submitArchive(client, {
     requestId: "e2e:time-window:after-snapshot:" + runId,
     binId: "binny-runs-one",
     items: [
       {
         sourceKey: { namespace: "e2e", key: token + ":later" },
         title: "Later Beijing window item",
-        sourcePublishedAt: {
-          precision: "instant",
-          value: "2026-11-08T12:00:00+08:00",
-          timeZone: "Asia/Shanghai",
-        },
+        sourcePublishedAt: instant("2026-11-08T12:00:00+08:00"),
         sourceModifiedAt: null,
         extensions: {},
         body: { text: token },
@@ -3370,9 +3477,155 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     ],
   });
 
-  const undeterminedResponse = await client.archives.search.$post({
+  const certainNextPageResponse = await client.archives.search.$post({
+    json: {
+      ...query,
+      cursor: certain.nextCursor,
+      limit: 10,
+    },
+  });
+  assert.equal(certainNextPageResponse.status, 200);
+  if (certainNextPageResponse.status !== 200) {
+    throw new Error("Certain-time cursor page failed.");
+  }
+  const certainNextPage = await certainNextPageResponse.json();
+  assert.equal(certainNextPage.snapshot.asOf, snapshotAsOf);
+  assert.deepEqual(certainNextPage.timeSummary, certain.timeSummary);
+  assert.equal(certainNextPage.hasMore, false);
+  assert.equal(
+    certainNextPage.hasMore,
+    certainNextPage.nextCursor !== undefined,
+  );
+  assert.equal(certainNextPage.nextCursor, undefined);
+  const certainIds = [
+    ...certain.results.map(({ itemId }) => itemId),
+    ...certainNextPage.results.map(({ itemId }) => itemId),
+  ];
+  assert.deepEqual(
+    certainIds.toSorted(),
+    [
+      itemId("from"),
+      itemId("middle"),
+      itemId("day-known"),
+      multiViewItemId,
+    ].toSorted(),
+  );
+  assert.equal(certainIds.includes(afterSnapshot.items[0]!.itemId), false);
+  assert.equal(certainIds.includes(itemId("before")), false);
+  assert.equal(certainIds.includes(itemId("until")), false);
+  assert.equal(certainIds.includes(itemId("old-day-without-zone")), false);
+
+  const modifiedTimeResponse = await client.archives.search.$post({
     json: {
       bins: ["binny-runs-one"],
+      text: { in: "title", groups: [["Beijing window modified-only"]] },
+      timeWindow: {
+        field: "sourceModifiedAt",
+        from: "2026-11-08",
+        until: "2026-11-09",
+        timeZone: "Asia/Shanghai",
+      },
+    },
+  });
+  assert.equal(modifiedTimeResponse.status, 200);
+  if (modifiedTimeResponse.status !== 200) {
+    throw new Error("Source-modified time search failed.");
+  }
+  const modifiedTimePage = await modifiedTimeResponse.json();
+  assert.deepEqual(
+    modifiedTimePage.results.map(({ itemId: resultId }) => resultId),
+    [itemId("modified-only")],
+  );
+
+  const cetAliasResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: {
+        in: "title",
+        groups: [["Beijing window summer-cet-day"]],
+      },
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-07-01",
+        until: "2026-07-02",
+        timeZone: "Europe/Brussels",
+      },
+    },
+  });
+  assert.equal(cetAliasResponse.status, 200);
+  if (cetAliasResponse.status !== 200) {
+    throw new Error("Canonical source-zone alias search failed.");
+  }
+  const cetAliasPage = await cetAliasResponse.json();
+  assert.deepEqual(
+    cetAliasPage.results.map(({ itemId: resultId }) => resultId),
+    [itemId("summer-cet-day")],
+  );
+
+  const daylightSavingResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: {
+        in: "title",
+        groups: [["Beijing window dst-"]],
+      },
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-03-29",
+        until: "2026-03-30",
+        timeZone: "Europe/Brussels",
+      },
+    },
+  });
+  assert.equal(daylightSavingResponse.status, 200);
+  if (daylightSavingResponse.status !== 200) {
+    throw new Error("Daylight-saving time-window search failed.");
+  }
+  const daylightSavingPage = await daylightSavingResponse.json();
+  assert.deepEqual(daylightSavingPage.timeSummary, {
+    certainItems: "2",
+    undeterminedItems: "0",
+  });
+  assert.deepEqual(
+    daylightSavingPage.results
+      .map(({ itemId: resultId }) => resultId)
+      .toSorted(),
+    [itemId("dst-day"), itemId("dst-inside")].toSorted(),
+  );
+
+  const invalidTimeRange = await client.archives.search.$post({
+    json: {
+      ...query,
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-09",
+        until: "2026-11-08",
+        timeZone: "Asia/Shanghai",
+      },
+    },
+  });
+  assert.equal(invalidTimeRange.status, 400);
+  if (invalidTimeRange.status === 400) {
+    const error = (await invalidTimeRange.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["timeWindow", "until"]);
+  }
+  const invalidLocalDate = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-02-30",
+        until: "2026-03-01",
+        timeZone: "UTC",
+      },
+    },
+  });
+  assert.equal(invalidLocalDate.status, 400);
+
+  const undeterminedResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
       text: { in: "body", groups: [[token]] },
       asOf: snapshotAsOf,
       timeWindow: {
@@ -3391,21 +3644,64 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   const undetermined = await undeterminedResponse.json();
   assert.equal(undetermined.snapshot.asOf, snapshotAsOf);
   assert.deepEqual(undetermined.timeSummary, {
-    certainItems: "1",
-    undeterminedItems: "1",
+    certainItems: "4",
+    undeterminedItems: "5",
   });
   assert.deepEqual(
-    undetermined.results.map(({ itemId }) => itemId),
-    [missingItemId],
+    undetermined.results.map(({ itemId: resultId }) => resultId).toSorted(),
+    [
+      itemId("day-without-zone"),
+      itemId("month-overlap"),
+      itemId("year-overlap"),
+      itemId("missing"),
+      multiViewItemId,
+    ].toSorted(),
   );
   assert.equal(
-    undetermined.results[0]?.matches[0]?.timeMatch?.status,
-    "undetermined",
+    undetermined.results.at(-1)?.itemId,
+    itemId("missing"),
+    "Null SourceTime sorts after all non-null uncertain dates.",
+  );
+  const unknownById = new Map(
+    undetermined.results.map((result) => [result.itemId, result]),
+  );
+  const timeReason = (resultId: string): string => {
+    const timeMatch = unknownById.get(resultId)?.matches[0]?.timeMatch;
+    assert.ok(timeMatch);
+    assert.equal(timeMatch.status, "undetermined");
+    if (timeMatch.status !== "undetermined") {
+      throw new Error("Expected an undetermined time match.");
+    }
+    return timeMatch.reason;
+  };
+  assert.equal(timeReason(itemId("missing")), "missingTime");
+  assert.equal(timeReason(itemId("day-without-zone")), "missingTimeZone");
+  assert.equal(
+    timeReason(itemId("month-overlap")),
+    "precisionOverlapsBoundary",
   );
   assert.equal(
-    undetermined.results[0]?.matches[0]?.timeMatch?.reason,
-    "missingTime",
+    unknownById.get(multiViewItemId)?.matches[0]?.binId,
+    "binny-runs-two",
   );
+
+  const invalidTimeZone = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08",
+        until: "2026-11-09",
+        timeZone: "No/Such_Zone",
+      },
+    },
+  });
+  assert.equal(invalidTimeZone.status, 400);
+  if (invalidTimeZone.status === 400) {
+    const error = (await invalidTimeZone.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["timeWindow", "timeZone"]);
+  }
 }
 
 async function verifyHardDeleteEntryPoint(

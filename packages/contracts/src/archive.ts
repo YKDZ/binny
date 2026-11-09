@@ -1058,6 +1058,7 @@ export type ArchiveSearchTimeWindow = z.infer<
   typeof archiveSearchTimeWindowSchema
 >;
 
+/** Classification of one returned bin view against the requested time window. */
 const archiveSearchTimeMatchSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("certain") }).strict(),
   z
