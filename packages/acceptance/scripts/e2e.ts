@@ -9781,6 +9781,8 @@ async function main(): Promise<void> {
           "linuxdo-e2e",
           "--profile",
           "binny-articles",
+          "--profile",
+          "binny-documents",
           "down",
           "--volumes",
           "--remove-orphans",
