@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import type { ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -37,6 +38,7 @@ export type ServerRuntime = {
   readonly app: ReturnType<typeof createApiRoutes>;
   readonly fetch: (request: Request) => Promise<Response>;
   readonly attachUpgradeHandler: (server: ServerType) => () => void;
+  readonly stopBackgroundWork: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
 
@@ -77,6 +79,7 @@ export async function createServerRuntime(options: {
   const archives = createArchiveStore(database, {
     resourceDirectory:
       process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
+    executeCancellableSearchQuery: connection.executeCancellableQuery,
     unreferencedResourceAgeMs: environmentMilliseconds(
       "BINNY_RESOURCE_UNREFERENCED_AGE_MS",
       24 * 60 * 60 * 1000,
@@ -86,6 +89,11 @@ export async function createServerRuntime(options: {
       "BINNY_RESOURCE_CLEANUP_INTERVAL_MS",
       60 * 60 * 1000,
       100,
+    ),
+    archiveSearchBudgetMs: environmentMilliseconds(
+      "BINNY_ARCHIVE_SEARCH_BUDGET_MS",
+      10_000,
+      1,
     ),
   });
   const runtime = createRuntimeConnectionStore(database, browserCapacity);
@@ -225,6 +233,24 @@ export async function createServerRuntime(options: {
         "unpublished",
     },
   );
+  let backgroundWorkStop: Promise<void> | undefined;
+  const stopBackgroundWork = (): Promise<void> => {
+    if (backgroundWorkStop !== undefined) return backgroundWorkStop;
+    scheduleClosing = true;
+    if (schedulePoll !== undefined) clearInterval(schedulePoll);
+    schedulePoll = undefined;
+    if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
+    pendingTimeout = undefined;
+    backgroundWorkStop = (async () => {
+      await scheduleWork;
+      try {
+        await activeScheduleDispatcher.close();
+      } finally {
+        await humanSessions.beginHumanGatewayShutdown();
+      }
+    })();
+    return backgroundWorkStop;
+  };
   const viewerBundlePath = fileURLToPath(
     new URL(
       import.meta.url.endsWith(".ts")
@@ -264,16 +290,11 @@ export async function createServerRuntime(options: {
     },
     attachUpgradeHandler: (server) =>
       gateway.attach(server as import("node:http").Server),
+    stopBackgroundWork,
     close: async () => {
-      scheduleClosing = true;
-      if (schedulePoll !== undefined) clearInterval(schedulePoll);
-      schedulePoll = undefined;
-      await scheduleWork;
       try {
-        await scheduleDispatcher?.close();
+        await stopBackgroundWork();
       } finally {
-        if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
-        await humanSessions.beginHumanGatewayShutdown();
         try {
           await gateway.close();
         } finally {
@@ -296,25 +317,59 @@ export async function startServer(options: {
   readonly close: () => Promise<void>;
 }> {
   const runtime = await createServerRuntime(options);
+  let shuttingDown = false;
   const server = serve({
-    fetch: runtime.fetch,
+    // Requests on existing keep-alive sockets can arrive after the listener closes.
+    fetch: (request) =>
+      shuttingDown
+        ? Promise.resolve(
+            new Response(null, {
+              status: 503,
+              headers: { connection: "close" },
+            }),
+          )
+        : runtime.fetch(request),
     hostname: "0.0.0.0",
     port: options.port,
   });
   const detachUpgradeHandler = runtime.attachUpgradeHandler(server);
+  const activeHttpResponses = new Set<ServerResponse>();
+  server.on("request", (_request, response) => {
+    activeHttpResponses.add(response);
+    if (shuttingDown) {
+      response.shouldKeepAlive = false;
+      if (!response.headersSent) response.setHeader("connection", "close");
+    }
+    response.once("finish", () => activeHttpResponses.delete(response));
+    response.once("close", () => activeHttpResponses.delete(response));
+  });
   return {
     server,
     close: async () => {
+      shuttingDown = true;
+      for (const response of activeHttpResponses) {
+        response.shouldKeepAlive = false;
+        if (!response.headersSent) response.setHeader("connection", "close");
+      }
+      detachUpgradeHandler();
       const serverClosed = new Promise<void>((resolveClose, reject) => {
         server.close((error) =>
           error === undefined ? resolveClose() : reject(error),
         );
       });
       try {
-        await runtime.close();
+        if ("closeIdleConnections" in server) server.closeIdleConnections();
       } finally {
-        detachUpgradeHandler();
-        await serverClosed;
+        try {
+          // Stop background work before draining requests and keep dependencies open through the drain.
+          await runtime.stopBackgroundWork();
+        } finally {
+          try {
+            await serverClosed;
+          } finally {
+            await runtime.close();
+          }
+        }
       }
     },
   };

@@ -16,12 +16,8 @@ const fetch: typeof globalThis.fetch = async (input, init) => {
     return Response.json({
       product: { name: "Binny", version: "1.2.3" },
       protocols: { httpApi: publicApiProtocolVersion },
-      capabilities: [
-        "archives.search",
-        "archives.aggregate",
-        "archive.query-contract",
-      ],
-      contracts: { archiveQuery: { version: 1, path: "/meta/query" } },
+      capabilities: ["archives.search", "archive.query-contract"],
+      contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
     });
   }
   if (url.pathname === "/runs") {

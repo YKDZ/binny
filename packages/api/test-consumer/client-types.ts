@@ -565,153 +565,40 @@ async function checkPublicArchiveContract(): Promise<void> {
     void (await relations.json()).error.code;
   }
 
-  const relatedSearch = await client.archives.search.$post({
+  const fixedSearch = await client.archives.search.$post({
     json: {
-      scope: { kind: "asOf", binId: "rss-main", asOf: "12" },
-      where: {
-        type: "relation",
-        direction: "outgoing",
-        name: "reply",
-        properties: {
-          type: "json",
-          field: "properties",
-          path: ["rank"],
-          valueType: "number",
-          operator: "gte",
-          value: 1,
-        },
-        target: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.key",
-              operator: "eq",
-              value: "entry/8",
-            },
-            {
-              type: "text",
-              text: { kind: "literal", value: "归档正文" },
-            },
-          ],
-        },
-        operator: "count",
-        count: { operator: "gte", value: 2 },
+      bins: ["rss-main", "rss-backup"],
+      text: {
+        in: "both",
+        groups: [["model", "release"], ["GPT"]],
       },
-      expand: [
-        { key: "replies", direction: "outgoing", name: "reply", limit: 2 },
-      ],
-      select: ["sourceKey"],
-      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-      limit: 10,
+      asOf: "12",
+      limit: 20,
     },
   });
-  if (relatedSearch.status === 200) {
-    const relatedPage = await relatedSearch.json();
-    const relatedMatch = relatedPage.results[0]?.matches[0];
-    if (relatedMatch !== undefined) {
-      void relatedMatch.binId;
-      const expansion = relatedMatch.expansions?.[0];
-      if (expansion !== undefined) {
-        void expansion.hasMore;
-        const relation = expansion.relations[0];
-        if (relation?.status === "observed") {
-          void relation.direction;
-          void relation.state.properties?.rank;
-        }
+  if (fixedSearch.status === 200) {
+    const page = await fixedSearch.json();
+    void page.snapshot.asOf;
+    void page.hasMore;
+    const result = page.results[0];
+    if (result !== undefined) {
+      void result.title;
+      void result.sourceKey.namespace;
+      void result.observedAt;
+      const view = result.matches[0];
+      if (view !== undefined) {
+        void view.binId;
+        void view.revisionId;
+        void view.archiveSeq;
+        // @ts-expect-error search summaries do not include the complete body.
+        void view.body;
       }
+      // @ts-expect-error Search results do not expose an implementation query hash.
+      void result.queryHash;
     }
-  } else if (relatedSearch.status === 400 || relatedSearch.status === 422) {
-    void (await relatedSearch.json()).error.code;
+  } else if (fixedSearch.status === 400 || fixedSearch.status === 422) {
+    void (await fixedSearch.json()).error.path;
   }
-
-  const relatedPathSearch = await client.archives.search.$post({
-    json: {
-      scope: { kind: "current", binId: "rss-main" },
-      where: {
-        type: "path",
-        steps: [
-          {
-            direction: "outgoing",
-            name: "reply",
-            target: {
-              type: "field",
-              field: "sourceKey.key",
-              operator: "eq",
-              value: "entry/8",
-            },
-          },
-          {
-            direction: "incoming",
-            name: "mentions",
-            target: {
-              type: "text",
-              text: { kind: "literal", value: "归档正文" },
-            },
-          },
-        ],
-        operator: "count",
-        count: { operator: "gte", value: 1 },
-      },
-      expandPaths: [
-        {
-          key: "replies-and-mentions",
-          steps: [
-            { direction: "outgoing", name: "reply" },
-            { direction: "either", name: "mentions" },
-          ],
-          limit: 2,
-        },
-      ],
-      select: ["sourceKey"],
-      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-      limit: 10,
-    },
-  });
-  if (relatedPathSearch.status === 200) {
-    const pathPage = await relatedPathSearch.json();
-    const pathExpansion = pathPage.results[0]?.matches[0]?.pathExpansions?.[0];
-    if (pathExpansion !== undefined) {
-      void pathExpansion.hasMore;
-      const firstPath = pathExpansion.paths[0];
-      if (firstPath !== undefined) {
-        void firstPath.steps[0]?.observation.archiveSeq;
-        void firstPath.steps[0]?.state.name;
-        void firstPath.steps[1]?.direction;
-      }
-    }
-  } else if (
-    relatedPathSearch.status === 400 ||
-    relatedPathSearch.status === 422
-  ) {
-    void (await relatedPathSearch.json()).error.code;
-  }
-
-  const invalidPathFilter = {
-    type: "path",
-    steps: [{ direction: "outgoing" }],
-    operator: "count",
-    // @ts-expect-error count 路径必须声明最终目标数量比较。
-  } satisfies NonNullable<
-    Parameters<typeof client.archives.search.$post>[0]["json"]["where"]
-  >;
-  void invalidPathFilter;
-
-  void client.archives.search.$post({
-    json: {
-      scope: { kind: "current", binId: "rss-main" },
-      where: {
-        type: "path",
-        steps: [{ direction: "outgoing" }],
-        operator: "exists",
-        // @ts-expect-error exists 路径不能声明 count 比较。
-        count: { operator: "eq", value: 0 },
-      },
-      select: ["sourceKey"],
-      orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-      limit: 10,
-    },
-  });
 
   const relationOnly = await client.archives.$post({
     json: {
@@ -787,36 +674,6 @@ async function checkPublicArchiveContract(): Promise<void> {
 
 void checkPublicArchiveContract;
 
-async function checkPublicArchiveAggregationContract(): Promise<void> {
-  const client = createApiClient("http://127.0.0.1:3000");
-  const input = {
-    scope: { kind: "current" as const },
-    unit: "item" as const,
-    groupBy: [],
-    metrics: [{ key: "items", op: "count" as const }],
-  };
-  const response = await client.archives.aggregate.$post({ json: input });
-  if (response.status === 200) {
-    const result = await response.json();
-    const unit: "item" | "revision" | "observation" | "relation" = result.unit;
-    const metric: string | null | undefined =
-      result.groups[0]?.metrics[0]?.value;
-    void unit;
-    void metric;
-    // @ts-expect-error 聚合响应只包含契约声明的字段。
-    void result.queryHash;
-  } else if (response.status === 400 || response.status === 422) {
-    const failure = await response.json();
-    const code: string = failure.error.code;
-    void code;
-  }
-
-  // @ts-expect-error 聚合请求必须符合公开契约，不能附加未声明字段。
-  void client.archives.aggregate.$post({ json: { ...input, invented: true } });
-}
-
-void checkPublicArchiveAggregationContract;
-
 async function checkPublicServiceDiscoveryContract(): Promise<void> {
   const client = createApiClient("http://127.0.0.1:3000");
   const metadataResponse = await client.meta.$get();
@@ -839,11 +696,9 @@ async function checkPublicServiceDiscoveryContract(): Promise<void> {
     const searchPath: string = queryContract.operations.search.path;
     const searchSchema: Record<string, unknown> =
       queryContract.operations.search.requestSchema;
-    const aggregatePath: string = queryContract.operations.aggregate.path;
     void version;
     void searchPath;
     void searchSchema;
-    void aggregatePath;
   }
 
   // @ts-expect-error 未声明的服务发现路由不能由正式客户端调用。

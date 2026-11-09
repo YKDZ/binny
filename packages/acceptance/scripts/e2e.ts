@@ -47,6 +47,12 @@ type ManagedProcess = {
 
 type HeartbeatDelayProxy = {
   readonly arm: (stoppedRunId: string) => Promise<void>;
+  readonly armRequestBody: () => Promise<void>;
+  readonly waitUntilRequestBodyHeld: () => Promise<{
+    readonly heldAt: number;
+    readonly runtimeId: string;
+  }>;
+  readonly waitUntilRequestBodyResponse: () => Promise<number>;
   readonly waitUntilHeld: () => Promise<{
     readonly heldAt: number;
     readonly runtimeId: string;
@@ -62,6 +68,7 @@ type HeartbeatDelayProxy = {
 
 type HeartbeatDelayProxyStatus = {
   readonly held: boolean;
+  readonly heldForRequestBody?: boolean;
   readonly heldAt?: number;
   readonly clientClosedAt?: number;
   readonly heldRuntimeId?: string;
@@ -69,6 +76,7 @@ type HeartbeatDelayProxyStatus = {
   readonly heldStoppedRunId?: string;
   readonly forwardedRuntimeId?: string;
   readonly forwardedOwnerGeneration?: string;
+  readonly forwardedStatusCode?: number;
 };
 
 type RssImageUpdate = {
@@ -115,9 +123,14 @@ const isFullCapacityRun = capacityProfile === "full";
 const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
 const scheduleOnly =
   internalStep === "scheduled-runs" || internalStep === "schedule-overlap";
+const scheduledRunsOnly = internalStep === "scheduled-runs";
 const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const archiveModelOnly = internalStep === "archive-model";
-const manualRunsOnly = scheduleOnly || archiveModelOnly;
+const archiveSearchOnly = internalStep === "archive-search";
+const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
+const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
+const manualRunsOnly = scheduleOnly || archiveModelJourney;
+const useHeartbeatProxy = !manualRunsOnly || scheduledRunsOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -159,6 +172,38 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
         signal: AbortSignal.timeout(3_000),
       });
       assert.equal(response.status, 200);
+    },
+    async armRequestBody() {
+      const response = await fetch(controlUrl + "/control/arm", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ binId: "binny-runs-one", requestBody: true }),
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async waitUntilRequestBodyHeld() {
+      const status = await waitFor(
+        readStatus,
+        (current) =>
+          current.held &&
+          current.heldForRequestBody === true &&
+          typeof current.heldAt === "number" &&
+          typeof current.heldRuntimeId === "string",
+        "server accepted an incomplete real heartbeat request body",
+      );
+      assert.ok(status.heldAt !== undefined);
+      assert.ok(status.heldRuntimeId !== undefined);
+      return { heldAt: status.heldAt, runtimeId: status.heldRuntimeId };
+    },
+    async waitUntilRequestBodyResponse() {
+      const status = await waitFor(
+        readStatus,
+        (current) => typeof current.forwardedStatusCode === "number",
+        "server completed the held heartbeat request",
+      );
+      assert.ok(status.forwardedStatusCode !== undefined);
+      return status.forwardedStatusCode;
     },
     async waitUntilHeld() {
       const status = await waitFor(
@@ -237,6 +282,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
     BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
     BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
+    BINNY_ARCHIVE_SEARCH_BUDGET_MS: String(archiveSearchBudgetMs),
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -437,7 +483,7 @@ function cliFailure<T extends { readonly code: string }>(
 }
 
 async function archiveHttpStep(
-  stage: "submit" | "after-restart",
+  stage: "fixed-search" | "submit" | "after-restart",
   baseUrl: string,
   state?: string,
   sdkResourceState?: string,
@@ -468,369 +514,215 @@ async function archiveHttpStep(
   return result.stdout.trim();
 }
 
-async function archiveAggregationCliStep(baseUrl: string): Promise<void> {
-  const request = {
-    scope: { kind: "current" },
-    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
-    unit: "item",
-    where: {
-      type: "and",
-      conditions: [
-        {
-          type: "field",
-          field: "sourceKey.namespace",
-          operator: "eq",
-          value: "e2e",
-        },
-        {
-          type: "field",
-          field: "sourceKey.key",
-          operator: "in",
-          values: ["aggregation-shared-p", "aggregation-distinct-q"],
-        },
-        {
-          type: "or",
-          conditions: [
-            {
-              type: "json",
-              field: "properties",
-              path: ["category"],
-              operator: "eq",
-              valueType: "string",
-              value: "x",
-            },
-            {
-              type: "json",
-              field: "properties",
-              path: ["category"],
-              operator: "eq",
-              valueType: "string",
-              value: "y",
-            },
-          ],
-        },
-        {
-          type: "not",
-          condition: {
-            type: "json",
-            field: "properties",
-            path: ["category"],
-            operator: "eq",
-            valueType: "string",
-            value: "y",
-          },
-        },
-      ],
-    },
-    groupBy: [
-      {
-        key: "category",
-        type: "json",
-        field: "properties",
-        path: ["category"],
-      },
-    ],
-    metrics: [
-      { key: "items", op: "count" },
-      {
-        key: "priceSum",
-        op: "sum",
-        value: {
-          type: "json",
-          field: "properties",
-          path: ["price"],
-          valueType: "number",
-        },
-      },
-    ],
-    orderBy: [{ key: "category", direction: "asc" }],
-  };
-  const result = cliData<{
-    readonly unit: string;
-    readonly groups: readonly {
-      readonly keys: readonly {
-        readonly key: string;
-        readonly result: {
-          readonly status: string;
-          readonly value?: unknown;
-        };
-      }[];
-      readonly metrics: readonly {
-        readonly key: string;
-        readonly value: string | null;
-      }[];
-    }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "aggregate",
-      "--query",
-      JSON.stringify(request),
-    ]),
-    "aggregated",
-  );
-  assert.equal(result.unit, "item");
-  assert.deepEqual(result.groups[0]?.metrics, [
-    { key: "items", op: "count", value: "2" },
-    { key: "priceSum", op: "sum", value: "20" },
-  ]);
-  assert.deepEqual(result.groups[0]?.keys, [
-    { key: "category", result: { status: "value", value: "x" } },
-  ]);
-
-  const invalidRequest = { ...request, unit: "unknown" };
-  const failure = cliFailure<{
-    readonly code: string;
-    readonly path?: readonly (string | number)[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "aggregate",
-      "--query",
-      JSON.stringify(invalidRequest),
-    ]),
-    "invalid_input",
-  );
-  assert.deepEqual(failure.path, ["unit"]);
-}
-
-async function archiveSearchPaginationCliStep(baseUrl: string): Promise<void> {
+async function archiveSearchCliStep(baseUrl: string): Promise<void> {
+  const binId = "binny-runs-one";
   const query = {
-    scope: { kind: "current", binId: "binny-runs-one" },
-    text: { kind: "regex", pattern: "^聚合完整候选集合$" },
-    where: {
-      type: "and",
-      conditions: [
-        {
-          type: "field",
-          field: "sourceKey.namespace",
-          operator: "eq",
-          value: "e2e",
-        },
-        {
-          type: "field",
-          field: "sourceKey.key",
-          operator: "in",
-          values: ["aggregation-shared-p", "aggregation-distinct-q"],
-        },
-        {
-          type: "or",
-          conditions: [
-            {
-              type: "json",
-              field: "properties",
-              path: ["category"],
-              operator: "eq",
-              valueType: "string",
-              value: "x",
-            },
-            {
-              type: "json",
-              field: "properties",
-              path: ["category"],
-              operator: "eq",
-              valueType: "string",
-              value: "y",
-            },
-          ],
-        },
-        {
-          type: "not",
-          condition: {
-            type: "json",
-            field: "properties",
-            path: ["category"],
-            operator: "eq",
-            valueType: "string",
-            value: "y",
-          },
-        },
-      ],
-    },
-    select: [
-      "sourceKey",
-      { type: "json", field: "properties", path: ["category"] },
-    ],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit: 1,
+    bins: [binId],
+    text: { groups: [["Needle"], ["release"]] },
+    limit: 10,
   };
-  const firstPage = cliData<{
+  const search = cliData<{
+    readonly snapshot: { readonly asOf: string };
     readonly results: readonly {
-      readonly sourceKey?: { readonly key: string };
+      readonly itemId: string;
+      readonly title: string | null;
+      readonly sourceKey: { readonly namespace: string; readonly key: string };
       readonly matches: readonly {
-        readonly json?: readonly {
-          readonly path: readonly (string | number)[];
-          readonly value?: unknown;
-        }[];
+        readonly binId: string;
+        readonly revisionId: string;
+        readonly archiveSeq: string;
       }[];
     }[];
-    readonly nextCursor?: string;
   }>(
     await cli(baseUrl, ["archive", "search", "--query", JSON.stringify(query)]),
     "found",
   );
-  assert.deepEqual(
-    firstPage.results.map(({ sourceKey }) => sourceKey?.key),
-    ["aggregation-distinct-q"],
+  const matchedItem = search.results.find(
+    ({ title }) => title === "Needle model updated",
   );
-  assert.equal(typeof firstPage.nextCursor, "string");
+  assert.ok(matchedItem !== undefined);
+  assert.equal(matchedItem.sourceKey.namespace, "e2e");
   assert.ok(
-    firstPage.results[0]?.matches[0]?.json?.some(
-      ({ path, value }) => path.join(".") === "category" && value === "x",
+    matchedItem.matches.some(
+      ({ binId: matchedBinId, revisionId }) =>
+        matchedBinId === binId && revisionId.length > 0,
     ),
   );
 
-  const secondPage = cliData<{
-    readonly results: readonly {
-      readonly sourceKey?: { readonly key: string };
-    }[];
+  const firstPage = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly results: readonly { readonly itemId: string }[];
+    readonly hasMore: boolean;
+    readonly nextCursor?: string;
   }>(
     await cli(baseUrl, [
       "archive",
       "search",
       "--query",
-      JSON.stringify({ ...query, cursor: firstPage.nextCursor }),
+      JSON.stringify({ bins: [binId], limit: 1 }),
     ]),
     "found",
   );
-  assert.deepEqual(
-    secondPage.results.map(({ sourceKey }) => sourceKey?.key),
-    ["aggregation-shared-p"],
-  );
-}
-
-async function archiveQueryValidationCliStep(baseUrl: string): Promise<void> {
-  const search = cliData<{ readonly unit: string }>(
+  assert.equal(firstPage.results.length, 1);
+  assert.equal(firstPage.hasMore, true);
+  assert.ok(firstPage.nextCursor);
+  assert.equal(firstPage.hasMore, firstPage.nextCursor !== undefined);
+  const secondPage = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly results: readonly { readonly itemId: string }[];
+    readonly hasMore: boolean;
+    readonly nextCursor?: string;
+  }>(
     await cli(baseUrl, [
       "archive",
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        text: { kind: "literal", value: "正文 A" },
+        bins: [binId],
+        limit: 2,
+        cursor: firstPage.nextCursor,
       }),
     ]),
     "found",
   );
-  assert.equal(search.unit, "item");
+  assert.deepEqual(secondPage.snapshot, firstPage.snapshot);
+  assert.ok(secondPage.results.length > 0);
+  assert.equal(secondPage.hasMore, secondPage.nextCursor !== undefined);
+  assert.ok(
+    secondPage.results.every(
+      ({ itemId }) => itemId !== firstPage.results[0]?.itemId,
+    ),
+  );
 
-  for (const command of ["search", "aggregate"] as const) {
-    const missingScope = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    }>(
-      await cli(baseUrl, ["archive", command, "--query", "{}"]),
-      "invalid_input",
-    );
-    assert.equal(missingScope.message, "必填字段缺失或字段类型无效。");
-    assert.deepEqual(missingScope.path, ["scope"]);
+  const reusedSnapshot = cliData<{
+    readonly snapshot: { readonly asOf: string; readonly mode: string };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { in: "title", groups: [["Needle"]] },
+        asOf: firstPage.snapshot.asOf,
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(reusedSnapshot.snapshot.asOf, firstPage.snapshot.asOf);
+  assert.equal(reusedSnapshot.snapshot.mode, "asOf");
 
-    const validRequest =
-      command === "search"
-        ? { scope: { kind: "current", binId: "binny-runs-one" } }
-        : {
-            scope: { kind: "current", binId: "binny-runs-one" },
-            unit: "item",
-            groupBy: [],
-            metrics: [{ key: "items", op: "count" }],
-          };
-    const invalidScope = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    }>(
+  const readable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify({ bins: [binId], limit: 1 }),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(readable.code, 0, readable.stderr);
+  assert.match(readable.stdout, /Snapshot:/u);
+  assert.match(readable.stdout, /Matches on this page: 1/u);
+  assert.match(
+    readable.stdout,
+    /More results are available\. Repeat with query\.cursor set to [A-Za-z0-9_-]+\./u,
+  );
+  assert.doesNotMatch(readable.stdout, /"results"\s*:/u);
+
+  for (const invalidQuery of [
+    { unsupportedFilter: true },
+    { budgetMs: 1 },
+    { bins: [binId], limit: 0 },
+  ]) {
+    const failure = cliFailure<{ readonly code: string }>(
       await cli(baseUrl, [
         "archive",
-        command,
+        "search",
         "--query",
-        JSON.stringify({
-          ...validRequest,
-          scope: { kind: "invalid" },
-          ...(command === "search"
-            ? { text: { kind: "literal", value: "x" } }
-            : {}),
-        }),
+        JSON.stringify(invalidQuery),
       ]),
       "invalid_input",
     );
-    assert.equal(invalidScope.message, "字段值不符合要求。");
-    assert.deepEqual(invalidScope.path, ["scope", "kind"]);
-
-    const unknownKey = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    }>(
-      await cli(baseUrl, [
-        "archive",
-        command,
-        "--query",
-        JSON.stringify({ ...validRequest, "中文。": 1 }),
-      ]),
-      "invalid_input",
-    );
-    assert.equal(unknownKey.message, "请求包含未支持的字段。");
-    assert.equal(unknownKey.path, undefined);
-
-    const missingValueType = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    }>(
-      await cli(baseUrl, [
-        "archive",
-        command,
-        "--query",
-        JSON.stringify({
-          ...validRequest,
-          ...(command === "search"
-            ? { text: { kind: "literal", value: "x" } }
-            : {}),
-          where: {
-            type: "json",
-            field: "properties",
-            path: ["x"],
-            operator: "eq",
-            value: 1,
-          },
-        }),
-      ]),
-      "invalid_input",
-    );
-    assert.equal(missingValueType.message, "字段值不符合要求。");
-    assert.deepEqual(missingValueType.path, ["where", "valueType"]);
-
-    const reversedRange = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-      readonly path?: readonly (string | number)[];
-    }>(
-      await cli(baseUrl, [
-        "archive",
-        command,
-        "--query",
-        JSON.stringify({
-          ...validRequest,
-          ...(command === "search"
-            ? { text: { kind: "literal", value: "x" } }
-            : {}),
-          where: {
-            type: "json",
-            field: "properties",
-            path: ["x"],
-            valueType: "number",
-            operator: "between",
-            lower: 2,
-            upper: 1,
-          },
-        }),
-      ]),
-      "invalid_input",
-    );
-    assert.equal(reversedRange.message, "JSON 数值范围上界不能早于下界。");
-    assert.deepEqual(reversedRange.path, ["where", "upper"]);
+    assert.equal(failure.code, "invalid_input");
   }
+
+  const mismatchedCursor = cliFailure<{ readonly code: string }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { groups: [["different filter"]] },
+        cursor: firstPage.nextCursor,
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.equal(mismatchedCursor.code, "invalid_input");
+}
+
+async function verifyArchiveSearchPoolWaitBudget(
+  baseUrl: string,
+  itemId: string,
+): Promise<void> {
+  const databasePoolSize = 10;
+  // The server reserves one of its pool sessions for the schedule dispatcher.
+  const reservedScheduleSessionCount = 1;
+  const blockedReadConnectionCount =
+    databasePoolSize - reservedScheduleSessionCount;
+  const lock = await holdArchiveItemReadLock();
+  const itemReads = Array.from({ length: blockedReadConnectionCount }, () =>
+    fetch(`${baseUrl}/archives/items/${itemId}`, {
+      signal: AbortSignal.timeout(30_000),
+    }),
+  );
+
+  try {
+    const blockedReads = await waitFor(
+      async () =>
+        (await readManualRunLockWaiters()).filter(({ blockers }) =>
+          blockers.includes(lock.backendPid),
+        ),
+      (waiters) => waiters.length === blockedReadConnectionCount,
+      "archive item reads to occupy every non-reserved PostgreSQL pool connection",
+    );
+    assert.equal(blockedReads.length, blockedReadConnectionCount);
+
+    const startedAt = performance.now();
+    const response = await fetch(`${baseUrl}/archives/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
+      signal: AbortSignal.timeout(6_000),
+    });
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(response.status, 422);
+    const failure = (await response.json()) as {
+      readonly error: { readonly code: string; readonly message: string };
+    };
+    assert.equal(failure.error.code, "query_budget_exceeded");
+    assert.match(
+      failure.error.message,
+      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+    );
+    assert.ok(
+      elapsedMs < archiveSearchBudgetMs * 2,
+      `Search waited ${String(elapsedMs)} ms for the occupied database pool.`,
+    );
+  } finally {
+    await lock.release();
+    const responses = await Promise.all(itemReads);
+    assert.ok(responses.every(({ status }) => status === 200));
+  }
+
+  const recoveredSearch = await fetch(`${baseUrl}/archives/search`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(recoveredSearch.status, 200);
 }
 
 async function capacityHttpStep(baseUrl: string): Promise<string> {
@@ -1086,6 +978,11 @@ type HeldTableLock = {
   readonly release: () => Promise<void>;
 };
 
+type HeldArchiveItemLock = {
+  readonly backendPid: number;
+  readonly release: () => Promise<void>;
+};
+
 type ManualRunLockWaiter = {
   readonly pid: number;
   readonly blockers: readonly number[];
@@ -1119,6 +1016,27 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
   await lock.waitForMarker("BINNY_RESOURCES_LOCK_HELD");
   let released = false;
   return {
+    async release() {
+      if (released) return;
+      released = true;
+      lock.write("COMMIT;\n\\q\n");
+      const result = await lock.waitForClose();
+      assert.equal(result.code, 0, result.stderr);
+    },
+  };
+}
+
+async function holdArchiveItemReadLock(): Promise<HeldArchiveItemLock> {
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_item IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_ITEM_READ_LOCK_HELD';\n",
+  );
+  await lock.waitForMarker("BINNY_ARCHIVE_ITEM_READ_LOCK_HELD");
+  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
+  let released = false;
+  return {
+    backendPid,
     async release() {
       if (released) return;
       released = true;
@@ -1314,6 +1232,13 @@ function archiveReferenceProcess(resourceId: string): ManagedProcess {
   ]);
 }
 
+async function waitForUnreferencedResourceAge(): Promise<void> {
+  const gracePeriodMs = Number(
+    composeEnvironment().BINNY_RESOURCE_UNREFERENCED_AGE_MS,
+  );
+  await new Promise((resolveGrace) => setTimeout(resolveGrace, gracePeriodMs));
+}
+
 async function verifyResourceStorageInterruptions(
   baseUrl: string,
   archive: string,
@@ -1451,10 +1376,7 @@ async function verifyResourceStorageInterruptions(
     if (referenceServerNeedsRestart) currentBaseUrl = await restartServer();
   }
 
-  const gracePeriodMs = Number(
-    composeEnvironment().BINNY_RESOURCE_UNREFERENCED_AGE_MS,
-  );
-  await new Promise((resolveGrace) => setTimeout(resolveGrace, gracePeriodMs));
+  await waitForUnreferencedResourceAge();
   return currentBaseUrl;
 }
 
@@ -3243,23 +3165,39 @@ async function searchRssArchive(
     readonly sourceKey?: { readonly namespace: string; readonly key: string };
   }[]
 > {
-  const query = {
-    scope: { kind: "current", binId },
-    text: { kind: "literal", value: text },
-    select: ["sourceKey", "sourceRef", "capture.completeness"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit: 100,
-  };
-  const page = cliData<{
-    readonly results: readonly {
-      readonly itemId: string;
-      readonly sourceKey?: { readonly namespace: string; readonly key: string };
-    }[];
-  }>(
-    await cli(baseUrl, ["archive", "search", "--query", JSON.stringify(query)]),
-    "found",
-  );
-  return page.results;
+  const results: {
+    readonly itemId: string;
+    readonly sourceKey: { readonly namespace: string; readonly key: string };
+  }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = cliData<{
+      readonly results: readonly {
+        readonly itemId: string;
+        readonly sourceKey: {
+          readonly namespace: string;
+          readonly key: string;
+        };
+      }[];
+      readonly nextCursor?: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: [binId],
+          text: { groups: [[text]] },
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
+      ]),
+      "found",
+    );
+    results.push(...page.results);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return results;
 }
 
 async function readRssArchive(
@@ -5256,7 +5194,10 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
   }
 }
 
-async function scheduledRunsStep(baseUrl: string): Promise<string> {
+async function scheduledRunsStep(
+  baseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+): Promise<string> {
   const binId = "binny-runs-one";
   const sourceControlUrl = manualRunSourceControlUrl();
   const sourceUrl = manualRunSourceRuntimeUrl();
@@ -5314,10 +5255,53 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   );
   assert.ok(shortOutageScheduledAt - Date.now() > 15_000);
 
+  await wait(Math.max(0, shortOutageScheduledAt - Date.now() - 8_500));
+  await heartbeatProxy.armRequestBody();
+  const heldHeartbeat = await heartbeatProxy.waitUntilRequestBodyHeld();
+  assert.ok(heldHeartbeat.heldAt < shortOutageScheduledAt - 4_500);
+  const serverContainerId = (await compose(["ps", "-q", "server"])).stdout
+    .trim()
+    .split("\n")[0];
+  assert.ok(serverContainerId !== undefined && serverContainerId.length > 0);
+  const signalEvents = startManagedProcess("docker", [
+    "events",
+    "--filter",
+    `container=${serverContainerId}`,
+    "--filter",
+    "event=kill",
+    "--format",
+    "{{.Actor.Attributes.signal}}",
+  ]);
   await wait(Math.max(0, shortOutageScheduledAt - Date.now() - 4_500));
   const shortOutageStartedAt = Date.now();
-  await compose(["stop", "server"]);
-  const shortOutageStoppedAt = Date.now();
+  let stopCompletedAt: number | undefined;
+  const stopPromise = compose(["stop", "server"]).then((result) => {
+    stopCompletedAt = Date.now();
+    return result;
+  });
+  let signalObservedAt: number | undefined;
+  let requestBodyReleasedAt: number | undefined;
+  let signalError: unknown;
+  try {
+    await signalEvents.waitForMarker("15");
+    signalObservedAt = Date.now();
+    await wait(2_000);
+  } catch (error) {
+    signalError = error;
+  } finally {
+    signalEvents.child.kill("SIGTERM");
+    await signalEvents.waitForClose();
+    requestBodyReleasedAt = Date.now();
+    await heartbeatProxy.release();
+  }
+  await stopPromise;
+  const shortOutageStoppedAt = stopCompletedAt ?? Date.now();
+  if (signalError !== undefined) throw signalError;
+  const heartbeatStatus = await heartbeatProxy.waitUntilRequestBodyResponse();
+  process.stdout.write(
+    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; heartbeat HTTP ${String(heartbeatStatus)}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
+  );
+  assert.equal(heartbeatStatus, 200);
   assert.ok(
     shortOutageScheduledAt - shortOutageStoppedAt > 500,
     `所有 server 停止时应距离触发仍超过0.5秒，实际 ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms。`,
@@ -7284,7 +7268,6 @@ async function verifyRestartAndRemoval(
   assert.deepEqual(cliSdkItem, expectedArchive.sdkItem);
 
   const cliSearch = cliData<{
-    readonly unit: string;
     readonly results: readonly {
       readonly itemId: string;
       readonly matches: readonly {
@@ -7298,14 +7281,13 @@ async function verifyRestartAndRemoval(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        text: { kind: "literal", value: "正文 A" },
+        bins: ["binny-runs-one"],
+        text: { groups: [["正文 A"]] },
         limit: 10,
       }),
     ]),
     "found",
   );
-  assert.equal(cliSearch.unit, "item");
   const cliSearchResult = cliSearch.results.find(
     (result) => result.itemId === itemId,
   );
@@ -7316,254 +7298,6 @@ async function verifyRestartAndRemoval(
         match.binId === "binny-runs-one" && match.revisionId === revisionId,
     ),
   );
-
-  const cliJsonSearch = cliData<{
-    readonly unit: string;
-    readonly results: readonly {
-      readonly sourceKey?: { readonly key: string };
-      readonly matches: readonly {
-        readonly json?: readonly {
-          readonly field: string;
-          readonly path: readonly (string | number)[];
-          readonly exists: boolean;
-          readonly value?: unknown;
-        }[];
-      }[];
-    }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        where: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.key",
-              operator: "eq",
-              value: "json-number-high",
-            },
-            {
-              type: "json",
-              field: "properties",
-              path: ["profile", "score"],
-              valueType: "number",
-              operator: "eq",
-              value: 10,
-            },
-          ],
-        },
-        select: [
-          "sourceKey",
-          {
-            type: "json",
-            field: "properties",
-            path: ["profile", "score"],
-          },
-        ],
-        orderBy: [
-          {
-            field: "properties",
-            path: ["profile", "score"],
-            valueType: "number",
-            direction: "desc",
-          },
-          { field: "sourceKey.key", direction: "asc" },
-        ],
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.equal(cliJsonSearch.unit, "item");
-  assert.deepEqual(
-    cliJsonSearch.results.map((result) => result.sourceKey?.key),
-    ["json-number-high"],
-  );
-  assert.deepEqual(cliJsonSearch.results[0]?.matches[0]?.json, [
-    {
-      field: "properties",
-      path: ["profile", "score"],
-      exists: true,
-      value: 10,
-    },
-  ]);
-
-  const cliRelationSearch = cliData<{
-    readonly results: readonly {
-      readonly sourceKey?: { readonly key: string };
-      readonly matches: readonly {
-        readonly binId: string;
-        readonly expansions?: readonly {
-          readonly key: string;
-          readonly hasMore: boolean;
-          readonly relations: readonly {
-            readonly relationId: string;
-            readonly status: string;
-          }[];
-        }[];
-      }[];
-    }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        where: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.key",
-              operator: "eq",
-              value: "split-root",
-            },
-            {
-              type: "relation",
-              direction: "outgoing",
-              name: "cites",
-              operator: "exists",
-            },
-          ],
-        },
-        expand: [
-          {
-            key: "mentions",
-            direction: "outgoing",
-            name: "mentions",
-            limit: 1,
-          },
-        ],
-        select: ["sourceKey"],
-        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.deepEqual(
-    cliRelationSearch.results.map((result) => result.sourceKey?.key),
-    ["split-root"],
-  );
-  assert.deepEqual(
-    cliRelationSearch.results[0]?.matches[0]?.expansions?.[0]?.relations.map(
-      ({ relationId }) => relationId,
-    ),
-    ["e2e:relation-query:split-text"],
-  );
-
-  const cliPathSearch = cliData<{
-    readonly results: readonly {
-      readonly sourceKey?: { readonly key: string };
-      readonly matches: readonly {
-        readonly pathExpansions?: readonly {
-          readonly key: string;
-          readonly hasMore: boolean;
-          readonly paths: readonly {
-            readonly steps: readonly {
-              readonly relationId: string;
-              readonly direction: string;
-              readonly status: string;
-              readonly observation: { readonly archiveSeq: string };
-            }[];
-          }[];
-        }[];
-      }[];
-    }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        where: {
-          type: "and",
-          conditions: [
-            {
-              type: "field",
-              field: "sourceKey.key",
-              operator: "eq",
-              value: "path-root",
-            },
-            {
-              type: "path",
-              steps: [
-                { direction: "outgoing", name: "path-first" },
-                { direction: "outgoing", name: "path-second" },
-              ],
-              operator: "count",
-              count: { operator: "eq", value: 1 },
-            },
-          ],
-        },
-        expandPaths: [
-          {
-            key: "two-hop",
-            steps: [
-              { direction: "outgoing", name: "path-first" },
-              { direction: "outgoing", name: "path-second" },
-            ],
-            limit: 10,
-          },
-        ],
-        select: ["sourceKey"],
-        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.deepEqual(
-    cliPathSearch.results.map(({ sourceKey }) => sourceKey?.key),
-    ["path-root"],
-  );
-  const cliPaths = cliPathSearch.results[0]?.matches[0]?.pathExpansions?.[0];
-  assert.ok(cliPaths !== undefined);
-  assert.equal(cliPaths.paths.length, 2);
-  assert.equal(cliPaths.hasMore, false);
-  assert.deepEqual(
-    cliPaths.paths.map(({ steps }) =>
-      steps.map(({ relationId }) => relationId),
-    ),
-    [
-      ["e2e:relation-query:path-first-c", "e2e:relation-query:path-second-c"],
-      [
-        "e2e:relation-query:path-first-unknown",
-        "e2e:relation-query:path-second-unknown",
-      ],
-    ],
-  );
-  assert.match(
-    cliPaths.paths[0]?.steps[0]?.observation.archiveSeq ?? "",
-    /^\d+$/u,
-  );
-
-  const cliInvalidPath = cliFailure<{ readonly code: string }>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-runs-one" },
-        where: {
-          type: "path",
-          steps: [],
-          operator: "exists",
-        },
-        select: ["sourceKey"],
-        orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-        limit: 10,
-      }),
-    ]),
-    "invalid_input",
-  );
-  assert.equal(cliInvalidPath.code, "invalid_input");
 
   const downloadDirectory = await mkdtemp(
     path.join(tmpdir(), "binny-relations-resource-cli-"),
@@ -7812,42 +7546,9 @@ async function runRssAcceptance(
   );
   assert.deepEqual(
     await searchRssArchive(baseUrl, "binny-rss-one", "rss 全文测试文章"),
-    [],
-    "literal 搜索沿用大小写敏感的子串语义。",
+    [{ itemId: rssItemV1.itemId, sourceKey: rssItemV1.sourceKey }],
+    "literal search matches title text without case sensitivity.",
   );
-
-  const rssRegexTitle = cliData<{
-    readonly results: readonly { readonly itemId: string }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-rss-one" },
-        text: { kind: "regex", pattern: "^RSS 全文测试文章" },
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.ok(
-    rssRegexTitle.results.some(({ itemId }) => itemId === rssItemV1.itemId),
-  );
-  const rssRegexLowercase = cliData<typeof rssRegexTitle>(
-    await cli(baseUrl, [
-      "archive",
-      "search",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-rss-one" },
-        text: { kind: "regex", pattern: "^rss 全文测试文章" },
-        limit: 10,
-      }),
-    ]),
-    "found",
-  );
-  assert.deepEqual(rssRegexLowercase.results, []);
 
   const titleOnlyItem = await readRssArchive(
     baseUrl,
@@ -7871,18 +7572,10 @@ async function runRssAcceptance(
   assert.equal(titleOnlyState.sourceModifiedAt, null);
   assert.equal("title" in titleOnlyState.extensions, false);
 
-  const titleOnlyUnicodeSearch = cliData<{
+  const titleOnlySearch = cliData<{
     readonly results: readonly {
       readonly itemId: string;
-      readonly matches: readonly {
-        readonly hit?: {
-          readonly position: {
-            readonly encoding: string;
-            readonly start: number;
-            readonly end: number;
-          };
-        };
-      }[];
+      readonly matches: readonly { readonly binId: string }[];
     }[];
   }>(
     await cli(baseUrl, [
@@ -7890,39 +7583,22 @@ async function runRssAcceptance(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "binny-rss-one" },
-        text: { kind: "literal", value: "标题資料🌿" },
+        bins: ["binny-rss-one"],
+        text: { in: "title", groups: [["标题資料🌿"]] },
         limit: 10,
       }),
     ]),
     "found",
   );
-  const titleOnlyUnicodeResult = titleOnlyUnicodeSearch.results.find(
+  const titleOnlyResult = titleOnlySearch.results.find(
     ({ itemId }) => itemId === titleOnlyItem.itemId,
   );
-  assert.ok(titleOnlyUnicodeResult !== undefined);
-  assert.deepEqual(titleOnlyUnicodeResult.matches[0]?.hit?.position, {
-    encoding: "unicode-code-point",
-    start: 5,
-    end: 10,
-  });
+  assert.ok(titleOnlyResult !== undefined);
+  assert.ok(
+    titleOnlyResult.matches.some(({ binId }) => binId === "binny-rss-one"),
+  );
 
-  const titleOnlyFilter = {
-    type: "and",
-    conditions: [
-      {
-        type: "text",
-        text: { kind: "literal", value: "标题資料🌿" },
-      },
-      {
-        type: "field",
-        field: "sourceKey.namespace",
-        operator: "eq",
-        value: "rss:rss-main",
-      },
-    ],
-  } as const;
-  const titleOnlyFilteredSearch = cliData<{
+  const titleOnlyBodySearch = cliData<{
     readonly results: readonly { readonly itemId: string }[];
   }>(
     await cli(baseUrl, [
@@ -7930,40 +7606,14 @@ async function runRssAcceptance(
       "search",
       "--query",
       JSON.stringify({
-        scope: { kind: "current", binId: "binny-rss-one" },
-        where: titleOnlyFilter,
+        bins: ["binny-rss-one"],
+        text: { in: "body", groups: [["标题資料🌿"]] },
         limit: 10,
       }),
     ]),
     "found",
   );
-  assert.deepEqual(
-    titleOnlyFilteredSearch.results.map(({ itemId }) => itemId),
-    [titleOnlyItem.itemId],
-  );
-  const titleOnlyAggregate = cliData<{
-    readonly groups: readonly {
-      readonly metrics: readonly {
-        readonly key: string;
-        readonly value: string;
-      }[];
-    }[];
-  }>(
-    await cli(baseUrl, [
-      "archive",
-      "aggregate",
-      "--query",
-      JSON.stringify({
-        scope: { kind: "current", binId: "binny-rss-one" },
-        unit: "item",
-        where: titleOnlyFilter,
-        groupBy: [],
-        metrics: [{ key: "items", op: "count" }],
-      }),
-    ]),
-    "aggregated",
-  );
-  assert.equal(titleOnlyAggregate.groups[0]?.metrics[0]?.value, "1");
+  assert.deepEqual(titleOnlyBodySearch.results, []);
   const rssResources = rssV1.resources ?? [];
   const rssResourceBytes = await Promise.all(
     rssResources.map(({ resourceId }) => readRssResource(baseUrl, resourceId)),
@@ -9543,16 +9193,16 @@ async function main(): Promise<void> {
       "      - runtime",
       "  runtime-fifteen-one:",
       "    environment:",
-      manualRunsOnly
-        ? "      BINNY_API_URL: http://server:3000"
-        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      useHeartbeatProxy
+        ? "      BINNY_API_URL: http://heartbeat-proxy:8082"
+        : "      BINNY_API_URL: http://server:3000",
       "    networks: !override",
       "      - runtime",
       "  runtime-fifteen-two:",
       "    environment:",
-      manualRunsOnly
-        ? "      BINNY_API_URL: http://server:3000"
-        : "      BINNY_API_URL: http://heartbeat-proxy:8082",
+      useHeartbeatProxy
+        ? "      BINNY_API_URL: http://heartbeat-proxy:8082"
+        : "      BINNY_API_URL: http://server:3000",
       "    networks: !override",
       "      - runtime",
       "  runtime-linuxdo:",
@@ -9670,7 +9320,8 @@ async function main(): Promise<void> {
           "server",
           "manual-runs-source",
           "runtime-fifteen-one",
-          ...(archiveModelOnly ? ["runtime-fifteen-two"] : []),
+          ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+          ...(archiveModelJourney ? ["runtime-fifteen-two"] : []),
         ]
       : [
           "postgres",
@@ -9705,14 +9356,16 @@ async function main(): Promise<void> {
       linuxdoSourcePort = await publishedPort("linuxdo-e2e-source", 8081);
     }
     let activeHeartbeatProxy: HeartbeatDelayProxy | undefined;
-    if (!manualRunsOnly) {
+    if (useHeartbeatProxy) {
       activeHeartbeatProxy = createHeartbeatDelayProxy(
         await publishedPort("heartbeat-proxy", 8083),
       );
       heartbeatProxy = activeHeartbeatProxy;
-      rssControlSource = await createRssControlSource(
-        await publishedPort("rss-e2e-source", 8081),
-      );
+      if (!manualRunsOnly) {
+        rssControlSource = await createRssControlSource(
+          await publishedPort("rss-e2e-source", 8081),
+        );
+      }
     }
     baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
@@ -9741,24 +9394,47 @@ async function main(): Promise<void> {
       if (scheduleOverlapOnly) {
         await verifyScheduleOverlapPolicy(baseUrl);
       } else {
-        baseUrl = await scheduledRunsStep(baseUrl);
+        assert.ok(activeHeartbeatProxy !== undefined);
+        baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
       }
-    } else if (archiveModelOnly) {
+    } else if (archiveModelJourney) {
       const manifest = await createRuntimeFixtureManifest();
       await configureManualRunBins(baseUrl, manifest);
       await waitForManualRunSource();
       const itemId = await manualRunsHttpStep(baseUrl, manifest);
       assert.ok(itemId);
-      await compose(["kill", "-s", "SIGKILL", "server"]);
-      baseUrl = await restartServer();
-      await waitForApiAndDatabase(baseUrl);
-      await manualRunsHttpStep(baseUrl, manifest, {
-        stage: "verify-after-restart",
-        itemId,
-      });
-      process.stdout.write(
-        "SDK/运行器/HTTP/数据库归档模型及重启后公开读回通过。\n",
-      );
+      await archiveHttpStep("fixed-search", baseUrl);
+      await archiveSearchCliStep(baseUrl);
+      if (archiveSearchOnly) {
+        process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
+      } else {
+        const archiveState = await archiveHttpStep("submit", baseUrl);
+        const archiveStateReference = JSON.parse(archiveState) as {
+          readonly itemId: string;
+        };
+        await verifyArchiveSearchPoolWaitBudget(
+          baseUrl,
+          archiveStateReference.itemId,
+        );
+        const sdkResourceState = await sdkResourceStep(baseUrl);
+        await waitForUnreferencedResourceAge();
+        await compose(["kill", "-s", "SIGKILL", "server"]);
+        baseUrl = await restartServer();
+        await waitForApiAndDatabase(baseUrl);
+        await archiveHttpStep(
+          "after-restart",
+          baseUrl,
+          archiveState,
+          sdkResourceState,
+        );
+        await manualRunsHttpStep(baseUrl, manifest, {
+          stage: "verify-after-restart",
+          itemId,
+        });
+        process.stdout.write(
+          "SDK/运行器/HTTP/数据库归档模型及重启后公开读回通过。\n",
+        );
+      }
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(installedCliConsumer !== undefined);
@@ -9771,16 +9447,15 @@ async function main(): Promise<void> {
       await manualRunControllerPartitionStep();
       await manualRunsHttpStep(baseUrl, manualRunManifest);
       await verifyGlobalOperationsCli(baseUrl);
-      baseUrl = await scheduledRunsStep(baseUrl);
+      baseUrl = await scheduledRunsStep(baseUrl, activeHeartbeatProxy);
       const rssAcceptance = await runRssAcceptance(
         baseUrl,
         rssControlSource,
         rssImageUpdate,
       );
+      await archiveHttpStep("fixed-search", baseUrl);
       const archive = await archiveHttpStep("submit", baseUrl);
-      await archiveQueryValidationCliStep(baseUrl);
-      await archiveAggregationCliStep(baseUrl);
-      await archiveSearchPaginationCliStep(baseUrl);
+      await archiveSearchCliStep(baseUrl);
       const sdkResource = await sdkResourceStep(baseUrl);
       baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
       baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
