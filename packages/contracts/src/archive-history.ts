@@ -6,6 +6,7 @@ import {
   archiveSnapshotSchema,
   archiveSnapshotSequenceSchema,
   archiveRelationStateSchema,
+  sourceTimeSchema,
   withArchiveJsonSchemaProjection,
   type ArchiveCommit,
   type ArchiveOperation,
@@ -53,7 +54,7 @@ export const archiveTimelineItemEventSchema = z
     kind: z.literal("item"),
     itemId: archiveIdentifierSchema,
     revisionId: archiveIdentifierSchema,
-    sourceModifiedAt: timestampSchema.optional(),
+    sourceModifiedAt: sourceTimeSchema.nullable(),
   })
   .strict();
 
