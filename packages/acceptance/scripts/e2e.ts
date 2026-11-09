@@ -52,7 +52,12 @@ type HeartbeatDelayProxy = {
     readonly heldAt: number;
     readonly runtimeId: string;
   }>;
-  readonly waitUntilRequestBodyResponse: () => Promise<number>;
+  readonly forwardUnrelatedRequest: () => Promise<number>;
+  readonly waitUntilRequestBodyResponse: () => Promise<{
+    readonly statusCode: number;
+    readonly latestForwardedStatusCode?: number;
+    readonly error?: string;
+  }>;
   readonly waitUntilHeld: () => Promise<{
     readonly heldAt: number;
     readonly runtimeId: string;
@@ -69,6 +74,8 @@ type HeartbeatDelayProxy = {
 type HeartbeatDelayProxyStatus = {
   readonly held: boolean;
   readonly heldForRequestBody?: boolean;
+  readonly heldRequestBodyStatusCode?: number;
+  readonly heldRequestBodyError?: string;
   readonly heldAt?: number;
   readonly clientClosedAt?: number;
   readonly heldRuntimeId?: string;
@@ -151,7 +158,10 @@ let linuxdoSourcePort = 0;
 let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
 let installedCliConsumer: IsolatedCliConsumer | undefined;
 
-function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
+function createHeartbeatDelayProxy(
+  controlPort: number,
+  runtimePort: number,
+): HeartbeatDelayProxy {
   const host = process.env.BINNY_E2E_HOST ?? "172.17.0.1";
   const controlUrl = `http://${host}:${String(controlPort)}`;
 
@@ -196,14 +206,30 @@ function createHeartbeatDelayProxy(controlPort: number): HeartbeatDelayProxy {
       assert.ok(status.heldRuntimeId !== undefined);
       return { heldAt: status.heldAt, runtimeId: status.heldRuntimeId };
     },
+    async forwardUnrelatedRequest() {
+      const response = await fetch(
+        `http://${host}:${String(runtimePort)}/health`,
+        { signal: AbortSignal.timeout(3_000) },
+      );
+      await response.arrayBuffer();
+      return response.status;
+    },
     async waitUntilRequestBodyResponse() {
       const status = await waitFor(
         readStatus,
-        (current) => typeof current.forwardedStatusCode === "number",
+        (current) => typeof current.heldRequestBodyStatusCode === "number",
         "server completed the held heartbeat request",
       );
-      assert.ok(status.forwardedStatusCode !== undefined);
-      return status.forwardedStatusCode;
+      assert.ok(status.heldRequestBodyStatusCode !== undefined);
+      return {
+        statusCode: status.heldRequestBodyStatusCode,
+        ...(status.forwardedStatusCode === undefined
+          ? {}
+          : { latestForwardedStatusCode: status.forwardedStatusCode }),
+        ...(status.heldRequestBodyError === undefined
+          ? {}
+          : { error: status.heldRequestBodyError }),
+      };
     },
     async waitUntilHeld() {
       const status = await waitFor(
@@ -5297,11 +5323,18 @@ async function scheduledRunsStep(
   await stopPromise;
   const shortOutageStoppedAt = stopCompletedAt ?? Date.now();
   if (signalError !== undefined) throw signalError;
-  const heartbeatStatus = await heartbeatProxy.waitUntilRequestBodyResponse();
+  const unrelatedRequestStatus = await heartbeatProxy.forwardUnrelatedRequest();
+  const heartbeatResponse = await heartbeatProxy.waitUntilRequestBodyResponse();
   process.stdout.write(
-    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; heartbeat HTTP ${String(heartbeatStatus)}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
+    `Scheduled-run shutdown: heartbeat held ${String(shortOutageScheduledAt - heldHeartbeat.heldAt)}ms before due; SIGTERM observed ${String((signalObservedAt ?? shortOutageStartedAt) - shortOutageStartedAt)}ms after stop start; body released ${String((requestBodyReleasedAt ?? shortOutageStartedAt) - (signalObservedAt ?? shortOutageStartedAt))}ms after SIGTERM; held heartbeat HTTP ${String(heartbeatResponse.statusCode)}; unrelated proxy request HTTP ${String(unrelatedRequestStatus)}; latest forwarded HTTP ${String(heartbeatResponse.latestForwardedStatusCode)}; held error ${heartbeatResponse.error ?? "none"}; server stop ${String(shortOutageStoppedAt - shortOutageStartedAt)}ms; due margin ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms.\n`,
   );
-  assert.equal(heartbeatStatus, 200);
+  assert.equal(unrelatedRequestStatus, 502);
+  assert.equal(heartbeatResponse.latestForwardedStatusCode, 502);
+  assert.equal(
+    heartbeatResponse.statusCode,
+    200,
+    `Held heartbeat failed: ${heartbeatResponse.error ?? "no upstream error"}`,
+  );
   assert.ok(
     shortOutageScheduledAt - shortOutageStoppedAt > 500,
     `所有 server 停止时应距离触发仍超过0.5秒，实际 ${String(shortOutageScheduledAt - shortOutageStoppedAt)}ms。`,
@@ -9367,6 +9400,7 @@ async function main(): Promise<void> {
     if (useHeartbeatProxy) {
       activeHeartbeatProxy = createHeartbeatDelayProxy(
         await publishedPort("heartbeat-proxy", 8083),
+        await publishedPort("heartbeat-proxy", 8082),
       );
       heartbeatProxy = activeHeartbeatProxy;
       if (!manualRunsOnly) {
