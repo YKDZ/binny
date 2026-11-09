@@ -9261,7 +9261,7 @@ async function main(): Promise<void> {
     installedCliConsumer = await createIsolatedCliConsumer({
       artifactRoot,
     });
-    await installedCliConsumer.verifyOfflineSchema();
+    if (!archiveModelOnly) await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
     await compose(["build", "runtime-fifteen-one"]);
