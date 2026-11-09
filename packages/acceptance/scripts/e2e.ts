@@ -3882,6 +3882,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--action",
       "collect",
@@ -4070,6 +4071,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--action",
       "check",
@@ -4093,6 +4095,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--action",
       "check",
@@ -4112,11 +4115,32 @@ async function manualRunsCliStep(
     }[];
     readonly nextCursor?: string;
   }>(
-    await cli(baseUrl, ["run", "list", "binny-runs-one", "--limit", "2"]),
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "--bin-id",
+      "binny-runs-one",
+      "--limit",
+      "2",
+    ]),
     "listed",
   );
   assert.equal(firstHistoryPage.runs.length, 2);
   assert.ok(firstHistoryPage.nextCursor);
+  const readableRunHistory = await cli(baseUrl, [
+    "run",
+    "list",
+    "--bin-id",
+    "binny-runs-one",
+    "--limit",
+    "10",
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(readableRunHistory.code, 0, readableRunHistory.stderr);
+  assert.match(readableRunHistory.stdout, /Runs/u);
+  assert.match(readableRunHistory.stdout, /binny run get binny-runs-one /u);
+  assert.doesNotMatch(readableRunHistory.stdout, /"runs"/u);
   const firstHistoryRun = firstHistoryPage.runs[0];
   assert.ok(firstHistoryRun);
   const detailFromHistory = cliData<ManualRunCliState>(
@@ -4132,6 +4156,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--cursor",
       "invalid-cursor",
@@ -4146,6 +4171,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--action",
       "check",
@@ -4195,6 +4221,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--limit",
       "2",
@@ -4265,6 +4292,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--status",
       "executing",
@@ -4314,7 +4342,14 @@ async function manualRunsCliStep(
       readonly status: string;
     }[];
   }>(
-    await cli(baseUrl, ["run", "list", "binny-runs-one", "--status", "queued"]),
+    await cli(baseUrl, [
+      "run",
+      "list",
+      "--bin-id",
+      "binny-runs-one",
+      "--status",
+      "queued",
+    ]),
     "listed",
   );
   assert.ok(
@@ -4362,6 +4397,7 @@ async function manualRunsCliStep(
     await cli(baseUrl, [
       "run",
       "list",
+      "--bin-id",
       "binny-runs-one",
       "--status",
       "cancelled",
@@ -4582,7 +4618,10 @@ async function manualRunsCliStep(
   };
   const schedulesBeforeNativeRejection = cliData<{
     readonly schedules: readonly { readonly scheduleId: string }[];
-  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  }>(
+    await cli(baseUrl, ["schedule", "list", "--bin-id", "binny-runs-one"]),
+    "listed",
+  );
   cliFailure<{ readonly code: string }>(
     await cli(baseUrl, [
       "schedule",
@@ -4604,7 +4643,10 @@ async function manualRunsCliStep(
   );
   const schedulesAfterNativeRejection = cliData<{
     readonly schedules: readonly { readonly scheduleId: string }[];
-  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  }>(
+    await cli(baseUrl, ["schedule", "list", "--bin-id", "binny-runs-one"]),
+    "listed",
+  );
   assert.deepEqual(
     schedulesAfterNativeRejection.schedules.map(({ scheduleId }) => scheduleId),
     schedulesBeforeNativeRejection.schedules.map(
@@ -4639,12 +4681,30 @@ async function manualRunsCliStep(
   assert.equal(createdSchedule.enabled, true);
   const scheduleList = cliData<{
     readonly schedules: readonly { readonly scheduleId: string }[];
-  }>(await cli(baseUrl, ["schedule", "list", "binny-runs-one"]), "listed");
+  }>(
+    await cli(baseUrl, ["schedule", "list", "--bin-id", "binny-runs-one"]),
+    "listed",
+  );
   assert.ok(
     scheduleList.schedules.some(
       ({ scheduleId }) => scheduleId === createdSchedule.scheduleId,
     ),
   );
+  const readableScheduleList = await cli(baseUrl, [
+    "schedule",
+    "list",
+    "--bin-id",
+    "binny-runs-one",
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
+  assert.match(readableScheduleList.stdout, /Schedules/u);
+  assert.match(
+    readableScheduleList.stdout,
+    /binny schedule get binny-runs-one /u,
+  );
+  assert.doesNotMatch(readableScheduleList.stdout, /"schedules"/u);
   cliFailure<{ readonly code: string }>(
     await cli(baseUrl, [
       "schedule",
@@ -4769,6 +4829,244 @@ async function manualRunsHttpStep(
   );
   assert.equal(result.code, 0, result.stderr);
   process.stdout.write(result.stdout);
+}
+
+async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
+  const runFilter = [
+    "--action",
+    "collect",
+    "--status",
+    "completed",
+    "--created-from",
+    "2020-01-01T00:00:00Z",
+    "--created-before",
+    "2099-01-01T00:00:00Z",
+    "--limit",
+    "1",
+  ];
+  const runs = new Map<
+    string,
+    { readonly runId: string; readonly binId: string }
+  >();
+  let cursor: string | undefined;
+  do {
+    const page = cliData<{
+      readonly runs: readonly {
+        readonly runId: string;
+        readonly binId: string;
+      }[];
+      readonly nextCursor?: string;
+    }>(
+      await cli(baseUrl, [
+        "run",
+        "list",
+        ...runFilter,
+        ...(cursor === undefined ? [] : ["--cursor", cursor]),
+      ]),
+      "listed",
+    );
+    for (const run of page.runs) {
+      assert.equal(Object.hasOwn(run, "params"), false);
+      assert.equal(Object.hasOwn(run, "report"), false);
+      assert.equal(Object.hasOwn(run, "result"), false);
+      assert.equal(runs.has(run.runId), false);
+      runs.set(run.runId, run);
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  const runBinIds = new Set([...runs.values()].map(({ binId }) => binId));
+  assert.ok(runBinIds.has("binny-runs-one"));
+  assert.ok(runBinIds.has("binny-runs-two"));
+  const selectedRun = runs.values().next().value;
+  assert.ok(selectedRun);
+  const runDetail = cliData<ManualRunCliState>(
+    await cli(baseUrl, ["run", "get", selectedRun.binId, selectedRun.runId]),
+    "found",
+  );
+  assert.equal(runDetail.runId, selectedRun.runId);
+  const readableRunDetail = await cli(baseUrl, [
+    "run",
+    "get",
+    selectedRun.binId,
+    selectedRun.runId,
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(readableRunDetail.code, 0, readableRunDetail.stderr);
+  assert.match(readableRunDetail.stdout, /^Run\n/u);
+  assert.match(
+    readableRunDetail.stdout,
+    new RegExp(`Bin: ${selectedRun.binId}`, "u"),
+  );
+  assert.match(readableRunDetail.stdout, /Result:\n/u);
+  assert.doesNotMatch(readableRunDetail.stdout, /"runId":/u);
+
+  const readableRunList = await cli(baseUrl, [
+    "run",
+    "list",
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(readableRunList.code, 0, readableRunList.stderr);
+  assert.match(readableRunList.stdout, /Runs/u);
+  assert.match(readableRunList.stdout, /binny run get /u);
+  assert.doesNotMatch(readableRunList.stdout, /"runs"/u);
+
+  const schedules: { readonly binId: string; readonly scheduleId: string }[] =
+    [];
+  try {
+    for (const input of [
+      { binId: "binny-runs-one", enabled: true, suffix: "one" },
+      { binId: "binny-runs-two", enabled: false, suffix: "two" },
+    ]) {
+      const params = {
+        sourceUrl: manualRunSourceRuntimeUrl(),
+        gateKey: "global-cli-schedule-" + input.suffix,
+        sourceKey: "global-cli-schedule-" + input.suffix,
+      };
+      const result = cliData<{ readonly scheduleId: string }>(
+        await cli(baseUrl, [
+          "schedule",
+          "create",
+          input.binId,
+          "--expression",
+          "0 0 0 1 1 *",
+          "--time-zone",
+          "UTC",
+          "--action",
+          "collect",
+          "--params",
+          JSON.stringify(params),
+          ...(input.enabled ? [] : ["--disabled"]),
+        ]),
+        "created",
+      );
+      schedules.push({ binId: input.binId, scheduleId: result.scheduleId });
+    }
+
+    const scheduleIds = new Set<string>();
+    const scheduleBinIds = new Set<string>();
+    cursor = undefined;
+    do {
+      const page: {
+        readonly schedules: readonly {
+          readonly scheduleId: string;
+          readonly binId: string;
+        }[];
+        readonly nextCursor?: string;
+      } = cliData<{
+        readonly schedules: readonly {
+          readonly scheduleId: string;
+          readonly binId: string;
+        }[];
+        readonly nextCursor?: string;
+      }>(
+        await cli(baseUrl, [
+          "schedule",
+          "list",
+          "--action",
+          "collect",
+          "--limit",
+          "1",
+          ...(cursor === undefined ? [] : ["--cursor", cursor]),
+        ]),
+        "listed",
+      );
+      for (const schedule of page.schedules) {
+        assert.equal(Object.hasOwn(schedule, "params"), false);
+        assert.equal(scheduleIds.has(schedule.scheduleId), false);
+        scheduleIds.add(schedule.scheduleId);
+        scheduleBinIds.add(schedule.binId);
+      }
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    assert.deepEqual(
+      scheduleIds,
+      new Set(schedules.map(({ scheduleId }) => scheduleId)),
+    );
+    assert.deepEqual(
+      scheduleBinIds,
+      new Set(["binny-runs-one", "binny-runs-two"]),
+    );
+
+    const disabledPlans = cliData<{
+      readonly schedules: readonly {
+        readonly scheduleId: string;
+        readonly binId: string;
+        readonly enabled: boolean;
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "list",
+        "--action",
+        "collect",
+        "--enabled",
+        "false",
+      ]),
+      "listed",
+    );
+    assert.deepEqual(
+      disabledPlans.schedules.map(({ binId, enabled }) => ({ binId, enabled })),
+      [{ binId: "binny-runs-two", enabled: false }],
+    );
+    const scheduleDetail = cliData<{
+      readonly params: { readonly gateKey: string };
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "get",
+        disabledPlans.schedules[0]!.binId,
+        disabledPlans.schedules[0]!.scheduleId,
+      ]),
+      "found",
+    );
+    assert.equal(scheduleDetail.params.gateKey, "global-cli-schedule-two");
+    const readableScheduleDetail = await cli(baseUrl, [
+      "schedule",
+      "get",
+      disabledPlans.schedules[0]!.binId,
+      disabledPlans.schedules[0]!.scheduleId,
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(readableScheduleDetail.code, 0, readableScheduleDetail.stderr);
+    assert.match(readableScheduleDetail.stdout, /^Schedule\n/u);
+    assert.match(
+      readableScheduleDetail.stdout,
+      new RegExp(`Bin: ${disabledPlans.schedules[0]!.binId}`, "u"),
+    );
+    assert.match(readableScheduleDetail.stdout, /Parameters:\n/u);
+    assert.match(
+      readableScheduleDetail.stdout,
+      /"gateKey": "global-cli-schedule-two"/u,
+    );
+    assert.doesNotMatch(readableScheduleDetail.stdout, /"scheduleId":/u);
+
+    const readableScheduleList = await cli(baseUrl, [
+      "schedule",
+      "list",
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
+    assert.match(readableScheduleList.stdout, /Schedules/u);
+    assert.match(readableScheduleList.stdout, /binny schedule get /u);
+    assert.doesNotMatch(readableScheduleList.stdout, /"schedules"/u);
+  } finally {
+    for (const schedule of schedules) {
+      cliData<{ readonly scheduleId: string }>(
+        await cli(baseUrl, [
+          "schedule",
+          "remove",
+          schedule.binId,
+          schedule.scheduleId,
+        ]),
+        "removed",
+      );
+    }
+  }
 }
 
 async function scheduledRunsStep(baseUrl: string): Promise<string> {
@@ -4993,7 +5291,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
   assert.equal(checkSchedule.nextDueAt, scheduledFor);
   const schedules = cliData<{
     readonly schedules: readonly { readonly scheduleId: string }[];
-  }>(await cli(baseUrl, ["schedule", "list", binId]), "listed");
+  }>(await cli(baseUrl, ["schedule", "list", "--bin-id", binId]), "listed");
   assert.ok(
     schedules.schedules.some(
       ({ scheduleId }) => scheduleId === collectSchedule.scheduleId,
@@ -5336,6 +5634,7 @@ async function scheduledRunsStep(baseUrl: string): Promise<string> {
       await cli(baseUrl, [
         "run",
         "list",
+        "--bin-id",
         binId,
         "--action",
         retained.action,
@@ -5859,17 +6158,13 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
       Date.parse(queuedSkip.nextDueAt) > Date.parse(changedPolicy.nextDueAt),
     );
     const listedSkip = cliData<{
-      readonly schedules: readonly {
-        readonly scheduleId: string;
-        readonly lastSkip?: { readonly reason: string };
-      }[];
-    }>(await cli(baseUrl, ["schedule", "list", binId]), "listed");
-    assert.equal(
-      listedSkip.schedules.find(
-        ({ scheduleId }) => scheduleId === created.scheduleId,
-      )?.lastSkip?.reason,
-      "overlap",
+      readonly scheduleId: string;
+      readonly lastSkip?: { readonly reason: string };
+    }>(
+      await cli(baseUrl, ["schedule", "get", binId, created.scheduleId]),
+      "found",
     );
+    assert.equal(listedSkip.lastSkip?.reason, "overlap");
 
     const nextOverlapAt = new Date(Date.parse(queuedSkip.nextDueAt));
     assert.ok(Date.parse(queuedSkip.nextDueAt) - Date.now() > 10_000);
@@ -6338,7 +6633,14 @@ async function manualRunControllerPartitionStep(): Promise<void> {
         readonly status: string;
       }[];
     }>(
-      await cli(baseUrl, ["run", "list", binId, "--status", "failed"]),
+      await cli(baseUrl, [
+        "run",
+        "list",
+        "--bin-id",
+        binId,
+        "--status",
+        "failed",
+      ]),
       "listed",
     );
     assert.ok(
@@ -6449,7 +6751,7 @@ async function verifyConfigurationJourney(
   const listRunIds = async (): Promise<readonly string[]> => {
     const page = cliData<{
       readonly runs: readonly { readonly runId: string }[];
-    }>(await cli(baseUrl, ["run", "list", binId]), "listed");
+    }>(await cli(baseUrl, ["run", "list", "--bin-id", binId]), "listed");
     return page.runs.map(({ runId }) => runId);
   };
   const runsBefore = await listRunIds();
@@ -9133,6 +9435,7 @@ async function main(): Promise<void> {
       await manualRunsCliStep(baseUrl, manualRunManifest, activeHeartbeatProxy);
       await manualRunControllerPartitionStep();
       await manualRunsHttpStep(baseUrl, manualRunManifest);
+      await verifyGlobalOperationsCli(baseUrl);
       baseUrl = await scheduledRunsStep(baseUrl);
       const rssAcceptance = await runRssAcceptance(
         baseUrl,

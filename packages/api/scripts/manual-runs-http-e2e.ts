@@ -209,8 +209,8 @@ async function createConcurrencyBin(
       (await offlineSchedule.json()).error.code,
       "runtime_action_validation_unavailable",
     );
-  const schedules = await client.bins[":binId"].schedules.$get({
-    param: { binId },
+  const schedules = await client.schedules.$get({
+    query: { binId },
   });
   assert.equal(schedules.status, 200);
   if (schedules.status === 200)
@@ -800,8 +800,8 @@ async function verifySchedulesCrud(runtimeSourceUrl: string): Promise<void> {
   assert.equal(schedule.overlapPolicy, "queue");
   assert.ok(Date.parse(schedule.nextDueAt) > Date.now());
 
-  const listed = await client.bins[":binId"].schedules.$get({
-    param: { binId },
+  const listed = await client.schedules.$get({
+    query: { binId },
   });
   assert.equal(listed.status, 200);
   if (listed.status === 200)
@@ -1515,6 +1515,246 @@ async function configureRegisteredBin(binId: string): Promise<void> {
   assert.fail(`运行器没有自动登记 bin ${binId}。`);
 }
 
+async function verifyGlobalOperationLists(): Promise<void> {
+  const binIds = new Set<string>();
+  const runIds = new Set<string>();
+  const matchedRuns: {
+    readonly runId: string;
+    readonly binId: string;
+    readonly createdAt: string;
+  }[] = [];
+  let cursor: string | undefined;
+  let firstRunCursor: string | undefined;
+  do {
+    const response = await client.runs.$get({
+      query: {
+        action: "collect",
+        status: "completed",
+        createdFrom: "2020-01-01T00:00:00Z",
+        createdBefore: "2099-01-01T00:00:00Z",
+        limit: "1",
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+    });
+    assert.equal(response.status, 200);
+    if (response.status !== 200) return;
+    const page = await response.json();
+    assert.ok(page.runs.length <= 2);
+    for (const run of page.runs) {
+      assert.equal(Object.hasOwn(run, "params"), false);
+      assert.equal(Object.hasOwn(run, "report"), false);
+      assert.equal(Object.hasOwn(run, "result"), false);
+      assert.equal(runIds.has(run.runId), false);
+      runIds.add(run.runId);
+      binIds.add(run.binId);
+      matchedRuns.push(run);
+    }
+    firstRunCursor ??= page.nextCursor;
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  assert.ok(matchedRuns.length > 0);
+  assert.ok(firstRunCursor);
+  assert.ok(binIds.has("binny-runs-one"));
+  assert.ok(binIds.has("binny-runs-two"));
+  const repeatedFirstPage = await client.runs.$get({
+    query: {
+      action: "collect",
+      status: "completed",
+      createdFrom: "2020-01-01T00:00:00Z",
+      createdBefore: "2099-01-01T00:00:00Z",
+      limit: "1",
+    },
+  });
+  assert.equal(repeatedFirstPage.status, 200);
+  if (repeatedFirstPage.status === 200)
+    assert.deepEqual(
+      (await repeatedFirstPage.json()).runs.map(({ runId }) => runId),
+      matchedRuns.slice(0, 1).map(({ runId }) => runId),
+    );
+  const mismatchedRunBin = await client.runs.$get({
+    query: {
+      binId: "binny-runs-one",
+      action: "collect",
+      status: "completed",
+      createdFrom: "2020-01-01T00:00:00Z",
+      createdBefore: "2099-01-01T00:00:00Z",
+      limit: "1",
+      cursor: firstRunCursor,
+    },
+  });
+  assert.equal(mismatchedRunBin.status, 400);
+  if (mismatchedRunBin.status === 400)
+    assert.deepEqual((await mismatchedRunBin.json()).error.path, ["cursor"]);
+
+  const firstRun = matchedRuns[0]!;
+  const inclusiveLowerBound = await client.runs.$get({
+    query: {
+      binId: firstRun.binId,
+      action: "collect",
+      status: "completed",
+      createdFrom: firstRun.createdAt,
+      createdBefore: "2099-01-01T00:00:00Z",
+    },
+  });
+  assert.equal(inclusiveLowerBound.status, 200);
+  if (inclusiveLowerBound.status === 200)
+    assert.ok(
+      (await inclusiveLowerBound.json()).runs.some(
+        ({ runId }) => runId === firstRun.runId,
+      ),
+    );
+
+  const exclusiveUpperBound = await client.runs.$get({
+    query: {
+      binId: firstRun.binId,
+      action: "collect",
+      status: "completed",
+      createdFrom: "2020-01-01T00:00:00Z",
+      createdBefore: firstRun.createdAt,
+    },
+  });
+  assert.equal(exclusiveUpperBound.status, 200);
+  if (exclusiveUpperBound.status === 200)
+    assert.equal(
+      (await exclusiveUpperBound.json()).runs.some(
+        ({ runId }) => runId === firstRun.runId,
+      ),
+      false,
+    );
+
+  const emptyRuns = await client.runs.$get({
+    query: {
+      binId: "binny-runs-one",
+      createdFrom: "2099-01-01T00:00:00Z",
+      createdBefore: "2100-01-01T00:00:00Z",
+    },
+  });
+  assert.equal(emptyRuns.status, 200);
+  if (emptyRuns.status === 200)
+    assert.deepEqual(await emptyRuns.json(), { runs: [] });
+
+  const invalidStatus = await fetch(baseUrl + "/runs?status=unknown");
+  assert.equal(invalidStatus.status, 400);
+  if (invalidStatus.status === 400)
+    assert.equal((await invalidStatus.json()).error.code, "invalid_input");
+  const invalidRange = await client.runs.$get({
+    query: {
+      createdFrom: "2026-11-01T00:00:00Z",
+      createdBefore: "2026-11-01T00:00:00Z",
+    },
+  });
+  assert.equal(invalidRange.status, 400);
+  if (invalidRange.status === 400)
+    assert.deepEqual((await invalidRange.json()).error.path, ["createdBefore"]);
+
+  const scheduleInput = [
+    { binId: "binny-runs-one", enabled: true, suffix: "one" },
+    { binId: "binny-runs-two", enabled: false, suffix: "two" },
+  ] as const;
+  const schedules: { readonly binId: string; readonly scheduleId: string }[] =
+    [];
+  try {
+    for (const input of scheduleInput) {
+      const response = await client.bins[":binId"].schedules.$post({
+        param: { binId: input.binId },
+        json: {
+          expression: "0 0 0 1 1 *",
+          timeZone: "UTC",
+          action: "collect",
+          params: {
+            sourceUrl: sourceRuntimeUrl,
+            gateKey: "global-schedule-" + input.suffix,
+            sourceKey: "global-schedule-" + input.suffix,
+          },
+          enabled: input.enabled,
+        },
+      });
+      assert.equal(response.status, 201);
+      if (response.status !== 201) return;
+      const schedule = await response.json();
+      schedules.push({ binId: input.binId, scheduleId: schedule.scheduleId });
+    }
+
+    const scheduleBinIds = new Set<string>();
+    const scheduleIds = new Set<string>();
+    cursor = undefined;
+    let scheduleNextCursor: string | undefined;
+    do {
+      const response = await client.schedules.$get({
+        query: {
+          limit: "1",
+          ...(cursor === undefined ? {} : { cursor }),
+        },
+      });
+      assert.equal(response.status, 200);
+      if (response.status !== 200) return;
+      const page = await response.json();
+      for (const schedule of page.schedules) {
+        assert.equal(Object.hasOwn(schedule, "params"), false);
+        scheduleBinIds.add(schedule.binId);
+        assert.equal(scheduleIds.has(schedule.scheduleId), false);
+        scheduleIds.add(schedule.scheduleId);
+      }
+      cursor = page.nextCursor;
+      scheduleNextCursor ??= page.nextCursor;
+    } while (cursor !== undefined);
+    assert.deepEqual(
+      scheduleBinIds,
+      new Set(["binny-runs-one", "binny-runs-two"]),
+    );
+    assert.deepEqual(
+      scheduleIds,
+      new Set(schedules.map(({ scheduleId }) => scheduleId)),
+    );
+    assert.ok(scheduleNextCursor);
+    const mismatchedSchedules = await client.schedules.$get({
+      query: { enabled: "true", limit: "1", cursor: scheduleNextCursor },
+    });
+    assert.equal(mismatchedSchedules.status, 400);
+    if (mismatchedSchedules.status === 400)
+      assert.deepEqual((await mismatchedSchedules.json()).error.path, [
+        "cursor",
+      ]);
+
+    const filteredSchedules = await client.schedules.$get({
+      query: { binId: "binny-runs-two", action: "collect", enabled: "false" },
+    });
+    assert.equal(filteredSchedules.status, 200);
+    if (filteredSchedules.status === 200)
+      assert.deepEqual(
+        (await filteredSchedules.json()).schedules.map(
+          ({ scheduleId }) => scheduleId,
+        ),
+        [schedules[1]?.scheduleId],
+      );
+
+    const emptySchedules = await client.schedules.$get({
+      query: { binId: "binny-runs-one", action: "collect", enabled: "false" },
+    });
+    assert.equal(emptySchedules.status, 200);
+    if (emptySchedules.status === 200)
+      assert.deepEqual(await emptySchedules.json(), { schedules: [] });
+
+    const invalidState = await fetch(baseUrl + "/schedules?enabled=maybe");
+    assert.equal(invalidState.status, 400);
+    if (invalidState.status === 400)
+      assert.equal((await invalidState.json()).error.code, "invalid_input");
+
+    const detail = await client.bins[":binId"].schedules[":scheduleId"].$get({
+      param: { binId: "binny-runs-two", scheduleId: schedules[1]!.scheduleId },
+    });
+    assert.equal(detail.status, 200);
+    if (detail.status === 200)
+      assert.equal((await detail.json()).params.gateKey, "global-schedule-two");
+  } finally {
+    for (const schedule of schedules) {
+      await client.bins[":binId"].schedules[":scheduleId"].$delete({
+        param: schedule,
+      });
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await configureRegisteredBin("binny-runs-one");
   await configureRegisteredBin("binny-runs-two");
@@ -1536,9 +1776,10 @@ async function main(): Promise<void> {
   await verifyAvailabilityChecks();
   await verifyOrdinaryAction();
   await verifySchedulesCrud(sourceRuntimeUrl);
+  await verifyGlobalOperationLists();
   await verifyScheduledReferenceTime(sourceRuntimeUrl, sourceControlUrl);
   process.stdout.write(
-    "运行 HTTP 队列、check 诊断、普通动作输出、串行并行、归档约束和错误结果旅程通过。\n",
+    "Manual-run HTTP acceptance for queues, diagnostics, action outputs, global operation lists, archive constraints, and failures passed.\n",
   );
 }
 
