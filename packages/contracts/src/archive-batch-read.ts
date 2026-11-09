@@ -13,7 +13,7 @@ const archiveBatchReadArchiveSequenceSchema = archiveSequenceSchema.refine(
   (value) =>
     value.length < 19 ||
     (value.length === 19 && value <= "9223372036854775807"),
-  "Archive sequence exceeds PostgreSQL bigint range.",
+  "Archive sequence must be between 1 and 9223372036854775807. Copy the archiveSeq from the selected search match.",
 );
 
 /** Maximum number of selected archive views accepted by one batch request. */

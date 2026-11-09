@@ -309,7 +309,10 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     const error = (await outOfRangeSequence.json()).error;
     assert.equal(error.code, "invalid_input");
     assert.deepEqual(error.path, ["references", 0, "archiveSeq"]);
-    assert.match(error.message, /PostgreSQL bigint range/u);
+    assert.match(
+      error.message,
+      /Archive sequence must be between 1 and 9223372036854775807.*archiveSeq from the selected search match/u,
+    );
   }
 
   const tooManyReferences = await client.archives["batch-read"].$post({
