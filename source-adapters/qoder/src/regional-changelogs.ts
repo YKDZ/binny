@@ -23,12 +23,17 @@ import {
   extractDocKey,
   isHtmlSpaOrError,
 } from "./cn-announcements-events.ts";
-import { cleanQoderMdx, type QoderMdxUpdate } from "./mdx-cleaner.ts";
+import {
+  cleanQoderMdx,
+  extractQoderDocumentTitle,
+  type QoderMdxUpdate,
+} from "./mdx-cleaner.ts";
 import type {
   QoderCheckOutput,
   QoderCollectOutput,
   QoderCollectParams,
   QoderConfig,
+  QoderExtensions,
   QoderSyncOutput,
 } from "./source-adapter.ts";
 
@@ -61,7 +66,7 @@ export interface ParsedChangelogMetadata {
   readonly latestUpdateLabel?: string | undefined;
   readonly latestVersion?: string | undefined;
   readonly latestUpdateDate?: string | undefined;
-  readonly datePrecision?: "day" | "month" | undefined;
+  readonly latestUpdateDatePrecision?: "day" | "month" | undefined;
 }
 
 /**
@@ -290,7 +295,7 @@ export function parseChangelogMetadata(
   let latestUpdateLabel: string | undefined;
   let latestVersion: string | undefined;
   let latestUpdateDate: string | undefined;
-  let datePrecision: "day" | "month" | undefined;
+  let latestUpdateDatePrecision: "day" | "month" | undefined;
 
   if (updates.length > 0) {
     const firstUpdate = updates[0]!;
@@ -300,12 +305,12 @@ export function parseChangelogMetadata(
     const labelDateInfo = parseUpdateDate(firstUpdate.label);
     if (labelDateInfo) {
       latestUpdateDate = labelDateInfo.date;
-      datePrecision = labelDateInfo.precision;
+      latestUpdateDatePrecision = labelDateInfo.precision;
     } else if (firstUpdate.description) {
       const descDateInfo = parseUpdateDate(firstUpdate.description);
       if (descDateInfo) {
         latestUpdateDate = descDateInfo.date;
-        datePrecision = descDateInfo.precision;
+        latestUpdateDatePrecision = descDateInfo.precision;
       }
     }
 
@@ -334,7 +339,7 @@ export function parseChangelogMetadata(
       const dateInfo = parseUpdateDate(part1) ?? parseUpdateDate(part2);
       if (dateInfo) {
         latestUpdateDate = dateInfo.date;
-        datePrecision = dateInfo.precision;
+        latestUpdateDatePrecision = dateInfo.precision;
       }
 
       const version =
@@ -351,7 +356,7 @@ export function parseChangelogMetadata(
     latestUpdateLabel,
     latestVersion,
     latestUpdateDate,
-    datePrecision,
+    latestUpdateDatePrecision,
   };
 }
 
@@ -652,7 +657,7 @@ function failureFromProblems(
 
 /** Checks Qoder CN documentation index reachability and verifies extraction on 1 sample document. */
 export async function checkCnChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderCheckOutput> {
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
   try {
@@ -730,7 +735,7 @@ export async function checkCnChangelogs(
 
 /** Checks Qoder International changelog index reachability and verifies extraction on 1 sample document. */
 export async function checkInternationalChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderCheckOutput> {
   const indexUrl =
     context.config.intChangelogIndexUrl ?? DEFAULT_INTERNATIONAL_CHANGELOG_URL;
@@ -814,7 +819,7 @@ export async function checkInternationalChangelogs(
  * ongoing-document whole-page revision semantics.
  */
 async function syncRegionalChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   isCn: boolean,
 ): Promise<QoderSyncOutput> {
   const scopeId = isCn
@@ -938,13 +943,16 @@ async function syncRegionalChangelogs(
             key: doc.docKey,
           },
           sourceRef: doc.canonicalUrl,
-          title: doc.title,
-          sourceModifiedAt: undefined, // NEVER fabricate!
-          metadata: {
+          title:
+            doc.title === doc.docKey
+              ? extractQoderDocumentTitle(cleanResult.markdown)
+              : doc.title,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
             region: isCn ? "cn" : "international",
             language: isCn ? "zh-CN" : "en",
             category: "changelog",
-            title: doc.title,
             ...(doc.description ? { summary: doc.description } : {}),
             ...(meta.latestUpdateLabel
               ? { latestUpdateLabel: meta.latestUpdateLabel }
@@ -955,10 +963,12 @@ async function syncRegionalChangelogs(
             ...(meta.latestUpdateDate
               ? { latestUpdateDate: meta.latestUpdateDate }
               : {}),
-            ...(meta.datePrecision
-              ? { datePrecision: meta.datePrecision }
+            ...(meta.latestUpdateDatePrecision
+              ? { latestUpdateDatePrecision: meta.latestUpdateDatePrecision }
               : {}),
-            ...(updates.length > 0 ? { updates } : {}),
+            ...(updates.length > 0
+              ? { updates: updates.map((update) => ({ ...update })) }
+              : {}),
           },
           cleanResult,
           captureScope: {
@@ -1001,20 +1011,20 @@ async function syncRegionalChangelogs(
 }
 
 export function syncCnChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderSyncOutput> {
   return syncRegionalChangelogs(context, true);
 }
 
 export function syncInternationalChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
 ): Promise<QoderSyncOutput> {
   return syncRegionalChangelogs(context, false);
 }
 
 /** Collects regional changelog documents on demand. */
 async function collectRegionalChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
   isCn: boolean,
 ): Promise<QoderCollectOutput> {
@@ -1116,13 +1126,16 @@ async function collectRegionalChangelogs(
           key: doc.docKey,
         },
         sourceRef: doc.canonicalUrl,
-        title: doc.title,
-        sourceModifiedAt: undefined, // NEVER fabricate!
-        metadata: {
+        title:
+          doc.title === doc.docKey
+            ? extractQoderDocumentTitle(cleanResult.markdown)
+            : doc.title,
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {
           region: isCn ? "cn" : "international",
           language: isCn ? "zh-CN" : "en",
           category: "changelog",
-          title: doc.title,
           ...(doc.description ? { summary: doc.description } : {}),
           ...(meta.latestUpdateLabel
             ? { latestUpdateLabel: meta.latestUpdateLabel }
@@ -1131,8 +1144,12 @@ async function collectRegionalChangelogs(
           ...(meta.latestUpdateDate
             ? { latestUpdateDate: meta.latestUpdateDate }
             : {}),
-          ...(meta.datePrecision ? { datePrecision: meta.datePrecision } : {}),
-          ...(updates.length > 0 ? { updates } : {}),
+          ...(meta.latestUpdateDatePrecision
+            ? { latestUpdateDatePrecision: meta.latestUpdateDatePrecision }
+            : {}),
+          ...(updates.length > 0
+            ? { updates: updates.map((update) => ({ ...update })) }
+            : {}),
         },
         cleanResult,
         captureScope: {
@@ -1174,14 +1191,14 @@ async function collectRegionalChangelogs(
 }
 
 export function collectCnChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
 ): Promise<QoderCollectOutput> {
   return collectRegionalChangelogs(context, params, true);
 }
 
 export function collectInternationalChangelogs(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
 ): Promise<QoderCollectOutput> {
   return collectRegionalChangelogs(context, params, false);

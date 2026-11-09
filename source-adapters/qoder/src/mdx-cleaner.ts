@@ -10,6 +10,13 @@ export interface QoderMdxUpdate {
   readonly description?: string | undefined;
 }
 
+/** Returns the first Markdown H1 as a source title, or null when the page has none. */
+export function extractQoderDocumentTitle(markdown: string): string | null {
+  const match = /^\s{0,3}#\s+(.+?)\s*#*\s*$/mu.exec(markdown);
+  const title = match?.[1]?.trim();
+  return title ? title : null;
+}
+
 export interface TransformMdxResult {
   readonly transformedMarkdown: string;
   readonly updates: readonly QoderMdxUpdate[];

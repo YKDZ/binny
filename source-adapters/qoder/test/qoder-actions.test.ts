@@ -12,7 +12,10 @@ import type {
   SourceAdapterArchiveSubmission,
   SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
-import { isSourceAdapterActionError } from "@binny/source-adapter-sdk";
+import {
+  isSourceAdapterActionError,
+  sourceAdapterManifest,
+} from "@binny/source-adapter-sdk";
 
 import {
   buildCanonicalDocUrl,
@@ -25,6 +28,7 @@ import {
   isAnnouncementOrEventSectionHeading,
 } from "../src/cn-announcements-events.ts";
 import {
+  extractInternationalBlogArticle,
   extractBlogSlug,
   INTERNATIONAL_BLOG_SCOPE_ID,
   normalizeDateToDay,
@@ -50,6 +54,7 @@ import {
   determineActiveScopes,
   sourceAdapter,
   type QoderConfig,
+  type QoderExtensions,
 } from "../src/source-adapter.ts";
 
 void describe("Qoder International Blog Source Adapter", () => {
@@ -59,6 +64,81 @@ void describe("Qoder International Blog Source Adapter", () => {
     assert.ok(sourceAdapter.actions.check !== undefined);
     assert.ok(sourceAdapter.actions.collect !== undefined);
     assert.ok(sourceAdapter.actions.sync !== undefined);
+  });
+
+  void test("one strict extension schema declares all Qoder source facts", () => {
+    const examples: QoderExtensions[] = [
+      {
+        region: "cn",
+        language: "zh-CN",
+        category: "event",
+        section: "活动",
+        effectiveDate: "2026年11月8日至2026年11月9日",
+      },
+      {
+        region: "cn",
+        language: "zh-CN",
+        category: "changelog",
+        latestUpdateLabel: "2026-11-08",
+        latestVersion: "1.4.0",
+        latestUpdateDate: "2026-11-08",
+        latestUpdateDatePrecision: "day",
+        updates: [{ label: "2026-11-08", description: "1.4.0" }],
+      },
+      {
+        region: "international",
+        language: "en",
+        category: "blog",
+        canonicalUrl: "https://qoder.com/blog/release",
+        authors: ["Qoder Team"],
+        categories: ["Engineering"],
+        summary: "A Qoder blog article summary.",
+      },
+    ];
+    for (const example of examples) {
+      assert.equal(
+        sourceAdapter.extensionsSchema.safeParse(example).success,
+        true,
+      );
+    }
+
+    const duplicateTitle: QoderExtensions = {
+      ...examples[0]!,
+      // @ts-expect-error Shared public fields cannot be duplicated in extensions.
+      title: "Duplicate public title",
+    };
+
+    assert.equal(
+      sourceAdapter.extensionsSchema.safeParse({
+        ...examples[0],
+        effectiveDate: 20261108,
+      }).success,
+      false,
+    );
+    assert.equal(
+      sourceAdapter.extensionsSchema.safeParse(duplicateTitle).success,
+      false,
+    );
+    assert.equal(
+      sourceAdapter.extensionsSchema.safeParse({
+        ...examples[0],
+        unknownFact: "not declared",
+      }).success,
+      false,
+    );
+
+    const manifest = sourceAdapterManifest(sourceAdapter);
+    assert.equal(manifest.extensionsSchema.additionalProperties, false);
+    for (const [key, property] of Object.entries(
+      manifest.extensionsSchema.properties ?? {},
+    )) {
+      assert.equal(
+        ["title", "sourcePublishedAt", "sourceModifiedAt"].includes(key),
+        false,
+      );
+      assert.ok(typeof property.description === "string");
+      assert.ok(property.description.length > 0);
+    }
   });
 
   void test("extractBlogSlug normalizes various blog paths and ignores invalid routes", () => {
@@ -99,19 +179,68 @@ void describe("Qoder International Blog Source Adapter", () => {
     assert.equal(normalizeDateToDay("Oct 20, 2026"), "2026-10-20");
 
     const dayOnly = parseArticleDate("2026-10-20");
-    assert.equal(dayOnly.publishedDate, "2026-10-20");
-    assert.equal(dayOnly.sourceModifiedAt, undefined);
+    assert.deepEqual(dayOnly.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-10-20",
+    });
 
     const fullIso = parseArticleDate("2026-10-20T14:30:00Z");
-    assert.equal(fullIso.publishedDate, "2026-10-20");
-    assert.equal(fullIso.sourceModifiedAt, "2026-10-20T14:30:00Z");
+    assert.deepEqual(fullIso.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-20T14:30:00Z",
+    });
+    assert.deepEqual(
+      parseArticleDate("2026-11-08T12:30:00+08:00").sourcePublishedAt,
+      {
+        precision: "instant",
+        value: "2026-11-08T12:30:00+08:00",
+      },
+    );
+    assert.equal(parseArticleDate("2026-02-30").sourcePublishedAt, null);
+  });
+
+  void test("keeps blog publication and modification facts distinct at their source precision", () => {
+    const article = extractInternationalBlogArticle(
+      `<!doctype html><html><head>
+        <meta property="article:published_time" content="2026-11-08T12:30:00+08:00" />
+        <meta property="article:modified_time" content="2026-11-09T09:15:00-04:00" />
+      </head><body><main><article><h1>Source time contract</h1><p>Article body.</p></article></main></body></html>`,
+      "https://qoder.test/blog/source-time-contract",
+    );
+
+    assert.deepEqual(article.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-11-08T12:30:00+08:00",
+    });
+    assert.deepEqual(article.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-11-09T09:15:00-04:00",
+    });
+  });
+
+  void test("leaves unknown public blog facts null when a page only has an activity time", () => {
+    const article = extractInternationalBlogArticle(
+      `<!doctype html><html><body><main><article>
+        <p>The product event starts at <time datetime="2026-12-01">December 1</time>.</p>
+        <p>Article body without source publication metadata.</p>
+      </article></main></body></html>`,
+      "https://qoder.test/blog/unknown-public-facts",
+    );
+
+    assert.equal(article.title, null);
+    assert.equal(article.sourcePublishedAt, null);
+    assert.equal(article.sourceModifiedAt, null);
+    assert.match(
+      article.cleanResult.text,
+      /Article body without source publication metadata/u,
+    );
   });
 
   void test("full action flow: body extraction without article tag, canonical normalization, sync baseline, and error rejection", async () => {
     let blogListVersion = 1;
     const detailRequests: string[] = [];
     const mediaRequests: string[] = [];
-    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
     const uploadedResources: ArchiveResourceMetadata[] = [];
 
     const server = createServer((request, response) => {
@@ -334,7 +463,7 @@ qoder init</code></pre>
     let commitSeq = 0;
     function createContext(
       rawConfig: Partial<QoderConfig>,
-    ): SourceAdapterContext<QoderConfig> {
+    ): SourceAdapterContext<QoderConfig, never, QoderExtensions> {
       const config = configSchema.parse(rawConfig);
       const runId = randomUUID();
       return {
@@ -501,17 +630,22 @@ qoder init</code></pre>
         namespace: "qoder:int-blog",
         key: "introducing-qoder-cli",
       });
-      assert.equal(item.metadata?.title, "Introducing Qoder CLI");
-      // Day precision date must be preserved in metadata without fabricating sourceModifiedAt
-      assert.equal(item.sourceModifiedAt, undefined);
-      assert.equal(item.metadata?.region, "international");
-      assert.equal(item.metadata?.language, "en");
-      assert.equal(item.metadata?.publishedDate, "2026-10-20");
+      assert.equal(item.title, "Introducing Qoder CLI");
+      assert.deepEqual(item.sourcePublishedAt, {
+        precision: "day",
+        value: "2026-10-20",
+      });
+      assert.equal(item.sourceModifiedAt, null);
+      assert.equal(item.extensions.region, "international");
+      assert.equal(item.extensions.language, "en");
+      assert.equal(item.extensions.category, "blog");
+      assert.equal("title" in item.extensions, false);
+      assert.equal("publishedDate" in item.extensions, false);
       assert.equal(
-        item.metadata?.canonicalUrl,
+        item.extensions.canonicalUrl,
         "https://qoder.com/en/blog/introducing-qoder-cli",
       );
-      assert.deepEqual(item.metadata?.authors, ["Qoder Team"]);
+      assert.deepEqual(item.extensions.authors, ["Qoder Team"]);
 
       // Verify article content extraction from page WITHOUT <article> tag
       const body = item.body as {
@@ -708,7 +842,7 @@ void describe("Qoder CN Announcements and Events Source Adapter", () => {
     let llmsTxtMode = 1; // 1: initial active docs, 2: purchase-offer rules changed in-place, 3: purchase-offer removed from active directory
     let purchaseOfferContentVersion = 1;
     const detailRequests: string[] = [];
-    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
     const uploadedResources: ArchiveResourceMetadata[] = [];
 
     const server = createServer((request, response) => {
@@ -857,7 +991,7 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
     let commitSeq = 0;
     function createContext(
       rawConfig: Partial<QoderConfig>,
-    ): SourceAdapterContext<QoderConfig> {
+    ): SourceAdapterContext<QoderConfig, never, QoderExtensions> {
       const config = configSchema.parse(rawConfig);
       const runId = randomUUID();
       return {
@@ -1006,16 +1140,16 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       });
       assert.equal(item.sourceRef, `${origin}/events/purchase-offer`);
       // CRITICAL: effective date is separated from publication timestamp!
-      assert.equal(item.sourceModifiedAt, undefined);
-      assert.equal(item.metadata?.publishedAt, undefined);
-      assert.ok(typeof item.metadata?.effectiveDate === "string");
+      assert.equal(item.sourcePublishedAt, null);
+      assert.equal(item.sourceModifiedAt, null);
+      assert.ok(typeof item.extensions.effectiveDate === "string");
       assert.match(
-        item.metadata.effectiveDate as string,
+        item.extensions.effectiveDate as string,
         /2026 年 11 月 5 日/u,
       );
-      assert.equal(item.metadata?.region, "cn");
-      assert.equal(item.metadata?.language, "zh-CN");
-      assert.equal(item.metadata?.section, "事件");
+      assert.equal(item.extensions.region, "cn");
+      assert.equal(item.extensions.language, "zh-CN");
+      assert.equal(item.extensions.section, "事件");
 
       // Verify transformed body structure: MDX components converted to semantic Markdown
       const body = item.body as { markdown: string; text: string };
@@ -1081,6 +1215,13 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
         namespace: "qoder:cn-docs",
         key: "events/purchase-offer",
       });
+      assert.equal(submissions[0]?.items[0]?.sourcePublishedAt, null);
+      assert.equal(submissions[0]?.items[0]?.sourceModifiedAt, null);
+      assert.equal(submissions[0]?.items[0]?.extensions.category, "event");
+      assert.match(
+        submissions[0]?.items[0]?.extensions.effectiveDate as string,
+        /2026 年 11 月 5 日/u,
+      );
     } finally {
       server.close();
     }
@@ -1232,7 +1373,7 @@ void describe("Qoder Scope Resolution and Regional Changelogs Unit Tests", () =>
     );
     assert.equal(meta1.latestUpdateLabel, "2026-10-29");
     assert.equal(meta1.latestUpdateDate, "2026-10-29");
-    assert.equal(meta1.datePrecision, "day");
+    assert.equal(meta1.latestUpdateDatePrecision, "day");
     assert.equal(meta1.latestVersion, "0.2.30");
 
     const meta2 = parseChangelogMetadata(
@@ -1241,7 +1382,7 @@ void describe("Qoder Scope Resolution and Regional Changelogs Unit Tests", () =>
     );
     assert.equal(meta2.latestUpdateLabel, "October 2026");
     assert.equal(meta2.latestUpdateDate, "2026-10");
-    assert.equal(meta2.datePrecision, "month");
+    assert.equal(meta2.latestUpdateDatePrecision, "month");
     assert.equal(meta2.latestVersion, "0.5.3");
   });
 
@@ -1377,7 +1518,7 @@ void describe("Qoder CN Product Changelogs Action Flow", () => {
     let cliContentVersion = 1;
     let cliServerError = false;
     const detailRequests: string[] = [];
-    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
     const uploadedResources: ArchiveResourceMetadata[] = [];
 
     const server = createServer((request, response) => {
@@ -1537,7 +1678,7 @@ ${updatesMd}
     let commitSeq = 0;
     function createContext(
       rawConfig: Partial<QoderConfig>,
-    ): SourceAdapterContext<QoderConfig> {
+    ): SourceAdapterContext<QoderConfig, never, QoderExtensions> {
       const config = configSchema.parse(rawConfig);
       const runId = randomUUID();
       return {
@@ -1676,13 +1817,14 @@ ${updatesMd}
       });
       assert.equal(item.sourceRef, `${origin}/product-overview/qoder-cn-cli`);
       // Date and version metadata verification
-      assert.equal(item.sourceModifiedAt, undefined); // NEVER fabricate!
-      assert.equal(item.metadata?.region, "cn");
-      assert.equal(item.metadata?.language, "zh-CN");
-      assert.equal(item.metadata?.category, "changelog");
-      assert.equal(item.metadata?.latestUpdateDate, "2026-11-05");
-      assert.equal(item.metadata?.datePrecision, "day");
-      assert.equal(item.metadata?.latestVersion, "1.1.82");
+      assert.equal(item.sourcePublishedAt, null);
+      assert.equal(item.sourceModifiedAt, null);
+      assert.equal(item.extensions.region, "cn");
+      assert.equal(item.extensions.language, "zh-CN");
+      assert.equal(item.extensions.category, "changelog");
+      assert.equal(item.extensions.latestUpdateDate, "2026-11-05");
+      assert.equal(item.extensions.latestUpdateDatePrecision, "day");
+      assert.equal(item.extensions.latestVersion, "1.1.82");
 
       // Verify transformed body structure: Update block converted to Markdown heading
       const body = item.body as { markdown: string; text: string };
@@ -1732,11 +1874,11 @@ ${updatesMd}
         namespace: "qoder:cn:changelog",
         key: "product-overview/qoder-update-log",
       });
-      assert.equal(collectedItem.metadata?.region, "cn");
-      assert.equal(collectedItem.metadata?.language, "zh-CN");
-      assert.equal(collectedItem.metadata?.category, "changelog");
-      assert.equal(collectedItem.metadata?.latestUpdateDate, "2026-11-03");
-      assert.equal(collectedItem.metadata?.latestVersion, "0.5.3");
+      assert.equal(collectedItem.extensions.region, "cn");
+      assert.equal(collectedItem.extensions.language, "zh-CN");
+      assert.equal(collectedItem.extensions.category, "changelog");
+      assert.equal(collectedItem.extensions.latestUpdateDate, "2026-11-03");
+      assert.equal(collectedItem.extensions.latestVersion, "0.5.3");
 
       // Media upload and URL rewriting verification
       assert.equal(uploadedResources.length, 1);
@@ -1772,7 +1914,7 @@ ${updatesMd}
   void test("check, sync, and collect fall back to changelog.qoder.cn when docs.qoder.cn has no changelog section", async () => {
     let commitSeq = 0;
     const requestedUrls: string[] = [];
-    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
     let storedState: IncrementalSyncState | undefined;
 
     const mockDocsLlms = `# Qoder CN 文档\n\n## 快速入门\n- [快速开始](/quickstart.md)`;
@@ -1829,60 +1971,61 @@ Mobile 更新说明
 
     try {
       const runId = randomUUID();
-      const context: SourceAdapterContext<QoderConfig> = {
-        binId: "qoder-test-bin",
-        identityId: "qoder-test-identity",
-        runId,
-        referenceTime: "2026-11-07T12:00:00.000Z",
-        sourceAdapterVersion: sourceAdapter.version,
-        config: configSchema.parse({}),
-        signal: new AbortController().signal,
-        persistentState: {
-          async load() {
-            return storedState as Record<string, unknown> | undefined;
+      const context: SourceAdapterContext<QoderConfig, never, QoderExtensions> =
+        {
+          binId: "qoder-test-bin",
+          identityId: "qoder-test-identity",
+          runId,
+          referenceTime: "2026-11-07T12:00:00.000Z",
+          sourceAdapterVersion: sourceAdapter.version,
+          config: configSchema.parse({}),
+          signal: new AbortController().signal,
+          persistentState: {
+            async load() {
+              return storedState as Record<string, unknown> | undefined;
+            },
+            async save(state) {
+              storedState = state as IncrementalSyncState;
+            },
           },
-          async save(state) {
-            storedState = state as IncrementalSyncState;
+          archive: {
+            async submit(input) {
+              submissions.push(input);
+              commitSeq += 1;
+              return {
+                commitId: randomUUID(),
+                archiveSeq: String(commitSeq),
+                binId: "qoder-test-bin",
+                runId,
+                sourceAdapterVersion: sourceAdapter.version,
+                observedAt: "2026-11-07T12:00:00.000Z",
+                recordedAt: "2026-11-07T12:00:00.000Z",
+                items: input.items.map((item) => ({
+                  itemId: randomUUID(),
+                  revisionId: randomUUID(),
+                  sourceKey: item.sourceKey,
+                })),
+                relations: [],
+              } satisfies ArchiveCommit;
+            },
           },
-        },
-        archive: {
-          async submit(input) {
-            submissions.push(input);
-            commitSeq += 1;
-            return {
-              commitId: randomUUID(),
-              archiveSeq: String(commitSeq),
-              binId: "qoder-test-bin",
-              runId,
-              sourceAdapterVersion: sourceAdapter.version,
-              observedAt: "2026-11-07T12:00:00.000Z",
-              recordedAt: "2026-11-07T12:00:00.000Z",
-              items: input.items.map((item) => ({
-                itemId: randomUUID(),
-                revisionId: randomUUID(),
-                sourceKey: item.sourceKey,
-              })),
-              relations: [],
-            } satisfies ArchiveCommit;
+          resources: {
+            async resolve() {
+              return { resources: [], items: [], mediaByUrl: {} };
+            },
+            async upload() {
+              return {
+                ok: true,
+                resource: {
+                  resourceId: randomUUID(),
+                  sha256: "0".repeat(64),
+                  mediaType: "image/png",
+                  size: 10,
+                },
+              } as const;
+            },
           },
-        },
-        resources: {
-          async resolve() {
-            return { resources: [], items: [], mediaByUrl: {} };
-          },
-          async upload() {
-            return {
-              ok: true,
-              resource: {
-                resourceId: randomUUID(),
-                sha256: "0".repeat(64),
-                mediaType: "image/png",
-                size: 10,
-              },
-            } as const;
-          },
-        },
-      };
+        };
 
       // 1. Check Action falls back to changelog.qoder.cn and succeeds
       const checkResult = await sourceAdapter.actions.check.execute(context, {
@@ -1958,7 +2101,7 @@ void describe("Qoder International Product Changelogs Action Flow", () => {
   void test("full International product changelog lifecycle: baseline, change detection, and collect", async () => {
     let cliContentVersion = 1;
     const detailRequests: string[] = [];
-    const submissions: SourceAdapterArchiveSubmission[] = [];
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
     const uploadedResources: ArchiveResourceMetadata[] = [];
 
     const server = createServer((request, response) => {
@@ -2046,7 +2189,7 @@ ${updatesMd}
     let commitSeq = 0;
     function createContext(
       rawConfig: Partial<QoderConfig>,
-    ): SourceAdapterContext<QoderConfig> {
+    ): SourceAdapterContext<QoderConfig, never, QoderExtensions> {
       const config = configSchema.parse(rawConfig);
       const runId = randomUUID();
       return {
@@ -2172,13 +2315,14 @@ ${updatesMd}
         key: "content/changelog-cli",
       });
       assert.equal(item.sourceRef, `${origin}/content/changelog-cli`);
-      assert.equal(item.sourceModifiedAt, undefined);
-      assert.equal(item.metadata?.region, "international");
-      assert.equal(item.metadata?.language, "en");
-      assert.equal(item.metadata?.category, "changelog");
-      assert.equal(item.metadata?.latestUpdateDate, "2026-11-02");
-      assert.equal(item.metadata?.datePrecision, "day");
-      assert.equal(item.metadata?.latestVersion, "1.1.82");
+      assert.equal(item.sourcePublishedAt, null);
+      assert.equal(item.sourceModifiedAt, null);
+      assert.equal(item.extensions.region, "international");
+      assert.equal(item.extensions.language, "en");
+      assert.equal(item.extensions.category, "changelog");
+      assert.equal(item.extensions.latestUpdateDate, "2026-11-02");
+      assert.equal(item.extensions.latestUpdateDatePrecision, "day");
+      assert.equal(item.extensions.latestVersion, "1.1.82");
 
       // 5. Collect Action on specific changelog document
       detailRequests.length = 0;
@@ -2201,12 +2345,12 @@ ${updatesMd}
         namespace: "qoder:international:changelog",
         key: "content/changelog",
       });
-      assert.equal(collectedItem.metadata?.region, "international");
-      assert.equal(collectedItem.metadata?.language, "en");
-      assert.equal(collectedItem.metadata?.category, "changelog");
-      assert.equal(collectedItem.metadata?.latestUpdateDate, "2026-10");
-      assert.equal(collectedItem.metadata?.datePrecision, "month");
-      assert.equal(collectedItem.metadata?.latestVersion, "0.5.3");
+      assert.equal(collectedItem.extensions.region, "international");
+      assert.equal(collectedItem.extensions.language, "en");
+      assert.equal(collectedItem.extensions.category, "changelog");
+      assert.equal(collectedItem.extensions.latestUpdateDate, "2026-10");
+      assert.equal(collectedItem.extensions.latestUpdateDatePrecision, "month");
+      assert.equal(collectedItem.extensions.latestVersion, "0.5.3");
     } finally {
       server.close();
     }

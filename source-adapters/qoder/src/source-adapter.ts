@@ -54,6 +54,93 @@ export const configSchema = z
   })
   .strict();
 
+/** Qoder-specific source facts included in the runtime manifest. */
+export const extensionsSchema = z
+  .object({
+    region: z
+      .enum(["cn", "international"])
+      .describe("Geographic Qoder content region represented by this item."),
+    language: z
+      .enum(["zh-CN", "en"])
+      .describe("Language of the Qoder content body."),
+    category: z
+      .enum(["announcement", "event", "changelog", "blog"])
+      .optional()
+      .describe("Qoder content category when the source identifies one."),
+    section: z
+      .string()
+      .optional()
+      .describe("Index section that listed a Qoder announcement or event."),
+    summary: z
+      .string()
+      .optional()
+      .describe("Short description supplied by the Qoder source listing."),
+    effectiveDate: z
+      .string()
+      .optional()
+      .describe(
+        "Business effective date or date range stated for a Qoder event.",
+      ),
+    latestUpdateLabel: z
+      .string()
+      .optional()
+      .describe(
+        "Label of the newest update block embedded in a cumulative changelog.",
+      ),
+    latestVersion: z
+      .string()
+      .optional()
+      .describe("Version identifier stated for the newest changelog update."),
+    latestUpdateDate: z
+      .string()
+      .optional()
+      .describe(
+        "Date stated by the newest update entry inside a cumulative changelog.",
+      ),
+    latestUpdateDatePrecision: z
+      .enum(["day", "month"])
+      .optional()
+      .describe(
+        "Calendar precision supplied for the newest changelog update date.",
+      ),
+    updates: z
+      .array(
+        z
+          .object({
+            label: z
+              .string()
+              .describe("Source label for one changelog update block."),
+            description: z
+              .string()
+              .optional()
+              .describe(
+                "Version or detail text attached to one changelog update block.",
+              ),
+          })
+          .strict(),
+      )
+      .optional()
+      .describe(
+        "Update blocks retained from the cumulative Qoder changelog page.",
+      ),
+    canonicalUrl: z
+      .string()
+      .optional()
+      .describe("Canonical article URL declared by the Qoder blog page."),
+    authors: z
+      .array(z.string())
+      .optional()
+      .describe("Author names supplied by the Qoder blog page."),
+    categories: z
+      .array(z.string())
+      .optional()
+      .describe("Tags or categories supplied by the Qoder blog page."),
+  })
+  .strict();
+
+/** Source-specific archive facts that do not duplicate shared public fields. */
+export type QoderExtensions = z.output<typeof extensionsSchema>;
+
 export const checkParamsSchema = z
   .object({
     scopes: z.array(z.string()).optional(),
@@ -134,7 +221,7 @@ export function determineActiveScopes(
 }
 
 async function executeCheck(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCheckParams,
 ): Promise<QoderCheckOutput> {
   const activeScopes = determineActiveScopes(context.config, params.scopes);
@@ -167,7 +254,7 @@ async function executeCheck(
 }
 
 async function executeSync(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderSyncParams,
 ): Promise<QoderSyncOutput> {
   const activeScopes = determineActiveScopes(context.config, params.scopes);
@@ -235,7 +322,7 @@ async function executeSync(
 }
 
 async function executeCollect(
-  context: SourceAdapterContext<QoderConfig>,
+  context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderCollectParams,
 ): Promise<QoderCollectOutput> {
   const activeScopes = determineActiveScopes(context.config, params.scopes);
@@ -297,21 +384,22 @@ export const sourceAdapter = defineSourceAdapter({
     browser: { required: false, profileReuseAfterRestart: false },
   },
   configSchema,
+  extensionsSchema,
   stateSchema: incrementalSyncStateSchema,
   actions: {
-    check: defineSourceAdapterAction(configSchema, {
+    check: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Check Qoder source availability.",
       params: checkParamsSchema,
       output: checkOutputSchema,
       execute: (context, params) => executeCheck(context, params),
     }),
-    collect: defineSourceAdapterAction(configSchema, {
+    collect: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Collect Qoder source items.",
       params: collectParamsSchema,
       output: collectOutputSchema,
       execute: (context, params) => executeCollect(context, params),
     }),
-    sync: defineSourceAdapterAction(configSchema, {
+    sync: defineSourceAdapterAction(configSchema, extensionsSchema, {
       description: "Incrementally synchronize Qoder source items.",
       params: syncParamsSchema,
       output: syncOutputSchema,
