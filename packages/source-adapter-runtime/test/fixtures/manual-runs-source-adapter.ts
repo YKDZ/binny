@@ -26,6 +26,12 @@ const extensionsSchema = z
     adapterLabel: z.string().optional(),
     actionLabel: z.string().optional(),
     referenceTime: z.string().optional(),
+    // Declared JSON slots let archive HTTP fixtures verify extension round trips.
+    sourceDetails: z.json().optional(),
+    attributes: z.json().optional(),
+    media: z
+      .array(z.strictObject({ url: z.url(), resourceId: z.uuid() }))
+      .optional(),
   })
   .strict();
 const sourceResultSchema = z.object({

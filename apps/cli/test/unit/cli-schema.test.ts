@@ -112,12 +112,8 @@ void describe("offline CLI command contract", () => {
           return Response.json({
             product: { name: "Binny", version: "1.2.3" },
             protocols: { httpApi: publicApiProtocolVersion },
-            capabilities: [
-              "archives.search",
-              "archives.aggregate",
-              "archive.query-contract",
-            ],
-            contracts: { archiveQuery: { version: 1, path: "/meta/query" } },
+            capabilities: ["archives.search", "archive.query-contract"],
+            contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
           });
         }
         return Response.json({
@@ -282,7 +278,9 @@ void describe("offline CLI command contract", () => {
     assert.ok(summary.output.length < 10_000);
     assert.ok(catalogFull.output.length > 100_000);
     assert.ok(input.output.length < 10_000);
-    assert.ok(output.output.length > 20_000);
+    assert.match(output.output, /nextCursor/u);
+    assert.match(output.output, /hasMore/u);
+    assert.match(output.output, /revisionId/u);
     assert.ok(full.output.length > output.output.length);
 
     const inputDocument = JSON.parse(input.output) as {
@@ -317,6 +315,7 @@ void describe("offline CLI command contract", () => {
     assert.deepEqual(Object.keys(outputDocument.data.contract), ["output"]);
     assert.equal(outputDocument.data.contract.output.kind, "data");
     assert.ok(output.output.includes("nextCursor"));
+    assert.ok(output.output.includes("hasMore"));
 
     const errorDocument = JSON.parse(errors.output) as {
       readonly data: {
@@ -437,8 +436,8 @@ void describe("offline CLI command contract", () => {
 
     const archiveHelp = await run(["archive", "search", "--help"]);
     assert.equal(archiveHelp.exitCode, 0);
-    assert.match(archiveHelp.output, /service info/u);
-    assert.match(archiveHelp.output, /JSON 字符串/u);
+    assert.match(archiveHelp.output, /literal keyword groups/u);
+    assert.match(archiveHelp.output, /model/u);
   });
 
   void it("exposes schedule field choices in the selected input contract", async () => {
@@ -555,6 +554,8 @@ void describe("offline CLI command contract", () => {
     assert.match(textOutput.output, /Command: binny archive search/u);
     assert.match(textOutput.output, /Parameters and options:/u);
     assert.match(textOutput.output, /--query/u);
+    assert.match(textOutput.output, /literal keyword groups/u);
+    assert.match(textOutput.output, /previous response's nextCursor/u);
     assert.match(
       textOutput.output,
       /--output-format <structured\|text> — default structured/u,

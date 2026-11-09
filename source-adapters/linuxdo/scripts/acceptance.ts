@@ -178,6 +178,7 @@ type ArchiveItem = {
   readonly sourceKey: { readonly namespace: string; readonly key: string };
   readonly views: readonly {
     readonly binId: string;
+    readonly runId?: string;
     readonly state: ArchiveItemState;
     readonly diagnostics?: readonly {
       readonly code: string;
@@ -707,9 +708,8 @@ async function closeHumanSession(sessionId: string): Promise<void> {
 
 async function searchArchiveItem(text: string): Promise<ArchiveItem> {
   const query = {
-    scope: { kind: "current", binId: "binny-discovery-topic" },
-    text: { kind: "literal", value: text },
-    select: ["sourceKey", "sourceRef", "capture.completeness"],
+    bins: ["binny-discovery-topic"],
+    text: { groups: [[text]] },
     limit: 10,
   };
   const page = cliData<{
@@ -734,19 +734,12 @@ async function searchArchiveItem(text: string): Promise<ArchiveItem> {
 }
 
 async function searchArchiveSourceKeys(text: string): Promise<string[]> {
-  const query = {
-    scope: { kind: "current", binId: "binny-discovery-topic" },
-    text: { kind: "literal", value: text },
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit: 100,
-  };
   const keys: string[] = [];
   let cursor: string | undefined;
   do {
     const page = cliData<{
       readonly results: readonly {
-        readonly sourceKey?: { readonly key: string };
+        readonly sourceKey: { readonly key: string };
       }[];
       readonly nextCursor?: string;
     }>(
@@ -754,18 +747,19 @@ async function searchArchiveSourceKeys(text: string): Promise<string[]> {
         "archive",
         "search",
         "--query",
-        JSON.stringify(cursor === undefined ? query : { ...query, cursor }),
+        JSON.stringify({
+          bins: ["binny-discovery-topic"],
+          text: { groups: [[text]] },
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
       ]),
       "found",
     );
-    keys.push(
-      ...page.results.flatMap(({ sourceKey }) =>
-        sourceKey === undefined ? [] : [sourceKey.key],
-      ),
-    );
+    keys.push(...page.results.map(({ sourceKey }) => sourceKey.key));
     cursor = page.nextCursor;
   } while (cursor !== undefined);
-  return keys;
+  return keys.sort((left, right) => left.localeCompare(right));
 }
 
 async function readArchiveItem(itemId: string): Promise<ArchiveItem> {
@@ -2464,29 +2458,10 @@ async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
   );
 
   const searchScheduledObservationRunIds = async (): Promise<string[]> => {
-    const page = cliData<{
-      readonly results: readonly {
-        readonly matches: readonly { readonly runId?: string }[];
-      }[];
-    }>(
-      await cli([
-        "archive",
-        "search",
-        "--query",
-        JSON.stringify({
-          scope: { kind: "observations", binId: "binny-discovery-topic" },
-          text: { kind: "literal", value: "主题正文版本 4" },
-          select: ["runId"],
-          limit: 10,
-        }),
-      ]),
-      "found",
-    );
+    const item = await searchArchiveItem("主题正文版本 4");
     return [
       ...new Set(
-        page.results.flatMap(({ matches }) =>
-          matches.flatMap(({ runId }) => (runId === undefined ? [] : [runId])),
-        ),
+        item.views.flatMap(({ runId }) => (runId === undefined ? [] : [runId])),
       ),
     ].sort();
   };

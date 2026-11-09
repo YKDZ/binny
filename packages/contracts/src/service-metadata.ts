@@ -3,15 +3,14 @@ import * as z from "zod";
 import { postgresTextSchema } from "./postgres-text.ts";
 
 /** Public HTTP route compatibility version, independent of the runtime protocol. */
-export const publicApiProtocolVersion = 3;
+export const publicApiProtocolVersion = 4;
 
-/** 搜索与聚合输入、输出契约的版本。 */
-export const archiveQueryContractVersion = 1;
+/** Fixed archive search input and output contract version. */
+export const archiveQueryContractVersion = 2;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {
   archiveSearch: "archives.search",
-  archiveAggregation: "archives.aggregate",
   archiveQueryContract: "archive.query-contract",
 } as const;
 

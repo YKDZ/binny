@@ -368,6 +368,7 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
               namespace: "binny-lifecycle.cancellation",
               key: queued.runId + ":invalid-extension",
             },
+            body: { text: "invalid-extension-attempt-" + queued.runId },
             extensions: { undeclared: true },
           },
         ],
@@ -386,12 +387,10 @@ async function verifyCancellationFencesLateWrites(): Promise<void> {
     }
     const rejectedExtensionSearch = await client.archives.search.$post({
       json: {
-        scope: { kind: "current", binId },
-        where: {
-          type: "field",
-          field: "sourceKey.key",
-          operator: "eq",
-          value: queued.runId + ":invalid-extension",
+        bins: [binId],
+        text: {
+          in: "body",
+          groups: [["invalid-extension-attempt-" + queued.runId]],
         },
         limit: 10,
       },

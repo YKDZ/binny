@@ -1,6 +1,8 @@
 export * from "./schema.ts";
 export {
   connectDatabase,
+  type CancellableDatabaseQuery,
+  type CancellableQueryExecutor,
   databaseErrorCode,
   migrateDatabase,
   type Database,

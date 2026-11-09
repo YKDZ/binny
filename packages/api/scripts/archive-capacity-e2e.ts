@@ -6,8 +6,6 @@ import path from "node:path";
 
 import { createApiClient } from "@binny/api/client";
 import {
-  archiveAggregationInputSchema,
-  archiveAggregationResultSchema,
   archiveCommitSchema,
   archiveErrorSchema,
   archiveItemDeletionResultSchema,
@@ -15,7 +13,6 @@ import {
   archiveResourceMetadataSchema,
   archiveSearchPageSchema,
   type ArchiveResourceMetadata,
-  type ArchiveAggregationRequest,
   type ArchiveSearchRequest,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
@@ -83,12 +80,6 @@ type CapacityReport = {
     readonly status: number;
     readonly resultCount?: number;
     readonly errorCode?: string;
-    readonly aggregateGroups?: readonly {
-      readonly start: string;
-      readonly end: string;
-      readonly observations: string | null;
-      readonly distinctItems: string | null;
-    }[];
   }[];
   readonly deletedCascadeItems?: number;
   readonly deletedSharedOwnerItems?: number;
@@ -479,15 +470,6 @@ async function loadManifest(
 
 type QueryMeasurement = CapacityReport["measurements"][number];
 
-function capacityNamespaceFilter(): NonNullable<ArchiveSearchRequest["where"]> {
-  return {
-    type: "field",
-    field: "sourceKey.namespace",
-    operator: "eq",
-    value: sourceNamespace,
-  };
-}
-
 async function measureSearch(
   client: ArchiveClient,
   name: string,
@@ -495,23 +477,22 @@ async function measureSearch(
 ): Promise<QueryMeasurement> {
   const startedAt = performance.now();
   const response = await client.archives.search.$post({ json: input });
-  const elapsedMilliseconds = performance.now() - startedAt;
   if (response.status === 422) {
     const error = archiveErrorSchema.parse(await response.json());
     return {
       name,
-      elapsedMilliseconds,
+      elapsedMilliseconds: performance.now() - startedAt,
       status: response.status,
       errorCode: error.error.code,
     };
   }
   if (response.status !== 200) {
-    throw new Error(name + " 查询失败：" + (await response.text()));
+    throw new Error(name + " search failed: " + (await response.text()));
   }
   const page = archiveSearchPageSchema.parse(await response.json());
   return {
     name,
-    elapsedMilliseconds,
+    elapsedMilliseconds: performance.now() - startedAt,
     status: response.status,
     resultCount: page.results.length,
   };
@@ -520,29 +501,9 @@ async function measureSearch(
 function assertSearchOutcome(
   measurement: QueryMeasurement,
   expectedResultCount: number,
-  allowBudgetExceeded: boolean,
 ): void {
-  if (allowBudgetExceeded && measurement.status === 422) {
-    assert.equal(measurement.errorCode, "query_budget_exceeded");
-    return;
-  }
   assert.equal(measurement.status, 200);
   assert.equal(measurement.resultCount, expectedResultCount);
-}
-
-function itemKeyFilter(ordinal: number) {
-  return {
-    type: "and" as const,
-    conditions: [
-      capacityNamespaceFilter(),
-      {
-        type: "field" as const,
-        field: "sourceKey.key" as const,
-        operator: "eq" as const,
-        value: sourceKeyFor(ordinal).key,
-      },
-    ],
-  };
 }
 
 function expectedChineseMatches(itemCount: number): number {
@@ -556,215 +517,31 @@ function expectedChineseMatches(itemCount: number): number {
 async function runSearchMatrix(
   client: ArchiveClient,
   shape: CapacityShape,
-  allowBudgetExceeded: boolean,
 ): Promise<readonly QueryMeasurement[]> {
   const measurements: QueryMeasurement[] = [];
-  const budgetMs = 10_000;
-  const limit = 10;
   const chinese = await measureSearch(client, "中文短串", {
-    scope: { kind: "current", binId },
-    text: { kind: "literal", value: "容量命中" },
-    where: capacityNamespaceFilter(),
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit,
-    budgetMs,
+    bins: [binId],
+    text: { in: "body", groups: [["容量命中"]] },
+    limit: 10,
   });
-  assertSearchOutcome(
-    chinese,
-    expectedChineseMatches(shape.itemCount),
-    allowBudgetExceeded,
-  );
+  assertSearchOutcome(chinese, expectedChineseMatches(shape.itemCount));
   measurements.push(chinese);
 
-  const broadRegexInput: ArchiveSearchRequest = {
-    scope: { kind: "current", binId },
-    text: { kind: "regex", pattern: ".*" },
-    where: capacityNamespaceFilter(),
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit,
-    budgetMs,
-  };
-  const broadRegex = await measureSearch(client, "宽正则", broadRegexInput);
-  assertSearchOutcome(broadRegex, limit, allowBudgetExceeded);
-  measurements.push(broadRegex);
-
-  const jsonRange = await measureSearch(client, "JSON 数值范围与排序", {
-    scope: { kind: "current", binId },
-    where: {
-      type: "and",
-      conditions: [
-        capacityNamespaceFilter(),
-        {
-          type: "json",
-          field: "properties",
-          path: ["capacityOrdinal"],
-          valueType: "number",
-          operator: "between",
-          lower: Math.floor(shape.itemCount / 4),
-          upper: Math.floor((shape.itemCount * 3) / 4),
-        },
-      ],
-    },
-    select: ["sourceKey"],
-    orderBy: [
-      {
-        field: "properties",
-        path: ["capacityOrdinal"],
-        valueType: "number",
-        direction: "desc",
-      },
-    ],
-    limit,
-    budgetMs,
-  });
-  assertSearchOutcome(jsonRange, limit, allowBudgetExceeded);
-  measurements.push(jsonRange);
-
-  const relationCount = await measureSearch(client, "关系计数", {
-    scope: { kind: "current", binId },
-    where: {
-      type: "and",
-      conditions: [
-        itemKeyFilter(0),
-        {
-          type: "relation",
-          direction: "outgoing",
-          name: "capacity-next",
-          operator: "count",
-          count: { operator: "eq", value: 2 },
-        },
-      ],
-    },
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit,
-    budgetMs,
-  });
-  assertSearchOutcome(relationCount, 1, allowBudgetExceeded);
-  measurements.push(relationCount);
-
-  const finitePath = await measureSearch(client, "有限关系路径", {
-    scope: { kind: "current", binId },
-    where: {
-      type: "and",
-      conditions: [
-        itemKeyFilter(0),
-        {
-          type: "path",
-          steps: [
-            { direction: "outgoing", name: "capacity-next" },
-            { direction: "outgoing", name: "capacity-next" },
-          ],
-          operator: "exists",
-        },
-      ],
-    },
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
-    limit,
-    budgetMs,
-  });
-  assertSearchOutcome(finitePath, 1, allowBudgetExceeded);
-  measurements.push(finitePath);
-
-  const overBudget = await measureSearch(client, "超预算显式失败", {
-    ...broadRegexInput,
-    budgetMs: 1,
-  });
-  assert.equal(overBudget.status, 422);
-  assert.equal(overBudget.errorCode, "query_budget_exceeded");
-  measurements.push(overBudget);
-  return measurements;
-}
-
-async function measureHistoricalAggregation(
-  client: ArchiveClient,
-  manifest: CapacityManifest,
-  shape: CapacityShape,
-  allowBudgetExceeded: boolean,
-): Promise<QueryMeasurement> {
-  const input: ArchiveAggregationRequest = {
-    scope: {
-      kind: "observations",
-      binId,
-      asOf: manifest.historicalAsOf,
-    },
-    where: capacityNamespaceFilter(),
-    unit: "observation",
-    groupBy: [
-      {
-        key: "week",
-        type: "timeBucket",
-        field: "observedAt",
-        grain: "week",
-        timeZone: "UTC",
-      },
-    ],
-    metrics: [
-      { key: "observations", op: "count" },
-      {
-        key: "distinctItems",
-        op: "distinct",
-        value: { type: "field", field: "itemId" },
-      },
-    ],
-    orderBy: [{ key: "week", direction: "asc" }],
+  const lastItem = await measureSearch(client, "末条目正文查询", {
+    bins: [binId],
+    text: { in: "body", groups: [[sourceKeyFor(shape.itemCount - 1).key]] },
     limit: 10,
-    budgetMs: 10_000,
-  };
-  const startedAt = performance.now();
-  const response = await client.archives.aggregate.$post({
-    json: archiveAggregationInputSchema.parse(input),
   });
-  const elapsedMilliseconds = performance.now() - startedAt;
-  if (response.status === 422) {
-    const error = archiveErrorSchema.parse(await response.json());
-    const measurement: QueryMeasurement = {
-      name: "历史观察周聚合",
-      elapsedMilliseconds,
-      status: response.status,
-      errorCode: error.error.code,
-    };
-    if (allowBudgetExceeded) {
-      assert.equal(measurement.errorCode, "query_budget_exceeded");
-      return measurement;
-    }
-    assert.fail("历史观察聚合未在预算内完成：" + JSON.stringify(measurement));
-  }
-  assert.equal(response.status, 200, await response.clone().text());
-  const result = archiveAggregationResultSchema.parse(await response.json());
-  assert.equal(result.unit, "observation");
-  assert.equal(result.scope.kind, "observations");
-  assert.equal(result.snapshot.mode, "asOf");
-  assert.equal(result.snapshot.asOf, manifest.historicalAsOf);
-  assert.equal(result.groups.length, 2);
-  const aggregateGroups = result.groups.map((group) => {
-    const timeBucket = group.keys.find(({ key }) => key === "week")?.result;
-    assert.ok(timeBucket?.status === "bucket");
-    const observations = group.metrics.find(
-      ({ key }) => key === "observations",
-    )?.value;
-    const distinctItems = group.metrics.find(
-      ({ key }) => key === "distinctItems",
-    )?.value;
-    assert.equal(observations, String(shape.itemCount));
-    assert.equal(distinctItems, String(shape.itemCount));
-    return {
-      start: timeBucket.start,
-      end: timeBucket.end,
-      observations,
-      distinctItems,
-    };
+  assertSearchOutcome(lastItem, 1);
+  measurements.push(lastItem);
+
+  const enumeration = await measureSearch(client, "零条件枚举", {
+    bins: [binId],
+    limit: 10,
   });
-  return {
-    name: "历史观察周聚合",
-    elapsedMilliseconds,
-    status: response.status,
-    resultCount: result.groups.length,
-    aggregateGroups,
-  };
+  assertSearchOutcome(enumeration, 10);
+  measurements.push(enumeration);
+  return measurements;
 }
 
 async function verifyRetainedMediaReferences(
@@ -886,12 +663,9 @@ async function verifyCascadeAndSharedResources(
     };
   }
   const leafSearch = await measureSearch(client, "级联删除后查询", {
-    scope: { kind: "current", binId },
-    where: itemKeyFilter(shape.itemCount - 1),
-    select: ["sourceKey"],
-    orderBy: [{ field: "sourceKey.key", direction: "asc" }],
+    bins: [binId],
+    text: { in: "body", groups: [[sourceKeyFor(shape.itemCount - 1).key]] },
     limit: 10,
-    budgetMs: 10_000,
   });
   assert.equal(leafSearch.status, 200);
   assert.equal(leafSearch.resultCount, 0);
@@ -991,17 +765,7 @@ export async function runArchiveCapacityE2E(
   }
 
   if (phase === "all" || phase === "verify") {
-    measurements.push(
-      ...(await runSearchMatrix(client, shape, profile === "full")),
-    );
-    measurements.push(
-      await measureHistoricalAggregation(
-        client,
-        manifest,
-        shape,
-        profile === "full",
-      ),
-    );
+    measurements.push(...(await runSearchMatrix(client, shape)));
   }
   if (phase === "all" || phase === "delete") {
     deletionResult = await verifyCascadeAndSharedResources(
