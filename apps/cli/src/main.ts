@@ -46,6 +46,7 @@ import {
   manualRunListQuerySchema,
   manualRunSchema,
   type ManualRun,
+  type SourceTime,
   postgresTextSchema,
   scheduleCreateInputSchema,
   scheduleDeleteResultSchema,
@@ -1077,6 +1078,14 @@ function createCliContract(identity: CliCommandIdentity) {
   const command = (id: string) => define.command(id);
   const outputText = (heading: string, payload: unknown) =>
     text.lines([heading, ...JSON.stringify(payload, null, 2).split("\n")]);
+  const sourceTimeText = (sourceTime: SourceTime | null) =>
+    sourceTime === null
+      ? "null"
+      : `${sourceTime.value} (precision=${sourceTime.precision}${
+          sourceTime.timeZone === undefined
+            ? ""
+            : `; timeZone=${sourceTime.timeZone}`
+        })`;
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
   ) =>
@@ -1089,8 +1098,30 @@ function createCliContract(identity: CliCommandIdentity) {
             `- ${result.title ?? result.sourceKey.key}`,
             `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
             `  Observed: ${result.observedAt}`,
+            `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+            `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
+            ...(result.timeStatus === undefined
+              ? []
+              : [`  Time review: ${result.timeStatus}`]),
             `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+            ...result.matches.flatMap(({ binId, timeMatch }) =>
+              timeMatch === undefined
+                ? []
+                : [
+                    `  Time match ${binId}: ${timeMatch.status}${
+                      timeMatch.status === "undetermined"
+                        ? ` (${timeMatch.reason})`
+                        : ""
+                    }`,
+                  ],
+            ),
           ])),
+      ...(page.timeSummary === undefined
+        ? []
+        : [
+            `Certain items: ${page.timeSummary.certainItems}`,
+            `Undetermined items: ${page.timeSummary.undeterminedItems}`,
+          ]),
       ...(page.hasMore
         ? [
             `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
@@ -1453,7 +1484,7 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          'Search archived items with literal keyword groups and declared extension filters. Discover fields with binny bin extension-fields <bin-id>; extension filters require an explicit bin scope. Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"category":{"op":"eq","value":"post"},"tags":{"op":"hasAny","values":["release","model"]}}},"limit":20}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
+          'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. Discover extension fields with binny bin extension-fields <bin-id>; extension filters require an explicit bin scope. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
         helpSupplement: text.lines([
           "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
           "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
@@ -1465,7 +1496,7 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--query",
             description:
-              "Fixed search request JSON. Reuse snapshot.asOf for a consistent cut and use nextCursor as cursor when hasMore is true.",
+              "Fixed search request JSON. Time window dates are interpreted as local midnights in the required time zone. Reuse snapshot.asOf for a consistent cut and use nextCursor as cursor when hasMore is true.",
           },
         },
         input: cliArchiveSearchInputSchema,

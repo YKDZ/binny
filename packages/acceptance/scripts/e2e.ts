@@ -753,6 +753,46 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     ),
   );
 
+  const timeWindowQuery = {
+    bins: [binId],
+    timeWindow: {
+      field: "observedAt",
+      from: "2000-01-01",
+      until: "2100-01-01",
+      timeZone: "UTC",
+    },
+    limit: 5,
+  };
+  const timeWindowPage = cliData<{
+    readonly timeSummary: {
+      readonly certainItems: string;
+      readonly undeterminedItems: string;
+    };
+    readonly results: readonly {
+      readonly timeStatus?: string;
+      readonly matches: readonly {
+        readonly timeMatch?: { readonly status: string };
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(timeWindowQuery),
+    ]),
+    "found",
+  );
+  assert.ok(Number(timeWindowPage.timeSummary.certainItems) > 0);
+  assert.equal(timeWindowPage.timeSummary.undeterminedItems, "0");
+  assert.ok(
+    timeWindowPage.results.every(
+      ({ timeStatus, matches }) =>
+        timeStatus === "certain" &&
+        matches.every(({ timeMatch }) => timeMatch?.status === "certain"),
+    ),
+  );
+
   const firstPage = cliData<{
     readonly snapshot: { readonly asOf: string };
     readonly results: readonly { readonly itemId: string }[];
@@ -832,6 +872,98 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     /More results are available\. Repeat with query\.cursor set to [A-Za-z0-9_-]+\./u,
   );
   assert.doesNotMatch(readable.stdout, /"results"\s*:/u);
+
+  const timeWindowReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(timeWindowQuery),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(timeWindowReadable.code, 0, timeWindowReadable.stderr);
+  assert.match(timeWindowReadable.stdout, /Certain items: [1-9]\d*/u);
+  assert.match(timeWindowReadable.stdout, /Undetermined items: 0/u);
+  assert.match(timeWindowReadable.stdout, /Time review: certain/u);
+
+  const sourceTimeQuery = {
+    bins: [binId],
+    text: { in: "title", groups: [["Beijing window"]] },
+    timeWindow: {
+      field: "sourcePublishedAt",
+      from: "2026-11-08",
+      until: "2026-11-09",
+      timeZone: "Asia/Shanghai",
+    },
+    limit: 20,
+  };
+  const certainSourceTimeReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(sourceTimeQuery),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(
+    certainSourceTimeReadable.code,
+    0,
+    certainSourceTimeReadable.stderr,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Source published: 2026-11-08T20:00:00\+08:00 \(precision=instant; timeZone=Asia\/Shanghai\)/u,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Source published: 2026-11-08 \(precision=day; timeZone=Asia\/Shanghai\)/u,
+  );
+  assert.match(
+    certainSourceTimeReadable.stdout,
+    /Time match binny-runs-one: certain/u,
+  );
+
+  const undeterminedSourceTimeReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify({
+      ...sourceTimeQuery,
+      timeWindow: { ...sourceTimeQuery.timeWindow, review: "undetermined" },
+    }),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(
+    undeterminedSourceTimeReadable.code,
+    0,
+    undeterminedSourceTimeReadable.stderr,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: null/u,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: 2026-11-08 \(precision=day\)/u,
+  );
+  assert.match(
+    undeterminedSourceTimeReadable.stdout,
+    /Source published: 2026-11 \(precision=month; timeZone=Asia\/Shanghai\)/u,
+  );
+  for (const reason of [
+    "missingTime",
+    "missingTimeZone",
+    "precisionOverlapsBoundary",
+  ]) {
+    assert.match(
+      undeterminedSourceTimeReadable.stdout,
+      new RegExp(
+        `Time match binny-runs-one: undetermined \\(${reason}\\)`,
+        "u",
+      ),
+    );
+  }
 
   for (const invalidQuery of [
     { unsupportedFilter: true },
