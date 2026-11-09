@@ -14,10 +14,20 @@ import type {
 import {
   createSourceAdapterContext,
   isSourceAdapterActionError,
+  sourceAdapterManifest,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
 
+import { parseCardDate } from "../src/discovery.ts";
 import { sourceAdapter } from "../src/index.ts";
+
+void test("Anthropic card date parsing preserves ISO instants and offsets", () => {
+  assert.equal(
+    parseCardDate("2026-11-08T12:00:00+08:00"),
+    "2026-11-08T12:00:00+08:00",
+  );
+  assert.equal(parseCardDate("2026-02-30"), undefined);
+});
 
 void test("anthropic adapter exports valid manifest", () => {
   assert.equal(sourceAdapter.id, "anthropic");
@@ -36,6 +46,8 @@ void test("anthropic adapter exports valid manifest", () => {
 });
 
 type AnthropicConfig = z.output<typeof sourceAdapter.configSchema>;
+type AnthropicExtensions = z.output<typeof sourceAdapter.extensionsSchema>;
+type AnthropicSubmission = ArchiveSubmissionInput<AnthropicExtensions>;
 
 void test("Anthropic actions: discovery, cross-section deduplication, layout extraction, and incremental sync", async () => {
   let storedPersistentState: IncrementalSyncState | undefined;
@@ -54,7 +66,7 @@ void test("Anthropic actions: discovery, cross-section deduplication, layout ext
   let detailFailEmpty = false;
 
   const detailRequests: string[] = [];
-  const submissions: ArchiveSubmissionInput[] = [];
+  const submissions: AnthropicSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let commitSeq = 0;
   const runId = randomUUID();
@@ -260,15 +272,15 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
 <head>
   <title>Cross Cutting Agent Research \\ Anthropic</title>
   <meta property="og:title" content="Cross Cutting Agent Research" />
-  <meta property="article:published_time" content="2026-10-15T00:00:00.000Z" />
-  <meta property="article:modified_time" content="2026-10-16T10:00:00.000Z" />
+  <meta property="article:published_time" content="2026-10-15T08:00:00-07:00" />
+  <meta property="article:modified_time" content="2026-10-16T03:00:00-07:00" />
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
     "@type": "Article",
     "headline": "Cross Cutting Agent Research",
-    "datePublished": "2026-10-15T00:00:00.000Z",
-    "dateModified": "2026-10-16T10:00:00.000Z"
+    "datePublished": "2026-10-15T08:00:00-07:00",
+    "dateModified": "2026-10-16T03:00:00-07:00"
   }
   </script>
 </head>
@@ -351,7 +363,7 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
 
   const mockApiClient = {
     archives: {
-      $post: async ({ json }: { json: ArchiveSubmissionInput }) => {
+      $post: async ({ json }: { json: AnthropicSubmission }) => {
         submissions.push(json);
         commitSeq += 1;
         return {
@@ -398,24 +410,41 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     },
   } as unknown as SourceAdapterApiClient;
 
-  const context = createSourceAdapterContext<AnthropicConfig>(mockApiClient, {
-    binId: "anthropic-test-bin",
-    identityId: "anthropic-test-identity",
-    runId,
-    referenceTime: "2026-10-28T00:00:00.000Z",
-    sourceAdapterVersion: sourceAdapter.version,
-    report: async () => {},
-    config: {
-      sections: [
-        { id: "news", url: `${origin}/news` },
-        { id: "research", url: `${origin}/research` },
-        { id: "engineering", url: `${origin}/engineering` },
-      ],
-      sitemapUrl: `${origin}/sitemap.xml`,
+  const context = createSourceAdapterContext<
+    AnthropicConfig,
+    typeof sourceAdapter.extensionsSchema
+  >(
+    mockApiClient,
+    {
+      binId: "anthropic-test-bin",
+      identityId: "anthropic-test-identity",
+      runId,
+      referenceTime: "2026-10-28T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      report: async () => {},
+      config: {
+        sections: [
+          { id: "news", url: `${origin}/news` },
+          { id: "research", url: `${origin}/research` },
+          { id: "engineering", url: `${origin}/engineering` },
+        ],
+        sitemapUrl: `${origin}/sitemap.xml`,
+      },
+      signal: new AbortController().signal,
+      persistentState,
     },
-    signal: new AbortController().signal,
-    persistentState,
-  });
+    sourceAdapter.extensionsSchema,
+  );
+
+  const manifest = sourceAdapterManifest(sourceAdapter);
+  assert.equal(manifest.extensionsSchema.additionalProperties, false);
+  const extensionFields = manifest.extensionsSchema.properties as Record<
+    string,
+    { readonly description?: string }
+  >;
+  for (const field of Object.values(extensionFields)) {
+    assert.ok(field.description);
+  }
 
   const { check, sync, collect } = sourceAdapter.actions;
 
@@ -451,9 +480,9 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
       "section:engineering",
     ]);
     assert.deepEqual(initSyncResult.initializedScopes, [
-      "section:news",
-      "section:research",
-      "section:engineering",
+      "news",
+      "research",
+      "engineering",
     ]);
 
     // Zero detail page requests and zero archive submissions on initial sync
@@ -512,9 +541,16 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     if (!item) throw new Error("Expected item");
     assert.equal(item.sourceKey.namespace, "anthropic:article");
     assert.equal(item.sourceKey.key, "/news/new-frontier-announcement");
-    // Verify sitemapLastMod is recorded as modification signal, not as publishedAt
-    assert.equal(item.metadata?.sitemapLastMod, "2026-11-05T15:00:00Z");
-    assert.equal(item.metadata?.publishedAt, "2026-10-20T00:00:00.000Z");
+    assert.deepEqual(item.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-20T00:00:00.000Z",
+    });
+    assert.equal(item.sourceModifiedAt, null);
+    assert.equal(
+      item.extensions.sitemapLastMod,
+      "2026-11-05T15:00:00Z",
+      "Sitemap lastmod remains source discovery evidence rather than a verified article edit time.",
+    );
     assert.equal(
       storedPersistentState.scopes["news"]?.entries[
         "/news/new-frontier-announcement"
@@ -549,10 +585,13 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     assert.equal(opusItem.sourceKey.namespace, "anthropic:article");
     assert.equal(opusItem.sourceKey.key, "/claude-opus-5-5");
 
-    // Model release date precision preservation: day precision, no fabricated sourceModifiedAt
-    assert.equal(opusItem.sourceModifiedAt, undefined);
-    assert.equal(opusItem.metadata?.publishedDate, "2026-09-22");
-    assert.equal(opusItem.metadata?.datePrecision, "day");
+    assert.deepEqual(opusItem.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-09-22",
+    });
+    assert.equal(opusItem.sourceModifiedAt, null);
+    assert.deepEqual(opusItem.extensions.sections, []);
+    assert.equal(Object.hasOwn(opusItem.extensions, "publishedDate"), false);
 
     // Content extraction: benchmark table and code block kept; testimonial cards stripped
     const opusMarkdown = opusItem.body?.markdown ?? "";
@@ -574,8 +613,14 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     if (!agentItem) throw new Error("Expected agentItem");
 
     // Timestamp precision on standard article
-    assert.equal(agentItem.metadata?.publishedAt, "2026-10-15T00:00:00.000Z");
-    assert.equal(agentItem.sourceModifiedAt, "2026-10-16T10:00:00.000Z");
+    assert.deepEqual(agentItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-10-15T08:00:00-07:00",
+    });
+    assert.deepEqual(agentItem.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-10-16T03:00:00-07:00",
+    });
 
     // Standard article content: breadcrumb, share buttons, author social stripped
     const agentMarkdown = agentItem.body?.markdown ?? "";
@@ -610,7 +655,7 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     );
     assert.equal(sharedFetches.length, 1);
 
-    // Verified metadata merged sections array
+    // Verified extensions retain the article's section membership.
     const sharedSubmission = submissions
       .slice(beforeMultiSectionSubmissions)
       .find(
@@ -620,11 +665,10 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
     assert.ok(sharedSubmission !== undefined);
     const sharedItem = sharedSubmission?.items[0];
     if (!sharedItem) throw new Error("Expected sharedItem");
-    const sharedSections = sharedItem.metadata?.sections as
-      | string[]
-      | undefined;
-    assert.ok(Array.isArray(sharedSections));
-    assert.deepEqual(sharedSections, ["engineering", "research"]);
+    assert.deepEqual(sharedItem.extensions.sections, [
+      "engineering",
+      "research",
+    ]);
 
     // 8. Detail fetch failure without summary fallback
     detailFail404 = true;

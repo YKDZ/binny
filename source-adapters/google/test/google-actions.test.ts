@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createSourceAdapterContext,
   isSourceAdapterActionError,
+  sourceAdapterManifest,
   type ArchiveResourceMetadata,
   type IncrementalSyncState,
   type SourceAdapterApiClient,
@@ -17,9 +18,16 @@ import { z } from "zod";
 import { sourceAdapter } from "../src/index.ts";
 
 type GoogleConfig = z.output<typeof sourceAdapter.configSchema>;
+type GoogleExtensions = z.output<typeof sourceAdapter.extensionsSchema>;
+type GoogleContext = SourceAdapterContext<
+  GoogleConfig,
+  never,
+  GoogleExtensions
+>;
+type GoogleSubmission = Parameters<GoogleContext["archive"]["submit"]>[0];
 
 function createMockClient(
-  submissions: Parameters<SourceAdapterContext["archive"]["submit"]>[0][],
+  submissions: GoogleSubmission[],
   resources: ArchiveResourceMetadata[],
 ): SourceAdapterApiClient {
   return {
@@ -75,9 +83,17 @@ function createMockClient(
 }
 
 await test("Google AI and DeepMind RSS discovery + dedicated HTML body extraction with no body.html", async () => {
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+  const manifest = sourceAdapterManifest(sourceAdapter);
+  assert.equal(manifest.extensionsSchema.additionalProperties, false);
+  const extensionFields = manifest.extensionsSchema.properties as Record<
+    string,
+    { readonly description?: string }
+  >;
+  for (const field of Object.values(extensionFields)) {
+    assert.ok(field.description);
+  }
+
+  const submissions: GoogleSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let persistentStateData: IncrementalSyncState | undefined;
 
@@ -130,7 +146,7 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
               <title>DeepMind Breakthrough</title>
               <link>${origin}/deepmind/article-1</link>
               <description><![CDATA[<p>DeepMind summary only</p>]]></description>
-              <pubDate>Tue, 03 Nov 2026 17:01:49 GMT</pubDate>
+              <pubDate>Tue, 03 Nov 2026 12:00:00 +0530</pubDate>
               <author>DeepMind Team</author>
               <category>Cheminformatics</category>
             </item>
@@ -202,8 +218,8 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
                 "@context": "https://schema.org",
                 "@type": "BlogPosting",
                 "headline": "DeepMind Breakthrough",
-                "datePublished": "2026-11-03T15:00:00Z",
-                "dateModified": "2026-11-03T16:00:00Z",
+                "datePublished": "2026-11-03T15:00:00+05:30",
+                "dateModified": "2026-11-03T16:00:00+05:30",
                 "author": [{ "@type": "Person", "name": "Demis Hassabis" }]
               }
             </script>
@@ -257,29 +273,37 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
   const client = createMockClient(submissions, resources);
   const runId = randomUUID();
 
-  const context = createSourceAdapterContext<GoogleConfig, never>(client, {
-    binId: "google-test-bin",
-    identityId: "google-test-identity",
-    runId,
-    referenceTime: "2026-11-07T00:00:00.000Z",
-    sourceAdapterVersion: sourceAdapter.version,
-    config: {
-      sources: [
-        {
-          id: "google-ai",
-          url: `${origin}/google-ai/rss`,
-          title: "Google AI Blog",
-        },
-        {
-          id: "deepmind",
-          url: `${origin}/deepmind/rss`,
-          title: "Google DeepMind Blog",
-        },
-      ],
+  const context = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId,
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [
+          {
+            id: "google-ai",
+            url: `${origin}/google-ai/rss`,
+            title: "Google AI Blog",
+          },
+          {
+            id: "deepmind",
+            url: `${origin}/deepmind/rss`,
+            title: "Google DeepMind Blog",
+          },
+        ],
+      },
+      signal: new AbortController().signal,
+      persistentState,
     },
-    signal: new AbortController().signal,
-    persistentState,
-  });
+    sourceAdapter.extensionsSchema,
+  );
 
   try {
     // 1. Check action validates feeds and sample HTML extraction
@@ -305,6 +329,11 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
       key: "urn:google:ai:1",
     });
     assert.equal(googleAiItem.sourceRef, `${origin}/google-ai/article-1`);
+    assert.deepEqual(googleAiItem.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-11-02",
+    });
+    assert.equal(googleAiItem.sourceModifiedAt, null);
     assert.ok(googleAiItem.body);
     assert.equal(
       "html" in (googleAiItem.body as any),
@@ -355,6 +384,14 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
     assert.ok(deepmindMd.includes("def compute(): pass"));
     assert.ok(deepmindMd.includes("| Benchmark | Result |"));
     assert.ok(deepmindMd.includes("![DeepMind Plot](binny://resource/"));
+    assert.deepEqual(deepmindItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-11-03T15:00:00+05:30",
+    });
+    assert.deepEqual(deepmindItem.sourceModifiedAt, {
+      precision: "instant",
+      value: "2026-11-03T16:00:00+05:30",
+    });
 
     // Noise stripping verification for DeepMind
     assert.equal(deepmindMd.includes("DeepMind Home"), false);
@@ -367,10 +404,8 @@ await test("Google AI and DeepMind RSS discovery + dedicated HTML body extractio
   }
 });
 
-await test("Preserves feed date vs article page date differences without overwriting or fabricating timestamps", async () => {
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+await test("Preserves page publication precision and actual modification facts", async () => {
+  const submissions: GoogleSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let persistentStateData: IncrementalSyncState | undefined;
 
@@ -428,59 +463,60 @@ await test("Preserves feed date vs article page date differences without overwri
   const origin = `http://127.0.0.1:${address.port}`;
 
   const client = createMockClient(submissions, resources);
-  const context = createSourceAdapterContext<GoogleConfig, never>(client, {
-    binId: "google-test-bin",
-    identityId: "google-test-identity",
-    runId: randomUUID(),
-    referenceTime: "2026-11-07T00:00:00.000Z",
-    sourceAdapterVersion: sourceAdapter.version,
-    config: {
-      sources: [
-        { id: "google-ai", url: `${origin}/feed`, title: "Google AI Blog" },
-      ],
-    },
-    signal: new AbortController().signal,
-    persistentState: {
-      async load() {
-        return persistentStateData;
+  const context = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [
+          { id: "google-ai", url: `${origin}/feed`, title: "Google AI Blog" },
+        ],
       },
-      async save(state: unknown) {
-        persistentStateData = state as IncrementalSyncState;
+      signal: new AbortController().signal,
+      persistentState: {
+        async load() {
+          return persistentStateData;
+        },
+        async save(state: unknown) {
+          persistentStateData = state as IncrementalSyncState;
+        },
       },
     },
-  });
+    sourceAdapter.extensionsSchema,
+  );
 
   try {
     await sourceAdapter.actions.collect.execute(context, {});
     assert.equal(submissions.length, 1);
     const item = submissions[0]!.items[0]!;
 
-    const metadata = item.metadata as Record<string, unknown>;
-    assert.equal(metadata.feedPublishedAt, "2026-11-02T17:45:00.000Z");
-    assert.equal(
-      metadata.articlePublishedAt,
-      "2026-11-02",
-      "Must preserve day precision without fabricating timestamp",
-    );
-    assert.equal(metadata.sourceId, "google-ai");
-    assert.equal(metadata.region, "international");
-    assert.equal(metadata.language, "en");
-
-    // item.sourceModifiedAt must be undefined because page date only had day precision
-    assert.equal(
-      item.sourceModifiedAt,
-      undefined,
-      "Must not fabricate sourceModifiedAt when page has day precision",
-    );
+    assert.deepEqual(item.sourcePublishedAt, {
+      precision: "day",
+      value: "2026-11-02",
+    });
+    assert.equal(item.sourceModifiedAt, null);
+    assert.deepEqual(item.extensions, {
+      sourceId: "google-ai",
+      region: "international",
+      language: "en",
+      authors: [],
+      categories: [],
+    });
   } finally {
     server.close();
   }
 });
 
 await test("Incremental sync: initial baseline establishes state without archiving, subsequent skip, and archiving new/modified items", async () => {
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+  const submissions: GoogleSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let persistentStateData: IncrementalSyncState | undefined;
   let feedVersion = 1;
@@ -519,7 +555,7 @@ await test("Incremental sync: initial baseline establishes state without archivi
             <guid>urn:google:sync:2</guid>
             <title>Sync New Article 2</title>
             <link>${origin}/sync/article-2</link>
-            <pubDate>Tue, 03 Nov 2026 12:00:00 GMT</pubDate>
+          <pubDate>Tue, 03 Nov 2026 12:00:00 +0530</pubDate>
           </item>
         `);
       }
@@ -560,27 +596,39 @@ await test("Incremental sync: initial baseline establishes state without archivi
   const origin = `http://127.0.0.1:${address.port}`;
 
   const client = createMockClient(submissions, resources);
-  const context = createSourceAdapterContext<GoogleConfig, never>(client, {
-    binId: "google-test-bin",
-    identityId: "google-test-identity",
-    runId: randomUUID(),
-    referenceTime: "2026-11-07T00:00:00.000Z",
-    sourceAdapterVersion: sourceAdapter.version,
-    config: {
-      sources: [
-        { id: "google-ai", url: `${origin}/sync/rss`, title: "Google AI Blog" },
-      ],
-    },
-    signal: new AbortController().signal,
-    persistentState: {
-      async load() {
-        return persistentStateData;
+  const context = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [
+          {
+            id: "google-ai",
+            url: `${origin}/sync/rss`,
+            title: "Google AI Blog",
+          },
+        ],
       },
-      async save(state: unknown) {
-        persistentStateData = state as IncrementalSyncState;
+      signal: new AbortController().signal,
+      persistentState: {
+        async load() {
+          return persistentStateData;
+        },
+        async save(state: unknown) {
+          persistentStateData = state as IncrementalSyncState;
+        },
       },
     },
-  });
+    sourceAdapter.extensionsSchema,
+  );
 
   try {
     // Phase 1: Initial sync establishes baseline only (0 article fetches, 0 submissions)
@@ -642,15 +690,20 @@ await test("Incremental sync: initial baseline establishes state without archivi
     const newEntry =
       persistentStateData.scopes["google-ai"]?.entries["urn:google:sync:2"];
     assert.equal(newEntry?.archivedCompleteness, "complete");
+    const newItem = submissions[0]?.items[0];
+    assert.ok(newItem);
+    assert.deepEqual(newItem.sourcePublishedAt, {
+      precision: "instant",
+      value: "2026-11-03T12:00:00+05:30",
+    });
+    assert.equal(newItem.sourceModifiedAt, null);
   } finally {
     server.close();
   }
 });
 
 await test("Article full-text failure fails scope without falling back to summary, and partial media failure records completeness partial", async () => {
-  const submissions: Parameters<
-    SourceAdapterContext["archive"]["submit"]
-  >[0][] = [];
+  const submissions: GoogleSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let persistentStateData: IncrementalSyncState | undefined;
 
@@ -732,27 +785,39 @@ await test("Article full-text failure fails scope without falling back to summar
   const origin = `http://127.0.0.1:${address.port}`;
 
   const client = createMockClient(submissions, resources);
-  const context = createSourceAdapterContext<GoogleConfig, never>(client, {
-    binId: "google-test-bin",
-    identityId: "google-test-identity",
-    runId: randomUUID(),
-    referenceTime: "2026-11-07T00:00:00.000Z",
-    sourceAdapterVersion: sourceAdapter.version,
-    config: {
-      sources: [
-        { id: "google-ai", url: `${origin}/fail/rss`, title: "Google AI Blog" },
-      ],
-    },
-    signal: new AbortController().signal,
-    persistentState: {
-      async load() {
-        return persistentStateData;
+  const context = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [
+          {
+            id: "google-ai",
+            url: `${origin}/fail/rss`,
+            title: "Google AI Blog",
+          },
+        ],
       },
-      async save(state: unknown) {
-        persistentStateData = state as IncrementalSyncState;
+      signal: new AbortController().signal,
+      persistentState: {
+        async load() {
+          return persistentStateData;
+        },
+        async save(state: unknown) {
+          persistentStateData = state as IncrementalSyncState;
+        },
       },
     },
-  });
+    sourceAdapter.extensionsSchema,
+  );
 
   try {
     // 1. HTTP 500 fails the scope without archiving RSS summary
