@@ -77,11 +77,44 @@ export const sourceAdapterActionsRecordSchema = z.record(
   sourceAdapterActionSchema,
 );
 
-/** `bin actions` 可返回完整动作表或只含所选动作的子集。 */
+/** Compact action discovery returned before a caller selects one action. */
+export const sourceAdapterActionSummarySchema = z
+  .object({
+    description: postgresTextSchema.min(
+      1,
+      "Action description must not be empty.",
+    ),
+  })
+  .strict();
+
+/** `bin actions` lists action names and descriptions without loading schemas. */
+export const sourceAdapterActionListSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      actions: z.record(
+        sourceAdapterActionNameSchema,
+        sourceAdapterActionSummarySchema,
+      ),
+    })
+    .strict(),
+);
+
+/** `bin actions <bin> <action>` returns the selected action's full declaration. */
 export const sourceAdapterActionDiscoverySchema =
   withPostgresJsonSchemaProjection(
     z.object({ actions: sourceAdapterActionsRecordSchema }).strict(),
   );
+
+/** An explicit discovery response for the dynamic configuration contract. */
+export const binConfigSchemaDiscoverySchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      sourceAdapterId: sourceAdapterIdSchema,
+      sourceAdapterVersion: postgresTextSchema.min(1),
+      configSchema: jsonSchemaDocumentSchema,
+    })
+    .strict(),
+);
 
 const sourceAdapterManifestActionsSchema = sourceAdapterActionsRecordSchema.and(
   z.object({
@@ -542,6 +575,101 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
+const binExecutionStatusSchema = z.enum(["online", "offline", "incompatible"]);
+
+/** Stable, concise identity and runtime status for each entry in `bin list`. */
+export const binListItemSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      id: binIdSchema,
+      sourceAdapterId: sourceAdapterIdSchema,
+      status: binStatusSchema,
+      execution: z.object({ status: binExecutionStatusSchema }).strict(),
+    })
+    .strict(),
+);
+
+/** Empty lists retain the same explicit collection shape as populated lists. */
+export const binListSchema = withPostgresJsonSchemaProjection(
+  z.object({ bins: z.array(binListItemSchema).readonly() }).strict(),
+);
+
+const binExecutionSummarySchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("online"),
+      runtimeId: postgresTextSchema,
+      lastHeartbeatAt: z.iso.datetime(),
+      environment: runtimeEnvironmentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("offline"),
+      reason: z.enum([
+        "runtime_not_connected",
+        "heartbeat_expired",
+        "runtime_protocol_outdated",
+      ]),
+      runtimeId: postgresTextSchema.optional(),
+      lastHeartbeatAt: z.iso.datetime().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("incompatible"),
+      runtimeId: postgresTextSchema,
+      lastHeartbeatAt: z.iso.datetime(),
+      error: z.object({
+        code: z.enum([
+          "runtime_manifest_mismatch",
+          "runtime_configuration_incompatible",
+          "runtime_environment_incompatible",
+          "runtime_owner_mismatch",
+        ]),
+      }),
+    })
+    .strict(),
+]);
+
+const binSourceStateFreshnessSchema = z.discriminatedUnion("freshness", [
+  z.object({ freshness: z.literal("unknown") }).strict(),
+  z
+    .object({
+      freshness: z.literal("current"),
+      updatedAt: z.iso.datetime(),
+    })
+    .strict(),
+  z
+    .object({
+      freshness: z.literal("stale"),
+      updatedAt: z.iso.datetime(),
+    })
+    .strict(),
+]);
+
+/**
+ * Detailed bin configuration without adapter schemas or source-state payloads.
+ * Snapshot freshness describes the evidence age and does not assert collection
+ * coverage.
+ */
+export const binDetailsSchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      id: binIdSchema,
+      sourceAdapterId: sourceAdapterIdSchema,
+      identityId: identityIdSchema,
+      config: jsonObjectSchema,
+      browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
+      status: binStatusSchema,
+      execution: binExecutionSummarySchema,
+      sourceStateSnapshot: binSourceStateFreshnessSchema,
+      createdAt: z.iso.datetime(),
+      updatedAt: z.iso.datetime(),
+    })
+    .strict(),
+);
+
 export const binErrorSchema = z.object({
   error: z.object({
     code: z.enum([
@@ -570,6 +698,8 @@ export type JsonSchema = z.infer<typeof jsonSchemaDocumentSchema>;
 export type SourceAdapterManifest = z.infer<typeof sourceAdapterManifestSchema>;
 export type BinUpdateInput = z.infer<typeof binUpdateInputSchema>;
 export type BinConfiguration = z.infer<typeof binConfigurationSchema>;
+export type BinListItem = z.infer<typeof binListItemSchema>;
+export type BinDetails = z.infer<typeof binDetailsSchema>;
 export type RuntimeEnvironment = z.infer<typeof runtimeEnvironmentSchema>;
 export type RuntimeEnvironmentStored = z.infer<
   typeof runtimeEnvironmentStoredSchema

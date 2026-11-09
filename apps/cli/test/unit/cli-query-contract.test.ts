@@ -87,13 +87,23 @@ function fakeService(options: {
         output: { type: "object", properties: {} },
         report: { type: "object", properties: {} },
       };
+      if (actionName === null)
+        return Response.json({
+          actions: {
+            check: { description: "检查 feed 是否可用。" },
+            collect: { description: action.description },
+          },
+        });
       return Response.json({
-        actions:
-          actionName === null
-            ? { collect: action, discover: action }
-            : { [actionName]: action },
+        actions: { [actionName]: action },
       });
     }
+    if (url.pathname === "/bins/rss-main/config-schema")
+      return Response.json({
+        sourceAdapterId: "rss",
+        sourceAdapterVersion: "1.0.0",
+        configSchema: { type: "object", properties: {} },
+      });
     if (url.pathname === "/bins") return Response.json({ bins: [] });
     return new Response("Not found", { status: 404 });
   };
@@ -120,19 +130,40 @@ async function run(
 }
 
 void describe("查询服务发现", () => {
-  void it("CLI 信息命令读取公开服务元信息和查询契约", async () => {
+  void it("service info reads metadata without fetching the full query contract", async () => {
     const service = fakeService({});
     const result = await run(["service", "info"], service.fetch);
 
     assert.equal(result.exitCode, 0);
     assert.deepEqual(
       service.requests.map(({ method, path }) => [method, path]),
-      [
-        ["GET", "/meta"],
-        ["GET", "/meta/query"],
-      ],
+      [["GET", "/meta"]],
     );
     assert.match(result.output, /archive\.query-contract/u);
+    const wire = JSON.parse(result.output) as {
+      readonly data: {
+        readonly contracts: {
+          readonly archiveQuery: { readonly path: string };
+        };
+        readonly queryContract?: unknown;
+      };
+    };
+    assert.equal(wire.data.contracts.archiveQuery.path, "/meta/query");
+    assert.equal(Object.hasOwn(wire.data, "queryContract"), false);
+  });
+
+  void it("service info text lists capabilities and contract links", async () => {
+    const service = fakeService({});
+    const result = await run(
+      ["service", "info", "--output-format", "text"],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 0, result.output);
+    assert.match(result.output, /Product: Binny 1\.2\.3/u);
+    assert.match(result.output, /archive\.query-contract/u);
+    assert.match(result.output, /Archive query v1: \/meta\/query/u);
+    assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
   void it("产品版本不同但公开协议兼容时仍执行查询", async () => {
@@ -319,8 +350,36 @@ void describe("查询服务发现", () => {
     );
   });
 
-  void it("按 bin actions 可选动作读取声明且不会触发动作运行", async () => {
+  void it("lists compact action names before reading one declaration", async () => {
     const service = fakeService({});
+    const listed = await run(["bin", "actions", "rss-main"], service.fetch);
+
+    assert.equal(listed.exitCode, 0, listed.output);
+    const listedWire = JSON.parse(listed.output) as {
+      readonly data: {
+        readonly actions: Readonly<
+          Record<string, { readonly description: string }>
+        >;
+      };
+    };
+    assert.deepEqual(Object.keys(listedWire.data.actions), [
+      "check",
+      "collect",
+    ]);
+    assert.equal(
+      listedWire.data.actions.collect?.description,
+      "读取 feed 中的新内容。",
+    );
+    assert.equal("params" in listedWire.data.actions.collect!, false);
+
+    const listedText = await run(
+      ["bin", "actions", "rss-main", "--output-format", "text"],
+      service.fetch,
+    );
+    assert.equal(listedText.exitCode, 0, listedText.output);
+    assert.match(listedText.output, /- collect: 读取 feed 中的新内容。/u);
+    assert.doesNotMatch(listedText.output, /"kind"\s*:/u);
+
     const selected = await run(
       ["bin", "actions", "rss-main", "collect"],
       service.fetch,
@@ -351,6 +410,16 @@ void describe("查询服务发现", () => {
     assert.equal(Object.hasOwn(selectedWire.data, "execution"), false);
     assert.equal(Object.hasOwn(selectedWire.data, "environment"), false);
 
+    const selectedText = await run(
+      ["bin", "actions", "rss-main", "collect", "--output-format", "text"],
+      service.fetch,
+    );
+    assert.equal(selectedText.exitCode, 0, selectedText.output);
+    assert.match(selectedText.output, /Parameters:/u);
+    assert.match(selectedText.output, /Output:/u);
+    assert.match(selectedText.output, /Report:/u);
+    assert.doesNotMatch(selectedText.output, /"kind"\s*:/u);
+
     const missing = await run(
       ["bin", "actions", "rss-main", "missing"],
       service.fetch,
@@ -365,11 +434,53 @@ void describe("查询服务发现", () => {
       ]),
       [
         ["GET", "/meta", ""],
+        ["GET", "/bins/rss-main/actions", ""],
+        ["GET", "/meta", ""],
+        ["GET", "/bins/rss-main/actions", ""],
+        ["GET", "/meta", ""],
+        ["GET", "/bins/rss-main/actions", "?action=collect"],
+        ["GET", "/meta", ""],
         ["GET", "/bins/rss-main/actions", "?action=collect"],
         ["GET", "/meta", ""],
         ["GET", "/bins/rss-main/actions", "?action=missing"],
       ],
     );
+  });
+
+  void it("reads the full configuration schema through its explicit command", async () => {
+    const service = fakeService({});
+    const result = await run(
+      ["bin", "config-schema", "rss-main"],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 0, result.output);
+    const wire = JSON.parse(result.output) as {
+      readonly data: {
+        readonly sourceAdapterId: string;
+        readonly sourceAdapterVersion: string;
+        readonly configSchema: { readonly type?: string };
+      };
+    };
+    assert.equal(wire.data.sourceAdapterId, "rss");
+    assert.equal(wire.data.sourceAdapterVersion, "1.0.0");
+    assert.equal(wire.data.configSchema.type, "object");
+    assert.deepEqual(
+      service.requests.map(({ method, path }) => [method, path]),
+      [
+        ["GET", "/meta"],
+        ["GET", "/bins/rss-main/config-schema"],
+      ],
+    );
+
+    const textResult = await run(
+      ["bin", "config-schema", "rss-main", "--output-format", "text"],
+      service.fetch,
+    );
+    assert.equal(textResult.exitCode, 0, textResult.output);
+    assert.match(textResult.output, /Source adapter: rss@1\.0\.0/u);
+    assert.match(textResult.output, /Configuration schema:/u);
+    assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
   });
 
   void it("不兼容的归档查询契约会在查询前给出可读错误", async () => {

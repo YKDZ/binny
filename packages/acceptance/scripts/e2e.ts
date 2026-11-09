@@ -1057,6 +1057,25 @@ async function waitForApiAndDatabase(baseUrl: string): Promise<void> {
   throw new Error("等待 HTTP API 和 PostgreSQL 就绪超时：\n" + lastFailure);
 }
 
+async function verifyEmptyBinList(baseUrl: string): Promise<void> {
+  const response = await fetch(`${baseUrl}/bins`);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as {
+    readonly bins: readonly unknown[];
+  };
+  assert.deepEqual(payload.bins, []);
+
+  const listed = cliData<{ readonly bins: readonly unknown[] }>(
+    await cli(baseUrl, ["bin", "list"]),
+    "listed",
+  );
+  assert.deepEqual(listed.bins, []);
+
+  const text = await cli(baseUrl, ["bin", "list", "--output-format", "text"]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /No bins configured\./u);
+}
+
 type HeldTableLock = {
   readonly release: () => Promise<void>;
 };
@@ -1512,10 +1531,12 @@ async function waitForBinRegistration(
   binId: string,
 ): Promise<{
   readonly id: string;
+  readonly sourceAdapterId: string;
+  readonly sourceAdapterVersion: string;
   readonly identityId: string;
   readonly config: Record<string, unknown>;
-  readonly sourceAdapter: { readonly id: string; readonly version: string };
   readonly execution: { readonly status: string };
+  readonly sourceStateSnapshot: { readonly freshness: string };
 }> {
   const deadline = Date.now() + 30_000;
   let lastResponse = "尚未查询。";
@@ -1524,15 +1545,30 @@ async function waitForBinRegistration(
       `${baseUrl}/bins/${encodeURIComponent(binId)}`,
     );
     if (response.status === 200) {
-      return (await response.json()) as {
+      const bin = (await response.json()) as {
         readonly id: string;
+        readonly sourceAdapterId: string;
         readonly identityId: string;
         readonly config: Record<string, unknown>;
-        readonly sourceAdapter: {
-          readonly id: string;
-          readonly version: string;
-        };
         readonly execution: { readonly status: string };
+        readonly sourceStateSnapshot: { readonly freshness: string };
+      };
+      const schemaResponse = await fetch(
+        `${baseUrl}/bins/${encodeURIComponent(binId)}/config-schema`,
+      );
+      if (schemaResponse.status !== 200) {
+        lastResponse = `${schemaResponse.status} ${await schemaResponse.text()}`;
+        await wait(100);
+        continue;
+      }
+      const declaration = (await schemaResponse.json()) as {
+        readonly sourceAdapterId: string;
+        readonly sourceAdapterVersion: string;
+      };
+      assert.equal(declaration.sourceAdapterId, bin.sourceAdapterId);
+      return {
+        ...bin,
+        sourceAdapterVersion: declaration.sourceAdapterVersion,
       };
     }
     lastResponse = `${response.status} ${await response.text()}`;
@@ -1783,7 +1819,7 @@ async function createLinuxdoBin(
   const registered = await waitForBinRegistration(baseUrl, binId);
   const runtimeManifest = await linuxdoRuntimeManifest(service);
   assert.equal(
-    registered.sourceAdapter.version,
+    registered.sourceAdapterVersion,
     rssManifestVersion(runtimeManifest),
   );
   const configured = cliData<{ readonly id: string }>(
@@ -1800,6 +1836,81 @@ async function createLinuxdoBin(
   );
   assert.equal(configured.id, binId);
   await waitForRuntime(baseUrl, binId);
+
+  const summaries = await fetch(`${baseUrl}/bins`);
+  assert.equal(summaries.status, 200);
+  const list = (await summaries.json()) as {
+    readonly bins: readonly {
+      readonly id: string;
+      readonly sourceAdapterId: string;
+      readonly [key: string]: unknown;
+    }[];
+  };
+  const listed = list.bins.find((entry) => entry.id === binId);
+  assert.ok(listed !== undefined);
+  assert.equal(listed.sourceAdapterId, "binny.source-adapter-linuxdo");
+  assert.equal(Object.hasOwn(listed, "sourceAdapter"), false);
+  assert.equal(Object.hasOwn(listed, "configSchema"), false);
+  assert.equal(Object.hasOwn(listed, "actions"), false);
+
+  const details = cliData<{
+    readonly sourceAdapterId: string;
+    readonly execution: { readonly status: string };
+    readonly sourceStateSnapshot: { readonly freshness: string };
+    readonly [key: string]: unknown;
+  }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+  assert.equal(details.sourceAdapterId, "binny.source-adapter-linuxdo");
+  assert.equal(Object.hasOwn(details, "sourceAdapter"), false);
+  assert.equal(Object.hasOwn(details, "persistentState"), false);
+  assert.equal(Object.hasOwn(details, "sync"), false);
+
+  const configuration = cliData<{
+    readonly sourceAdapterId: string;
+    readonly sourceAdapterVersion: string;
+    readonly configSchema: unknown;
+  }>(await cli(baseUrl, ["bin", "config-schema", binId]), "discovered");
+  assert.equal(configuration.sourceAdapterId, "binny.source-adapter-linuxdo");
+  assert.equal(
+    configuration.sourceAdapterVersion,
+    registered.sourceAdapterVersion,
+  );
+  assert.ok(JSON.stringify(configuration.configSchema).length > 500);
+
+  const actions = cliData<{
+    readonly actions: Readonly<
+      Record<string, { readonly description: string }>
+    >;
+  }>(await cli(baseUrl, ["bin", "actions", binId]), "discovered");
+  assert.ok("collect" in actions.actions);
+  assert.equal("params" in actions.actions.collect!, false);
+  const collect = cliData<{
+    readonly actions: Readonly<
+      Record<
+        string,
+        {
+          readonly description: string;
+          readonly params: unknown;
+          readonly output: unknown;
+          readonly report?: unknown;
+        }
+      >
+    >;
+  }>(await cli(baseUrl, ["bin", "actions", binId, "collect"]), "discovered");
+  assert.ok(collect.actions.collect?.params !== undefined);
+  assert.ok(collect.actions.collect?.output !== undefined);
+  assert.ok(collect.actions.collect?.report !== undefined);
+  const collectText = await cli(baseUrl, [
+    "bin",
+    "actions",
+    binId,
+    "collect",
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(collectText.code, 0, collectText.stderr);
+  assert.match(collectText.stdout, /Parameters:/u);
+  assert.match(collectText.stdout, /Output:/u);
+  assert.match(collectText.stdout, /Report:/u);
 }
 
 const linuxdoTargetDefinitions = {
@@ -2880,7 +2991,7 @@ async function createRssBin(
   config: unknown,
 ): Promise<void> {
   const registered = await waitForBinRegistration(baseUrl, binId);
-  assert.equal(registered.sourceAdapter.version, rssManifestVersion(manifest));
+  assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
   const configJson = JSON.stringify(config);
   assert.ok(configJson !== undefined);
   const updated = cliData<{ readonly id: string }>(
@@ -2904,7 +3015,7 @@ async function updateRssBinSourceAdapter(
   manifest: unknown,
 ): Promise<void> {
   const registered = await waitForBinRegistration(baseUrl, binId);
-  assert.equal(registered.sourceAdapter.version, rssManifestVersion(manifest));
+  assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
 }
 
 async function rebuildRssRuntimeWithComposeWatch(
@@ -3791,10 +3902,7 @@ async function configureManualRunBins(
 ): Promise<void> {
   for (const binId of ["binny-runs-one", "binny-runs-two"]) {
     const registered = await waitForBinRegistration(baseUrl, binId);
-    assert.equal(
-      registered.sourceAdapter.version,
-      rssManifestVersion(manifest),
-    );
+    assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
     const configured = cliData<{
       readonly id: string;
       readonly config: { readonly section: string };
@@ -6488,9 +6596,79 @@ async function verifyConfigurationJourney(
   const binId = "binny-runs-one";
   const registered = await waitForBinRegistration(baseUrl, binId);
   assert.equal(registered.id, binId);
+  assert.ok(registered.sourceAdapterId.length > 0);
   assert.equal(registered.identityId, binId);
   assert.deepEqual(registered.config, {});
   assert.equal(registered.execution.status, "incompatible");
+
+  const binListResponse = await fetch(`${baseUrl}/bins`);
+  assert.equal(binListResponse.status, 200);
+  const binList = (await binListResponse.json()) as {
+    readonly bins: readonly {
+      readonly id: string;
+      readonly sourceAdapterId: string;
+      readonly status: string;
+      readonly execution: { readonly status: string };
+      readonly [key: string]: unknown;
+    }[];
+  };
+  assert.ok(binList.bins.length > 1);
+  const listedBin = binList.bins.find(({ id }) => id === binId);
+  assert.ok(listedBin !== undefined);
+  assert.equal(listedBin.sourceAdapterId, registered.sourceAdapterId);
+  assert.equal(listedBin.status, "active");
+  assert.equal(listedBin.execution.status, "incompatible");
+  assert.equal(Object.hasOwn(listedBin, "sourceAdapter"), false);
+  assert.equal(Object.hasOwn(listedBin, "config"), false);
+
+  const cliBinList = cliData<{
+    readonly bins: readonly {
+      readonly id: string;
+      readonly sourceAdapterId: string;
+    }[];
+  }>(await cli(baseUrl, ["bin", "list"]), "listed");
+  assert.ok(cliBinList.bins.length > 1);
+  assert.ok(cliBinList.bins.some(({ id }) => id === binId));
+  const cliBinListText = await cli(baseUrl, [
+    "bin",
+    "list",
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(cliBinListText.code, 0, cliBinListText.stderr);
+  assert.ok(cliBinListText.stdout.includes(registered.sourceAdapterId));
+  assert.doesNotMatch(cliBinListText.stdout, /"kind"\s*:/u);
+
+  const binResponse = await fetch(
+    `${baseUrl}/bins/${encodeURIComponent(binId)}`,
+  );
+  assert.equal(binResponse.status, 200);
+  const binDetails = (await binResponse.json()) as {
+    readonly sourceAdapterId: string;
+    readonly config: Record<string, unknown>;
+    readonly execution: { readonly status: string };
+    readonly sourceStateSnapshot: { readonly freshness: string };
+    readonly [key: string]: unknown;
+  };
+  assert.equal(binDetails.sourceAdapterId, registered.sourceAdapterId);
+  assert.equal(binDetails.execution.status, "incompatible");
+  assert.equal(Object.hasOwn(binDetails, "sourceAdapter"), false);
+  assert.equal(Object.hasOwn(binDetails, "persistentState"), false);
+
+  const configurationDeclaration = cliData<{
+    readonly sourceAdapterId: string;
+    readonly sourceAdapterVersion: string;
+    readonly configSchema: unknown;
+  }>(await cli(baseUrl, ["bin", "config-schema", binId]), "discovered");
+  assert.equal(
+    configurationDeclaration.sourceAdapterId,
+    registered.sourceAdapterId,
+  );
+  assert.equal(
+    configurationDeclaration.sourceAdapterVersion,
+    registered.sourceAdapterVersion,
+  );
+  assert.notEqual(configurationDeclaration.configSchema, undefined);
 
   const listRunIds = async (): Promise<readonly string[]> => {
     const page = cliData<{
@@ -6501,13 +6679,17 @@ async function verifyConfigurationJourney(
   const runsBefore = await listRunIds();
   const sourceArrivalsBefore = await countAllSourceArrivals(sourceControlUrl);
   const discovered = cliData<{
-    readonly actions: Readonly<Record<string, unknown>>;
+    readonly actions: Readonly<
+      Record<string, { readonly description: string }>
+    >;
     readonly environment?: unknown;
     readonly execution?: unknown;
   }>(await cli(baseUrl, ["bin", "actions", binId]), "discovered");
   assert.ok("check" in discovered.actions);
   assert.ok("collect" in discovered.actions);
   assert.ok("discover" in discovered.actions);
+  assert.equal("params" in discovered.actions.collect!, false);
+  assert.ok(discovered.actions.collect?.description.length);
   assert.equal(Object.hasOwn(discovered, "environment"), false);
   assert.equal(Object.hasOwn(discovered, "execution"), false);
 
@@ -6519,6 +6701,7 @@ async function verifyConfigurationJourney(
           readonly description: string;
           readonly params: unknown;
           readonly output: unknown;
+          readonly report?: unknown;
         }
       >
     >;
@@ -7760,10 +7943,13 @@ async function runRssAcceptance(
   );
   assert.ok(persistedInterruptedRun.stopConfirmedAt);
   const configuredUpdatedBin = cliData<{
-    readonly sourceAdapter: { readonly version: string };
-  }>(await cli(baseUrl, ["bin", "get", "binny-rss-one"]), "found");
+    readonly sourceAdapterVersion: string;
+  }>(
+    await cli(baseUrl, ["bin", "config-schema", "binny-rss-one"]),
+    "discovered",
+  );
   assert.equal(
-    configuredUpdatedBin.sourceAdapter.version,
+    configuredUpdatedBin.sourceAdapterVersion,
     rssManifestVersion(activeManifest),
   );
   process.stdout.write(
@@ -9095,6 +9281,21 @@ async function main(): Promise<void> {
       builtImages.add(rssBaselineRuntimeImageName);
       activeRssRuntimeImage = rssBaselineRuntimeImageName;
     }
+    await compose([
+      "up",
+      "--detach",
+      "--wait",
+      "--wait-timeout",
+      "360",
+      "--no-build",
+      "postgres",
+      "server",
+    ]);
+    composePort = await publishedPort("server", 3000);
+    let baseUrl = apiBaseUrl();
+    await waitForApiAndDatabase(baseUrl);
+    await verifyEmptyBinList(baseUrl);
+
     const e2eServices = manualRunsOnly
       ? [
           "postgres",
@@ -9145,7 +9346,7 @@ async function main(): Promise<void> {
         await publishedPort("rss-e2e-source", 8081),
       );
     }
-    let baseUrl = apiBaseUrl();
+    baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
     if (scheduleOnly) {
       const registered = await waitForBinRegistration(
@@ -9153,7 +9354,7 @@ async function main(): Promise<void> {
         "binny-runs-one",
       );
       assert.equal(
-        registered.sourceAdapter.version,
+        registered.sourceAdapterVersion,
         rssManifestVersion(await createRuntimeFixtureManifest()),
       );
       cliData(
