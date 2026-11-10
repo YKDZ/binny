@@ -3392,6 +3392,48 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     ]);
   }
 
+  const zeroDistributionToken = "zero-distribution-" + randomUUID();
+  const zeroMatchDistributionResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[zeroDistributionToken]] },
+      includeCandidates: false,
+      distribution: { by: "bin" },
+    },
+  });
+  assert.equal(zeroMatchDistributionResponse.status, 200);
+  if (zeroMatchDistributionResponse.status !== 200) {
+    throw new Error("Zero-match distribution search failed.");
+  }
+  const zeroMatchDistribution = await zeroMatchDistributionResponse.json();
+  assert.equal(zeroMatchDistribution.candidatesIncluded, false);
+  assert.equal(zeroMatchDistribution.distribution?.totalItems, "0");
+  assert.deepEqual(zeroMatchDistribution.distribution?.groups, []);
+  assert.equal(zeroMatchDistribution.distribution?.hasMore, false);
+  assert.equal(zeroMatchDistribution.distribution?.nextCursor, undefined);
+
+  const noConditionDistributionResponse = await client.archives.search.$post({
+    json: {
+      includeCandidates: false,
+      distribution: { by: "bin", limit: 100 },
+    },
+  });
+  assert.equal(noConditionDistributionResponse.status, 200);
+  if (noConditionDistributionResponse.status !== 200) {
+    throw new Error("No-condition distribution search failed.");
+  }
+  const noConditionDistribution = await noConditionDistributionResponse.json();
+  assert.ok(noConditionDistribution.distribution);
+  if (noConditionDistribution.distribution?.by !== "bin") {
+    throw new Error("Expected a bin distribution page.");
+  }
+  assert.ok(Number(noConditionDistribution.distribution.totalItems) > 0);
+  assert.ok(
+    noConditionDistribution.distribution.groups.some(
+      ({ binId }) => binId === "binny-runs-one",
+    ),
+  );
+
   const crossView = await client.archives.search.$post({
     json: {
       bins: ["binny-runs-one", "binny-runs-two"],

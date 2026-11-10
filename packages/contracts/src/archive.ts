@@ -1454,9 +1454,11 @@ const archiveSearchResultSchema = z
  * distribution covers the complete matching set and has its own continuation
  * cursor and page size. Date groups include a source-time fact only when its
  * complete represented interval fits one local calendar period; other facts
- * are grouped by their undetermined reason. Extension list values and matching
- * views are deduplicated within each group, and absent/null/empty values share
- * one missing group. Neither page size nor cursor changes the other page.
+ * are grouped by their undetermined reason. Matching views can place one item
+ * in different date or reason groups, but it counts once within each group.
+ * Extension list values and matching views are also deduplicated within each
+ * group, and absent/null/empty values share one missing group. Neither page
+ * size nor cursor changes the other page.
  */
 export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
   z

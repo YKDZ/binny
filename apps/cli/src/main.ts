@@ -1136,6 +1136,7 @@ function createCliContract(identity: CliCommandIdentity) {
         ? []
         : [
             `Distribution by ${page.distribution.by}: ${page.distribution.totalItems} distinct matching ${page.distribution.totalItems === "1" ? "item" : "items"}.`,
+            "Each group counts distinct items; one item can appear in multiple groups.",
             ...page.distribution.groups.map((group) => {
               if (group.kind === "bin") {
                 return `- Bin ${group.binId}: ${distributionItemCountText(group.itemCount)}`;
@@ -1578,6 +1579,7 @@ function createCliContract(identity: CliCommandIdentity) {
           "Every selected bin must use the declared adapter and schema. Missing and null extension values do not match.",
           'Example: binny archive search --query \'{"bins":["forum"],"includeCandidates":false,"distribution":{"by":"date","field":"sourcePublishedAt","period":"month","timeZone":"Europe/Paris"}}\'.',
           "One distribution dimension is available per request. Candidate pages and distribution pages advance independently; set includeCandidates to false to return only distribution groups.",
+          "Each group counts an item once; an item can appear in multiple groups, so group counts may exceed the distinct total. Missing extension values share one missing group.",
         ]),
         fields: {
           query: {

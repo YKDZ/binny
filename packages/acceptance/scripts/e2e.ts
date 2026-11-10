@@ -911,6 +911,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       categoryDistributionText.stdout,
       /- Missing extension value: 3 items/u,
     );
+    assert.match(
+      categoryDistributionText.stdout,
+      /Each group counts distinct items; one item can appear in multiple groups\./u,
+    );
     assert.match(categoryDistributionText.stdout, /End of distribution\./u);
     assert.doesNotMatch(categoryDistributionText.stdout, /"kind"\s*:/u);
 
@@ -918,6 +922,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     assert.equal(searchHelp.code, 0, searchHelp.stderr);
     assert.match(searchHelp.stdout, /distribute.*by bin, local date period/u);
     assert.match(searchHelp.stdout, /distribution\.cursor/u);
+    assert.match(
+      searchHelp.stdout,
+      /group counts may exceed the distinct total/u,
+    );
 
     const mixedAdapterFailure = cliFailure<{
       readonly code: string;
