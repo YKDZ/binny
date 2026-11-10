@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { publicApiProtocolVersion } from "@binny/contracts";
+import {
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+} from "@binny/contracts";
 
 import { runCli } from "../../src/main.ts";
 
@@ -113,7 +116,12 @@ void describe("offline CLI command contract", () => {
             product: { name: "Binny", version: "1.2.3" },
             protocols: { httpApi: publicApiProtocolVersion },
             capabilities: ["archives.search", "archive.query-contract"],
-            contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
+            contracts: {
+              archiveQuery: {
+                version: archiveQueryContractVersion,
+                path: "/meta/query",
+              },
+            },
           });
         }
         return Response.json({
@@ -563,7 +571,7 @@ void describe("offline CLI command contract", () => {
     assert.match(textOutput.output, /Parameters and options:/u);
     assert.match(textOutput.output, /--query/u);
     assert.match(textOutput.output, /literal keyword groups/u);
-    assert.match(textOutput.output, /previous response's nextCursor/u);
+    assert.match(textOutput.output, /distribution\.cursor/u);
     assert.match(textOutput.output, /extension-fields/u);
     assert.match(textOutput.output, /explicit bin scope/u);
     assert.match(

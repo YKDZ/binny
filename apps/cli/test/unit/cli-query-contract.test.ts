@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { publicApiProtocolVersion } from "@binny/contracts";
+import {
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+} from "@binny/contracts";
 
 import { runCli } from "../../src/main.ts";
 
@@ -9,7 +12,12 @@ const matchingMetadata = {
   product: { name: "Binny", version: "1.2.3" },
   protocols: { httpApi: publicApiProtocolVersion },
   capabilities: ["archives.search", "archive.query-contract"],
-  contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
+  contracts: {
+    archiveQuery: {
+      version: archiveQueryContractVersion,
+      path: "/meta/query",
+    },
+  },
 };
 
 function fakeService(options: {
@@ -49,7 +57,7 @@ function fakeService(options: {
         },
         contracts: {
           archiveQuery: {
-            version: options.archiveQueryVersion ?? 2,
+            version: options.archiveQueryVersion ?? archiveQueryContractVersion,
             path: "/meta/query",
           },
         },
@@ -57,7 +65,7 @@ function fakeService(options: {
     }
     if (url.pathname === "/meta/query") {
       return Response.json({
-        version: options.archiveQueryVersion ?? 2,
+        version: options.archiveQueryVersion ?? archiveQueryContractVersion,
         operations: {},
       });
     }
@@ -65,6 +73,7 @@ function fakeService(options: {
       return Response.json(
         options.searchResponse ?? {
           snapshot: { asOf: "0", mode: "current" },
+          candidatesIncluded: true,
           results: [],
           hasMore: false,
         },
@@ -188,7 +197,7 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v2: \/meta\/query/u);
+    assert.match(result.output, /Archive query v3: \/meta\/query/u);
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
@@ -341,10 +350,12 @@ void describe("查询服务发现", () => {
         in: "both",
         groups: [["GPT", "Claude"], ["released"]],
       },
+      includeCandidates: true,
       limit: 1,
     };
     const searchResponse = {
       snapshot: { asOf: "12", mode: "current" },
+      candidatesIncluded: true,
       hasMore: false,
       results: [
         {

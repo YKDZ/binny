@@ -5,11 +5,13 @@ import {
   archiveSearchInputSchema,
   archiveSearchInputIssue,
   archiveSearchPageSchema,
+  archiveSearchDistributionPageSchema,
   archiveSnapshotSchema,
   discoverSourceAdapterExtensionFields,
   sourceAdapterManifestStoredSchema,
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
+  type ArchiveSearchDistributionRequest,
   type ArchiveSearchOperation,
   type ArchiveSearchRequest,
   type SourceAdapterManifest,
@@ -25,8 +27,10 @@ import {
   remainingArchiveQueryBudgetMs,
 } from "./archive-query-budget.ts";
 import {
+  canonicalizeArchiveTimeZone,
   archiveTimeZoneAliases,
   localDateBoundarySql,
+  sourceTimeBoundsSql,
   sourceTimeFieldSql,
   sourceTimeWindowDecisionSql,
   type ArchiveTimeZoneAliases,
@@ -40,6 +44,12 @@ type SearchCursor = {
   readonly timeSortValue?: string | null;
   readonly itemId: string;
 };
+type SearchDistributionCursor = {
+  readonly version: 1;
+  readonly queryHash: string;
+  readonly snapshot: ReturnType<typeof archiveSnapshotSchema.parse>;
+  readonly groupKey: string;
+};
 type SearchInput = ReturnType<typeof archiveSearchInputSchema.parse>;
 type SearchPageRow = {
   readonly snapshotAsOf: string;
@@ -49,6 +59,8 @@ type SearchPageRow = {
   readonly extensionBins: unknown;
   readonly certainItems?: string;
   readonly undeterminedItems?: string;
+  readonly distributionGroups: unknown;
+  readonly distributionTotalItems: string | null;
 };
 
 type ExtensionScopeBin = {
@@ -64,6 +76,12 @@ type SearchZoneRow = {
 };
 
 function encodeSearchCursor(cursor: SearchCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function encodeSearchDistributionCursor(
+  cursor: SearchDistributionCursor,
+): string {
   return Buffer.from(JSON.stringify(cursor)).toString("base64url");
 }
 
@@ -121,6 +139,40 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
   }
 }
 
+function decodeSearchDistributionCursor(
+  cursor: string,
+): SearchDistributionCursor | undefined {
+  try {
+    const json = Buffer.from(cursor, "base64url").toString("utf8");
+    if (Buffer.from(json).toString("base64url") !== cursor) return undefined;
+    const value: unknown = JSON.parse(json);
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("version" in value) ||
+      value.version !== 1 ||
+      !("queryHash" in value) ||
+      typeof value.queryHash !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(value.queryHash) ||
+      !("snapshot" in value) ||
+      !("groupKey" in value) ||
+      typeof value.groupKey !== "string"
+    ) {
+      return undefined;
+    }
+    const snapshot = archiveSnapshotSchema.safeParse(value.snapshot);
+    if (!snapshot.success) return undefined;
+    return {
+      version: 1,
+      queryHash: value.queryHash,
+      snapshot: snapshot.data,
+      groupKey: value.groupKey,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function invalidInput(message: string, path: readonly (string | number)[]) {
   return {
     ok: false as const,
@@ -150,6 +202,21 @@ function queryHash(input: SearchInput): string {
         ...(input.timeWindow === undefined
           ? {}
           : { timeWindow: input.timeWindow }),
+      }),
+    )
+    .digest("hex");
+}
+
+function distributionQueryHash(
+  input: SearchInput,
+  distribution: ArchiveSearchDistributionRequest,
+): string {
+  const { cursor: _cursor, limit: _limit, ...dimension } = distribution;
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        query: queryHash(input),
+        distribution: dimension,
       }),
     )
     .digest("hex");
@@ -210,6 +277,267 @@ function extensionMatches(input: SearchInput) {
     },
   );
   return sql`(${sql.join(fieldMatches, sql` AND `)})`;
+}
+
+function timeZoneSql(timeZone: string): SQL {
+  const canonical = canonicalizeArchiveTimeZone(timeZone);
+  return /^(?:[+-](?:0\d|1[0-3]):[0-5]\d|[+-]14:00)$/u.test(canonical)
+    ? sql`${canonical}::interval`
+    : sql`${canonical}::text`;
+}
+
+function dateDistributionCtes(
+  distribution: Extract<
+    NonNullable<SearchInput["distribution"]>,
+    { by: "date" }
+  >,
+  cursor: SearchDistributionCursor | undefined,
+  aliases: ArchiveTimeZoneAliases,
+) {
+  const zone = timeZoneSql(distribution.timeZone);
+  const sourceTime =
+    distribution.field === "observedAt"
+      ? undefined
+      : sourceTimeFieldSql(sql`selected_views.state_data`, distribution.field);
+  const ranges =
+    sourceTime === undefined
+      ? sql`date_ranges AS (
+          SELECT
+            selected_views.item_id,
+            'instant'::text AS precision,
+            selected_views.observed_at::text AS value,
+            NULL::text AS time_zone,
+            selected_views.observed_at AS start_at,
+            selected_views.observed_at AS end_at,
+            selected_views.observed_at AS possible_start,
+            selected_views.observed_at AS possible_end
+          FROM selected_views
+        )`
+      : (() => {
+          const bounds = sourceTimeBoundsSql(sourceTime, aliases);
+          return sql`date_ranges AS (
+            SELECT
+              selected_views.item_id,
+              ${bounds.precision} AS precision,
+              ${bounds.value} AS value,
+              ${bounds.timeZone} AS time_zone,
+              ${bounds.start} AS start_at,
+              ${bounds.end} AS end_at,
+              ${bounds.possibleStart} AS possible_start,
+              ${bounds.possibleEnd} AS possible_end
+            FROM selected_views
+          )`;
+        })();
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const periodInterval = sql`CASE ${distribution.period}::text
+    WHEN 'day' THEN interval '1 day'
+    WHEN 'month' THEN interval '1 month'
+    ELSE interval '1 year'
+  END`;
+
+  return sql`${ranges}, date_candidates AS (
+    SELECT
+      date_ranges.*,
+      CASE
+        WHEN precision <> 'instant' AND time_zone IS NULL THEN possible_start
+        ELSE start_at
+      END AS range_start,
+      CASE
+        WHEN precision = 'instant' THEN start_at
+        WHEN time_zone IS NULL THEN possible_end
+        ELSE end_at
+      END AS range_end
+    FROM date_ranges
+  ), date_bucketed AS (
+    SELECT
+      date_candidates.*,
+      date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      ) AS bucket_local_start,
+      (date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      )) AT TIME ZONE ${zone} AS bucket_start,
+      (date_trunc(
+        ${distribution.period}::text,
+        (range_start AT TIME ZONE ${zone})
+      ) + ${periodInterval}) AT TIME ZONE ${zone} AS bucket_end
+    FROM date_candidates
+  ), date_decisions AS (
+    SELECT
+      item_id,
+      CASE ${distribution.period}::text
+        WHEN 'day' THEN to_char(bucket_local_start, 'YYYY-MM-DD')
+        WHEN 'month' THEN to_char(bucket_local_start, 'YYYY-MM')
+        ELSE to_char(bucket_local_start, 'YYYY')
+      END AS date_value,
+      CASE
+        WHEN value IS NULL THEN 'undetermined'
+        WHEN precision = 'instant'
+          AND range_start >= bucket_start
+          AND range_start < bucket_end
+        THEN 'date'
+        WHEN precision = 'instant' THEN 'undetermined'
+        WHEN range_start >= bucket_start AND range_end <= bucket_end
+        THEN 'date'
+        ELSE 'undetermined'
+      END AS group_kind,
+      CASE
+        WHEN value IS NULL THEN 'missingTime'
+        WHEN precision = 'instant' THEN NULL::text
+        WHEN time_zone IS NULL
+          AND NOT (range_start >= bucket_start AND range_end <= bucket_end)
+        THEN 'missingTimeZone'
+        WHEN range_start >= bucket_start AND range_end <= bucket_end
+        THEN NULL::text
+        ELSE 'precisionOverlapsBoundary'
+      END AS reason
+    FROM date_bucketed
+  ), date_assigned AS (
+    SELECT
+      item_id,
+      group_kind,
+      CASE WHEN group_kind = 'date' THEN date_value ELSE NULL::text END AS date_value,
+      reason,
+      CASE group_kind
+        WHEN 'date' THEN 'date:' || date_value
+        ELSE 'undetermined:' || reason
+      END COLLATE "C" AS group_key
+    FROM date_decisions
+  ), distribution_base AS (
+    SELECT
+      group_key,
+      group_kind,
+      date_value,
+      reason,
+      count(DISTINCT item_id)::text AS item_count
+    FROM date_assigned
+    GROUP BY group_key, group_kind, date_value, reason
+  ), distribution_total AS (
+    SELECT count(DISTINCT item_id)::text AS total_items
+    FROM selected_views
+  ), distribution_selected AS (
+    SELECT distribution_base.*
+    FROM distribution_base
+    WHERE ${afterCursor}
+    ORDER BY group_key COLLATE "C" ASC
+    LIMIT ${distribution.limit + 1}
+  ), distribution_groups AS (
+    SELECT coalesce(
+      jsonb_agg(
+        CASE group_kind
+          WHEN 'date' THEN jsonb_build_object(
+            'kind', 'date'::text,
+            'value', date_value,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+          ELSE jsonb_build_object(
+            'kind', 'undetermined'::text,
+            'reason', reason,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+        END ORDER BY group_key COLLATE "C" ASC
+      ),
+      '[]'::jsonb
+    ) AS groups
+    FROM distribution_selected
+  ), distribution_summary AS (
+    SELECT distribution_total.total_items, distribution_groups.groups
+    FROM distribution_total CROSS JOIN distribution_groups
+  )`;
+}
+
+function extensionDistributionCtes(
+  distribution: Extract<
+    NonNullable<SearchInput["distribution"]>,
+    { by: "extension" }
+  >,
+  cursor: SearchDistributionCursor | undefined,
+) {
+  const extensionValue = sql`selected_views.state_data->'extensions'->${distribution.field}`;
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  return sql`extension_values AS (
+    SELECT selected_views.item_id, extension_value.value AS group_value
+    FROM selected_views
+    CROSS JOIN LATERAL jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(${extensionValue}) = 'array' THEN ${extensionValue}
+        WHEN ${extensionValue} IS NULL OR ${extensionValue} = 'null'::jsonb
+        THEN '[]'::jsonb
+        ELSE jsonb_build_array(${extensionValue})
+      END
+    ) AS extension_value(value)
+  ), extension_counts AS (
+    SELECT group_value, count(DISTINCT item_id)::text AS item_count
+    FROM extension_values
+    GROUP BY group_value
+  ), extension_missing AS (
+    SELECT DISTINCT selected_views.item_id
+    FROM selected_views
+    WHERE ${extensionValue} IS NULL
+      OR ${extensionValue} = 'null'::jsonb
+      OR CASE
+        WHEN jsonb_typeof(${extensionValue}) = 'array'
+        THEN jsonb_array_length(${extensionValue}) = 0
+        ELSE false
+      END
+  ), distribution_base AS (
+    SELECT
+      ('extension:' || group_value::text) COLLATE "C" AS group_key,
+      'extension'::text AS group_kind,
+      group_value,
+      item_count
+    FROM extension_counts
+    UNION ALL
+    SELECT
+      'missing:'::text COLLATE "C" AS group_key,
+      'missing'::text AS group_kind,
+      NULL::jsonb AS group_value,
+      count(DISTINCT item_id)::text AS item_count
+    FROM extension_missing
+    HAVING count(DISTINCT item_id) > 0
+  ), distribution_total AS (
+    SELECT count(DISTINCT item_id)::text AS total_items
+    FROM selected_views
+  ), distribution_selected AS (
+    SELECT distribution_base.*
+    FROM distribution_base
+    WHERE ${afterCursor}
+    ORDER BY group_key COLLATE "C" ASC
+    LIMIT ${distribution.limit + 1}
+  ), distribution_groups AS (
+    SELECT coalesce(
+      jsonb_agg(
+        CASE group_kind
+          WHEN 'extension' THEN jsonb_build_object(
+            'kind', 'extension'::text,
+            'value', group_value,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+          ELSE jsonb_build_object(
+            'kind', 'missing'::text,
+            'itemCount', item_count,
+            '__distributionKey', group_key
+          )
+        END ORDER BY group_key COLLATE "C" ASC
+      ),
+      '[]'::jsonb
+    ) AS groups
+    FROM distribution_selected
+  ), distribution_summary AS (
+    SELECT distribution_total.total_items, distribution_groups.groups
+    FROM distribution_total CROSS JOIN distribution_groups
+  )`;
 }
 
 function decodeJsonValue(value: unknown): unknown {
@@ -275,12 +603,19 @@ function validateExtensionScope(
   value: unknown,
 ): ArchiveSearchOperation<never> | undefined {
   const extensions = input.extensions;
-  if (extensions === undefined) return undefined;
+  const distribution =
+    input.distribution?.by === "extension" ? input.distribution : undefined;
+  const sourceAdapterId =
+    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId;
+  if (sourceAdapterId === undefined) return undefined;
+  const adapterPath =
+    extensions === undefined
+      ? (["distribution", "sourceAdapterId"] as const)
+      : (["extensions", "sourceAdapterId"] as const);
   const bins = extensionScopeBins(value);
   if (bins.length === 0) {
     return invalidInput("No configured bin uses the selected source adapter.", [
-      "extensions",
-      "sourceAdapterId",
+      ...adapterPath,
     ]);
   }
   if (input.bins !== undefined && bins.length !== input.bins.length) {
@@ -291,9 +626,9 @@ function validateExtensionScope(
   }
 
   for (const bin of bins) {
-    if (bin.sourceAdapter.id !== extensions.sourceAdapterId) {
+    if (bin.sourceAdapter.id !== sourceAdapterId) {
       return invalidInput(
-        "Extension filters require bins from the declared source adapter only.",
+        "Extension operations require bins from the declared source adapter only.",
         ["bins"],
       );
     }
@@ -302,38 +637,56 @@ function validateExtensionScope(
       sourceAdapterVersion: bin.sourceAdapter.version,
       extensionsSchema: bin.sourceAdapter.extensionsSchema,
     }).fields;
-    for (const [fieldName, filter] of Object.entries(extensions.filters)) {
-      const path = ["extensions", "filters", fieldName] as const;
-      const field = fields[fieldName];
+    if (extensions !== undefined) {
+      for (const [fieldName, filter] of Object.entries(extensions.filters)) {
+        const path = ["extensions", "filters", fieldName] as const;
+        const field = fields[fieldName];
+        if (field === undefined) {
+          return invalidInput(
+            `The selected adapter does not declare the top-level extension field "${fieldName}".`,
+            path,
+          );
+        }
+        if (!field.operations.includes(filter.op)) {
+          return invalidInput(
+            `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
+            [...path, "op"],
+          );
+        }
+        const type =
+          filter.op === "has" || filter.op === "hasAny"
+            ? field.itemType
+            : field.type;
+        const allowedValues =
+          filter.op === "has" || filter.op === "hasAny"
+            ? field.allowedItemValues
+            : field.allowedValues;
+        for (const candidate of extensionFilterValues(filter)) {
+          if (
+            !extensionFilterValueMatches(candidate.value, type, allowedValues)
+          ) {
+            return invalidInput(
+              `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
+              [...path, ...candidate.path],
+            );
+          }
+        }
+      }
+    }
+    if (distribution !== undefined) {
+      const path = ["distribution", "field"] as const;
+      const field = fields[distribution.field];
       if (field === undefined) {
         return invalidInput(
-          `The selected adapter does not declare the top-level extension field "${fieldName}".`,
+          `The selected adapter does not declare the top-level extension field "${distribution.field}".`,
           path,
         );
       }
-      if (!field.operations.includes(filter.op)) {
+      if (field.operations.length === 0) {
         return invalidInput(
-          `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
-          [...path, "op"],
+          `The extension field "${distribution.field}" is not a scalar or scalar list.`,
+          path,
         );
-      }
-      const type =
-        filter.op === "has" || filter.op === "hasAny"
-          ? field.itemType
-          : field.type;
-      const allowedValues =
-        filter.op === "has" || filter.op === "hasAny"
-          ? field.allowedItemValues
-          : field.allowedValues;
-      for (const candidate of extensionFilterValues(filter)) {
-        if (
-          !extensionFilterValueMatches(candidate.value, type, allowedValues)
-        ) {
-          return invalidInput(
-            `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
-            [...path, ...candidate.path],
-          );
-        }
       }
     }
   }
@@ -349,6 +702,7 @@ function pageQuery(
   input: SearchInput,
   snapshot: SearchCursor["snapshot"] | undefined,
   cursor: SearchCursor | undefined,
+  distributionCursor: SearchDistributionCursor | undefined,
   aliases: ArchiveTimeZoneAliases,
 ) {
   const snapshotSequence =
@@ -358,7 +712,12 @@ function pageQuery(
   const snapshotMode = snapshot?.mode ?? "current";
   const extensionScopeBinFilter =
     input.extensions === undefined
-      ? sql`false`
+      ? input.distribution?.by === "extension"
+        ? sql`id IN (${sql.join(
+            input.bins!.map((binId) => sql`${binId}`),
+            sql`, `,
+          )})`
+        : sql`false`
       : input.bins === undefined
         ? sql`source_adapter->>'id' = ${input.extensions.sourceAdapterId}`
         : sql`id IN (${sql.join(
@@ -383,7 +742,7 @@ function pageQuery(
   }
 
   const afterCursor =
-    cursor === undefined
+    cursor === undefined || !input.includeCandidates
       ? sql`true`
       : input.timeWindow === undefined
         ? sql`(items.observed_at < ${new Date(cursor.observedAt)}::timestamptz OR (items.observed_at = ${new Date(cursor.observedAt)}::timestamptz AND items.item_id > ${cursor.itemId}::uuid))`
@@ -417,6 +776,53 @@ function pageQuery(
     input.timeWindow === undefined
       ? sql`selected.observed_at DESC, selected.item_id ASC`
       : sql`selected.sort_value DESC NULLS LAST, selected.item_id ASC`;
+  const distribution = input.distribution;
+  const afterDistributionCursor =
+    distributionCursor === undefined
+      ? sql`true`
+      : sql`distribution_base.group_key COLLATE "C" > ${distributionCursor.groupKey} COLLATE "C"`;
+  const distributionSql =
+    distribution === undefined
+      ? sql`distribution_summary AS (
+        SELECT NULL::text AS total_items, '[]'::jsonb AS groups
+      )`
+      : distribution.by === "bin"
+        ? sql`distribution_base AS (
+          SELECT
+            bin_id COLLATE "C" AS group_key,
+            bin_id,
+            count(DISTINCT item_id)::text AS item_count
+          FROM selected_views
+          GROUP BY bin_id
+        ), distribution_total AS (
+          SELECT count(DISTINCT item_id)::text AS total_items
+          FROM selected_views
+        ), distribution_selected AS (
+          SELECT distribution_base.*
+          FROM distribution_base
+          WHERE ${afterDistributionCursor}
+          ORDER BY distribution_base.group_key COLLATE "C" ASC
+          LIMIT ${distribution.limit + 1}
+        ), distribution_groups AS (
+          SELECT coalesce(
+            jsonb_agg(
+              jsonb_build_object(
+                'kind', 'bin'::text,
+                'binId', bin_id,
+                'itemCount', item_count,
+                '__distributionKey', group_key
+              ) ORDER BY group_key COLLATE "C" ASC
+            ),
+            '[]'::jsonb
+          ) AS groups
+          FROM distribution_selected
+        ), distribution_summary AS (
+          SELECT distribution_total.total_items, distribution_groups.groups
+          FROM distribution_total CROSS JOIN distribution_groups
+        )`
+        : distribution.by === "date"
+          ? dateDistributionCtes(distribution, distributionCursor, aliases)
+          : extensionDistributionCtes(distribution, distributionCursor);
   const classificationFields =
     decision === undefined
       ? sql`, NULL::text AS time_status, NULL::text AS time_reason, NULL::timestamptz AS sort_value`
@@ -527,7 +933,7 @@ function pageQuery(
       SELECT items.*
       FROM items
       CROSS JOIN fixed_snapshot
-      WHERE NOT fixed_snapshot.invalid AND ${afterCursor}
+      WHERE NOT fixed_snapshot.invalid AND ${input.includeCandidates ? afterCursor : sql`false`}
       ORDER BY ${sortOrder}
       LIMIT ${input.limit + 1}
     ), page AS (
@@ -555,7 +961,7 @@ function pageQuery(
         count(DISTINCT item_id) FILTER (WHERE time_status = 'certain')::text AS certain_items,
         count(DISTINCT item_id) FILTER (WHERE time_status = 'undetermined')::text AS undetermined_items
       FROM classified
-    )
+    ), ${distributionSql}
     SELECT
       fixed_snapshot.archive_sequence::text AS "snapshotAsOf",
       fixed_snapshot.mode AS "snapshotMode",
@@ -563,11 +969,14 @@ function pageQuery(
       page.results,
       extension_scope.bins AS "extensionBins",
       time_summary.certain_items AS "certainItems",
-      time_summary.undetermined_items AS "undeterminedItems"
+      time_summary.undetermined_items AS "undeterminedItems",
+      distribution_summary.groups AS "distributionGroups",
+      distribution_summary.total_items AS "distributionTotalItems"
     FROM fixed_snapshot
     CROSS JOIN page
     CROSS JOIN extension_scope
     CROSS JOIN time_summary
+    CROSS JOIN distribution_summary
   `;
 }
 
@@ -575,6 +984,7 @@ function pageQuery(
 function timeZoneDiscoveryQuery(
   input: SearchInput,
   snapshot: SearchCursor["snapshot"] | undefined,
+  fields: readonly ("sourcePublishedAt" | "sourceModifiedAt")[],
 ): SQL<SearchZoneRow[]> {
   const snapshotSequence =
     snapshot === undefined
@@ -593,7 +1003,10 @@ function timeZoneDiscoveryQuery(
       )})`,
     );
   }
-  const field = input.timeWindow!.field;
+  const zoneQueries = fields.map(
+    (field) =>
+      sql`SELECT state_data->${field}->>'timeZone' AS time_zone FROM latest`,
+  );
 
   return sql<SearchZoneRow[]>`
     WITH clock AS (
@@ -620,9 +1033,9 @@ function timeZoneDiscoveryQuery(
       WHERE ${sql.join(latestConditions, sql` AND `)}
       ORDER BY observation.item_id, commit.bin_id, commit.archive_seq DESC, commit.commit_id DESC, observation.ordinal DESC
     ), time_zones AS (
-      SELECT DISTINCT state_data->${field}->>'timeZone' AS time_zone
-      FROM latest
-      WHERE state_data->${field}->>'timeZone' IS NOT NULL
+      SELECT DISTINCT source_time_zones.time_zone
+      FROM (${sql.join(zoneQueries, sql` UNION ALL `)}) AS source_time_zones
+      WHERE source_time_zones.time_zone IS NOT NULL
     )
     SELECT
       fixed_snapshot.archive_sequence::text AS "snapshotAsOf",
@@ -678,6 +1091,16 @@ export function createArchiveSearchOperation(
         requestedCursor === undefined
           ? undefined
           : decodeSearchCursor(requestedCursor);
+      const distribution = input.distribution;
+      const requestedDistributionCursor = distribution?.cursor;
+      const distributionCursor =
+        requestedDistributionCursor === undefined
+          ? undefined
+          : decodeSearchDistributionCursor(requestedDistributionCursor);
+      const distributionHash =
+        distribution === undefined
+          ? undefined
+          : distributionQueryHash(input, distribution);
       if (
         requestedCursor !== undefined &&
         (cursor === undefined ||
@@ -692,9 +1115,33 @@ export function createArchiveSearchOperation(
           ["cursor"],
         );
       }
+      if (
+        requestedDistributionCursor !== undefined &&
+        (distributionCursor === undefined ||
+          distributionHash === undefined ||
+          distributionCursor.queryHash !== distributionHash ||
+          (input.asOf !== undefined &&
+            distributionCursor.snapshot.asOf !== input.asOf))
+      ) {
+        return invalidInput(
+          "Distribution cursor is invalid or belongs to another query.",
+          ["distribution", "cursor"],
+        );
+      }
+      if (
+        cursor !== undefined &&
+        distributionCursor !== undefined &&
+        cursor.snapshot.asOf !== distributionCursor.snapshot.asOf
+      ) {
+        return invalidInput(
+          "Candidate and distribution cursors must use the same archive cut.",
+          ["distribution", "cursor"],
+        );
+      }
 
       const snapshot =
         cursor?.snapshot ??
+        distributionCursor?.snapshot ??
         (input.asOf === undefined
           ? undefined
           : { asOf: input.asOf, mode: "asOf" as const });
@@ -702,14 +1149,26 @@ export function createArchiveSearchOperation(
       try {
         let resolvedQuerySnapshot = snapshot;
         let aliases: ArchiveTimeZoneAliases = new Map();
+        const timeZoneFields = new Set<
+          "sourcePublishedAt" | "sourceModifiedAt"
+        >();
         if (
           input.timeWindow !== undefined &&
           input.timeWindow.field !== "observedAt"
         ) {
+          timeZoneFields.add(input.timeWindow.field);
+        }
+        if (
+          input.distribution?.by === "date" &&
+          input.distribution.field !== "observedAt"
+        ) {
+          timeZoneFields.add(input.distribution.field);
+        }
+        if (timeZoneFields.size > 0) {
           const [zoneRow] =
             await executeArchiveQueryWithinDeadline<SearchZoneRow>(
               executeQuery,
-              timeZoneDiscoveryQuery(input, snapshot),
+              timeZoneDiscoveryQuery(input, snapshot, [...timeZoneFields]),
               deadline,
             );
           if (zoneRow === undefined) {
@@ -734,7 +1193,13 @@ export function createArchiveSearchOperation(
         }
         const [row] = await executeArchiveQueryWithinDeadline<SearchPageRow>(
           executeQuery,
-          pageQuery(input, resolvedQuerySnapshot, cursor, aliases),
+          pageQuery(
+            input,
+            resolvedQuerySnapshot,
+            cursor,
+            distributionCursor,
+            aliases,
+          ),
           deadline,
         );
         if (row === undefined) {
@@ -758,8 +1223,13 @@ export function createArchiveSearchOperation(
           mode: row.snapshotMode,
         });
         const rows = decodeSearchResults(row.results);
-        const hasMore = rows.length > input.limit;
-        const selectedRows = hasMore ? rows.slice(0, input.limit) : rows;
+        const candidateHasMore =
+          input.includeCandidates && rows.length > input.limit;
+        const selectedRows = candidateHasMore
+          ? rows.slice(0, input.limit)
+          : input.includeCandidates
+            ? rows
+            : [];
         const lastSelected = selectedRows.at(-1);
         const timeSortValue =
           input.timeWindow === undefined
@@ -791,6 +1261,7 @@ export function createArchiveSearchOperation(
         });
         const page = archiveSearchPageSchema.parse({
           snapshot: resolvedSnapshot,
+          candidatesIncluded: input.includeCandidates,
           results: pageRows,
           ...(input.timeWindow === undefined
             ? {}
@@ -800,11 +1271,11 @@ export function createArchiveSearchOperation(
                   undeterminedItems: row.undeterminedItems ?? "0",
                 },
               }),
-          hasMore,
+          hasMore: candidateHasMore,
         });
         const last = page.results.at(-1);
         const nextCursor =
-          hasMore && last !== undefined
+          candidateHasMore && last !== undefined
             ? encodeSearchCursor({
                 version: 1,
                 queryHash: hash,
@@ -816,9 +1287,82 @@ export function createArchiveSearchOperation(
                 itemId: last.itemId,
               })
             : undefined;
+        const rawDistributionGroups = decodeSearchResults(
+          row.distributionGroups,
+        );
+        const distributionHasMore =
+          distribution !== undefined &&
+          rawDistributionGroups.length > distribution.limit;
+        const selectedDistributionGroups = distributionHasMore
+          ? rawDistributionGroups.slice(0, distribution!.limit)
+          : rawDistributionGroups;
+        let nextDistributionCursor: string | undefined;
+        const lastDistributionGroup = selectedDistributionGroups.at(-1);
+        const lastDistributionGroupKey =
+          typeof lastDistributionGroup === "object" &&
+          lastDistributionGroup !== null &&
+          !Array.isArray(lastDistributionGroup)
+            ? (lastDistributionGroup as Record<string, unknown>)[
+                "__distributionKey"
+              ]
+            : undefined;
+        if (
+          distributionHasMore &&
+          distributionHash !== undefined &&
+          typeof lastDistributionGroupKey === "string"
+        ) {
+          nextDistributionCursor = encodeSearchDistributionCursor({
+            version: 1,
+            queryHash: distributionHash,
+            snapshot: resolvedSnapshot,
+            groupKey: lastDistributionGroupKey,
+          });
+        }
+        const publicDistributionGroups = selectedDistributionGroups.map(
+          (group) => {
+            if (
+              typeof group !== "object" ||
+              group === null ||
+              Array.isArray(group)
+            ) {
+              return group;
+            }
+            const record = group as Record<string, unknown>;
+            const { __distributionKey: _internalKey, ...publicGroup } = record;
+            return publicGroup;
+          },
+        );
+        const completedDistribution =
+          distribution === undefined
+            ? undefined
+            : archiveSearchDistributionPageSchema.parse({
+                ...(distribution.by === "date"
+                  ? {
+                      by: distribution.by,
+                      field: distribution.field,
+                      period: distribution.period,
+                      timeZone: distribution.timeZone,
+                    }
+                  : distribution.by === "extension"
+                    ? {
+                        by: distribution.by,
+                        sourceAdapterId: distribution.sourceAdapterId,
+                        field: distribution.field,
+                      }
+                    : { by: distribution.by }),
+                totalItems: row.distributionTotalItems ?? "0",
+                groups: publicDistributionGroups,
+                hasMore: distributionHasMore,
+                ...(nextDistributionCursor === undefined
+                  ? {}
+                  : { nextCursor: nextDistributionCursor }),
+              });
         const completedPage = archiveSearchPageSchema.parse({
           ...page,
           ...(nextCursor === undefined ? {} : { nextCursor }),
+          ...(completedDistribution === undefined
+            ? {}
+            : { distribution: completedDistribution }),
         });
         remainingArchiveQueryBudgetMs(deadline);
         return { ok: true, value: completedPage };
