@@ -1089,47 +1089,81 @@ function createCliContract(identity: CliCommandIdentity) {
             ? ""
             : `; timeZone=${sourceTime.timeZone}`
         })`;
+  const distributionItemCountText = (count: string) =>
+    `${count} ${count === "1" ? "item" : "items"}`;
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
   ) =>
     text.lines([
       `Snapshot: ${page.snapshot.asOf}`,
-      `Matches on this page: ${page.results.length}`,
-      ...(page.results.length === 0
-        ? ["No archived items matched."]
-        : page.results.flatMap((result) => [
-            `- ${result.title ?? result.sourceKey.key}`,
-            `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
-            `  Observed: ${result.observedAt}`,
-            `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
-            `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
-            ...(result.timeStatus === undefined
-              ? []
-              : [`  Time review: ${result.timeStatus}`]),
-            `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
-            ...result.matches.flatMap(({ binId, timeMatch }) =>
-              timeMatch === undefined
-                ? []
-                : [
-                    `  Time match ${binId}: ${timeMatch.status}${
-                      timeMatch.status === "undetermined"
-                        ? ` (${timeMatch.reason})`
-                        : ""
-                    }`,
-                  ],
-            ),
-          ])),
+      ...(page.candidatesIncluded
+        ? [
+            `Matches on this page: ${page.results.length}`,
+            ...(page.results.length === 0
+              ? ["No archived items matched."]
+              : page.results.flatMap((result) => [
+                  `- ${result.title ?? result.sourceKey.key}`,
+                  `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
+                  `  Observed: ${result.observedAt}`,
+                  `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+                  `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
+                  ...(result.timeStatus === undefined
+                    ? []
+                    : [`  Time review: ${result.timeStatus}`]),
+                  `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+                  ...result.matches.flatMap(({ binId, timeMatch }) =>
+                    timeMatch === undefined
+                      ? []
+                      : [
+                          `  Time match ${binId}: ${timeMatch.status}${
+                            timeMatch.status === "undetermined"
+                              ? ` (${timeMatch.reason})`
+                              : ""
+                          }`,
+                        ],
+                  ),
+                ])),
+          ]
+        : ["Candidate results were not requested."]),
       ...(page.timeSummary === undefined
         ? []
         : [
             `Certain items: ${page.timeSummary.certainItems}`,
             `Undetermined items: ${page.timeSummary.undeterminedItems}`,
           ]),
-      ...(page.hasMore
-        ? [
-            `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
-          ]
-        : ["End of results."]),
+      ...(page.candidatesIncluded
+        ? page.hasMore
+          ? [
+              `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
+            ]
+          : ["End of results."]
+        : []),
+      ...(page.distribution === undefined
+        ? []
+        : [
+            `Distribution by ${page.distribution.by}: ${page.distribution.totalItems} distinct matching ${page.distribution.totalItems === "1" ? "item" : "items"}.`,
+            "Each group counts distinct items; one item can appear in multiple groups.",
+            ...page.distribution.groups.map((group) => {
+              if (group.kind === "bin") {
+                return `- Bin ${group.binId}: ${distributionItemCountText(group.itemCount)}`;
+              }
+              if (group.kind === "date") {
+                return `- Date ${group.value}: ${distributionItemCountText(group.itemCount)}`;
+              }
+              if (group.kind === "undetermined") {
+                return `- Undetermined (${group.reason}): ${distributionItemCountText(group.itemCount)}`;
+              }
+              if (group.kind === "extension") {
+                return `- Extension ${JSON.stringify(group.value)}: ${distributionItemCountText(group.itemCount)}`;
+              }
+              return `- Missing extension value: ${distributionItemCountText(group.itemCount)}`;
+            }),
+            ...(page.distribution.hasMore
+              ? [
+                  `More distribution groups are available. Repeat with query.distribution.cursor set to ${page.distribution.nextCursor}.`,
+                ]
+              : ["End of distribution."]),
+          ]),
     ]);
   const archiveBatchReadText = (
     response: z.infer<typeof archiveBatchReadResponseSchema>,
@@ -1543,19 +1577,22 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. Discover extension fields with binny bin extension-fields <bin-id>; extension filters require an explicit bin scope. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. For another page, repeat the filters with cursor set to the previous response\'s nextCursor; reuse snapshot.asOf when continuing the same result set.',
+          'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. A request can also distribute its complete match set by bin, local date period, or a declared top-level scalar or scalar-list extension field. Extension filters and distributions require an explicit bin scope. Date groups require a time zone and include only source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. Candidate results and distribution groups have independent limits and cursors. Repeat with top-level cursor for candidates or distribution.cursor for groups; reuse snapshot.asOf when continuing the same result set.',
         helpSupplement: text.lines([
           "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
           "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
           'Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"floor":{"op":"in","values":[8,9]}}}}\'.',
           "Every selected bin must use the declared adapter and schema. Missing and null extension values do not match.",
+          'Example: binny archive search --query \'{"bins":["forum"],"includeCandidates":false,"distribution":{"by":"date","field":"sourcePublishedAt","period":"month","timeZone":"Europe/Paris"}}\'.',
+          "One distribution dimension is available per request. Candidate pages and distribution pages advance independently; set includeCandidates to false to return only distribution groups.",
+          "Each group counts an item once; an item can appear in multiple groups, so group counts may exceed the distinct total. Missing extension values share one missing group.",
         ]),
         fields: {
           query: {
             kind: "valueOption",
             longOption: "--query",
             description:
-              "Fixed search request JSON. Time window dates are interpreted as local midnights in the required time zone. Reuse snapshot.asOf for a consistent cut and use nextCursor as cursor when hasMore is true.",
+              "Fixed search request JSON. Time window dates and date distributions use local calendar boundaries in their required time zone. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.",
           },
         },
         input: cliArchiveSearchInputSchema,

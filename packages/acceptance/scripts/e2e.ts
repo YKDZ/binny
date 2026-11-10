@@ -827,6 +827,114 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     );
     assert.doesNotMatch(extensionText.stdout, /"kind"\s*:/u);
 
+    const extensionDistributionQuery = {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: {
+          labels: { op: "hasAny", values: ["release", "reply"] },
+        },
+      },
+      includeCandidates: false,
+      limit: 5,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        limit: 1,
+      },
+    };
+    const extensionDistribution = cliData<{
+      readonly candidatesIncluded: boolean;
+      readonly results: readonly unknown[];
+      readonly distribution?: {
+        readonly by: string;
+        readonly totalItems: string;
+        readonly groups: readonly {
+          readonly kind: string;
+          readonly value?: string;
+          readonly itemCount: string;
+        }[];
+        readonly hasMore: boolean;
+        readonly nextCursor?: string;
+      };
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify(extensionDistributionQuery),
+      ]),
+      "found",
+    );
+    assert.equal(extensionDistribution.candidatesIncluded, false);
+    assert.deepEqual(extensionDistribution.results, []);
+    assert.equal(extensionDistribution.distribution?.by, "extension");
+    assert.equal(extensionDistribution.distribution?.totalItems, "1");
+    assert.deepEqual(extensionDistribution.distribution?.groups, [
+      { kind: "extension", value: "news", itemCount: "1" },
+    ]);
+    assert.equal(extensionDistribution.distribution?.hasMore, true);
+    assert.ok(extensionDistribution.distribution?.nextCursor);
+
+    const categoryDistributionText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: ["binny-runs-one", "binny-runs-two"],
+        text: { in: "title", groups: [["Extension"]] },
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "category",
+        },
+      }),
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(
+      categoryDistributionText.code,
+      0,
+      categoryDistributionText.stderr,
+    );
+    assert.match(
+      categoryDistributionText.stdout,
+      /Distribution by extension: 4 distinct matching items\./u,
+    );
+    assert.match(
+      categoryDistributionText.stdout,
+      /- Extension "comment": 1 item/u,
+    );
+    assert.match(
+      categoryDistributionText.stdout,
+      /- Missing extension value: 3 items/u,
+    );
+    assert.match(
+      categoryDistributionText.stdout,
+      /Each group counts distinct items; one item can appear in multiple groups\./u,
+    );
+    assert.match(
+      categoryDistributionText.stdout,
+      /Candidate results were not requested\./u,
+    );
+    assert.doesNotMatch(
+      categoryDistributionText.stdout,
+      /No archived items matched\.|End of results\./u,
+    );
+    assert.match(categoryDistributionText.stdout, /End of distribution\./u);
+    assert.doesNotMatch(categoryDistributionText.stdout, /"kind"\s*:/u);
+
+    const searchHelp = await cli(baseUrl, ["archive", "search", "--help"]);
+    assert.equal(searchHelp.code, 0, searchHelp.stderr);
+    assert.match(searchHelp.stdout, /distribute.*by bin, local date period/u);
+    assert.match(searchHelp.stdout, /distribution\.cursor/u);
+    assert.match(
+      searchHelp.stdout,
+      /group counts may exceed the distinct total/u,
+    );
+
     const mixedAdapterFailure = cliFailure<{
       readonly code: string;
       readonly path?: readonly (string | number)[];
@@ -1122,6 +1230,39 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       ),
     );
   }
+
+  const dateDistributionReadable = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify({
+      bins: [binId],
+      text: { in: "title", groups: [["Beijing window day-utc"]] },
+      includeCandidates: false,
+      distribution: {
+        by: "date",
+        field: "sourcePublishedAt",
+        period: "day",
+        timeZone: "Asia/Shanghai",
+      },
+    }),
+    "--output-format",
+    "text",
+  ]);
+  assert.equal(
+    dateDistributionReadable.code,
+    0,
+    dateDistributionReadable.stderr,
+  );
+  assert.match(
+    dateDistributionReadable.stdout,
+    /Distribution by date: 1 distinct matching item\./u,
+  );
+  assert.match(
+    dateDistributionReadable.stdout,
+    /- Undetermined \(precisionOverlapsBoundary\): 1 item/u,
+  );
+  assert.match(dateDistributionReadable.stdout, /End of distribution\./u);
 
   for (const invalidQuery of [
     { unsupportedFilter: true },
