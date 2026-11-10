@@ -258,8 +258,11 @@ export function createArchiveBatchReadOperation(
           );
         }
 
+        // Unloaded references stay out until classified so a concurrent deletion cannot overstate this lower bound.
         const minimumResponseExceedsLimit = (): boolean => {
-          let bytes = emptyResponseBytes;
+          let bytes =
+            emptyResponseBytes +
+            Math.max(0, checked.data.references.length - 1);
           for (
             let index = 0;
             index < checked.data.references.length;
@@ -285,6 +288,7 @@ export function createArchiveBatchReadOperation(
               const revision = revisionsById.get(
                 reference.revisionId.toLowerCase(),
               );
+              if (revision === undefined) continue;
               const baseBytes = archiveJsonStringifyByteLength(
                 {
                   index,
@@ -301,10 +305,9 @@ export function createArchiveBatchReadOperation(
                 baseBytes -
                 2 -
                 2 +
-                (revision?.serializedBytes ?? 2) +
-                (revision?.minimumResourcesBytes ?? 2);
+                revision.serializedBytes +
+                revision.minimumResourcesBytes;
             }
-            if (index > 0) bytes += 1;
             if (bytes > archiveBatchReadMaxResponseBytes) return true;
           }
           return false;
