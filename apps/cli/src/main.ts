@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { rename, rm } from "node:fs/promises";
+import { readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 
@@ -59,7 +59,6 @@ import {
   scheduleSchema,
   type Schedule,
   scheduleUpdateInputSchema,
-  withArchiveJsonSchemaProjection,
   withPostgresJsonSchemaProjection,
 } from "@binny/contracts";
 import {
@@ -84,12 +83,14 @@ export type CliRuntime = {
   readonly identity: CliCommandIdentity;
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
+  readonly readStdin?: () => Promise<string>;
 };
 
 type CliDependencies = {
   readonly createClient: () => ReturnType<typeof createApiClient>;
   readonly apiUrl: string;
   readonly getServiceMetadata: () => Promise<ServiceMetadataDocument>;
+  readonly readStdin?: () => Promise<string>;
 };
 
 type ServiceMetadataDocument =
@@ -137,9 +138,13 @@ const jsonTextSchema = z.string().transform((source, context) => {
 const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
   jsonTextSchema.pipe(jsonObjectSchema),
 );
-const cliArchiveSearchInputSchema = withArchiveJsonSchemaProjection(
-  z.object({ query: postgresTextSchema.min(1) }).strict(),
-);
+const cliArchiveSearchInputSchema = z
+  .object({
+    query: postgresTextSchema.optional(),
+    queryFile: z.string().min(1).optional(),
+    queryStdin: z.boolean().optional(),
+  })
+  .strict();
 const browserIdleTimeoutOptionSchema = z.string();
 
 function parseBrowserIdleTimeoutOption(
@@ -1403,6 +1408,8 @@ function createCliContract(identity: CliCommandIdentity) {
         choices: "候选：{choices}",
         default: "默认：{value}",
         countAtLeast: "Provide at least {min} of: {fields}",
+        countExactly:
+          "Choose exactly {count} from these input sources: {fields}",
       },
     }),
     version: versionCapability({
@@ -1579,6 +1586,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. A request can also distribute its complete match set by bin, local date period, or a declared top-level scalar or scalar-list extension field. Extension filters and distributions require an explicit bin scope. Date groups require a time zone and include only source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. Candidate results and distribution groups have independent limits and cursors. Repeat with top-level cursor for candidates or distribution.cursor for groups; reuse snapshot.asOf when continuing the same result set.',
         helpSupplement: text.lines([
+          "Provide exactly one request source: --query <json>, --query-file <path>, or --query-stdin.",
           "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
           "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
           'Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"floor":{"op":"in","values":[8,9]}}}}\'.',
@@ -1594,7 +1602,26 @@ function createCliContract(identity: CliCommandIdentity) {
             description:
               "Fixed search request JSON. Time window dates and date distributions use local calendar boundaries in their required time zone. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.",
           },
+          queryFile: {
+            kind: "valueOption",
+            longOption: "--query-file",
+            description:
+              "Read the fixed search request from a UTF-8 JSON file.",
+          },
+          queryStdin: {
+            kind: "flag",
+            longOption: "--query-stdin",
+            description: "Read the fixed search request from standard input.",
+          },
         },
+        usageConstraints: [
+          {
+            kind: "count",
+            fields: ["query", "queryFile", "queryStdin"],
+            min: 1,
+            max: 1,
+          },
+        ],
         input: cliArchiveSearchInputSchema,
         success: {
           kind: "data",
@@ -1609,9 +1636,44 @@ function createCliContract(identity: CliCommandIdentity) {
         },
         failures,
         async handler({ input, dependencies, outcome }) {
+          let source: string;
+          if (input.query !== undefined) {
+            source = input.query;
+          } else if (input.queryFile !== undefined) {
+            try {
+              source = await readFile(input.queryFile, "utf8");
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              return outcome.failure.apiError({
+                code: "invalid_input",
+                message: `Cannot read search request file: ${detail}`,
+                path: ["queryFile"],
+              });
+            }
+          } else if (input.queryStdin === true) {
+            try {
+              if (dependencies.readStdin === undefined)
+                throw new Error("Standard input is not available.");
+              source = await dependencies.readStdin();
+            } catch (error) {
+              const detail =
+                error instanceof Error ? error.message : String(error);
+              return outcome.failure.apiError({
+                code: "invalid_input",
+                message: `Cannot read search request from standard input: ${detail}`,
+                path: ["queryStdin"],
+              });
+            }
+          } else {
+            throw new Error(
+              "The archive search source constraint was bypassed.",
+            );
+          }
+
           let request: unknown;
           try {
-            request = JSON.parse(input.query) as unknown;
+            request = JSON.parse(source) as unknown;
           } catch {
             const error = {
               code: "invalid_input" as const,
@@ -3311,6 +3373,9 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
         apiUrl,
         createClient,
         getServiceMetadata,
+        ...(runtime.readStdin === undefined
+          ? {}
+          : { readStdin: runtime.readStdin }),
       },
       write: runtime.write,
     });
