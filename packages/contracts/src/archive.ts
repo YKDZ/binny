@@ -6,12 +6,13 @@ import type {
   ArchiveBatchReadResponse,
 } from "./archive-batch-read.ts";
 import {
+  archiveExtensionScalarSchema,
   archiveSearchExtensionsSchema,
   type ArchiveExtensionScalar,
 } from "./archive-extensions.ts";
 import type { ArchiveHistoryOperations } from "./archive-history.ts";
 import type { ArchiveRelationsOperations } from "./archive-relations.ts";
-import { binIdSchema } from "./bin-configuration.ts";
+import { binIdSchema, sourceAdapterIdSchema } from "./bin-configuration.ts";
 import {
   addPostgresTextIssue,
   postgresTextSchema,
@@ -1081,6 +1082,167 @@ const archiveSearchTimeMatchSchema = z.discriminatedUnion("status", [
 
 const archiveSearchCountSchema = z.string().regex(/^(?:0|[1-9]\d*)$/u);
 
+const archiveSearchDistributionPageInputFields = {
+  limit: z.number().int().min(1).max(100).default(50),
+  cursor: postgresTextSchema.min(1).max(4096).optional(),
+};
+
+const archiveSearchBinDistributionRequestSchema = z
+  .object({
+    by: z.literal("bin"),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+const archiveSearchDateDistributionRequestSchema = z
+  .object({
+    by: z.literal("date"),
+    field: z
+      .enum(["sourcePublishedAt", "sourceModifiedAt", "observedAt"])
+      .describe("The source or archive time fact used for the date groups."),
+    period: z
+      .enum(["day", "month", "year"])
+      .default("day")
+      .describe("The local calendar period represented by each date group."),
+    timeZone: archiveTimeZoneSchema.describe(
+      "Required time zone used to form local calendar groups.",
+    ),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+const archiveSearchExtensionDistributionRequestSchema = z
+  .object({
+    by: z.literal("extension"),
+    sourceAdapterId: sourceAdapterIdSchema,
+    field: postgresTextSchema.min(1).max(128),
+    ...archiveSearchDistributionPageInputFields,
+  })
+  .strict();
+
+/**
+ * One independently paginated distribution over the complete match set.
+ * Date periods use local calendar boundaries in the required time zone; a day
+ * follows the calendar and may not be exactly 24 elapsed hours across DST.
+ */
+export const archiveSearchDistributionRequestSchema =
+  withArchiveJsonSchemaProjection(
+    z.discriminatedUnion("by", [
+      archiveSearchBinDistributionRequestSchema,
+      archiveSearchDateDistributionRequestSchema,
+      archiveSearchExtensionDistributionRequestSchema,
+    ]),
+  );
+const archiveSearchNonExtensionDistributionRequestSchema =
+  withArchiveJsonSchemaProjection(
+    z.discriminatedUnion("by", [
+      archiveSearchBinDistributionRequestSchema,
+      archiveSearchDateDistributionRequestSchema,
+    ]),
+  );
+export type ArchiveSearchDistributionRequest = z.input<
+  typeof archiveSearchDistributionRequestSchema
+>;
+
+const archiveSearchDistributionItemCountSchema = archiveSearchCountSchema;
+const archiveSearchDistributionUndeterminedReasonSchema = z.enum([
+  "missingTime",
+  "missingTimeZone",
+  "precisionOverlapsBoundary",
+]);
+const archiveSearchDistributionBinGroupSchema = z
+  .object({
+    kind: z.literal("bin"),
+    binId: binIdSchema,
+    itemCount: archiveSearchDistributionItemCountSchema,
+  })
+  .strict();
+const archiveSearchDistributionDateGroupSchema = z
+  .object({
+    kind: z.literal("date"),
+    value: postgresTextSchema,
+    itemCount: archiveSearchDistributionItemCountSchema,
+  })
+  .strict();
+const archiveSearchDistributionUndeterminedGroupSchema = z
+  .object({
+    kind: z.literal("undetermined"),
+    reason: archiveSearchDistributionUndeterminedReasonSchema,
+    itemCount: archiveSearchDistributionItemCountSchema,
+  })
+  .strict();
+const archiveSearchDistributionExtensionGroupSchema = z
+  .object({
+    kind: z.literal("extension"),
+    value: archiveExtensionScalarSchema,
+    itemCount: archiveSearchDistributionItemCountSchema,
+  })
+  .strict();
+const archiveSearchDistributionMissingGroupSchema = z
+  .object({
+    kind: z.literal("missing"),
+    itemCount: archiveSearchDistributionItemCountSchema,
+  })
+  .strict();
+const archiveSearchDistributionPageFields = {
+  totalItems: archiveSearchDistributionItemCountSchema,
+  hasMore: z.boolean(),
+  nextCursor: z.string().min(1).max(4096).optional(),
+};
+
+/**
+ * One stable, independently paginated view of the full matching set.
+ * `totalItems` is distinct by item. A multi-valued extension item can appear
+ * once in each value group; a bin distribution counts it once per matching
+ * bin, so group totals can exceed `totalItems`.
+ */
+export const archiveSearchDistributionPageSchema =
+  withArchiveJsonSchemaProjection(
+    z.discriminatedUnion("by", [
+      z
+        .object({
+          by: z.literal("bin"),
+          ...archiveSearchDistributionPageFields,
+          groups: z.array(archiveSearchDistributionBinGroupSchema),
+        })
+        .strict(),
+      z
+        .object({
+          by: z.literal("date"),
+          field: z.enum([
+            "sourcePublishedAt",
+            "sourceModifiedAt",
+            "observedAt",
+          ]),
+          period: z.enum(["day", "month", "year"]),
+          timeZone: archiveTimeZoneSchema,
+          ...archiveSearchDistributionPageFields,
+          groups: z.array(
+            z.union([
+              archiveSearchDistributionDateGroupSchema,
+              archiveSearchDistributionUndeterminedGroupSchema,
+            ]),
+          ),
+        })
+        .strict(),
+      z
+        .object({
+          by: z.literal("extension"),
+          sourceAdapterId: sourceAdapterIdSchema,
+          field: postgresTextSchema.min(1).max(128),
+          ...archiveSearchDistributionPageFields,
+          groups: z.array(
+            z.union([
+              archiveSearchDistributionExtensionGroupSchema,
+              archiveSearchDistributionMissingGroupSchema,
+            ]),
+          ),
+        })
+        .strict(),
+    ]),
+  );
+export type ArchiveSearchDistributionPage = z.infer<
+  typeof archiveSearchDistributionPageSchema
+>;
+
 function archiveSearchBinsSchema(requiredExtensionScope = false) {
   return z
     .array(binIdSchema, {
@@ -1106,20 +1268,46 @@ function archiveSearchBinsSchema(requiredExtensionScope = false) {
     });
 }
 
-const archiveSearchInputCommonFields = {
+const archiveSearchInputSharedFields = {
   text: archiveSearchTextSchema.optional(),
   timeWindow: archiveSearchTimeWindowSchema.optional(),
+  includeCandidates: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Return candidate item results alongside an optional distribution.",
+    ),
   asOf: archiveSnapshotSequenceSchema.optional(),
   limit: z.number().int().min(1).max(100).default(50),
   cursor: postgresTextSchema.min(1).max(4096).optional(),
 };
-const archiveSearchWithoutExtensionsSchema = z
-  .object({
-    bins: archiveSearchBinsSchema().optional(),
-    ...archiveSearchInputCommonFields,
-    extensions: z.never().optional(),
-  })
-  .strict();
+const archiveSearchInputCommonFields = {
+  ...archiveSearchInputSharedFields,
+  distribution: archiveSearchDistributionRequestSchema
+    .optional()
+    .describe(
+      "An independent complete-match distribution by bin, local date period, or declared extension field.",
+    ),
+};
+const archiveSearchWithoutExtensionsSchema = z.union([
+  z
+    .object({
+      bins: archiveSearchBinsSchema().optional(),
+      ...archiveSearchInputSharedFields,
+      distribution:
+        archiveSearchNonExtensionDistributionRequestSchema.optional(),
+      extensions: z.never().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      bins: archiveSearchBinsSchema(true),
+      ...archiveSearchInputSharedFields,
+      distribution: archiveSearchExtensionDistributionRequestSchema,
+      extensions: z.never().optional(),
+    })
+    .strict(),
+]);
 const archiveSearchWithExtensionsSchema = z
   .object({
     bins: archiveSearchBinsSchema(true),
@@ -1133,12 +1321,53 @@ const archiveSearchWithExtensionsSchema = z
  * snapshot. Extension filters require an explicit `bins` list. Every selected
  * bin must use the declared adapter and schema; all filters are evaluated on
  * the same latest bin view. Missing or null extension values do not match.
+ * A request may include one complete-match distribution by bin, date period,
+ * or declared top-level extension field. Candidate and distribution cursors
+ * and page sizes advance independently; set `includeCandidates` to false for
+ * distribution-only pages.
  */
 export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
-  z.union([
-    archiveSearchWithExtensionsSchema,
-    archiveSearchWithoutExtensionsSchema,
-  ]),
+  z
+    .union([
+      archiveSearchWithExtensionsSchema,
+      archiveSearchWithoutExtensionsSchema,
+    ])
+    .superRefine((input, context) => {
+      if (!input.includeCandidates && input.distribution === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["distribution"],
+          message: "A distribution is required when candidates are omitted.",
+        });
+      }
+      if (!input.includeCandidates && input.cursor !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["cursor"],
+          message:
+            "A candidate cursor cannot be used when candidates are omitted.",
+        });
+      }
+      if (input.distribution?.by === "extension" && input.bins === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["bins"],
+          message: "Extension distributions require an explicit bin scope.",
+        });
+      }
+      if (
+        input.distribution?.by === "extension" &&
+        input.extensions !== undefined &&
+        input.distribution.sourceAdapterId !== input.extensions.sourceAdapterId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["distribution", "sourceAdapterId"],
+          message:
+            "Extension filters and distributions must use the same source adapter.",
+        });
+      }
+    }),
 );
 
 function nestedArchiveSearchIssues(
@@ -1169,7 +1398,30 @@ export function archiveSearchInputIssue(
     input !== null &&
     Object.hasOwn(input, "extensions");
   const branchIndex = hasExtensionScope ? 0 : 1;
-  const branchIssues = unionIssue.errors[branchIndex];
+  let branchIssues = unionIssue.errors[branchIndex];
+  if (branchIssues === undefined) return issues[0];
+
+  const distribution =
+    typeof input === "object" &&
+    input !== null &&
+    "distribution" in input &&
+    typeof input.distribution === "object" &&
+    input.distribution !== null
+      ? input.distribution
+      : undefined;
+  if (
+    !hasExtensionScope &&
+    distribution !== undefined &&
+    "by" in distribution &&
+    distribution.by === "extension"
+  ) {
+    const distributionUnion = branchIssues.find(
+      (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
+    );
+    if (distributionUnion?.code === "invalid_union") {
+      branchIssues = distributionUnion.errors[1];
+    }
+  }
   if (branchIssues === undefined) return issues[0];
 
   const candidates = nestedArchiveSearchIssues(branchIssues.flat());
@@ -1220,13 +1472,22 @@ const archiveSearchResultSchema = z
  * key. A null time sorts last, and these keys never replace the stored public
  * SourceTime fact. Item ID breaks ties. Counts are distinct
  * per review set, so one item with certain and undetermined views may count in
- * both. `hasMore` and `nextCursor` agree. The cursor binds filters and snapshot
- * but does not bind the page size.
+ * both. `hasMore` and `nextCursor` describe the candidate page. If candidates
+ * are omitted, `results` is empty and `hasMore` is false. A requested
+ * distribution covers the complete matching set and has its own continuation
+ * cursor and page size. Date groups include a source-time fact only when its
+ * complete represented interval fits one local calendar period; other facts
+ * are grouped by their undetermined reason. Matching views can place one item
+ * in different date or reason groups, but it counts once within each group.
+ * Extension list values and matching views are also deduplicated within each
+ * group, and absent/null/empty values share one missing group. Neither page
+ * size nor cursor changes the other page.
  */
 export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
   z
     .object({
       snapshot: archiveSnapshotSchema,
+      candidatesIncluded: z.boolean(),
       results: z.array(archiveSearchResultSchema),
       timeSummary: z
         .object({
@@ -1237,6 +1498,7 @@ export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
         .optional(),
       hasMore: z.boolean(),
       nextCursor: z.string().min(1).max(4096).optional(),
+      distribution: archiveSearchDistributionPageSchema.optional(),
     })
     .strict(),
 );
