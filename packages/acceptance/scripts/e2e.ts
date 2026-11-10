@@ -1338,6 +1338,80 @@ async function verifyArchiveBatchReadBudget(
   assert.equal(recovered.status, 200, await recovered.clone().text());
 }
 
+async function verifyArchiveBatchReadRequestCancellation(
+  baseUrl: string,
+  reference: ArchiveBatchReadReference,
+): Promise<void> {
+  const lock = startManagedProcess("docker", postgresExecArgs([]));
+  lock.write(
+    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_resource IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD';\n",
+  );
+  await lock.waitForMarker("BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD");
+  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
+  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    lock.write("COMMIT;\n\\q\n");
+    const result = await lock.waitForClose();
+    assert.equal(result.code, 0, result.stderr);
+  };
+
+  try {
+    const controller = new AbortController();
+    const request = fetch(baseUrl + "/archives/batch-read", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ references: [reference] }),
+      signal: controller.signal,
+    }).then(
+      (response) => ({ kind: "response" as const, response }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    const waiterPid = await waitForManualRunLockWaiterBlockedBy(backendPid);
+    const abortedAt = performance.now();
+    controller.abort();
+    const outcome = await request;
+    assert.equal(outcome.kind, "error");
+    if (outcome.kind === "error") {
+      assert.ok(outcome.error instanceof Error);
+      assert.equal(outcome.error.name, "AbortError");
+    }
+
+    const cancellationDeadline =
+      Date.now() + Math.floor(archiveSearchBudgetMs / 2);
+    let waiterStillBlocked = true;
+    while (Date.now() < cancellationDeadline) {
+      waiterStillBlocked = (await readManualRunLockWaiters()).some(
+        ({ pid, blockers }) =>
+          pid === waiterPid && blockers.includes(backendPid),
+      );
+      if (!waiterStillBlocked) break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+    assert.equal(
+      waiterStillBlocked,
+      false,
+      "An aborted archive batch read kept waiting on PostgreSQL until its request budget expired.",
+    );
+    assert.ok(
+      performance.now() - abortedAt < archiveSearchBudgetMs / 2,
+      "The archive batch read stopped only after the ordinary request deadline.",
+    );
+  } finally {
+    await release();
+  }
+
+  const recovered = await fetch(baseUrl + "/archives/batch-read", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ references: [reference] }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(recovered.status, 200, await recovered.clone().text());
+}
+
 async function capacityHttpStep(baseUrl: string): Promise<string> {
   const result = await run(
     "pnpm",
@@ -10192,6 +10266,10 @@ async function main(): Promise<void> {
       await archiveHttpStep("fixed-search", baseUrl);
       const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
       await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
+      await verifyArchiveBatchReadRequestCancellation(
+        baseUrl,
+        batchReadFixture.reference,
+      );
       await removeResourceStorageFile(batchReadFixture.resourceId);
       await archiveBatchReadMissingMediaHttpStep(baseUrl, batchReadFixture);
       await archiveBatchReadCliStep(baseUrl, batchReadFixture);
