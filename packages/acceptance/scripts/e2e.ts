@@ -148,15 +148,22 @@ const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const articleAdaptersOnly = internalStep === "article-adapters";
 const documentAdaptersOnly = internalStep === "document-adapters";
 const qoderAdapterOnly = internalStep === "qoder-adapter";
-const archiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
+// This value sets expectations for timeout cases; ordinary journeys leave the
+// server variable unset and exercise the server's own default.
+const expectedArchiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
 const manualRunsOnly =
   scheduleOnly ||
   archiveModelJourney ||
   articleAdaptersOnly ||
   documentAdaptersOnly ||
   qoderAdapterOnly;
+const capacityPhaseOnly =
+  isFullCapacityRun &&
+  (capacityPhase === "verify" || capacityPhase === "delete");
 const useHeartbeatProxy =
-  (!manualRunsOnly || scheduledRunsOnly) && !rssLinuxdoOnly;
+  (!manualRunsOnly || scheduledRunsOnly) &&
+  !rssLinuxdoOnly &&
+  !capacityPhaseOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -370,7 +377,6 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
     BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
     BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
-    BINNY_ARCHIVE_SEARCH_BUDGET_MS: String(archiveSearchBudgetMs),
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -1703,10 +1709,13 @@ async function verifyArchiveSearchPoolWaitBudget(
     assert.equal(failure.error.code, "query_budget_exceeded");
     assert.match(
       failure.error.message,
-      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+      new RegExp(
+        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
+        "u",
+      ),
     );
     assert.ok(
-      elapsedMs < archiveSearchBudgetMs * 2,
+      elapsedMs < expectedArchiveSearchBudgetMs * 2,
       `Search waited ${String(elapsedMs)} ms for the occupied database pool.`,
     );
   } finally {
@@ -1753,7 +1762,7 @@ async function verifyArchiveSearchRequestCancellation(
     }
 
     const cancellationDeadline =
-      Date.now() + Math.floor(archiveSearchBudgetMs / 2);
+      Date.now() + Math.floor(expectedArchiveSearchBudgetMs / 2);
     let waiterStillBlocked = true;
     while (Date.now() < cancellationDeadline) {
       waiterStillBlocked = (await readManualRunLockWaiters()).some(
@@ -1769,7 +1778,7 @@ async function verifyArchiveSearchRequestCancellation(
       "An aborted archive search kept waiting on PostgreSQL until its request budget expired.",
     );
     assert.ok(
-      performance.now() - abortedAt < archiveSearchBudgetMs / 2,
+      performance.now() - abortedAt < expectedArchiveSearchBudgetMs / 2,
       "The database query stopped only after the ordinary search deadline.",
     );
   } finally {
@@ -1814,11 +1823,11 @@ async function verifyArchiveSearchSharedRequestBudget(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(archiveSearchBudgetMs * 3),
+      signal: AbortSignal.timeout(expectedArchiveSearchBudgetMs * 3),
     });
     await waitForManualRunLockWaiterBlockedBy(timeZoneLock.backendPid);
     const firstPhaseReleaseAt =
-      startedAt + Math.floor(archiveSearchBudgetMs / 2);
+      startedAt + Math.floor(expectedArchiveSearchBudgetMs / 2);
     while (performance.now() < firstPhaseReleaseAt) {
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
     }
@@ -1836,10 +1845,13 @@ async function verifyArchiveSearchSharedRequestBudget(
     assert.match(failure.error.message, /no partial results were returned/u);
     assert.match(
       failure.error.message,
-      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+      new RegExp(
+        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
+        "u",
+      ),
     );
     assert.ok(
-      elapsedMs < archiveSearchBudgetMs * 1.25,
+      elapsedMs < expectedArchiveSearchBudgetMs * 1.25,
       `Search reset its request budget between time-zone and result queries (${String(elapsedMs)} ms).`,
     );
   } finally {
@@ -1884,7 +1896,7 @@ async function verifyArchiveBatchReadBudget(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ references: [reference] }),
-      signal: AbortSignal.timeout(archiveSearchBudgetMs * 3),
+      signal: AbortSignal.timeout(expectedArchiveSearchBudgetMs * 3),
     });
     await waitForManualRunLockWaiterBlockedBy(backendPid);
     const response = await responsePromise;
@@ -1896,11 +1908,14 @@ async function verifyArchiveBatchReadBudget(
     assert.equal(failure.error.code, "query_budget_exceeded");
     assert.match(
       failure.error.message,
-      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+      new RegExp(
+        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
+        "u",
+      ),
     );
     assert.match(failure.error.message, /no partial results were returned/u);
     assert.ok(
-      elapsedMs < archiveSearchBudgetMs * 2,
+      elapsedMs < expectedArchiveSearchBudgetMs * 2,
       `Batch read waited ${String(elapsedMs)} ms for resource storage metadata.`,
     );
   } finally {
@@ -1938,11 +1953,14 @@ async function verifyArchiveBatchReadBudgetCli(
     }>(result, "query_budget_exceeded");
     assert.match(
       failure.message,
-      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+      new RegExp(
+        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
+        "u",
+      ),
     );
     assert.match(failure.message, /no partial results were returned/u);
     assert.ok(
-      elapsedMs < archiveSearchBudgetMs * 1.5,
+      elapsedMs < expectedArchiveSearchBudgetMs * 1.5,
       `The installed CLI waited ${String(elapsedMs)} ms for resource metadata.`,
     );
   } finally {
@@ -2003,7 +2021,7 @@ async function verifyArchiveBatchReadRequestCancellation(
     }
 
     const cancellationDeadline =
-      Date.now() + Math.floor(archiveSearchBudgetMs / 2);
+      Date.now() + Math.floor(expectedArchiveSearchBudgetMs / 2);
     let waiterStillBlocked = true;
     while (Date.now() < cancellationDeadline) {
       waiterStillBlocked = (await readManualRunLockWaiters()).some(
@@ -2019,7 +2037,7 @@ async function verifyArchiveBatchReadRequestCancellation(
       "An aborted archive batch read kept waiting on PostgreSQL until its request budget expired.",
     );
     assert.ok(
-      performance.now() - abortedAt < archiveSearchBudgetMs / 2,
+      performance.now() - abortedAt < expectedArchiveSearchBudgetMs / 2,
       "The archive batch read stopped only after the ordinary request deadline.",
     );
   } finally {
@@ -10374,6 +10392,23 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
   const serverId = (await compose(["ps", "-q", "server"])).stdout.trim();
   const postgresId = (await compose(["ps", "-q", "postgres"])).stdout.trim();
   assert.ok(serverId && postgresId);
+  const serverEnvironmentResult = await run("docker", [
+    "inspect",
+    "--format",
+    "{{range .Config.Env}}{{println .}}{{end}}",
+    serverId,
+  ]);
+  assert.equal(serverEnvironmentResult.code, 0, serverEnvironmentResult.stderr);
+  const archiveSearchBudgetEnvironment = serverEnvironmentResult.stdout
+    .split("\n")
+    .find((value) => value.startsWith("BINNY_ARCHIVE_SEARCH_BUDGET_MS="));
+  if (isFullCapacityRun) {
+    assert.equal(
+      archiveSearchBudgetEnvironment,
+      undefined,
+      "Full capacity queries must use the server's configured default budget.",
+    );
+  }
   const limits = await Promise.all([
     inspectContainerLimit("server"),
     inspectContainerLimit("postgres"),
@@ -10530,6 +10565,8 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
           serverImageId,
           serverBuildImageId,
           postgresImageId,
+          archiveSearchBudgetEnvironment:
+            archiveSearchBudgetEnvironment ?? null,
           node: process.version,
           host,
           networkSubnets,
@@ -10583,6 +10620,12 @@ async function main(): Promise<void> {
       "  server:",
       '    cpus: "1.0"',
       '    mem_limit: "2g"',
+      ...(archiveModelJourney
+        ? [
+            "    environment:",
+            `      BINNY_ARCHIVE_SEARCH_BUDGET_MS: "${String(expectedArchiveSearchBudgetMs)}"`,
+          ]
+        : []),
       "    ports: !override",
       '      - "3000"',
       "    networks: !override",
@@ -10678,12 +10721,7 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney =
-    !manualRunsOnly &&
-    !(
-      isFullCapacityRun &&
-      (capacityPhase === "verify" || capacityPhase === "delete")
-    );
+  const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
@@ -10693,6 +10731,7 @@ async function main(): Promise<void> {
     await compose(["build", "server"]);
     builtImages.add(imageName);
     if (
+      !capacityPhaseOnly &&
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&
@@ -10701,7 +10740,7 @@ async function main(): Promise<void> {
       await compose(["build", "runtime-fifteen-one"]);
       builtImages.add(runtimeImageName);
     }
-    if (!manualRunsOnly || archiveModelJourney) {
+    if (!capacityPhaseOnly && (!manualRunsOnly || archiveModelJourney)) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
     }
@@ -10749,58 +10788,60 @@ async function main(): Promise<void> {
     composePort = await publishedPort("server", 3000);
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    await verifyEmptyBinList(baseUrl);
+    if (!capacityPhaseOnly) await verifyEmptyBinList(baseUrl);
 
-    const e2eServices = articleAdaptersOnly
-      ? [
-          "postgres",
-          "server",
-          "rss-e2e-source",
-          ...articleAdapterRuntimeServices,
-        ]
-      : qoderAdapterOnly
-        ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
-        : documentAdaptersOnly
-          ? [
-              "postgres",
-              "server",
-              "rss-e2e-source",
-              ...documentAdapterRuntimeServices,
-            ]
-          : manualRunsOnly
+    const e2eServices = capacityPhaseOnly
+      ? ["postgres", "server"]
+      : articleAdaptersOnly
+        ? [
+            "postgres",
+            "server",
+            "rss-e2e-source",
+            ...articleAdapterRuntimeServices,
+          ]
+        : qoderAdapterOnly
+          ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
+          : documentAdaptersOnly
             ? [
                 "postgres",
                 "server",
-                "manual-runs-source",
-                "runtime-fifteen-one",
-                ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-                ...(archiveModelJourney
-                  ? [
-                      "runtime-fifteen-two",
-                      "runtime-fifteen-schema-two",
-                      "runtime-rss",
-                    ]
-                  : []),
+                "rss-e2e-source",
+                ...documentAdapterRuntimeServices,
               ]
-            : rssLinuxdoOnly
+            : manualRunsOnly
               ? [
                   "postgres",
                   "server",
-                  "rss-e2e-source",
-                  "runtime-rss",
-                  "runtime-rss-two",
-                ]
-              : [
-                  "postgres",
-                  "server",
                   "manual-runs-source",
-                  "rss-e2e-source",
                   "runtime-fifteen-one",
-                  "runtime-fifteen-two",
-                  "runtime-rss",
-                  "runtime-rss-two",
-                  "heartbeat-proxy",
-                ];
+                  ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+                  ...(archiveModelJourney
+                    ? [
+                        "runtime-fifteen-two",
+                        "runtime-fifteen-schema-two",
+                        "runtime-rss",
+                      ]
+                    : []),
+                ]
+              : rssLinuxdoOnly
+                ? [
+                    "postgres",
+                    "server",
+                    "rss-e2e-source",
+                    "runtime-rss",
+                    "runtime-rss-two",
+                  ]
+                : [
+                    "postgres",
+                    "server",
+                    "manual-runs-source",
+                    "rss-e2e-source",
+                    "runtime-fifteen-one",
+                    "runtime-fifteen-two",
+                    "runtime-rss",
+                    "runtime-rss-two",
+                    "heartbeat-proxy",
+                  ];
     if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -10828,6 +10869,7 @@ async function main(): Promise<void> {
     ]);
     composePort = await publishedPort("server", 3000);
     if (
+      !capacityPhaseOnly &&
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&

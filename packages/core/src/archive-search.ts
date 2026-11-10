@@ -906,12 +906,25 @@ function pageQuery(
       FROM classified
       WHERE ${reviewCondition}
     ), items AS (
+      -- Keep sorting narrow; build the complete per-view JSON after page selection.
       SELECT
         selected_views.item_id,
         selected_views.namespace,
         selected_views.source_key,
         max(selected_views.observed_at) AS observed_at,
-        ${decision === undefined ? sql`NULL::timestamptz` : sql`max(selected_views.sort_value)`} AS sort_value,
+        ${decision === undefined ? sql`NULL::timestamptz` : sql`max(selected_views.sort_value)`} AS sort_value
+      FROM selected_views
+      GROUP BY selected_views.item_id, selected_views.namespace, selected_views.source_key
+    ), selected AS (
+      SELECT items.*
+      FROM items
+      CROSS JOIN fixed_snapshot
+      WHERE NOT fixed_snapshot.invalid AND ${input.includeCandidates ? afterCursor : sql`false`}
+      ORDER BY ${sortOrder}
+      LIMIT ${input.limit + 1}
+    ), selected_matches AS (
+      SELECT
+        selected_views.item_id,
         jsonb_agg(
           jsonb_build_object(
             'binId', selected_views.bin_id,
@@ -930,14 +943,8 @@ function pageQuery(
           ORDER BY selected_views.observed_at DESC, selected_views.bin_id COLLATE "C" ASC
         ) AS matches
       FROM selected_views
-      GROUP BY selected_views.item_id, selected_views.namespace, selected_views.source_key
-    ), selected AS (
-      SELECT items.*
-      FROM items
-      CROSS JOIN fixed_snapshot
-      WHERE NOT fixed_snapshot.invalid AND ${input.includeCandidates ? afterCursor : sql`false`}
-      ORDER BY ${sortOrder}
-      LIMIT ${input.limit + 1}
+      JOIN selected ON selected.item_id = selected_views.item_id
+      GROUP BY selected_views.item_id
     ), page AS (
       SELECT coalesce(
         jsonb_agg(
@@ -947,17 +954,18 @@ function pageQuery(
               'namespace', selected.namespace,
               'key', selected.source_key
             ),
-            'title', selected.matches->0->'title',
-            'sourcePublishedAt', selected.matches->0->'sourcePublishedAt',
-            'sourceModifiedAt', selected.matches->0->'sourceModifiedAt',
+            'title', selected_matches.matches->0->'title',
+            'sourcePublishedAt', selected_matches.matches->0->'sourcePublishedAt',
+            'sourceModifiedAt', selected_matches.matches->0->'sourceModifiedAt',
             'observedAt', selected.observed_at,
-            'matches', selected.matches
+            'matches', selected_matches.matches
           ) || ${selectedResultTime}
           ORDER BY ${selectedOrder}
         ),
         '[]'::jsonb
       ) AS results
       FROM selected
+      JOIN selected_matches ON selected_matches.item_id = selected.item_id
     ), time_summary AS (
       SELECT
         count(DISTINCT item_id) FILTER (WHERE time_status = 'certain')::text AS certain_items,
