@@ -398,6 +398,7 @@ export type ArchiveStoreOptions = {
   readonly executeCancellableSearchQuery: CancellableQueryExecutor;
   readonly unreferencedResourceAgeMs?: number;
   readonly resourceCleanupIntervalMs?: number;
+  /** One server-side preparation budget shared by archive search and batch read. */
   readonly archiveSearchBudgetMs?: number;
 };
 

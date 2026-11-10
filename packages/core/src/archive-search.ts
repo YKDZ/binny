@@ -9,6 +9,7 @@ import {
   archiveSnapshotSchema,
   discoverSourceAdapterExtensionFields,
   sourceAdapterManifestStoredSchema,
+  type ArchiveOperationContext,
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
   type ArchiveSearchDistributionRequest,
@@ -21,10 +22,11 @@ import { sql, type SQL } from "drizzle-orm";
 
 import { canonicalJson } from "./archive-common.ts";
 import {
+  ArchiveRequestCancelled,
   ArchiveQueryBudgetExceeded,
+  assertArchiveQueryActive,
   createArchiveQueryDeadline,
   executeArchiveQueryWithinDeadline,
-  remainingArchiveQueryBudgetMs,
 } from "./archive-query-budget.ts";
 import {
   canonicalizeArchiveTimeZone,
@@ -1069,10 +1071,14 @@ export function createArchiveSearchOperation(
   return {
     async searchArchive(
       request: ArchiveSearchRequest,
+      context?: ArchiveOperationContext,
     ): Promise<
       ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
     > {
-      const deadline = createArchiveQueryDeadline(budgetMs);
+      const deadline =
+        context?.deadline ?? createArchiveQueryDeadline(budgetMs);
+      const signal = context?.signal;
+      assertArchiveQueryActive(deadline, signal);
       const checked = archiveSearchInputSchema.safeParse(request);
       if (!checked.success) {
         const issue = archiveSearchInputIssue(request, checked.error.issues);
@@ -1170,6 +1176,7 @@ export function createArchiveSearchOperation(
               executeQuery,
               timeZoneDiscoveryQuery(input, snapshot, [...timeZoneFields]),
               deadline,
+              signal,
             );
           if (zoneRow === undefined) {
             throw new Error("Search time-zone query returned no snapshot row.");
@@ -1201,6 +1208,7 @@ export function createArchiveSearchOperation(
             aliases,
           ),
           deadline,
+          signal,
         );
         if (row === undefined) {
           throw new Error("Search query did not return its snapshot row.");
@@ -1364,9 +1372,15 @@ export function createArchiveSearchOperation(
             ? {}
             : { distribution: completedDistribution }),
         });
-        remainingArchiveQueryBudgetMs(deadline);
+        assertArchiveQueryActive(deadline, signal);
         return { ok: true, value: completedPage };
       } catch (error) {
+        if (
+          context?.signal?.aborted ||
+          error instanceof ArchiveRequestCancelled
+        ) {
+          throw new ArchiveRequestCancelled();
+        }
         if (
           error instanceof ArchiveQueryBudgetExceeded ||
           databaseErrorCode(error) === "57014"
