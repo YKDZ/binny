@@ -1191,6 +1191,198 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   }>(await cli(baseUrl, ["archive", "search", "--query", "{}"]), "found");
   assert.ok(unfilteredSearch.results.length > 0);
 
+  const globalDistribution = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly candidatesIncluded: boolean;
+    readonly results: readonly unknown[];
+    readonly distribution?: {
+      readonly by: string;
+      readonly totalItems: string;
+      readonly groups: readonly {
+        readonly kind: string;
+        readonly binId?: string;
+        readonly itemCount: string;
+      }[];
+      readonly hasMore: boolean;
+    };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        includeCandidates: false,
+        distribution: { by: "bin", limit: 100 },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(globalDistribution.candidatesIncluded, false);
+  assert.deepEqual(globalDistribution.results, []);
+  assert.equal(globalDistribution.distribution?.by, "bin");
+  assert.equal(globalDistribution.distribution?.hasMore, false);
+  assert.ok(
+    globalDistribution.distribution?.groups.some(
+      ({ kind, binId: groupBinId }) => kind === "bin" && groupBinId === binId,
+    ),
+    "The global distribution should include the selected bin.",
+  );
+
+  const onboardingDirectory = await mkdtemp(
+    path.join(tmpdir(), "binny-search-onboarding-"),
+  );
+  try {
+    const onboardingQuery = {
+      bins: [binId],
+      extensions: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        filters: { section: { op: "eq", value: "model-news" } },
+      },
+      text: { in: "title", groups: [["Beijing"], ["window"]] },
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08",
+        until: "2026-11-09",
+        timeZone: "Asia/Shanghai",
+      },
+      asOf: globalDistribution.snapshot.asOf,
+      limit: 1,
+    };
+    const firstQueryPath = path.join(onboardingDirectory, "first-page.json");
+    await writeFile(firstQueryPath, JSON.stringify(onboardingQuery), "utf8");
+    const firstPage = cliData<{
+      readonly snapshot: { readonly asOf: string };
+      readonly results: readonly {
+        readonly itemId: string;
+        readonly title: string | null;
+        readonly matches: readonly {
+          readonly binId: string;
+          readonly revisionId: string;
+          readonly archiveSeq: string;
+        }[];
+      }[];
+      readonly hasMore: boolean;
+      readonly nextCursor?: string;
+    }>(
+      await cli(baseUrl, ["archive", "search", "--query-file", firstQueryPath]),
+      "found",
+    );
+    assert.equal(firstPage.snapshot.asOf, globalDistribution.snapshot.asOf);
+    assert.equal(firstPage.results.length, 1);
+    assert.match(firstPage.results[0]?.title ?? "", /^Beijing window /u);
+    assert.equal(firstPage.hasMore, true);
+    assert.ok(firstPage.nextCursor);
+
+    const firstPageText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query-file",
+      firstQueryPath,
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(firstPageText.code, 0, firstPageText.stderr);
+    assert.match(firstPageText.stdout, /Snapshot:/u);
+    assert.match(firstPageText.stdout, /Time review: certain/u);
+    assert.doesNotMatch(firstPageText.stdout, /"results"\s*:/u);
+
+    const nextQueryPath = path.join(onboardingDirectory, "next-page.json");
+    await writeFile(
+      nextQueryPath,
+      JSON.stringify({
+        ...onboardingQuery,
+        asOf: firstPage.snapshot.asOf,
+        cursor: firstPage.nextCursor,
+        limit: 3,
+      }),
+      "utf8",
+    );
+    const nextPage = cliData<{
+      readonly snapshot: { readonly asOf: string };
+      readonly results: readonly {
+        readonly itemId: string;
+        readonly matches: readonly {
+          readonly binId: string;
+          readonly revisionId: string;
+          readonly archiveSeq: string;
+        }[];
+      }[];
+      readonly hasMore: boolean;
+      readonly nextCursor?: string;
+    }>(
+      await cli(baseUrl, ["archive", "search", "--query-file", nextQueryPath]),
+      "found",
+    );
+    assert.equal(nextPage.snapshot.asOf, firstPage.snapshot.asOf);
+    assert.equal(nextPage.results.length, 3);
+    assert.equal(nextPage.hasMore, false);
+    assert.equal(nextPage.nextCursor, undefined);
+    assert.equal(
+      new Set([
+        ...firstPage.results.map(({ itemId }) => itemId),
+        ...nextPage.results.map(({ itemId }) => itemId),
+      ]).size,
+      4,
+    );
+
+    const selected = firstPage.results[0];
+    assert.ok(selected !== undefined);
+    const selectedMatch = selected.matches.find(
+      ({ binId: matchedBinId }) => matchedBinId === binId,
+    );
+    assert.ok(selectedMatch !== undefined);
+    const batchRead = cliData<{
+      readonly results: readonly {
+        readonly index: number;
+        readonly reference: {
+          readonly itemId: string;
+          readonly binId: string;
+          readonly revisionId: string;
+          readonly archiveSeq: string;
+        };
+        readonly status: string;
+        readonly revision?: {
+          readonly itemId: string;
+          readonly revisionId: string;
+          readonly state: { readonly body?: { readonly text?: string } };
+        };
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "batch-read",
+        "--references",
+        JSON.stringify([
+          {
+            itemId: selected.itemId,
+            binId: selectedMatch.binId,
+            revisionId: selectedMatch.revisionId,
+            archiveSeq: selectedMatch.archiveSeq,
+          },
+        ]),
+      ]),
+      "read",
+    );
+    assert.equal(batchRead.results.length, 1);
+    const selectedRead = batchRead.results[0];
+    assert.ok(selectedRead?.status === "readable");
+    assert.equal(selectedRead.index, 0);
+    assert.deepEqual(selectedRead.reference, {
+      itemId: selected.itemId,
+      binId: selectedMatch.binId,
+      revisionId: selectedMatch.revisionId,
+      archiveSeq: selectedMatch.archiveSeq,
+    });
+    assert.equal(selectedRead.revision?.itemId, selected.itemId);
+    assert.equal(selectedRead.revision?.revisionId, selectedMatch.revisionId);
+    assert.match(
+      selectedRead.revision?.state.body?.text ?? "",
+      /^beijing-window-[0-9a-f-]{36}$/u,
+    );
+  } finally {
+    await rm(onboardingDirectory, { recursive: true, force: true });
+  }
+
   const timeWindowQuery = {
     bins: [binId],
     timeWindow: {
