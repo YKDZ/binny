@@ -10,6 +10,13 @@ const require = createRequire(import.meta.url);
 process.exitCode = await runCli({
   argv: process.argv,
   write: nodeCliOutput({ stdout: process.stdout, stderr: process.stderr }),
+  readStdin: async () => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  },
   ...(process.env.BINNY_API_URL === undefined
     ? {}
     : { apiUrl: process.env.BINNY_API_URL }),
