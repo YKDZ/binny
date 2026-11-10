@@ -12,6 +12,7 @@ import {
 import { databaseErrorCode, type CancellableQueryExecutor } from "@binny/db";
 import { sql } from "drizzle-orm";
 
+import { archiveJsonStringifyByteLength } from "./archive-json-size.ts";
 import {
   ArchiveRequestCancelled,
   ArchiveQueryBudgetExceeded,
@@ -30,8 +31,33 @@ type BatchReadRow = {
   readonly revisionId: string | null;
   readonly revisionItemId: string | null;
   readonly stateHash: string | null;
-  readonly stateData: unknown;
   readonly observedArchiveSeq: string | null;
+};
+
+type ArchiveRevisionStateRow = {
+  readonly stateData: unknown;
+};
+
+type CurrentItemStatusRow = {
+  readonly itemId: string | null;
+  readonly deletionSequence: string | null;
+};
+
+type ReadableReferenceGroup = {
+  readonly row: BatchReadRow;
+  readonly referenceIndexes: number[];
+};
+
+type ReadableRevision = {
+  readonly revision: ReturnType<typeof archiveRevisionReadSchema.parse>;
+  readonly serializedBytes: number;
+  readonly resourceIds: readonly string[];
+  readonly minimumResourcesBytes: number;
+  resources?: {
+    readonly resourceId: string;
+    readonly status: "available" | "missing";
+  }[];
+  resourceBytes?: number;
 };
 
 function payloadTooLarge(): ArchiveBatchReadOperation<never> {
@@ -116,7 +142,7 @@ export function createArchiveBatchReadOperation(
         );
         const rows = await executeArchiveQueryWithinDeadline(
           executeQuery,
-          // A JSON recordset keeps duplicate references and their input indexes in one cancellable query.
+          // Resolve references without copying revision bodies into every result row.
           sql<BatchReadRow[]>`
             WITH requested AS (
               SELECT *
@@ -137,7 +163,6 @@ export function createArchiveBatchReadOperation(
               revision.revision_id::text AS "revisionId",
               revision.item_id::text AS "revisionItemId",
               revision.state_hash AS "stateHash",
-              revision.state_data AS "stateData",
               observed_commit.archive_seq::text AS "observedArchiveSeq"
             FROM requested
             LEFT JOIN archive_item AS item
@@ -165,8 +190,8 @@ export function createArchiveBatchReadOperation(
           throw new Error("Batch read did not resolve every input reference.");
         }
 
-        const results: ArchiveBatchReadItemResult[] = [];
-        const resourceIds: string[] = [];
+        const resultsByIndex = new Map<number, ArchiveBatchReadItemResult>();
+        const readableGroups = new Map<string, ReadableReferenceGroup>();
         for (const row of rows) {
           assertArchiveQueryActive(deadline, signal);
           const reference = checked.data.references[row.referenceIndex];
@@ -187,7 +212,7 @@ export function createArchiveBatchReadOperation(
                   ? "reference_mismatch"
                   : undefined;
           if (unreadableReason !== undefined) {
-            results.push({
+            resultsByIndex.set(row.referenceIndex, {
               index: row.referenceIndex,
               reference,
               status: "unreadable",
@@ -201,32 +226,198 @@ export function createArchiveBatchReadOperation(
             row.namespace === null ||
             row.sourceKey === null ||
             row.revisionId === null ||
-            row.stateHash === null ||
-            row.stateData === null
+            row.revisionItemId === null ||
+            row.stateHash === null
           ) {
             throw new Error(
-              "Batch read resolved an incomplete archive revision.",
+              "Batch read resolved incomplete revision metadata.",
             );
+          }
+          const group = readableGroups.get(row.revisionId);
+          if (group === undefined) {
+            readableGroups.set(row.revisionId, {
+              row,
+              referenceIndexes: [row.referenceIndex],
+            });
+          } else {
+            group.referenceIndexes.push(row.referenceIndex);
+          }
+        }
+
+        const revisionsById = new Map<string, ReadableRevision>();
+        const resourceIds: string[] = [];
+        const assertActive = () => assertArchiveQueryActive(deadline, signal);
+        const emptyResponseBytes = archiveJsonStringifyByteLength(
+          { results: [] },
+          archiveBatchReadMaxResponseBytes,
+          assertActive,
+        );
+        if (emptyResponseBytes === undefined) {
+          throw new Error(
+            "Batch read response framing exceeds its byte limit.",
+          );
+        }
+
+        // Unloaded references stay out until classified so a concurrent deletion cannot overstate this lower bound.
+        const minimumResponseExceedsLimit = (): boolean => {
+          let bytes =
+            emptyResponseBytes +
+            Math.max(0, checked.data.references.length - 1);
+          for (
+            let index = 0;
+            index < checked.data.references.length;
+            index += 1
+          ) {
+            assertActive();
+            const result = resultsByIndex.get(index);
+            if (result?.status === "unreadable") {
+              const resultBytes = archiveJsonStringifyByteLength(
+                result,
+                archiveBatchReadMaxResponseBytes,
+                assertActive,
+              );
+              if (resultBytes === undefined) return true;
+              bytes += resultBytes;
+            } else {
+              const reference = checked.data.references[index];
+              if (reference === undefined) {
+                throw new Error(
+                  "Batch read returned an unknown reference index.",
+                );
+              }
+              const revision = revisionsById.get(
+                reference.revisionId.toLowerCase(),
+              );
+              if (revision === undefined) continue;
+              const baseBytes = archiveJsonStringifyByteLength(
+                {
+                  index,
+                  reference,
+                  status: "readable",
+                  revision: {},
+                  resources: [],
+                },
+                archiveBatchReadMaxResponseBytes,
+                assertActive,
+              );
+              if (baseBytes === undefined) return true;
+              bytes +=
+                baseBytes -
+                2 -
+                2 +
+                revision.serializedBytes +
+                revision.minimumResourcesBytes;
+            }
+            if (bytes > archiveBatchReadMaxResponseBytes) return true;
+          }
+          return false;
+        };
+
+        for (const [revisionId, group] of readableGroups) {
+          assertActive();
+          const { row } = group;
+          if (
+            row.itemId === null ||
+            row.revisionId === null ||
+            row.stateHash === null
+          ) {
+            throw new Error(
+              "Batch read resolved incomplete revision metadata.",
+            );
+          }
+          const revisionRows = await executeArchiveQueryWithinDeadline(
+            executeQuery,
+            sql<ArchiveRevisionStateRow[]>`
+              SELECT revision.state_data AS "stateData"
+              FROM archive_revision AS revision
+              WHERE revision.revision_id = ${row.revisionId}::uuid
+                AND revision.item_id = ${row.itemId}::uuid
+                AND revision.state_hash = ${row.stateHash}
+            `,
+            deadline,
+            signal,
+          );
+          const revisionRow = revisionRows[0];
+          if (revisionRow === undefined) {
+            const currentItemRows = await executeArchiveQueryWithinDeadline(
+              executeQuery,
+              sql<CurrentItemStatusRow[]>`
+                SELECT
+                  item.item_id::text AS "itemId",
+                  deletion.deletion_seq::text AS "deletionSequence"
+                FROM (SELECT ${row.itemId}::uuid AS item_id) AS requested
+                LEFT JOIN archive_item AS item
+                  ON item.item_id = requested.item_id
+                LEFT JOIN archive_item_deletion AS deletion
+                  ON deletion.item_id = requested.item_id
+              `,
+              deadline,
+              signal,
+            );
+            const currentItem = currentItemRows[0];
+            const reason =
+              currentItem !== undefined &&
+              currentItem.itemId === null &&
+              currentItem.deletionSequence !== null
+                ? "deleted"
+                : "not_found";
+            for (const referenceIndex of group.referenceIndexes) {
+              const reference = checked.data.references[referenceIndex];
+              if (reference === undefined) {
+                throw new Error(
+                  "Batch read returned an unknown reference index.",
+                );
+              }
+              resultsByIndex.set(referenceIndex, {
+                index: referenceIndex,
+                reference,
+                status: "unreadable",
+                reason,
+              });
+            }
+            continue;
+          }
+          if (revisionRows.length !== 1) {
+            throw new Error("Batch read resolved a revision more than once.");
           }
           const revision = archiveRevisionReadSchema.parse({
             revisionId: row.revisionId,
             itemId: row.itemId,
             sourceKey: { namespace: row.namespace, key: row.sourceKey },
             stateHash: row.stateHash,
-            state: row.stateData,
+            state: revisionRow.stateData,
           });
-          results.push({
-            index: row.referenceIndex,
-            reference,
-            status: "readable",
+          const serializedBytes = archiveJsonStringifyByteLength(
             revision,
-            resources: [],
-          });
-          resourceIds.push(
-            ...(revision.state.resources ?? []).map(
-              ({ resourceId }) => resourceId,
-            ),
+            archiveBatchReadMaxResponseBytes,
+            assertActive,
           );
+          if (serializedBytes === undefined) return payloadTooLarge();
+          const revisionResourceIds = (revision.state.resources ?? []).map(
+            ({ resourceId }) => resourceId,
+          );
+          // Missing is the shorter status, keeping this precheck a safe lower bound.
+          const minimumResources = revisionResourceIds.map((resourceId) => ({
+            resourceId,
+            status: "missing" as const,
+          }));
+          const minimumResourcesBytes = archiveJsonStringifyByteLength(
+            minimumResources,
+            archiveBatchReadMaxResponseBytes,
+            assertActive,
+          );
+          if (minimumResourcesBytes === undefined) return payloadTooLarge();
+          revisionsById.set(revisionId, {
+            revision,
+            serializedBytes,
+            resourceIds: revisionResourceIds,
+            minimumResourcesBytes,
+          });
+          for (const resourceId of revisionResourceIds) {
+            assertActive();
+            resourceIds.push(resourceId);
+          }
+          if (minimumResponseExceedsLimit()) return payloadTooLarge();
         }
 
         const resourceAvailability = await resourceStorage.inspectAvailability(
@@ -235,33 +426,99 @@ export function createArchiveBatchReadOperation(
           deadline,
           signal,
         );
-        const response = archiveBatchReadResponseSchema.parse({
-          results: results.map((result) =>
-            result.status === "unreadable"
-              ? result
-              : {
-                  ...result,
-                  resources: (result.revision.state.resources ?? []).map(
-                    ({ resourceId }) => ({
-                      resourceId,
-                      status:
-                        resourceAvailability.get(resourceId.toLowerCase()) ===
-                        true
-                          ? ("available" as const)
-                          : ("missing" as const),
-                    }),
-                  ),
-                },
-          ),
-        });
-        assertArchiveQueryActive(deadline, signal);
-        if (
-          Buffer.byteLength(JSON.stringify(response), "utf8") >
-          archiveBatchReadMaxResponseBytes
-        ) {
-          return payloadTooLarge();
+        for (const [revisionId, readableRevision] of revisionsById) {
+          assertActive();
+          const resources = readableRevision.resourceIds.map((resourceId) => ({
+            resourceId,
+            status:
+              resourceAvailability.get(resourceId.toLowerCase()) === true
+                ? ("available" as const)
+                : ("missing" as const),
+          }));
+          const resourceBytes = archiveJsonStringifyByteLength(
+            resources,
+            archiveBatchReadMaxResponseBytes,
+            assertActive,
+          );
+          if (resourceBytes === undefined) return payloadTooLarge();
+          readableRevision.resources = resources;
+          readableRevision.resourceBytes = resourceBytes;
+          revisionsById.set(revisionId, readableRevision);
         }
-        assertArchiveQueryActive(deadline, signal);
+
+        const results: ArchiveBatchReadItemResult[] = [];
+        let responseBytes = emptyResponseBytes;
+        for (
+          let index = 0;
+          index < checked.data.references.length;
+          index += 1
+        ) {
+          assertActive();
+          const unreadableResult = resultsByIndex.get(index);
+          let result: ArchiveBatchReadItemResult;
+          let resultBytes: number | undefined;
+          if (unreadableResult?.status === "unreadable") {
+            result = unreadableResult;
+            resultBytes = archiveJsonStringifyByteLength(
+              result,
+              archiveBatchReadMaxResponseBytes,
+              assertActive,
+            );
+          } else {
+            const reference = checked.data.references[index];
+            if (reference === undefined) {
+              throw new Error(
+                "Batch read returned an unknown reference index.",
+              );
+            }
+            const readableRevision = revisionsById.get(
+              reference.revisionId.toLowerCase(),
+            );
+            if (
+              readableRevision === undefined ||
+              readableRevision.resources === undefined ||
+              readableRevision.resourceBytes === undefined
+            ) {
+              throw new Error("Batch read did not load a readable revision.");
+            }
+            const baseBytes = archiveJsonStringifyByteLength(
+              {
+                index,
+                reference,
+                status: "readable",
+                revision: {},
+                resources: [],
+              },
+              archiveBatchReadMaxResponseBytes,
+              assertActive,
+            );
+            if (baseBytes === undefined) return payloadTooLarge();
+            resultBytes =
+              baseBytes -
+              2 -
+              2 +
+              readableRevision.serializedBytes +
+              readableRevision.resourceBytes;
+            result = {
+              index,
+              reference,
+              status: "readable",
+              revision: readableRevision.revision,
+              resources: readableRevision.resources,
+            };
+          }
+          if (resultBytes === undefined) return payloadTooLarge();
+          responseBytes += resultBytes + (index > 0 ? 1 : 0);
+          if (responseBytes > archiveBatchReadMaxResponseBytes) {
+            return payloadTooLarge();
+          }
+          results.push(result);
+        }
+        assertActive();
+        // Parsed revisions and references are shared; parsing the aggregate again would copy duplicate bodies.
+        const response = {
+          results,
+        } satisfies ReturnType<typeof archiveBatchReadResponseSchema.parse>;
         return { ok: true, value: response };
       } catch (error) {
         if (signal?.aborted || error instanceof ArchiveRequestCancelled) {
