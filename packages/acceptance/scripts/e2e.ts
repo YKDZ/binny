@@ -1219,6 +1219,67 @@ async function verifyArchiveSearchPoolWaitBudget(
   assert.equal(recoveredSearch.status, 200);
 }
 
+async function verifyArchiveSearchRequestCancellation(
+  baseUrl: string,
+): Promise<void> {
+  const lock = await holdArchiveItemReadLock();
+  const controller = new AbortController();
+  const request = fetch(`${baseUrl}/archives/search`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
+    signal: controller.signal,
+  }).then(
+    (response) => ({ kind: "response" as const, response }),
+    (error: unknown) => ({ kind: "error" as const, error }),
+  );
+
+  try {
+    const waiterPid = await waitForManualRunLockWaiterBlockedBy(
+      lock.backendPid,
+    );
+    const abortedAt = performance.now();
+    controller.abort();
+    const outcome = await request;
+    assert.equal(outcome.kind, "error");
+    if (outcome.kind === "error") {
+      assert.ok(outcome.error instanceof Error);
+      assert.equal(outcome.error.name, "AbortError");
+    }
+
+    const cancellationDeadline =
+      Date.now() + Math.floor(archiveSearchBudgetMs / 2);
+    let waiterStillBlocked = true;
+    while (Date.now() < cancellationDeadline) {
+      waiterStillBlocked = (await readManualRunLockWaiters()).some(
+        ({ pid, blockers }) =>
+          pid === waiterPid && blockers.includes(lock.backendPid),
+      );
+      if (!waiterStillBlocked) break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+    assert.equal(
+      waiterStillBlocked,
+      false,
+      "An aborted archive search kept waiting on PostgreSQL until its request budget expired.",
+    );
+    assert.ok(
+      performance.now() - abortedAt < archiveSearchBudgetMs / 2,
+      "The database query stopped only after the ordinary search deadline.",
+    );
+  } finally {
+    await lock.release();
+  }
+
+  const recovered = await fetch(`${baseUrl}/archives/search`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(recovered.status, 200);
+}
+
 async function verifyArchiveBatchReadBudget(
   baseUrl: string,
   reference: ArchiveBatchReadReference,
@@ -10135,6 +10196,7 @@ async function main(): Promise<void> {
       await archiveBatchReadMissingMediaHttpStep(baseUrl, batchReadFixture);
       await archiveBatchReadCliStep(baseUrl, batchReadFixture);
       await archiveSearchCliStep(baseUrl);
+      await verifyArchiveSearchRequestCancellation(baseUrl);
       if (archiveSearchOnly) {
         process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
       } else {
