@@ -404,6 +404,110 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     assert.match(error.message, /archive revision <revision-id>/u);
   }
 
+  const cumulativeReferences: ArchiveBatchReadReference[] = [];
+  const cumulativeBodies = [
+    "Cumulative response one " +
+      token +
+      "\n" +
+      "a".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024),
+    "Cumulative response two " +
+      token +
+      "\n" +
+      "b".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024),
+  ];
+  for (const [index, cumulativeBody] of cumulativeBodies.entries()) {
+    const cumulativeToken = token + ":cumulative:" + String(index);
+    const cumulativeSubmission = await client.archives.$post({
+      json: {
+        requestId:
+          "e2e:archive-batch-read:cumulative:" + runId + ":" + String(index),
+        binId: "binny-runs-one",
+        items: [
+          {
+            sourceKey: { namespace: "e2e", key: cumulativeToken },
+            title: "Cumulative batch response " + cumulativeToken,
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            extensions: {},
+            body: { text: cumulativeBody },
+            capture: {
+              scope: { case: "archive-batch-read-cumulative" },
+              completeness: "complete",
+              missing: [],
+            },
+          },
+        ],
+      },
+    });
+    assert.equal(cumulativeSubmission.status, 201);
+
+    const cumulativeSearch = await client.archives.search.$post({
+      json: {
+        bins: ["binny-runs-one"],
+        text: { in: "title", groups: [[cumulativeToken]] },
+        limit: 10,
+      },
+    });
+    assert.equal(cumulativeSearch.status, 200);
+    if (cumulativeSearch.status !== 200) {
+      throw new Error("Search for cumulative batch fixture failed.");
+    }
+    const cumulativeCandidate = (await cumulativeSearch.json()).results.find(
+      ({ sourceKey }) => sourceKey.key === cumulativeToken,
+    );
+    assert.ok(cumulativeCandidate !== undefined);
+    const cumulativeMatch = cumulativeCandidate.matches.find(
+      ({ binId }) => binId === "binny-runs-one",
+    );
+    assert.ok(cumulativeMatch !== undefined);
+    const cumulativeReference: ArchiveBatchReadReference = {
+      itemId: cumulativeCandidate.itemId,
+      binId: cumulativeMatch.binId,
+      revisionId: cumulativeMatch.revisionId,
+      archiveSeq: cumulativeMatch.archiveSeq,
+    };
+    const singleCumulativeRead = await readBatch(client, [cumulativeReference]);
+    const singleCumulativeResult = singleCumulativeRead.results[0];
+    assert.ok(singleCumulativeResult?.status === "readable");
+    assert.equal(
+      singleCumulativeResult.revision.state.body?.text,
+      cumulativeBody,
+    );
+    cumulativeReferences.push(cumulativeReference);
+  }
+
+  const cumulativeRead = await client.archives["batch-read"].$post({
+    json: { references: cumulativeReferences },
+  });
+  assert.equal(cumulativeRead.status, 413, await cumulativeRead.clone().text());
+  if (cumulativeRead.status === 413) {
+    const error = (await cumulativeRead.json()).error;
+    assert.equal(error.code, "payload_too_large");
+  }
+
+  const repeatedOversizedRead = await client.archives["batch-read"].$post({
+    json: {
+      references: Array.from(
+        { length: archiveBatchReadMaxReferences },
+        () => oversizedReference,
+      ),
+    },
+  });
+  assert.equal(
+    repeatedOversizedRead.status,
+    413,
+    await repeatedOversizedRead.clone().text(),
+  );
+  if (repeatedOversizedRead.status === 413) {
+    const error = (await repeatedOversizedRead.json()).error;
+    assert.equal(error.code, "payload_too_large");
+  }
+
+  const recoveredRead = await readBatch(client, [firstBinReference]);
+  const recoveredResult = recoveredRead.results[0];
+  assert.ok(recoveredResult?.status === "readable");
+  assert.equal(recoveredResult.revision.state.body?.text, bodyText);
+
   return {
     reference: firstBinReference,
     oversizedReference,
