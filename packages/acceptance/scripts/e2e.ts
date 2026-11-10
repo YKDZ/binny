@@ -1306,7 +1306,7 @@ async function verifyArchiveSearchPoolWaitBudget(
   const reservedScheduleSessionCount = 1;
   const blockedReadConnectionCount =
     databasePoolSize - reservedScheduleSessionCount;
-  const lock = await holdArchiveItemReadLock();
+  const lock = await holdArchiveTableReadLock("archive_item");
   const itemReads = Array.from({ length: blockedReadConnectionCount }, () =>
     fetch(`${baseUrl}/archives/items/${itemId}`, {
       signal: AbortSignal.timeout(30_000),
@@ -1363,7 +1363,7 @@ async function verifyArchiveSearchPoolWaitBudget(
 async function verifyArchiveSearchRequestCancellation(
   baseUrl: string,
 ): Promise<void> {
-  const lock = await holdArchiveItemReadLock();
+  const lock = await holdArchiveTableReadLock("archive_item");
   const controller = new AbortController();
   const request = fetch(`${baseUrl}/archives/search`, {
     method: "POST",
@@ -1419,6 +1419,76 @@ async function verifyArchiveSearchRequestCancellation(
     signal: AbortSignal.timeout(5_000),
   });
   assert.equal(recovered.status, 200);
+}
+
+async function verifyArchiveSearchSharedRequestBudget(
+  baseUrl: string,
+): Promise<void> {
+  const timeZoneLock = await holdArchiveTableReadLock("archive_revision");
+  const pageLock = await holdArchiveTableReadLock("bin_configurations");
+  const requestBody = {
+    bins: ["binny-runs-one", "binny-runs-two"],
+    extensions: {
+      sourceAdapterId: "binny-runs.manual-run-fixture",
+      filters: {
+        labels: { op: "hasAny", values: ["release", "reply"] },
+      },
+    },
+    includeCandidates: false,
+    distribution: {
+      by: "date",
+      field: "sourcePublishedAt",
+      period: "day",
+      timeZone: "UTC",
+      limit: 10,
+    },
+  };
+
+  try {
+    const startedAt = performance.now();
+    const responsePromise = fetch(baseUrl + "/archives/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(archiveSearchBudgetMs * 3),
+    });
+    await waitForManualRunLockWaiterBlockedBy(timeZoneLock.backendPid);
+    const firstPhaseReleaseAt =
+      startedAt + Math.floor(archiveSearchBudgetMs / 2);
+    while (performance.now() < firstPhaseReleaseAt) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+    }
+    await timeZoneLock.release();
+    await waitForManualRunLockWaiterBlockedBy(pageLock.backendPid);
+
+    const response = await responsePromise;
+    const elapsedMs = performance.now() - startedAt;
+    assert.equal(response.status, 422);
+    const failure = (await response.json()) as {
+      readonly error: { readonly code: string; readonly message: string };
+    };
+    assert.deepEqual(Object.keys(failure).sort(), ["error"]);
+    assert.equal(failure.error.code, "query_budget_exceeded");
+    assert.match(failure.error.message, /no partial results were returned/u);
+    assert.match(
+      failure.error.message,
+      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+    );
+    assert.ok(
+      elapsedMs < archiveSearchBudgetMs * 1.25,
+      `Search reset its request budget between time-zone and result queries (${String(elapsedMs)} ms).`,
+    );
+  } finally {
+    await Promise.all([timeZoneLock.release(), pageLock.release()]);
+  }
+
+  const recovered = await fetch(baseUrl + "/archives/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(5_000),
+  });
+  assert.equal(recovered.status, 200, await recovered.clone().text());
 }
 
 async function verifyArchiveBatchReadBudget(
@@ -1806,7 +1876,7 @@ type HeldTableLock = {
   readonly release: () => Promise<void>;
 };
 
-type HeldArchiveItemLock = {
+type HeldArchiveTableReadLock = {
   readonly backendPid: number;
   readonly release: () => Promise<void>;
 };
@@ -1854,12 +1924,15 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
   };
 }
 
-async function holdArchiveItemReadLock(): Promise<HeldArchiveItemLock> {
+async function holdArchiveTableReadLock(
+  table: "archive_item" | "archive_revision" | "bin_configurations",
+): Promise<HeldArchiveTableReadLock> {
+  const marker = `BINNY_${table.toUpperCase()}_READ_LOCK_HELD`;
   const lock = startManagedProcess("docker", postgresExecArgs([]));
   lock.write(
-    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_item IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_ITEM_READ_LOCK_HELD';\n",
+    `BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE;\nSELECT '${marker}';\n`,
   );
-  await lock.waitForMarker("BINNY_ARCHIVE_ITEM_READ_LOCK_HELD");
+  await lock.waitForMarker(marker);
   const backendPid = Number(lock.stdout().trim().split("\n")[0]);
   assert.ok(Number.isInteger(backendPid) && backendPid > 0);
   let released = false;
@@ -10416,6 +10489,7 @@ async function main(): Promise<void> {
       await archiveBatchReadCliStep(baseUrl, batchReadFixture);
       await archiveSearchCliStep(baseUrl);
       await verifyArchiveSearchRequestCancellation(baseUrl);
+      await verifyArchiveSearchSharedRequestBudget(baseUrl);
       if (archiveSearchOnly) {
         process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
       } else {
@@ -10529,11 +10603,18 @@ async function main(): Promise<void> {
         });
         await archiveHttpStep("fixed-search", baseUrl);
         const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
+        await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
+        await verifyArchiveBatchReadRequestCancellation(
+          baseUrl,
+          batchReadFixture.reference,
+        );
         await removeResourceStorageFile(batchReadFixture.resourceId);
         await archiveBatchReadMissingMediaHttpStep(baseUrl, batchReadFixture);
         await archiveBatchReadCliStep(baseUrl, batchReadFixture);
         const archive = await archiveHttpStep("submit", baseUrl);
         await archiveSearchCliStep(baseUrl);
+        await verifyArchiveSearchRequestCancellation(baseUrl);
+        await verifyArchiveSearchSharedRequestBudget(baseUrl);
         const sdkResource = await sdkResourceStep(baseUrl);
         baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
         baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);
