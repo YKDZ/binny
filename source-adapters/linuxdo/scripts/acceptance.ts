@@ -715,7 +715,15 @@ async function closeHumanSession(sessionId: string): Promise<void> {
   await closeLinuxdoHumanSession(cli, "binny-discovery-topic", sessionId);
 }
 
-async function searchArchiveItem(text: string): Promise<ArchiveItem> {
+function searchArchiveItem(text: string): Promise<ArchiveItem>;
+function searchArchiveItem(
+  text: string,
+  allowMissing: true,
+): Promise<ArchiveItem | undefined>;
+async function searchArchiveItem(
+  text: string,
+  allowMissing = false,
+): Promise<ArchiveItem | undefined> {
   const query = {
     bins: ["binny-discovery-topic"],
     text: { groups: [[text]] },
@@ -727,6 +735,7 @@ async function searchArchiveItem(text: string): Promise<ArchiveItem> {
     await cli(["archive", "search", "--query", JSON.stringify(query)]),
     "found",
   );
+  if (allowMissing && page.results.length === 0) return undefined;
   assert.equal(page.results.length, 1, `应只命中一条正文「${text}」。`);
   const result = page.results[0];
   assert.ok(result !== undefined);
@@ -1750,41 +1759,20 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
   }
 }
 
-type PublicSourceStateSnapshot = {
-  readonly freshness: "unknown" | "current" | "stale";
-  readonly updatedAt?: string;
-  readonly sync?: unknown;
-  readonly sourceAccess:
-    | { readonly status: "unknown" }
-    | {
-        readonly status: "unavailable";
-        readonly reason: "persistent_state_unavailable";
-      }
-    | {
-        readonly status: "available";
-        readonly groups: Readonly<
-          Record<
-            string,
-            {
-              readonly lastAdmittedAt?: string;
-              readonly cooldownUntil?: string;
-              readonly latestLimitStatus?: 429 | 503;
-            }
-          >
-        >;
-      };
-};
+type PublicSourceStateSnapshot =
+  | { readonly freshness: "unknown" }
+  | {
+      readonly freshness: "current" | "stale";
+      readonly updatedAt: string;
+    };
 
 type PublicBinRuntime = {
-  readonly status: string;
+  readonly execution: { readonly status: string };
   readonly sourceStateSnapshot: PublicSourceStateSnapshot;
 };
 
 async function readBinRuntime(binId: string): Promise<PublicBinRuntime> {
-  const bin = cliData<{
-    readonly execution: PublicBinRuntime;
-  }>(await cli(["bin", "get", binId]), "found");
-  return bin.execution;
+  return cliData<PublicBinRuntime>(await cli(["bin", "get", binId]), "found");
 }
 
 async function verifySourceStateFreshness(
@@ -1796,12 +1784,12 @@ async function verifySourceStateFreshness(
       readonly status: string;
       readonly runtimeId: string;
       readonly environment: Record<string, unknown>;
-      readonly sourceStateSnapshot: PublicSourceStateSnapshot;
     };
+    readonly sourceStateSnapshot: PublicSourceStateSnapshot;
   }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
   assert.equal(initialBin.execution.status, "online");
-  assert.equal(initialBin.execution.sourceStateSnapshot.freshness, "current");
-  assert.ok(initialBin.execution.sourceStateSnapshot.updatedAt !== undefined);
+  assert.equal(initialBin.sourceStateSnapshot.freshness, "current");
+  assert.ok("updatedAt" in initialBin.sourceStateSnapshot);
   const ownerGenerationResult = await compose([
     "exec",
     "--no-TTY",
@@ -1821,8 +1809,11 @@ async function verifySourceStateFreshness(
 
   await compose(["stop", "runtime-linuxdo"]);
   const stoppedRuntime = await readBinRuntime("binny-discovery-topic");
+  if (!("updatedAt" in stoppedRuntime.sourceStateSnapshot))
+    assert.fail(
+      "The stopped runtime should retain the last snapshot timestamp.",
+    );
   const originalUpdatedAt = stoppedRuntime.sourceStateSnapshot.updatedAt;
-  assert.ok(originalUpdatedAt !== undefined);
   const sendHeartbeatWithoutSnapshot = async (): Promise<void> => {
     const response = await fetch(
       `${apiUrl()}/bins/binny-discovery-topic/runtime/heartbeat`,
@@ -1853,7 +1844,7 @@ async function verifySourceStateFreshness(
     if (Date.now() - Date.parse(originalUpdatedAt) > 10_000) break;
     await delay(1_000);
   }
-  assert.equal(latest.status, "online");
+  assert.equal(latest.execution.status, "online");
   assert.equal(latest.sourceStateSnapshot.freshness, "stale");
   assert.equal(latest.sourceStateSnapshot.updatedAt, originalUpdatedAt);
   assert.equal((await sourceState()).events.length, 0);
@@ -1862,7 +1853,7 @@ async function verifySourceStateFreshness(
   await waitForRuntimeHealth();
   await waitForRuntime();
   const recovered = await readBinRuntime("binny-discovery-topic");
-  assert.equal(recovered.status, "online");
+  assert.equal(recovered.execution.status, "online");
   assert.equal(recovered.sourceStateSnapshot.freshness, "current");
   assert.ok(
     Date.parse(recovered.sourceStateSnapshot.updatedAt!) >=
@@ -1875,9 +1866,8 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
   const beforeRead = await sourceState();
   const current = await readBinRuntime("binny-discovery-topic");
   assert.equal(current.sourceStateSnapshot.freshness, "current");
-  assert.equal(current.sourceStateSnapshot.sourceAccess.status, "available");
   const afterRead = await sourceState();
-  assert.equal(afterRead.events.length, beforeRead.events.length);
+  assert.deepEqual(afterRead.events, beforeRead.events);
 
   await compose(["stop", "runtime-linuxdo"]);
   await compose([
@@ -1894,14 +1884,11 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
   ]);
   const legacy = await waitFor(
     async () => await readBinRuntime("binny-discovery-topic"),
-    (runtime) => runtime.status === "offline",
+    (runtime) => runtime.execution.status === "offline",
     "运行器停止后的未知快照离线收敛",
   );
-  assert.equal(legacy.status, "offline");
+  assert.equal(legacy.execution.status, "offline");
   assert.equal(legacy.sourceStateSnapshot.freshness, "unknown");
-  assert.deepEqual(legacy.sourceStateSnapshot.sourceAccess, {
-    status: "unknown",
-  });
   assert.equal((await sourceState()).events.length, afterRead.events.length);
   await compose(["start", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
@@ -1933,58 +1920,37 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
       Date.parse(limitedAccess.rateLimitResponses[0]!.observedAt),
   );
 
-  const availableWithCooldown = await waitFor(
-    async () => await readBinRuntime("binny-discovery-topic"),
-    (runtime) => {
-      const sourceAccess = runtime.sourceStateSnapshot.sourceAccess;
-      if (sourceAccess.status !== "available") return false;
-      const group = sourceAccess.groups.linuxdo;
-      return (
-        runtime.sourceStateSnapshot.freshness === "current" &&
-        group?.latestLimitStatus === 429 &&
-        group.cooldownUntil === firstCooldown
-      );
-    },
-    "429 后的当前冷却快照",
-  );
-  assert.equal(
-    availableWithCooldown.sourceStateSnapshot.sourceAccess.status,
-    "available",
-  );
   const eventsBeforeSnapshotRead = await sourceState();
-  await readBinRuntime("binny-discovery-topic");
-  assert.equal(
-    (await sourceState()).events.length,
-    eventsBeforeSnapshotRead.events.length,
+  const afterCooldownRead = await readBinRuntime("binny-discovery-topic");
+  assert.equal(afterCooldownRead.sourceStateSnapshot.freshness, "current");
+  assert.deepEqual(
+    (await sourceState()).events,
+    eventsBeforeSnapshotRead.events,
   );
 
   await compose(["stop", "runtime-linuxdo"]);
   const offline = await waitFor(
     async () => await readBinRuntime("binny-discovery-topic"),
     (runtime) =>
-      runtime.status === "offline" &&
+      runtime.execution.status === "offline" &&
       runtime.sourceStateSnapshot.freshness === "stale",
     "运行器停止后的离线快照收敛",
   );
-  assert.equal(offline.status, "offline");
+  assert.equal(offline.execution.status, "offline");
   assert.equal(offline.sourceStateSnapshot.freshness, "stale");
-  const offlineAccess = offline.sourceStateSnapshot.sourceAccess;
-  assert.equal(offlineAccess.status, "available");
-  if (offlineAccess.status !== "available")
-    assert.fail("离线快照没有保留来源状态。");
-  assert.equal(offlineAccess.groups.linuxdo?.latestLimitStatus, 429);
-  assert.equal(offlineAccess.groups.linuxdo?.cooldownUntil, firstCooldown);
+  assert.deepEqual(
+    (await sourceState()).events,
+    eventsBeforeSnapshotRead.events,
+  );
   await compose(["start", "runtime-linuxdo"]);
   await waitForRuntimeHealth();
   await waitForRuntime();
   const restarted = await readBinRuntime("binny-discovery-topic");
   assert.equal(restarted.sourceStateSnapshot.freshness, "current");
-  const restartedAccess = restarted.sourceStateSnapshot.sourceAccess;
-  assert.equal(restartedAccess.status, "available");
-  if (restartedAccess.status !== "available")
-    assert.fail("重启后的运行器没有来源状态快照。");
-  assert.equal(restartedAccess.groups.linuxdo?.latestLimitStatus, 429);
-  assert.equal(restartedAccess.groups.linuxdo?.cooldownUntil, firstCooldown);
+  assert.deepEqual(
+    (await sourceState()).events,
+    eventsBeforeSnapshotRead.events,
+  );
 
   await updateFixtureState({
     rateLimitPath: null,
@@ -1994,6 +1960,13 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
   const resumed = await trigger("check", { topicId: 2401 });
   assert.equal(resumed.status, "completed", JSON.stringify(resumed));
   const resumedAccess = sourceAccessSummary(resumed);
+  assert.ok(resumed.startedAt !== undefined, JSON.stringify(resumed));
+  const remainingCooldownMs =
+    Date.parse(firstCooldown) - Date.parse(resumed.startedAt);
+  assert.ok(
+    remainingCooldownMs > 0,
+    JSON.stringify({ firstCooldown, resumedStartedAt: resumed.startedAt }),
+  );
   const resumedSourceEvents = (await sourceState()).events.slice(
     eventsBeforeResume.events.length,
   );
@@ -2005,6 +1978,7 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
     resumedSessionEvent.at >= Date.parse(firstCooldown),
     JSON.stringify({ firstCooldown, resumedSessionEvent, resumedAccess }),
   );
+  assert.ok(resumedAccess.waitedMs > 0, JSON.stringify(resumedAccess));
   assert.equal(
     resumedSourceEvents.filter(({ action }) => action === "session-current")
       .length,
@@ -2028,23 +2002,14 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
     [{ status: 503, outcome: "cooled" }],
     JSON.stringify(sourceAccessSummary(dateLimited)),
   );
-  const dateCooldownSnapshot = await waitFor(
-    async () => await readBinRuntime("binny-discovery-topic"),
-    (runtime) => {
-      const access = runtime.sourceStateSnapshot.sourceAccess;
-      return (
-        runtime.sourceStateSnapshot.freshness === "current" &&
-        access.status === "available" &&
-        access.groups.linuxdo?.latestLimitStatus === 503
-      );
-    },
-    "503 HTTP 日期冷却快照",
+  const dateCooldownAt =
+    sourceAccessSummary(dateLimited).rateLimitResponses[0]?.cooldownUntil;
+  assert.ok(dateCooldownAt !== undefined);
+  assert.equal(
+    (await readBinRuntime("binny-discovery-topic")).sourceStateSnapshot
+      .freshness,
+    "current",
   );
-  const dateCooldownUntil =
-    dateCooldownSnapshot.sourceStateSnapshot.sourceAccess;
-  assert.equal(dateCooldownUntil.status, "available");
-  assert.ok(dateCooldownUntil.groups.linuxdo?.cooldownUntil !== undefined);
-  const dateCooldownAt = dateCooldownUntil.groups.linuxdo.cooldownUntil;
   const eventsBeforeDateFollowUp = await sourceState();
   const dateLimitedFollowUp = await trigger("check", { topicId: 2401 });
   assert.equal(dateLimitedFollowUp.status, "completed");
@@ -2084,13 +2049,10 @@ async function verifyCorruptSourceStateVisibility(): Promise<void> {
   await waitForRuntime();
 
   const bin = cliData<{
-    readonly execution: PublicBinRuntime;
+    readonly execution: { readonly status: string };
+    readonly sourceStateSnapshot: PublicSourceStateSnapshot;
   }>(await cli(["bin", "get", "binny-discovery-topic"]), "found");
-  assert.equal(bin.execution.sourceStateSnapshot.freshness, "current");
-  assert.deepEqual(bin.execution.sourceStateSnapshot.sourceAccess, {
-    status: "unavailable",
-    reason: "persistent_state_unavailable",
-  });
+  assert.equal(bin.sourceStateSnapshot.freshness, "current");
   assert.equal(JSON.stringify(bin).includes("source-access.json"), false);
 
   const unavailableCheck = await trigger("check", { topicId: 2401 });
@@ -2299,15 +2261,28 @@ async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
   const listedSchedules = cliData<{
     readonly schedules: readonly {
       readonly scheduleId: string;
-      readonly lastRunId?: string;
     }[];
-  }>(await cli(["schedule", "list", "binny-discovery-topic"]), "listed");
-  assert.equal(
-    listedSchedules.schedules.find(
-      ({ scheduleId }) => scheduleId === schedule.scheduleId,
-    )?.lastRunId,
-    queuedRunId,
+  }>(
+    await cli(["schedule", "list", "--bin-id", "binny-discovery-topic"]),
+    "listed",
   );
+  assert.ok(
+    listedSchedules.schedules.some(
+      ({ scheduleId }) => scheduleId === schedule.scheduleId,
+    ),
+  );
+  const listedScheduleDetails = cliData<{
+    readonly lastRunId?: string;
+  }>(
+    await cli([
+      "schedule",
+      "get",
+      "binny-discovery-topic",
+      schedule.scheduleId,
+    ]),
+    "found",
+  );
+  assert.equal(listedScheduleDetails.lastRunId, queuedRunId);
 
   const changedSchedule = cliData<{
     readonly lastRunId?: string;
@@ -2455,7 +2430,8 @@ async function verifyScheduledCollectionAcrossMidnight(): Promise<void> {
   );
 
   const searchScheduledObservationRunIds = async (): Promise<string[]> => {
-    const item = await searchArchiveItem("主题正文版本 4");
+    const item = await searchArchiveItem("主题正文版本 4", true);
+    if (item === undefined) return [];
     return [
       ...new Set(
         item.views.flatMap(({ runId }) => (runId === undefined ? [] : [runId])),
@@ -7089,7 +7065,7 @@ async function main(): Promise<void> {
       assert.ok(sourceAccessSummary(sourceAccessProbe).admittedAttempts > 0);
       await verifyCorruptSourceStateVisibility();
       process.stdout.write(
-        "公开 heartbeat 省略状态时旧快照转为 stale、正式运行器重启后恢复 current；损坏冷却状态公开且拒绝来源访问。\n",
+        "Omitting source state from a heartbeat marks the last snapshot stale; restarting the official runtime restores current freshness. Corrupt persisted access state is reported by the action and blocks source requests.\n",
       );
       return;
     }
