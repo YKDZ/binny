@@ -2691,6 +2691,34 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     extensionScalarPage.results[0]?.matches.map(({ binId }) => binId),
     ["binny-runs-one"],
   );
+  const invalidExtensionScalarResponse = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...extensionScalarQuery,
+        extensions: {
+          ...extensionScalarQuery.extensions,
+          filters: { section: { op: "eq", value: "\u0000" } },
+        },
+      }),
+    },
+  );
+  assert.equal(invalidExtensionScalarResponse.status, 400);
+  if (invalidExtensionScalarResponse.status === 400) {
+    const error = (
+      (await invalidExtensionScalarResponse.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly message: string;
+          readonly path: readonly (string | number)[];
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["extensions", "filters", "section", "value"]);
+  }
   const unmatchedExtensionQuery = {
     ...extensionScalarQuery,
     extensions: {
@@ -3302,6 +3330,34 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
   assert.equal(binDistribution.distribution.hasMore, true);
   assert.ok(binDistribution.distribution.nextCursor);
 
+  const binDistributionCursorPayload = JSON.parse(
+    Buffer.from(binDistribution.distribution.nextCursor, "base64url").toString(
+      "utf8",
+    ),
+  ) as { readonly groupKey?: unknown; readonly [key: string]: unknown };
+  const invalidDistributionCursor = Buffer.from(
+    JSON.stringify({ ...binDistributionCursorPayload, groupKey: "\u0000" }),
+  ).toString("base64url");
+  const invalidDistributionCursorResponse = await client.archives.search.$post({
+    json: {
+      bins: binDistributionQuery.bins,
+      text: binDistributionQuery.text,
+      includeCandidates: false,
+      limit: 9,
+      distribution: {
+        by: "bin",
+        limit: 5,
+        cursor: invalidDistributionCursor,
+      },
+    },
+  });
+  assert.equal(invalidDistributionCursorResponse.status, 400);
+  if (invalidDistributionCursorResponse.status === 400) {
+    const error = (await invalidDistributionCursorResponse.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["distribution", "cursor"]);
+  }
+
   const distributionOnlyResponse = await client.archives.search.$post({
     json: {
       bins: binDistributionQuery.bins,
@@ -3591,6 +3647,69 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     (await reusedSnapshot.json()).snapshot.asOf,
     firstPage.snapshot.asOf,
   );
+  assert.equal(
+    searchInput({ ...paginationQuery, asOf: "9223372036854775807" }),
+    true,
+  );
+  assert.equal(
+    searchInput({ ...paginationQuery, asOf: "9223372036854775808" }),
+    false,
+  );
+
+  const beforeFirstSequence = await client.archives.search.$post({
+    json: { ...paginationQuery, asOf: "0", limit: 10 },
+  });
+  assert.equal(beforeFirstSequence.status, 200);
+  if (beforeFirstSequence.status !== 200) {
+    throw new Error("Searching before the first archive sequence failed.");
+  }
+  const beforeFirstSequencePage = await beforeFirstSequence.json();
+  assert.equal(beforeFirstSequencePage.snapshot.asOf, "0");
+  assert.deepEqual(beforeFirstSequencePage.results, []);
+
+  const maximumSnapshot = await client.archives.search.$post({
+    json: { ...paginationQuery, asOf: "9223372036854775807", limit: 1 },
+  });
+  assert.equal(maximumSnapshot.status, 400);
+  if (maximumSnapshot.status === 400) {
+    const error = (await maximumSnapshot.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["asOf"]);
+    assert.match(error.message, /later than the current sequence/u);
+  }
+
+  const overflowingSnapshot = await client.archives.search.$post({
+    json: { ...paginationQuery, asOf: "9223372036854775808", limit: 1 },
+  });
+  assert.equal(overflowingSnapshot.status, 400);
+  if (overflowingSnapshot.status === 400) {
+    const error = (await overflowingSnapshot.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["asOf"]);
+    assert.match(error.message, /9223372036854775807/u);
+  }
+
+  const firstCursorPayload = JSON.parse(
+    Buffer.from(firstPage.nextCursor, "base64url").toString("utf8"),
+  ) as {
+    readonly snapshot: { readonly asOf: string; readonly mode: string };
+    readonly [key: string]: unknown;
+  };
+  const overflowingCursor = Buffer.from(
+    JSON.stringify({
+      ...firstCursorPayload,
+      snapshot: { ...firstCursorPayload.snapshot, asOf: "9223372036854775808" },
+    }),
+  ).toString("base64url");
+  const overflowingCursorResponse = await client.archives.search.$post({
+    json: { ...paginationQuery, cursor: overflowingCursor, limit: 2 },
+  });
+  assert.equal(overflowingCursorResponse.status, 400);
+  if (overflowingCursorResponse.status === 400) {
+    const error = (await overflowingCursorResponse.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["cursor"]);
+  }
 
   const mismatchedCursor = await client.archives.search.$post({
     json: {
@@ -3712,7 +3831,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     },
     {
       key: "multi-view",
-      sourcePublishedAt: instant("2026-11-08T10:00:00+08:00"),
+      sourcePublishedAt: instant("2026-11-08T10:00:00.123456+08:00"),
       sourceModifiedAt: null,
     },
     {
@@ -3866,6 +3985,28 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   assert.equal(certain.hasMore, true);
   assert.equal(certain.hasMore, certain.nextCursor !== undefined);
   assert.ok(certain.nextCursor);
+  const certainCursorPayload = JSON.parse(
+    Buffer.from(certain.nextCursor, "base64url").toString("utf8"),
+  ) as { readonly timeSortValue?: unknown; readonly [key: string]: unknown };
+  assert.equal(
+    certainCursorPayload.timeSortValue,
+    "2026-11-08T02:00:00.123456Z",
+  );
+  const invalidTimeCursor = Buffer.from(
+    JSON.stringify({
+      ...certainCursorPayload,
+      timeSortValue: "2026-99-99T00:00:00.000000Z",
+    }),
+  ).toString("base64url");
+  const invalidTimeCursorResponse = await client.archives.search.$post({
+    json: { ...query, cursor: invalidTimeCursor, limit: 10 },
+  });
+  assert.equal(invalidTimeCursorResponse.status, 400);
+  if (invalidTimeCursorResponse.status === 400) {
+    const error = (await invalidTimeCursorResponse.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["cursor"]);
+  }
   const snapshotAsOf = certain.snapshot.asOf;
 
   const afterSnapshot = await submitArchive(client, {
@@ -5623,7 +5764,9 @@ async function main(): Promise<void> {
   if (stage === "fixed-search") {
     await verifyFixedSearch(baseUrl);
     await verifyTimeWindowSearch(baseUrl);
-    process.stdout.write("固定归档搜索与分页验收通过。\n");
+    process.stdout.write(
+      "Fixed archive search and pagination acceptance passed.\n",
+    );
     return;
   }
   if (stage === "submit") {

@@ -9,8 +9,17 @@ import {
   type ArchiveBatchReadRequest,
   type ArchiveOperations,
 } from "@binny/contracts";
-import { databaseErrorCode, type CancellableQueryExecutor } from "@binny/db";
-import { sql } from "drizzle-orm";
+import {
+  archiveCommits,
+  archiveItemDeletions,
+  archiveItems,
+  archiveObservations,
+  archiveRevisions,
+  databaseErrorCode,
+  type CancellableQueryExecutor,
+  type Database,
+} from "@binny/db";
+import { and, asc, eq, exists, sql } from "drizzle-orm";
 
 import { archiveJsonStringifyByteLength } from "./archive-json-size.ts";
 import {
@@ -98,6 +107,7 @@ function invalidInput(
  * one shared deadline covering resource checks and complete result assembly.
  */
 export function createArchiveBatchReadOperation(
+  database: Database,
   resourceStorage: ArchiveResourceStorage,
   executeQuery: CancellableQueryExecutor,
   budgetMs: number,
@@ -140,49 +150,103 @@ export function createArchiveBatchReadOperation(
             archive_seq: reference.archiveSeq,
           })),
         );
-        const rows = await executeArchiveQueryWithinDeadline(
-          executeQuery,
-          // Resolve references without copying revision bodies into every result row.
-          sql<BatchReadRow[]>`
-            WITH requested AS (
-              SELECT *
-              FROM jsonb_to_recordset(${requestJson}::text::jsonb) AS reference(
+        const requested = database.$with("requested").as(
+          database
+            .select({
+              reference_index: sql`reference.reference_index`.as(
+                "reference_index",
+              ),
+              item_id: sql`reference.item_id`.as("item_id"),
+              bin_id: sql`reference.bin_id`.as("bin_id"),
+              revision_id: sql`reference.revision_id`.as("revision_id"),
+              archive_seq: sql`reference.archive_seq`.as("archive_seq"),
+            })
+            .from(
+              sql`jsonb_to_recordset(${requestJson}::text::jsonb) AS reference(
                 reference_index integer,
                 item_id uuid,
                 bin_id text,
                 revision_id uuid,
                 archive_seq text
-              )
+              )`,
+            ),
+        );
+        const rows = await executeArchiveQueryWithinDeadline<BatchReadRow>(
+          executeQuery,
+          // Resolve references without copying revision bodies into every result row.
+          database
+            .with(requested)
+            .select({
+              referenceIndex: sql`${requested.reference_index}`.as(
+                "referenceIndex",
+              ),
+              itemId: sql`${archiveItems.itemId}::text`.as("itemId"),
+              namespace: sql`${archiveItems.namespace}`.as("namespace"),
+              sourceKey: sql`${archiveItems.sourceKey}`.as("sourceKey"),
+              deletionSequence:
+                sql`${archiveItemDeletions.deletionSequence}::text`.as(
+                  "deletionSequence",
+                ),
+              revisionId: sql`${archiveRevisions.revisionId}::text`.as(
+                "revisionId",
+              ),
+              revisionItemId: sql`${archiveRevisions.itemId}::text`.as(
+                "revisionItemId",
+              ),
+              stateHash: sql`${archiveRevisions.stateHash}`.as("stateHash"),
+              observedArchiveSeq:
+                sql`${archiveCommits.archiveSequence}::text`.as(
+                  "observedArchiveSeq",
+                ),
+            })
+            .from(requested)
+            .leftJoin(
+              archiveItems,
+              eq(archiveItems.itemId, sql`${requested.item_id}::uuid`),
             )
-            SELECT
-              requested.reference_index AS "referenceIndex",
-              item.item_id::text AS "itemId",
-              item.namespace AS "namespace",
-              item.source_key AS "sourceKey",
-              deletion.deletion_seq::text AS "deletionSequence",
-              revision.revision_id::text AS "revisionId",
-              revision.item_id::text AS "revisionItemId",
-              revision.state_hash AS "stateHash",
-              observed_commit.archive_seq::text AS "observedArchiveSeq"
-            FROM requested
-            LEFT JOIN archive_item AS item
-              ON item.item_id = requested.item_id
-            LEFT JOIN archive_item_deletion AS deletion
-              ON deletion.item_id = requested.item_id
-            LEFT JOIN archive_revision AS revision
-              ON revision.revision_id = requested.revision_id
-            LEFT JOIN archive_commit AS observed_commit
-              ON observed_commit.archive_seq = requested.archive_seq::bigint
-             AND observed_commit.bin_id = requested.bin_id
-             AND EXISTS (
-               SELECT 1
-               FROM archive_observation AS observation
-               WHERE observation.commit_id = observed_commit.commit_id
-                 AND observation.item_id = requested.item_id
-                 AND observation.revision_id = requested.revision_id
-             )
-            ORDER BY requested.reference_index
-          `,
+            .leftJoin(
+              archiveItemDeletions,
+              eq(archiveItemDeletions.itemId, sql`${requested.item_id}::uuid`),
+            )
+            .leftJoin(
+              archiveRevisions,
+              eq(
+                archiveRevisions.revisionId,
+                sql`${requested.revision_id}::uuid`,
+              ),
+            )
+            .leftJoin(
+              archiveCommits,
+              and(
+                eq(
+                  archiveCommits.archiveSequence,
+                  sql`${requested.archive_seq}::bigint`,
+                ),
+                eq(archiveCommits.binId, requested.bin_id),
+                exists(
+                  database
+                    .select({ found: sql`1` })
+                    .from(archiveObservations)
+                    .where(
+                      and(
+                        eq(
+                          archiveObservations.commitId,
+                          archiveCommits.commitId,
+                        ),
+                        eq(
+                          archiveObservations.itemId,
+                          sql`${requested.item_id}::uuid`,
+                        ),
+                        eq(
+                          archiveObservations.revisionId,
+                          sql`${requested.revision_id}::uuid`,
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .orderBy(asc(requested.reference_index)),
           deadline,
           signal,
         );
@@ -325,35 +389,51 @@ export function createArchiveBatchReadOperation(
               "Batch read resolved incomplete revision metadata.",
             );
           }
-          const revisionRows = await executeArchiveQueryWithinDeadline(
-            executeQuery,
-            sql<ArchiveRevisionStateRow[]>`
-              SELECT revision.state_data AS "stateData"
-              FROM archive_revision AS revision
-              WHERE revision.revision_id = ${row.revisionId}::uuid
-                AND revision.item_id = ${row.itemId}::uuid
-                AND revision.state_hash = ${row.stateHash}
-            `,
-            deadline,
-            signal,
-          );
-          const revisionRow = revisionRows[0];
-          if (revisionRow === undefined) {
-            const currentItemRows = await executeArchiveQueryWithinDeadline(
+          const revisionRows =
+            await executeArchiveQueryWithinDeadline<ArchiveRevisionStateRow>(
               executeQuery,
-              sql<CurrentItemStatusRow[]>`
-                SELECT
-                  item.item_id::text AS "itemId",
-                  deletion.deletion_seq::text AS "deletionSequence"
-                FROM (SELECT ${row.itemId}::uuid AS item_id) AS requested
-                LEFT JOIN archive_item AS item
-                  ON item.item_id = requested.item_id
-                LEFT JOIN archive_item_deletion AS deletion
-                  ON deletion.item_id = requested.item_id
-              `,
+              database
+                .select({
+                  stateData: sql`${archiveRevisions.stateData}`.as("stateData"),
+                })
+                .from(archiveRevisions)
+                .where(
+                  and(
+                    eq(archiveRevisions.revisionId, row.revisionId),
+                    eq(archiveRevisions.itemId, row.itemId),
+                    eq(archiveRevisions.stateHash, row.stateHash),
+                  ),
+                ),
               deadline,
               signal,
             );
+          const revisionRow = revisionRows[0];
+          if (revisionRow === undefined) {
+            const currentItemRows =
+              await executeArchiveQueryWithinDeadline<CurrentItemStatusRow>(
+                executeQuery,
+                database
+                  .select({
+                    itemId: sql`${archiveItems.itemId}::text`.as("itemId"),
+                    deletionSequence:
+                      sql`${archiveItemDeletions.deletionSequence}::text`.as(
+                        "deletionSequence",
+                      ),
+                  })
+                  .from(
+                    sql`(SELECT ${row.itemId}::uuid AS item_id) AS requested`,
+                  )
+                  .leftJoin(
+                    archiveItems,
+                    sql`${archiveItems.itemId} = requested.item_id`,
+                  )
+                  .leftJoin(
+                    archiveItemDeletions,
+                    sql`${archiveItemDeletions.itemId} = requested.item_id`,
+                  ),
+                deadline,
+                signal,
+              );
             const currentItem = currentItemRows[0];
             const reason =
               currentItem !== undefined &&

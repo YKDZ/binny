@@ -102,7 +102,7 @@ function fakeService(options: {
       if (actionName === null)
         return Response.json({
           actions: {
-            check: { description: "检查 feed 是否可用。" },
+            check: { description: "Check whether a feed is available." },
             collect: { description: action.description },
           },
         });
@@ -343,7 +343,7 @@ void describe("查询服务发现", () => {
     );
   });
 
-  void it("固定搜索转发关键词组并返回精简候选", async () => {
+  void it("forwards term groups in fixed search and returns concise candidates", async () => {
     const query = {
       bins: ["rss-main"],
       text: {
@@ -617,7 +617,7 @@ void describe("查询服务发现", () => {
     assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
   });
 
-  void it("不兼容的归档查询契约会在固定搜索前给出可读错误", async () => {
+  void it("reports an incompatible archive query contract with a readable error before fixed search", async () => {
     const service = fakeService({ archiveQueryVersion: 99 });
     const result = await run(
       [

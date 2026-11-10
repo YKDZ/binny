@@ -6367,7 +6367,10 @@ async function manualRunsHttpStep(
   const itemId = /^BINNY_TYPED_ARCHIVE_ITEM_ID=([0-9a-f-]+)$/mu.exec(
     result.stdout,
   )?.[1];
-  assert.ok(itemId, "手工运行归档旅程应返回公开条目 ID。");
+  assert.ok(
+    itemId,
+    "The manual archive journey should return a public item ID.",
+  );
   return itemId;
 }
 
@@ -10953,7 +10956,7 @@ async function main(): Promise<void> {
       await verifyArchiveSearchRequestCancellation(baseUrl);
       await verifyArchiveSearchSharedRequestBudget(baseUrl);
       if (archiveSearchOnly) {
-        process.stdout.write("固定搜索 HTTP/CLI 验收通过。\n");
+        process.stdout.write("Fixed search HTTP and CLI acceptance passed.\n");
       } else {
         const archiveState = await archiveHttpStep("submit", baseUrl);
         const archiveStateReference = JSON.parse(archiveState) as {
@@ -10983,7 +10986,7 @@ async function main(): Promise<void> {
           itemId,
         });
         process.stdout.write(
-          "SDK/运行器/HTTP/数据库归档模型及重启后公开读回通过。\n",
+          "SDK, runner, HTTP, database archive model, and post-restart public readback passed.\n",
         );
       }
     } else if (articleAdaptersOnly) {
@@ -11138,7 +11141,7 @@ async function main(): Promise<void> {
       );
       if (rssLinuxdoOnly) {
         process.stdout.write(
-          "RSS/Atom、Linux.do 来源映射、媒体复用与公开历史读回通过。\n",
+          "RSS/Atom, Linux.do source mapping, media reuse, and public history readback passed.\n",
         );
       } else {
         await verifyLinuxdoCapacityJourney(baseUrl);

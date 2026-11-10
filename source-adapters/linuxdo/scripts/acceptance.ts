@@ -6458,7 +6458,7 @@ async function verifySyncScopeTransitions(): Promise<void> {
     assert.equal(
       mainCategory43AfterSecondBin.range?.from,
       originalCategory43.position,
-      "另一个 bin 的初始化不得重置当前 bin 的既有类别接续位置。",
+      "Initializing another bin must not reset this bin's existing category continuation position.",
     );
     const priorityBaseUpperBound = syncReport(secondBinSync).upperBound;
     const minutesAfterPriorityBase = (minutes: number) =>
