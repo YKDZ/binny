@@ -5509,7 +5509,7 @@ async function verifyArchivePersistence(
     new Uint8Array(await sdkResourceResponse.arrayBuffer()),
     sdkBytes,
   );
-  const sdkResourceDetails = {
+  const sdkResourceMetadata = {
     resourceId: sdkResource.resourceId,
     mediaType: sdkResourceResponse.headers.get("content-type"),
     size: Number(sdkResourceResponse.headers.get("content-length")),
@@ -5605,7 +5605,7 @@ async function verifyArchivePersistence(
     resourceMarkerItem,
     resourceRevision: historicalResource,
     sdkItem,
-    sdkResourceDetails,
+    sdkResourceMetadata,
     firstTimelinePage,
     secondTimelinePage,
     commit,

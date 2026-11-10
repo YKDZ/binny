@@ -305,7 +305,7 @@ void describe("offline CLI command contract", () => {
     assert.deepEqual(Object.keys(inputDocument.data.contract), ["input"]);
     assert.deepEqual(
       Object.keys(inputDocument.data.contract.input.schema.properties),
-      ["query", "apiUrl"],
+      ["query", "queryFile", "queryStdin", "apiUrl"],
     );
 
     const outputDocument = JSON.parse(output.output) as {

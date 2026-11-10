@@ -509,11 +509,13 @@ function startManagedProcess(
 async function cli(
   baseUrl: string,
   args: readonly string[],
+  options: { readonly stdin?: string } = {},
 ): Promise<ProcessResult> {
   assert.ok(installedCliConsumer !== undefined, "未安装独立 CLI 消费者。");
   return await installedCliConsumer.run(args, {
     apiUrl: baseUrl,
     environmentApiUrl: "http://127.0.0.1:1",
+    ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
   });
 }
 
@@ -1019,6 +1021,175 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
         matchedBinId === binId && revisionId.length > 0,
     ),
   );
+
+  const queryDirectory = await mkdtemp(
+    path.join(tmpdir(), "binny-search-query-"),
+  );
+  try {
+    const queryFile = path.join(queryDirectory, "query.json");
+    await writeFile(queryFile, JSON.stringify(query), "utf8");
+    const fileSearch = cliData<{
+      readonly results: readonly { readonly itemId: string }[];
+    }>(
+      await cli(baseUrl, ["archive", "search", "--query-file", queryFile]),
+      "found",
+    );
+    assert.deepEqual(
+      fileSearch.results.map(({ itemId }) => itemId),
+      search.results.map(({ itemId }) => itemId),
+    );
+
+    const unreadableFile = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query-file",
+        path.join(queryDirectory, "missing.json"),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(unreadableFile.path, ["queryFile"]);
+    assert.match(unreadableFile.message, /Cannot read search request file/u);
+
+    for (const args of [
+      ["archive", "search"],
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify(query),
+        "--query-file",
+        queryFile,
+      ],
+    ]) {
+      const rejectedSources = await cli(baseUrl, args);
+      assert.equal(rejectedSources.code, 2, rejectedSources.stderr);
+      const usageFailure = JSON.parse(rejectedSources.stderr) as {
+        readonly kind: string;
+        readonly issues: readonly { readonly code: string }[];
+      };
+      assert.equal(usageFailure.kind, "usageFailure");
+      assert.ok(
+        usageFailure.issues.some(
+          ({ code }) => code === "countConstraintViolation",
+        ),
+      );
+    }
+
+    type SearchInputError = {
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+    };
+    const invalidJson = "{broken";
+    const invalidJsonFile = path.join(queryDirectory, "invalid-json.json");
+    await writeFile(invalidJsonFile, invalidJson, "utf8");
+    const invalidJsonErrors = [
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query", invalidJson]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query-file",
+          invalidJsonFile,
+        ]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+          stdin: invalidJson,
+        }),
+        "invalid_input",
+      ),
+    ];
+    assert.deepEqual(invalidJsonErrors[0]?.path, ["query"]);
+    assert.match(invalidJsonErrors[0]?.message ?? "", /valid JSON/u);
+    assert.deepEqual(invalidJsonErrors[1], invalidJsonErrors[0]);
+    assert.deepEqual(invalidJsonErrors[2], invalidJsonErrors[0]);
+
+    const emptyQuery = "";
+    const emptyQueryFile = path.join(queryDirectory, "empty-query.json");
+    await writeFile(emptyQueryFile, emptyQuery, "utf8");
+    const emptyQueryErrors = [
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query", emptyQuery]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query-file",
+          emptyQueryFile,
+        ]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+          stdin: emptyQuery,
+        }),
+        "invalid_input",
+      ),
+    ];
+    assert.deepEqual(emptyQueryErrors[0]?.path, ["query"]);
+    assert.match(emptyQueryErrors[0]?.message ?? "", /valid JSON/u);
+    assert.deepEqual(emptyQueryErrors[1], emptyQueryErrors[0]);
+    assert.deepEqual(emptyQueryErrors[2], emptyQueryErrors[0]);
+
+    const invalidQuery = JSON.stringify({ limit: 0 });
+    const invalidQueryFile = path.join(queryDirectory, "invalid-query.json");
+    await writeFile(invalidQueryFile, invalidQuery, "utf8");
+    const invalidQueryErrors = [
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query", invalidQuery]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query-file",
+          invalidQueryFile,
+        ]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+          stdin: invalidQuery,
+        }),
+        "invalid_input",
+      ),
+    ];
+    assert.deepEqual(invalidQueryErrors[0]?.path, ["limit"]);
+    assert.deepEqual(invalidQueryErrors[1], invalidQueryErrors[0]);
+    assert.deepEqual(invalidQueryErrors[2], invalidQueryErrors[0]);
+  } finally {
+    await rm(queryDirectory, { recursive: true, force: true });
+  }
+  const stdinSearch = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+      stdin: JSON.stringify(query),
+    }),
+    "found",
+  );
+  assert.deepEqual(
+    stdinSearch.results.map(({ itemId }) => itemId),
+    search.results.map(({ itemId }) => itemId),
+  );
+
+  const unfilteredSearch = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(await cli(baseUrl, ["archive", "search", "--query", "{}"]), "found");
+  assert.ok(unfilteredSearch.results.length > 0);
 
   const timeWindowQuery = {
     bins: [binId],

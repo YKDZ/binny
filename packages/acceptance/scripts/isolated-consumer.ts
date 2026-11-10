@@ -24,6 +24,7 @@ type ConsumerOptions = {
 export type CliRunOptions = {
   readonly apiUrl?: string;
   readonly environmentApiUrl?: string | null;
+  readonly stdin?: string;
 };
 
 export type IsolatedCliConsumer = {
@@ -41,13 +42,14 @@ function run(
   args: readonly string[],
   cwd: string,
   environment?: Readonly<Record<string, string>>,
+  stdin?: string,
 ): Promise<ProcessResult> {
   return new Promise((resolveResult, reject) => {
     const env = { ...process.env, ...environment };
     const child = spawn(command, [...args], {
       cwd,
       env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
@@ -59,6 +61,8 @@ function run(
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
+    if (stdin === undefined) child.stdin.end();
+    else child.stdin.end(stdin);
     child.once("error", reject);
     child.once("close", (code) => {
       resolveResult({ code: code ?? 1, stdout, stderr });
@@ -412,6 +416,7 @@ export async function createIsolatedCliConsumer({
         invocation,
         consumerDirectory,
         consumerEnvironment(environmentApiUrl),
+        options.stdin,
       );
     };
     return {
