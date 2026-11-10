@@ -40,6 +40,8 @@ import {
   not,
   sql,
   type SQL,
+  type SQLWrapper,
+  type WithSubquery,
 } from "drizzle-orm";
 import { unionAll } from "drizzle-orm/pg-core";
 
@@ -353,6 +355,12 @@ function timeZoneSql(timeZone: string): SQL {
 }
 
 function dateDistributionCtes(
+  database: Database,
+  selectedViews: WithSubquery & {
+    readonly item_id: SQLWrapper;
+    readonly observed_at: SQLWrapper;
+    readonly state_data: SQLWrapper;
+  },
   distribution: Extract<
     NonNullable<SearchInput["distribution"]>,
     { by: "date" }
@@ -364,246 +372,487 @@ function dateDistributionCtes(
   const sourceTime =
     distribution.field === "observedAt"
       ? undefined
-      : sourceTimeFieldSql(sql`selected_views.state_data`, distribution.field);
-  const ranges =
+      : sourceTimeFieldSql(
+          sql`${selectedViews.state_data}`,
+          distribution.field,
+        );
+  const bounds =
     sourceTime === undefined
-      ? sql`date_ranges AS (
-          SELECT
-            selected_views.item_id,
-            'instant'::text AS precision,
-            selected_views.observed_at::text AS value,
-            NULL::text AS time_zone,
-            selected_views.observed_at AS start_at,
-            selected_views.observed_at AS end_at,
-            selected_views.observed_at AS possible_start,
-            selected_views.observed_at AS possible_end
-          FROM selected_views
-        )`
-      : (() => {
-          const bounds = sourceTimeBoundsSql(sourceTime, aliases);
-          return sql`date_ranges AS (
-            SELECT
-              selected_views.item_id,
-              ${bounds.precision} AS precision,
-              ${bounds.value} AS value,
-              ${bounds.timeZone} AS time_zone,
-              ${bounds.start} AS start_at,
-              ${bounds.end} AS end_at,
-              ${bounds.possibleStart} AS possible_start,
-              ${bounds.possibleEnd} AS possible_end
-            FROM selected_views
-          )`;
-        })();
-  const afterCursor =
-    cursor === undefined
-      ? sql`true`
-      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+      ? undefined
+      : sourceTimeBoundsSql(sourceTime, aliases);
+  const dateRanges = database.$with("date_ranges").as(
+    database
+      .select({
+        item_id: sql`${selectedViews.item_id}`.as("item_id"),
+        precision:
+          bounds?.precision.as("precision") ??
+          sql`'instant'::text`.as("precision"),
+        value:
+          bounds?.value.as("value") ??
+          sql`${selectedViews.observed_at}::text`.as("value"),
+        time_zone:
+          bounds?.timeZone.as("time_zone") ?? sql`NULL::text`.as("time_zone"),
+        start_at:
+          bounds?.start.as("start_at") ??
+          sql`${selectedViews.observed_at}`.as("start_at"),
+        end_at:
+          bounds?.end.as("end_at") ??
+          sql`${selectedViews.observed_at}`.as("end_at"),
+        possible_start:
+          bounds?.possibleStart.as("possible_start") ??
+          sql`${selectedViews.observed_at}`.as("possible_start"),
+        possible_end:
+          bounds?.possibleEnd.as("possible_end") ??
+          sql`${selectedViews.observed_at}`.as("possible_end"),
+      })
+      .from(selectedViews),
+  );
+  const dateCandidates = database.$with("date_candidates").as(
+    database
+      .select({
+        item_id: sql`${dateRanges.item_id}`.as("item_id"),
+        precision: sql`${dateRanges.precision}`.as("precision"),
+        value: sql`${dateRanges.value}`.as("value"),
+        time_zone: sql`${dateRanges.time_zone}`.as("time_zone"),
+        start_at: sql`${dateRanges.start_at}`.as("start_at"),
+        end_at: sql`${dateRanges.end_at}`.as("end_at"),
+        possible_start: sql`${dateRanges.possible_start}`.as("possible_start"),
+        possible_end: sql`${dateRanges.possible_end}`.as("possible_end"),
+        range_start: sql`CASE
+          WHEN ${dateRanges.precision} <> 'instant' AND ${dateRanges.time_zone} IS NULL
+          THEN ${dateRanges.possible_start}
+          ELSE ${dateRanges.start_at}
+        END`.as("range_start"),
+        range_end: sql`CASE
+          WHEN ${dateRanges.precision} = 'instant' THEN ${dateRanges.start_at}
+          WHEN ${dateRanges.time_zone} IS NULL THEN ${dateRanges.possible_end}
+          ELSE ${dateRanges.end_at}
+        END`.as("range_end"),
+      })
+      .from(dateRanges),
+  );
+  const bucketLocalStart = sql`date_trunc(
+    ${distribution.period}::text,
+    (${dateCandidates.range_start} AT TIME ZONE ${zone})
+  )`;
   const periodInterval = sql`CASE ${distribution.period}::text
     WHEN 'day' THEN interval '1 day'
     WHEN 'month' THEN interval '1 month'
     ELSE interval '1 year'
   END`;
-
-  return sql`${ranges}, date_candidates AS (
-    SELECT
-      date_ranges.*,
-      CASE
-        WHEN precision <> 'instant' AND time_zone IS NULL THEN possible_start
-        ELSE start_at
-      END AS range_start,
-      CASE
-        WHEN precision = 'instant' THEN start_at
-        WHEN time_zone IS NULL THEN possible_end
-        ELSE end_at
-      END AS range_end
-    FROM date_ranges
-  ), date_bucketed AS (
-    SELECT
-      date_candidates.*,
-      date_trunc(
-        ${distribution.period}::text,
-        (range_start AT TIME ZONE ${zone})
-      ) AS bucket_local_start,
-      (date_trunc(
-        ${distribution.period}::text,
-        (range_start AT TIME ZONE ${zone})
-      )) AT TIME ZONE ${zone} AS bucket_start,
-      (date_trunc(
-        ${distribution.period}::text,
-        (range_start AT TIME ZONE ${zone})
-      ) + ${periodInterval}) AT TIME ZONE ${zone} AS bucket_end
-    FROM date_candidates
-  ), date_decisions AS (
-    SELECT
-      item_id,
-      CASE ${distribution.period}::text
-        WHEN 'day' THEN to_char(bucket_local_start, 'YYYY-MM-DD')
-        WHEN 'month' THEN to_char(bucket_local_start, 'YYYY-MM')
-        ELSE to_char(bucket_local_start, 'YYYY')
-      END AS date_value,
-      CASE
-        WHEN value IS NULL THEN 'undetermined'
-        WHEN precision = 'instant'
-          AND range_start >= bucket_start
-          AND range_start < bucket_end
-        THEN 'date'
-        WHEN precision = 'instant' THEN 'undetermined'
-        WHEN range_start >= bucket_start AND range_end <= bucket_end
-        THEN 'date'
-        ELSE 'undetermined'
-      END AS group_kind,
-      CASE
-        WHEN value IS NULL THEN 'missingTime'
-        WHEN precision = 'instant' THEN NULL::text
-        WHEN time_zone IS NULL
-          AND NOT (range_start >= bucket_start AND range_end <= bucket_end)
-        THEN 'missingTimeZone'
-        WHEN range_start >= bucket_start AND range_end <= bucket_end
-        THEN NULL::text
-        ELSE 'precisionOverlapsBoundary'
-      END AS reason
-    FROM date_bucketed
-  ), date_assigned AS (
-    SELECT
-      item_id,
-      group_kind,
-      CASE WHEN group_kind = 'date' THEN date_value ELSE NULL::text END AS date_value,
-      reason,
-      CASE group_kind
-        WHEN 'date' THEN 'date:' || date_value
-        ELSE 'undetermined:' || reason
-      END COLLATE "C" AS group_key
-    FROM date_decisions
-  ), distribution_base AS (
-    SELECT
-      group_key,
-      group_kind,
-      date_value,
-      reason,
-      count(DISTINCT item_id)::text AS item_count
-    FROM date_assigned
-    GROUP BY group_key, group_kind, date_value, reason
-  ), distribution_total AS (
-    SELECT count(DISTINCT item_id)::text AS total_items
-    FROM selected_views
-  ), distribution_selected AS (
-    SELECT distribution_base.*
-    FROM distribution_base
-    WHERE ${afterCursor}
-    ORDER BY group_key COLLATE "C" ASC
-    LIMIT ${distribution.limit + 1}
-  ), distribution_groups AS (
-    SELECT coalesce(
-      jsonb_agg(
-        CASE group_kind
-          WHEN 'date' THEN jsonb_build_object(
-            'kind', 'date'::text,
-            'value', date_value,
-            'itemCount', item_count,
-            '__distributionKey', group_key
-          )
-          ELSE jsonb_build_object(
-            'kind', 'undetermined'::text,
-            'reason', reason,
-            'itemCount', item_count,
-            '__distributionKey', group_key
-          )
-        END ORDER BY group_key COLLATE "C" ASC
+  const dateBucketed = database.$with("date_bucketed").as(
+    database
+      .select({
+        item_id: sql`${dateCandidates.item_id}`.as("item_id"),
+        precision: sql`${dateCandidates.precision}`.as("precision"),
+        value: sql`${dateCandidates.value}`.as("value"),
+        time_zone: sql`${dateCandidates.time_zone}`.as("time_zone"),
+        range_start: sql`${dateCandidates.range_start}`.as("range_start"),
+        range_end: sql`${dateCandidates.range_end}`.as("range_end"),
+        bucket_local_start: bucketLocalStart.as("bucket_local_start"),
+        bucket_start: sql`(${bucketLocalStart}) AT TIME ZONE ${zone}`.as(
+          "bucket_start",
+        ),
+        bucket_end:
+          sql`(${bucketLocalStart} + ${periodInterval}) AT TIME ZONE ${zone}`.as(
+            "bucket_end",
+          ),
+      })
+      .from(dateCandidates),
+  );
+  const dateDecisions = database.$with("date_decisions").as(
+    database
+      .select({
+        item_id: sql`${dateBucketed.item_id}`.as("item_id"),
+        date_value: sql`CASE ${distribution.period}::text
+          WHEN 'day' THEN to_char(${dateBucketed.bucket_local_start}, 'YYYY-MM-DD')
+          WHEN 'month' THEN to_char(${dateBucketed.bucket_local_start}, 'YYYY-MM')
+          ELSE to_char(${dateBucketed.bucket_local_start}, 'YYYY')
+        END`.as("date_value"),
+        group_kind: sql`CASE
+          WHEN ${dateBucketed.value} IS NULL THEN 'undetermined'
+          WHEN ${dateBucketed.precision} = 'instant'
+            AND ${dateBucketed.range_start} >= ${dateBucketed.bucket_start}
+            AND ${dateBucketed.range_start} < ${dateBucketed.bucket_end}
+          THEN 'date'
+          WHEN ${dateBucketed.precision} = 'instant' THEN 'undetermined'
+          WHEN ${dateBucketed.range_start} >= ${dateBucketed.bucket_start}
+            AND ${dateBucketed.range_end} <= ${dateBucketed.bucket_end}
+          THEN 'date'
+          ELSE 'undetermined'
+        END`.as("group_kind"),
+        reason: sql`CASE
+          WHEN ${dateBucketed.value} IS NULL THEN 'missingTime'
+          WHEN ${dateBucketed.precision} = 'instant' THEN NULL::text
+          WHEN ${dateBucketed.time_zone} IS NULL
+            AND NOT (
+              ${dateBucketed.range_start} >= ${dateBucketed.bucket_start}
+              AND ${dateBucketed.range_end} <= ${dateBucketed.bucket_end}
+            )
+          THEN 'missingTimeZone'
+          WHEN ${dateBucketed.range_start} >= ${dateBucketed.bucket_start}
+            AND ${dateBucketed.range_end} <= ${dateBucketed.bucket_end}
+          THEN NULL::text
+          ELSE 'precisionOverlapsBoundary'
+        END`.as("reason"),
+      })
+      .from(dateBucketed),
+  );
+  const dateAssigned = database.$with("date_assigned").as(
+    database
+      .select({
+        item_id: sql`${dateDecisions.item_id}`.as("item_id"),
+        group_kind: sql`${dateDecisions.group_kind}`.as("group_kind"),
+        date_value: sql`CASE
+          WHEN ${dateDecisions.group_kind} = 'date' THEN ${dateDecisions.date_value}
+          ELSE NULL::text
+        END`.as("date_value"),
+        reason: sql`${dateDecisions.reason}`.as("reason"),
+        group_key: sql`CASE ${dateDecisions.group_kind}
+          WHEN 'date' THEN 'date:' || ${dateDecisions.date_value}
+          ELSE 'undetermined:' || ${dateDecisions.reason}
+        END COLLATE "C"`.as("group_key"),
+      })
+      .from(dateDecisions),
+  );
+  const distributionBase = database.$with("distribution_base").as(
+    database
+      .select({
+        group_key: sql`${dateAssigned.group_key}`.as("group_key"),
+        group_kind: sql`${dateAssigned.group_kind}`.as("group_kind"),
+        date_value: sql`${dateAssigned.date_value}`.as("date_value"),
+        reason: sql`${dateAssigned.reason}`.as("reason"),
+        item_count: sql`count(DISTINCT ${dateAssigned.item_id})::text`.as(
+          "item_count",
+        ),
+      })
+      .from(dateAssigned)
+      .groupBy(
+        dateAssigned.group_key,
+        dateAssigned.group_kind,
+        dateAssigned.date_value,
+        dateAssigned.reason,
       ),
-      '[]'::jsonb
-    ) AS groups
-    FROM distribution_selected
-  ), distribution_summary AS (
-    SELECT distribution_total.total_items, distribution_groups.groups
-    FROM distribution_total CROSS JOIN distribution_groups
-  )`;
+  );
+  const distributionTotal = database.$with("distribution_total").as(
+    database
+      .select({
+        total_items: sql`count(DISTINCT ${selectedViews.item_id})::text`.as(
+          "total_items",
+        ),
+      })
+      .from(selectedViews),
+  );
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const distributionSelected = database.$with("distribution_selected").as(
+    database
+      .select()
+      .from(distributionBase)
+      .where(afterCursor)
+      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .limit(distribution.limit + 1),
+  );
+  const distributionGroups = database.$with("distribution_groups").as(
+    database
+      .select({
+        groups: sql`coalesce(
+          jsonb_agg(
+            CASE ${distributionSelected.group_kind}
+              WHEN 'date' THEN jsonb_build_object(
+                'kind', 'date'::text,
+                'value', ${distributionSelected.date_value},
+                'itemCount', ${distributionSelected.item_count},
+                '__distributionKey', ${distributionSelected.group_key}
+              )
+              ELSE jsonb_build_object(
+                'kind', 'undetermined'::text,
+                'reason', ${distributionSelected.reason},
+                'itemCount', ${distributionSelected.item_count},
+                '__distributionKey', ${distributionSelected.group_key}
+              )
+            END ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+          ),
+          '[]'::jsonb
+        )`.as("groups"),
+      })
+      .from(distributionSelected),
+  );
+  const distributionSummary = database.$with("distribution_summary").as(
+    database
+      .select({
+        total_items: sql`${distributionTotal.total_items}`.as("total_items"),
+        groups: sql`${distributionGroups.groups}`.as("groups"),
+      })
+      .from(distributionTotal)
+      .crossJoin(distributionGroups),
+  );
+  return {
+    queries: [
+      dateRanges,
+      dateCandidates,
+      dateBucketed,
+      dateDecisions,
+      dateAssigned,
+      distributionBase,
+      distributionTotal,
+      distributionSelected,
+      distributionGroups,
+      distributionSummary,
+    ] as const,
+    summary: distributionSummary,
+  };
 }
 
 function extensionDistributionCtes(
+  database: Database,
+  selectedViews: WithSubquery & {
+    readonly item_id: SQLWrapper;
+    readonly state_data: SQLWrapper;
+  },
   distribution: Extract<
     NonNullable<SearchInput["distribution"]>,
     { by: "extension" }
   >,
   cursor: SearchDistributionCursor | undefined,
 ) {
-  const extensionValue = sql`selected_views.state_data->'extensions'->${distribution.field}`;
+  const extensionValue = sql`${selectedViews.state_data}->'extensions'->${distribution.field}`;
+  const expandedValues = sql`jsonb_array_elements(
+    CASE
+      WHEN jsonb_typeof(${extensionValue}) = 'array' THEN ${extensionValue}
+      WHEN ${extensionValue} IS NULL OR ${extensionValue} = 'null'::jsonb
+      THEN '[]'::jsonb
+      ELSE jsonb_build_array(${extensionValue})
+    END
+  ) AS extension_value(value)`;
+  const extensionValues = database.$with("extension_values").as(
+    database
+      .select({
+        item_id: sql`${selectedViews.item_id}`.as("item_id"),
+        group_value: sql`extension_value.value`.as("group_value"),
+      })
+      .from(selectedViews)
+      .crossJoinLateral(expandedValues),
+  );
+  const extensionCounts = database.$with("extension_counts").as(
+    database
+      .select({
+        group_value: sql`${extensionValues.group_value}`.as("group_value"),
+        item_count: sql`count(DISTINCT ${extensionValues.item_id})::text`.as(
+          "item_count",
+        ),
+      })
+      .from(extensionValues)
+      .groupBy(extensionValues.group_value),
+  );
+  const extensionMissing = database.$with("extension_missing").as(
+    database
+      .selectDistinct({
+        item_id: sql`${selectedViews.item_id}`.as("item_id"),
+      })
+      .from(selectedViews)
+      .where(
+        sql`${extensionValue} IS NULL
+          OR ${extensionValue} = 'null'::jsonb
+          OR CASE
+            WHEN jsonb_typeof(${extensionValue}) = 'array'
+            THEN jsonb_array_length(${extensionValue}) = 0
+            ELSE false
+          END`,
+      ),
+  );
+  const extensionGroupRows = database
+    .select({
+      group_key:
+        sql`('extension:' || ${extensionCounts.group_value}::text) COLLATE "C"`.as(
+          "group_key",
+        ),
+      group_kind: sql`'extension'::text`.as("group_kind"),
+      group_value: sql`${extensionCounts.group_value}`.as("group_value"),
+      item_count: sql`${extensionCounts.item_count}`.as("item_count"),
+    })
+    .from(extensionCounts);
+  const missingGroupRows = database
+    .select({
+      group_key: sql`'missing:'::text COLLATE "C"`.as("group_key"),
+      group_kind: sql`'missing'::text`.as("group_kind"),
+      group_value: sql`NULL::jsonb`.as("group_value"),
+      item_count: sql`count(DISTINCT ${extensionMissing.item_id})::text`.as(
+        "item_count",
+      ),
+    })
+    .from(extensionMissing)
+    .having(sql`count(DISTINCT ${extensionMissing.item_id}) > 0`);
+  const distributionBase = database
+    .$with("distribution_base")
+    .as(unionAll(extensionGroupRows, missingGroupRows));
+  const distributionTotal = database.$with("distribution_total").as(
+    database
+      .select({
+        total_items: sql`count(DISTINCT ${selectedViews.item_id})::text`.as(
+          "total_items",
+        ),
+      })
+      .from(selectedViews),
+  );
   const afterCursor =
     cursor === undefined
       ? sql`true`
-      : sql`distribution_base.group_key COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
-  return sql`extension_values AS (
-    SELECT selected_views.item_id, extension_value.value AS group_value
-    FROM selected_views
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(${extensionValue}) = 'array' THEN ${extensionValue}
-        WHEN ${extensionValue} IS NULL OR ${extensionValue} = 'null'::jsonb
-        THEN '[]'::jsonb
-        ELSE jsonb_build_array(${extensionValue})
-      END
-    ) AS extension_value(value)
-  ), extension_counts AS (
-    SELECT group_value, count(DISTINCT item_id)::text AS item_count
-    FROM extension_values
-    GROUP BY group_value
-  ), extension_missing AS (
-    SELECT DISTINCT selected_views.item_id
-    FROM selected_views
-    WHERE ${extensionValue} IS NULL
-      OR ${extensionValue} = 'null'::jsonb
-      OR CASE
-        WHEN jsonb_typeof(${extensionValue}) = 'array'
-        THEN jsonb_array_length(${extensionValue}) = 0
-        ELSE false
-      END
-  ), distribution_base AS (
-    SELECT
-      ('extension:' || group_value::text) COLLATE "C" AS group_key,
-      'extension'::text AS group_kind,
-      group_value,
-      item_count
-    FROM extension_counts
-    UNION ALL
-    SELECT
-      'missing:'::text COLLATE "C" AS group_key,
-      'missing'::text AS group_kind,
-      NULL::jsonb AS group_value,
-      count(DISTINCT item_id)::text AS item_count
-    FROM extension_missing
-    HAVING count(DISTINCT item_id) > 0
-  ), distribution_total AS (
-    SELECT count(DISTINCT item_id)::text AS total_items
-    FROM selected_views
-  ), distribution_selected AS (
-    SELECT distribution_base.*
-    FROM distribution_base
-    WHERE ${afterCursor}
-    ORDER BY group_key COLLATE "C" ASC
-    LIMIT ${distribution.limit + 1}
-  ), distribution_groups AS (
-    SELECT coalesce(
-      jsonb_agg(
-        CASE group_kind
-          WHEN 'extension' THEN jsonb_build_object(
-            'kind', 'extension'::text,
-            'value', group_value,
-            'itemCount', item_count,
-            '__distributionKey', group_key
-          )
-          ELSE jsonb_build_object(
-            'kind', 'missing'::text,
-            'itemCount', item_count,
-            '__distributionKey', group_key
-          )
-        END ORDER BY group_key COLLATE "C" ASC
-      ),
-      '[]'::jsonb
-    ) AS groups
-    FROM distribution_selected
-  ), distribution_summary AS (
-    SELECT distribution_total.total_items, distribution_groups.groups
-    FROM distribution_total CROSS JOIN distribution_groups
-  )`;
+      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const distributionSelected = database.$with("distribution_selected").as(
+    database
+      .select()
+      .from(distributionBase)
+      .where(afterCursor)
+      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .limit(distribution.limit + 1),
+  );
+  const distributionGroups = database.$with("distribution_groups").as(
+    database
+      .select({
+        groups: sql`coalesce(
+          jsonb_agg(
+            CASE ${distributionSelected.group_kind}
+              WHEN 'extension' THEN jsonb_build_object(
+                'kind', 'extension'::text,
+                'value', ${distributionSelected.group_value},
+                'itemCount', ${distributionSelected.item_count},
+                '__distributionKey', ${distributionSelected.group_key}
+              )
+              ELSE jsonb_build_object(
+                'kind', 'missing'::text,
+                'itemCount', ${distributionSelected.item_count},
+                '__distributionKey', ${distributionSelected.group_key}
+              )
+            END ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+          ),
+          '[]'::jsonb
+        )`.as("groups"),
+      })
+      .from(distributionSelected),
+  );
+  const distributionSummary = database.$with("distribution_summary").as(
+    database
+      .select({
+        total_items: sql`${distributionTotal.total_items}`.as("total_items"),
+        groups: sql`${distributionGroups.groups}`.as("groups"),
+      })
+      .from(distributionTotal)
+      .crossJoin(distributionGroups),
+  );
+  return {
+    queries: [
+      extensionValues,
+      extensionCounts,
+      extensionMissing,
+      distributionBase,
+      distributionTotal,
+      distributionSelected,
+      distributionGroups,
+      distributionSummary,
+    ] as const,
+    summary: distributionSummary,
+  };
+}
+
+function binDistributionCtes(
+  database: Database,
+  selectedViews: WithSubquery & {
+    readonly bin_id: SQLWrapper;
+    readonly item_id: SQLWrapper;
+  },
+  distribution: Extract<
+    NonNullable<SearchInput["distribution"]>,
+    { by: "bin" }
+  >,
+  cursor: SearchDistributionCursor | undefined,
+) {
+  const distributionBase = database.$with("distribution_base").as(
+    database
+      .select({
+        group_key: sql`${selectedViews.bin_id} COLLATE "C"`.as("group_key"),
+        bin_id: sql`${selectedViews.bin_id}`.as("bin_id"),
+        item_count: sql`count(DISTINCT ${selectedViews.item_id})::text`.as(
+          "item_count",
+        ),
+      })
+      .from(selectedViews)
+      .groupBy(sql`${selectedViews.bin_id}`),
+  );
+  const distributionTotal = database.$with("distribution_total").as(
+    database
+      .select({
+        total_items: sql`count(DISTINCT ${selectedViews.item_id})::text`.as(
+          "total_items",
+        ),
+      })
+      .from(selectedViews),
+  );
+  const afterCursor =
+    cursor === undefined
+      ? sql`true`
+      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const distributionSelected = database.$with("distribution_selected").as(
+    database
+      .select()
+      .from(distributionBase)
+      .where(afterCursor)
+      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .limit(distribution.limit + 1),
+  );
+  const distributionGroups = database.$with("distribution_groups").as(
+    database
+      .select({
+        groups: sql`coalesce(
+          jsonb_agg(
+            jsonb_build_object(
+              'kind', 'bin'::text,
+              'binId', ${distributionSelected.bin_id},
+              'itemCount', ${distributionSelected.item_count},
+              '__distributionKey', ${distributionSelected.group_key}
+            ) ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+          ),
+          '[]'::jsonb
+        )`.as("groups"),
+      })
+      .from(distributionSelected),
+  );
+  const distributionSummary = database.$with("distribution_summary").as(
+    database
+      .select({
+        total_items: sql`${distributionTotal.total_items}`.as("total_items"),
+        groups: sql`${distributionGroups.groups}`.as("groups"),
+      })
+      .from(distributionTotal)
+      .crossJoin(distributionGroups),
+  );
+  return {
+    queries: [
+      distributionBase,
+      distributionTotal,
+      distributionSelected,
+      distributionGroups,
+      distributionSummary,
+    ] as const,
+    summary: distributionSummary,
+  };
+}
+
+function emptyDistributionCtes(
+  database: Database,
+  fixedSnapshot: WithSubquery,
+) {
+  const summary = database.$with("distribution_summary").as(
+    database
+      .select({
+        total_items: sql`NULL::text`.as("total_items"),
+        groups: sql`'[]'::jsonb`.as("groups"),
+      })
+      .from(fixedSnapshot),
+  );
+  return { queries: [summary] as const, summary };
 }
 
 function decodeJsonValue(value: unknown): unknown {
@@ -992,63 +1241,40 @@ function pageQuery(
       .limit(input.limit + 1),
   );
   const distribution = input.distribution;
-  const afterDistributionCursor =
-    distributionCursor === undefined
-      ? sql`true`
-      : sql`distribution_base.group_key COLLATE "C" > ${distributionCursor.groupKey} COLLATE "C"`;
-  const distributionSql =
+  const distributionCtes =
     distribution === undefined
-      ? sql`distribution_summary AS (
-        SELECT NULL::text AS total_items, '[]'::jsonb AS groups
-      )`
+      ? emptyDistributionCtes(database, fixedSnapshot)
       : distribution.by === "bin"
-        ? sql`distribution_base AS (
-          SELECT
-            bin_id COLLATE "C" AS group_key,
-            bin_id,
-            count(DISTINCT item_id)::text AS item_count
-          FROM selected_views
-          GROUP BY bin_id
-        ), distribution_total AS (
-          SELECT count(DISTINCT item_id)::text AS total_items
-          FROM selected_views
-        ), distribution_selected AS (
-          SELECT distribution_base.*
-          FROM distribution_base
-          WHERE ${afterDistributionCursor}
-          ORDER BY distribution_base.group_key COLLATE "C" ASC
-          LIMIT ${distribution.limit + 1}
-        ), distribution_groups AS (
-          SELECT coalesce(
-            jsonb_agg(
-              jsonb_build_object(
-                'kind', 'bin'::text,
-                'binId', bin_id,
-                'itemCount', item_count,
-                '__distributionKey', group_key
-              ) ORDER BY group_key COLLATE "C" ASC
-            ),
-            '[]'::jsonb
-          ) AS groups
-          FROM distribution_selected
-        ), distribution_summary AS (
-          SELECT distribution_total.total_items, distribution_groups.groups
-          FROM distribution_total CROSS JOIN distribution_groups
-        )`
+        ? binDistributionCtes(
+            database,
+            selectedViews,
+            distribution,
+            distributionCursor,
+          )
         : distribution.by === "date"
-          ? dateDistributionCtes(distribution, distributionCursor, aliases)
-          : extensionDistributionCtes(distribution, distributionCursor);
-  // Declare the output columns because this CTE wraps PostgreSQL-specific SQL.
-  const distributionResult = database
-    .$with("distribution_result", {
-      total_items: sql<string>``.as("total_items"),
-      groups: sql``.as("groups"),
-    })
-    .as(
-      sql`WITH ${distributionSql}
-      SELECT distribution_summary.total_items, distribution_summary.groups
-      FROM distribution_summary`,
-    );
+          ? dateDistributionCtes(
+              database,
+              selectedViews,
+              distribution,
+              distributionCursor,
+              aliases,
+            )
+          : extensionDistributionCtes(
+              database,
+              selectedViews,
+              distribution,
+              distributionCursor,
+            );
+  const distributionResult = database.$with("distribution_result").as(
+    database
+      .select({
+        total_items: sql`${distributionCtes.summary.total_items}`.as(
+          "total_items",
+        ),
+        groups: sql`${distributionCtes.summary.groups}`.as("groups"),
+      })
+      .from(distributionCtes.summary),
+  );
   const selectedTimeMatch =
     input.timeWindow === undefined
       ? sql`'{}'::jsonb`
@@ -1157,6 +1383,7 @@ function pageQuery(
       selectedMatches,
       page,
       timeSummary,
+      ...distributionCtes.queries,
       distributionResult,
     )
     .select({
