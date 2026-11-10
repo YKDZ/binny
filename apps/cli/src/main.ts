@@ -7,6 +7,8 @@ import { pipeline } from "node:stream/promises";
 import { createApiClient } from "@binny/api/client";
 import { validationFailure } from "@binny/api/validation";
 import {
+  archiveBatchReadInputSchema,
+  archiveBatchReadResponseSchema,
   archiveCommitSchema,
   archiveErrorSchema,
   archiveIdentifierSchema,
@@ -256,6 +258,7 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
   const commandsWithoutAutomaticProtocolCheck = new Set([
     "serviceInfo",
     "archiveSearch",
+    "archiveBatchRead",
   ]);
   const extendedCommands = Object.fromEntries(
     Object.entries(commands).map(([name, definition]) => {
@@ -1133,6 +1136,62 @@ function createCliContract(identity: CliCommandIdentity) {
           ]
         : ["End of results."]),
     ]);
+  const archiveBatchReadText = (
+    response: z.infer<typeof archiveBatchReadResponseSchema>,
+  ) =>
+    text.lines([
+      `Selected references: ${String(response.results.length)}`,
+      ...response.results.flatMap((result) => {
+        if (result.status === "unreadable") {
+          return [
+            `Reference ${String(result.index)}: unreadable (${result.reason})`,
+            `  Item: ${result.reference.itemId}`,
+            `  Bin: ${result.reference.binId}`,
+            `  Revision: ${result.reference.revisionId}`,
+            `  Archive sequence: ${result.reference.archiveSeq}`,
+          ];
+        }
+
+        const { reference, revision, resources } = result;
+        const body = revision.state.body;
+        return [
+          `Reference ${String(result.index)}: readable`,
+          `  Item: ${revision.itemId}`,
+          `  Bin: ${reference.binId}`,
+          `  Revision: ${revision.revisionId}`,
+          `  Archive sequence: ${reference.archiveSeq}`,
+          `  Source: ${revision.sourceKey.namespace}:${revision.sourceKey.key}`,
+          `  Title: ${revision.state.title ?? "(none)"}`,
+          `  Published: ${JSON.stringify(revision.state.sourcePublishedAt)}`,
+          `  Modified: ${JSON.stringify(revision.state.sourceModifiedAt)}`,
+          ...(revision.state.sourceRef === undefined
+            ? []
+            : [`  Source reference: ${revision.state.sourceRef}`]),
+          ...(body === undefined
+            ? ["  Body: no body representation was stored."]
+            : Object.entries(body).flatMap(([format, content]) => [
+                `  Body ${format}:`,
+                ...String(content)
+                  .split("\n")
+                  .map((line) => `    ${line}`),
+              ])),
+          `  Capture: ${revision.state.capture.completeness}`,
+          ...revision.state.capture.missing.map(
+            ({ path, reason }) => `  Missing ${path}: ${reason}`,
+          ),
+          "  Resources:",
+          ...(resources.length === 0
+            ? ["    (none)"]
+            : resources.map(
+                ({ resourceId, status }) => `    ${resourceId}: ${status}`,
+              )),
+          "  Extensions:",
+          ...JSON.stringify(revision.state.extensions, null, 2)
+            .split("\n")
+            .map((line) => `    ${line}`),
+        ];
+      }),
+    ]);
   const jsonSection = (heading: string, payload: unknown) => [
     `${heading}:`,
     ...JSON.stringify(payload, null, 2)
@@ -1353,7 +1412,7 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "archive",
-        description: "读取和删除归档资料、对象关系及观察历史。",
+        description: "搜索、批量读取和管理归档资料、对象关系及观察历史。",
       },
       service: {
         kind: "commandGroup",
@@ -1614,6 +1673,86 @@ function createCliContract(identity: CliCommandIdentity) {
           if (response.status === 400 || response.status === 422)
             return outcome.failure.apiError((await response.json()).error);
           throw new Error("服务返回了未声明的归档搜索状态。");
+        },
+      }),
+      ...command("archiveBatchRead")({
+        kind: "command",
+        parent: "archive",
+        name: "batch-read",
+        description:
+          "Read exact revisions selected from search results without resolving the current view.",
+        helpSupplement: text.lines([
+          "Run archive search, select a result and one of its matches, then copy the result itemId and that match's binId, revisionId, and archiveSeq into the JSON array passed with --references.",
+          'Example: binny archive batch-read --references \'[{"itemId":"650e8400-e29b-41d4-a716-446655440000","binId":"forum","revisionId":"750e8400-e29b-41d4-a716-446655440000","archiveSeq":"42"}]\'.',
+          "A request accepts 1 to 50 references and returns every result in input order, including duplicates and unreadable references. Complete responses are limited to 16 MiB; split the request into smaller batches if it exceeds the limit.",
+          "Stored body representations are returned in full. Missing media is reported per resource and does not prevent an available body from being read.",
+        ]),
+        fields: {
+          references: {
+            kind: "valueOption",
+            longOption: "--references",
+            description:
+              "JSON array of exact references copied from archive search results.",
+          },
+        },
+        input: z.object({
+          references: postgresTextSchema.min(1),
+        }),
+        success: {
+          kind: "data",
+          variants: {
+            read: {
+              description: "One exact read result for every supplied reference",
+              exitCode: 0,
+              schema: archiveBatchReadResponseSchema,
+              text: archiveBatchReadText,
+            },
+          },
+        },
+        failures,
+        async handler({ input, dependencies, outcome }) {
+          let request: unknown;
+          try {
+            request = {
+              references: JSON.parse(input.references) as unknown,
+            };
+          } catch {
+            return outcome.failure.apiError({
+              code: "invalid_input",
+              message: "Batch read references must be valid JSON.",
+              path: ["references"],
+            });
+          }
+          const checked = archiveBatchReadInputSchema.safeParse(request);
+          if (!checked.success) {
+            return outcome.failure.apiError(
+              validationFailure(checked.error.issues, {
+                preserveOriginalMessage: true,
+              }).error,
+            );
+          }
+          const compatibilityFailure = await queryCompatibilityFailure(
+            dependencies,
+            serviceCapabilities.archiveBatchRead,
+          );
+          if (compatibilityFailure !== undefined) {
+            return outcome.failure.apiError(compatibilityFailure);
+          }
+          const response = await dependencies
+            .createClient()
+            .archives["batch-read"].$post({ json: checked.data });
+          if (response.status === 200)
+            return outcome.data.read(await response.json());
+          if (
+            response.status === 400 ||
+            response.status === 413 ||
+            response.status === 422 ||
+            response.status === 503
+          )
+            return outcome.failure.apiError((await response.json()).error);
+          throw new Error(
+            "The service returned an undeclared batch-read status.",
+          );
         },
       }),
       ...command("binList")({
