@@ -5,8 +5,18 @@ import type { SQL } from "drizzle-orm";
 
 export class ArchiveQueryBudgetExceeded extends Error {}
 
+export class ArchiveRequestCancelled extends Error {}
+
 export function createArchiveQueryDeadline(budgetMs: number): number {
   return performance.now() + budgetMs;
+}
+
+export function assertArchiveQueryActive(
+  deadline: number,
+  signal?: AbortSignal,
+): number {
+  if (signal?.aborted) throw new ArchiveRequestCancelled();
+  return remainingArchiveQueryBudgetMs(deadline);
 }
 
 export function remainingArchiveQueryBudgetMs(deadline: number): number {
@@ -22,25 +32,49 @@ export async function executeArchiveQueryWithinDeadline<
   executeQuery: CancellableQueryExecutor,
   query: SQL<Row[]>,
   deadline: number,
+  signal?: AbortSignal,
 ): Promise<readonly Row[]> {
-  const remaining = remainingArchiveQueryBudgetMs(deadline);
+  const remaining = assertArchiveQueryActive(deadline, signal);
   const pending = executeQuery<Row>(query);
   let timeout: NodeJS.Timeout | undefined;
-  const outcome = await Promise.race([
-    pending.rows.then(
-      (rows) => ({ kind: "rows" as const, rows }),
-      (error: unknown) => ({ kind: "error" as const, error }),
-    ),
-    new Promise<{ readonly kind: "timeout" }>((resolve) => {
-      timeout = setTimeout(() => resolve({ kind: "timeout" }), remaining);
-    }),
-  ]);
-  if (timeout !== undefined) clearTimeout(timeout);
+  let abortHandler: (() => void) | undefined;
+  const cancelled = new Promise<{ readonly kind: "cancelled" }>((resolve) => {
+    if (signal === undefined) return;
+    abortHandler = () => resolve({ kind: "cancelled" });
+    signal.addEventListener("abort", abortHandler, { once: true });
+    if (signal.aborted) abortHandler();
+  });
+  let outcome:
+    | { readonly kind: "rows"; readonly rows: readonly Row[] }
+    | { readonly kind: "error"; readonly error: unknown }
+    | { readonly kind: "timeout" }
+    | { readonly kind: "cancelled" };
+  try {
+    outcome = await Promise.race([
+      pending.rows.then(
+        (rows) => ({ kind: "rows" as const, rows }),
+        (error: unknown) => ({ kind: "error" as const, error }),
+      ),
+      new Promise<{ readonly kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), remaining);
+      }),
+      cancelled,
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (signal !== undefined && abortHandler !== undefined) {
+      signal.removeEventListener("abort", abortHandler);
+    }
+  }
   if (outcome.kind === "timeout") {
     pending.cancel();
     throw new ArchiveQueryBudgetExceeded();
   }
+  if (outcome.kind === "cancelled") {
+    pending.cancel();
+    throw new ArchiveRequestCancelled();
+  }
   if (outcome.kind === "error") throw outcome.error;
-  remainingArchiveQueryBudgetMs(deadline);
+  assertArchiveQueryActive(deadline, signal);
   return outcome.rows as readonly Row[];
 }

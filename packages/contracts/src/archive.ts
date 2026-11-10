@@ -1312,6 +1312,15 @@ export type ArchiveOperation<T> =
       readonly status: 400 | 404 | 409 | 503;
       readonly error: ArchiveError;
     };
+
+/** Server-only execution metadata passed between the HTTP adapter and archive store. */
+export type ArchiveOperationContext = {
+  /** Monotonic deadline set by the server; never accepted in a serialized request. */
+  readonly deadline?: number;
+  /** Aborted when the HTTP client disconnects before the response is complete. */
+  readonly signal?: AbortSignal;
+};
+
 export type ArchiveOperations = {
   submitArchive(
     input: ArchiveSubmissionInput,
@@ -1351,6 +1360,7 @@ export type ArchiveOperations = {
   /** Search fixed fields at an immutable archive snapshot with stable pagination. */
   searchArchive(
     input: ArchiveSearchRequest,
+    context?: ArchiveOperationContext,
   ): Promise<ArchiveSearchOperation<ArchiveSearchPage>>;
   /**
    * Read exact item, bin, revision, and observation references selected from
