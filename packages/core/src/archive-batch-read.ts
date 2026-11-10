@@ -3,6 +3,7 @@ import {
   archiveBatchReadMaxResponseBytes,
   archiveBatchReadResponseSchema,
   archiveRevisionReadSchema,
+  type ArchiveOperationContext,
   type ArchiveBatchReadItemResult,
   type ArchiveBatchReadOperation,
   type ArchiveBatchReadRequest,
@@ -12,10 +13,11 @@ import { databaseErrorCode, type CancellableQueryExecutor } from "@binny/db";
 import { sql } from "drizzle-orm";
 
 import {
+  ArchiveRequestCancelled,
   ArchiveQueryBudgetExceeded,
+  assertArchiveQueryActive,
   createArchiveQueryDeadline,
   executeArchiveQueryWithinDeadline,
-  remainingArchiveQueryBudgetMs,
 } from "./archive-query-budget.ts";
 import type { ArchiveResourceStorage } from "./archive-resource-storage.ts";
 
@@ -65,7 +67,10 @@ function invalidInput(
   };
 }
 
-/** Read selected immutable item views through one bounded, cancellable query. */
+/**
+ * Read selected immutable item views through bounded, cancellable queries with
+ * one shared deadline covering resource checks and complete result assembly.
+ */
 export function createArchiveBatchReadOperation(
   resourceStorage: ArchiveResourceStorage,
   executeQuery: CancellableQueryExecutor,
@@ -78,12 +83,16 @@ export function createArchiveBatchReadOperation(
   return {
     async readArchiveBatch(
       request: ArchiveBatchReadRequest,
+      context?: ArchiveOperationContext,
     ): Promise<
       ArchiveBatchReadOperation<
         ReturnType<typeof archiveBatchReadResponseSchema.parse>
       >
     > {
-      const deadline = createArchiveQueryDeadline(budgetMs);
+      const deadline =
+        context?.deadline ?? createArchiveQueryDeadline(budgetMs);
+      const signal = context?.signal;
+      assertArchiveQueryActive(deadline, signal);
       const checked = archiveBatchReadInputSchema.safeParse(request);
       if (!checked.success) {
         const issue = checked.error.issues[0];
@@ -150,6 +159,7 @@ export function createArchiveBatchReadOperation(
             ORDER BY requested.reference_index
           `,
           deadline,
+          signal,
         );
         if (rows.length !== checked.data.references.length) {
           throw new Error("Batch read did not resolve every input reference.");
@@ -158,7 +168,7 @@ export function createArchiveBatchReadOperation(
         const results: ArchiveBatchReadItemResult[] = [];
         const resourceIds: string[] = [];
         for (const row of rows) {
-          remainingArchiveQueryBudgetMs(deadline);
+          assertArchiveQueryActive(deadline, signal);
           const reference = checked.data.references[row.referenceIndex];
           if (reference === undefined) {
             throw new Error("Batch read returned an unknown reference index.");
@@ -223,6 +233,7 @@ export function createArchiveBatchReadOperation(
           resourceIds,
           executeQuery,
           deadline,
+          signal,
         );
         const response = archiveBatchReadResponseSchema.parse({
           results: results.map((result) =>
@@ -243,16 +254,19 @@ export function createArchiveBatchReadOperation(
                 },
           ),
         });
-        remainingArchiveQueryBudgetMs(deadline);
+        assertArchiveQueryActive(deadline, signal);
         if (
           Buffer.byteLength(JSON.stringify(response), "utf8") >
           archiveBatchReadMaxResponseBytes
         ) {
           return payloadTooLarge();
         }
-        remainingArchiveQueryBudgetMs(deadline);
+        assertArchiveQueryActive(deadline, signal);
         return { ok: true, value: response };
       } catch (error) {
+        if (signal?.aborted || error instanceof ArchiveRequestCancelled) {
+          throw new ArchiveRequestCancelled();
+        }
         if (
           error instanceof ArchiveQueryBudgetExceeded ||
           databaseErrorCode(error) === "57014"

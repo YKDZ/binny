@@ -76,6 +76,12 @@ export async function createServerRuntime(options: {
   const browserCapacity = createBrowserCapacityCoordinator(
     environmentPositiveInteger("BINNY_BROWSER_CAPACITY_LIMIT", 2),
   );
+  // This existing setting is one complete server-side preparation deadline for search and batch-read.
+  const archiveRequestBudgetMs = environmentMilliseconds(
+    "BINNY_ARCHIVE_SEARCH_BUDGET_MS",
+    10_000,
+    1,
+  );
   const archives = createArchiveStore(database, {
     resourceDirectory:
       process.env.BINNY_RESOURCE_DIRECTORY ?? "/var/lib/binny/resources",
@@ -90,11 +96,7 @@ export async function createServerRuntime(options: {
       60 * 60 * 1000,
       100,
     ),
-    archiveSearchBudgetMs: environmentMilliseconds(
-      "BINNY_ARCHIVE_SEARCH_BUDGET_MS",
-      10_000,
-      1,
-    ),
+    archiveSearchBudgetMs: archiveRequestBudgetMs,
   });
   const runtime = createRuntimeConnectionStore(database, browserCapacity);
   const runs = createManualRunStore(database, browserCapacity);
@@ -231,6 +233,7 @@ export async function createServerRuntime(options: {
         process.env.BINNY_PRODUCT_VERSION ??
         serverPackageVersion ??
         "unpublished",
+      archiveRequestBudgetMs,
     },
   );
   let backgroundWorkStop: Promise<void> | undefined;
