@@ -157,8 +157,13 @@ const manualRunsOnly =
   articleAdaptersOnly ||
   documentAdaptersOnly ||
   qoderAdapterOnly;
+const capacityPhaseOnly =
+  isFullCapacityRun &&
+  (capacityPhase === "verify" || capacityPhase === "delete");
 const useHeartbeatProxy =
-  (!manualRunsOnly || scheduledRunsOnly) && !rssLinuxdoOnly;
+  (!manualRunsOnly || scheduledRunsOnly) &&
+  !rssLinuxdoOnly &&
+  !capacityPhaseOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
 const projectName = isFullCapacityRun
@@ -10716,12 +10721,7 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney =
-    !manualRunsOnly &&
-    !(
-      isFullCapacityRun &&
-      (capacityPhase === "verify" || capacityPhase === "delete")
-    );
+  const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
@@ -10731,6 +10731,7 @@ async function main(): Promise<void> {
     await compose(["build", "server"]);
     builtImages.add(imageName);
     if (
+      !capacityPhaseOnly &&
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&
@@ -10739,7 +10740,7 @@ async function main(): Promise<void> {
       await compose(["build", "runtime-fifteen-one"]);
       builtImages.add(runtimeImageName);
     }
-    if (!manualRunsOnly || archiveModelJourney) {
+    if (!capacityPhaseOnly && (!manualRunsOnly || archiveModelJourney)) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
     }
@@ -10787,58 +10788,60 @@ async function main(): Promise<void> {
     composePort = await publishedPort("server", 3000);
     let baseUrl = apiBaseUrl();
     await waitForApiAndDatabase(baseUrl);
-    await verifyEmptyBinList(baseUrl);
+    if (!capacityPhaseOnly) await verifyEmptyBinList(baseUrl);
 
-    const e2eServices = articleAdaptersOnly
-      ? [
-          "postgres",
-          "server",
-          "rss-e2e-source",
-          ...articleAdapterRuntimeServices,
-        ]
-      : qoderAdapterOnly
-        ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
-        : documentAdaptersOnly
-          ? [
-              "postgres",
-              "server",
-              "rss-e2e-source",
-              ...documentAdapterRuntimeServices,
-            ]
-          : manualRunsOnly
+    const e2eServices = capacityPhaseOnly
+      ? ["postgres", "server"]
+      : articleAdaptersOnly
+        ? [
+            "postgres",
+            "server",
+            "rss-e2e-source",
+            ...articleAdapterRuntimeServices,
+          ]
+        : qoderAdapterOnly
+          ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
+          : documentAdaptersOnly
             ? [
                 "postgres",
                 "server",
-                "manual-runs-source",
-                "runtime-fifteen-one",
-                ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-                ...(archiveModelJourney
-                  ? [
-                      "runtime-fifteen-two",
-                      "runtime-fifteen-schema-two",
-                      "runtime-rss",
-                    ]
-                  : []),
+                "rss-e2e-source",
+                ...documentAdapterRuntimeServices,
               ]
-            : rssLinuxdoOnly
+            : manualRunsOnly
               ? [
                   "postgres",
                   "server",
-                  "rss-e2e-source",
-                  "runtime-rss",
-                  "runtime-rss-two",
-                ]
-              : [
-                  "postgres",
-                  "server",
                   "manual-runs-source",
-                  "rss-e2e-source",
                   "runtime-fifteen-one",
-                  "runtime-fifteen-two",
-                  "runtime-rss",
-                  "runtime-rss-two",
-                  "heartbeat-proxy",
-                ];
+                  ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+                  ...(archiveModelJourney
+                    ? [
+                        "runtime-fifteen-two",
+                        "runtime-fifteen-schema-two",
+                        "runtime-rss",
+                      ]
+                    : []),
+                ]
+              : rssLinuxdoOnly
+                ? [
+                    "postgres",
+                    "server",
+                    "rss-e2e-source",
+                    "runtime-rss",
+                    "runtime-rss-two",
+                  ]
+                : [
+                    "postgres",
+                    "server",
+                    "manual-runs-source",
+                    "rss-e2e-source",
+                    "runtime-fifteen-one",
+                    "runtime-fifteen-two",
+                    "runtime-rss",
+                    "runtime-rss-two",
+                    "heartbeat-proxy",
+                  ];
     if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -10866,6 +10869,7 @@ async function main(): Promise<void> {
     ]);
     composePort = await publishedPort("server", 3000);
     if (
+      !capacityPhaseOnly &&
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&
