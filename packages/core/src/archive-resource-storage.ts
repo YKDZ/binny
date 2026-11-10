@@ -22,8 +22,8 @@ import { and, asc, eq, inArray, lte, notExists, sql } from "drizzle-orm";
 import { withArchiveWriteLock } from "./archive-lock.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import {
+  assertArchiveQueryActive,
   executeArchiveQueryWithinDeadline,
-  remainingArchiveQueryBudgetMs,
 } from "./archive-query-budget.ts";
 
 type ResourceRow = typeof archiveResources.$inferSelect;
@@ -64,6 +64,7 @@ export type ArchiveResourceStorage = {
     resourceIds: readonly string[],
     executeQuery: CancellableQueryExecutor,
     deadline: number,
+    signal?: AbortSignal,
   ) => Promise<ReadonlyMap<string, boolean>>;
   readonly collectUnreferencedResources: (
     resourceIds: readonly string[],
@@ -650,6 +651,7 @@ export function createArchiveResourceStorage(
     resourceIds: readonly string[],
     executeQuery: CancellableQueryExecutor,
     deadline: number,
+    signal?: AbortSignal,
   ): Promise<ReadonlyMap<string, boolean>> {
     // PostgreSQL returns UUID text in lowercase even when the immutable state preserves source casing.
     const uniqueResourceIds = [
@@ -657,7 +659,7 @@ export function createArchiveResourceStorage(
     ];
     if (uniqueResourceIds.length === 0) return new Map();
 
-    remainingArchiveQueryBudgetMs(deadline);
+    assertArchiveQueryActive(deadline, signal);
     const requestJson = JSON.stringify(uniqueResourceIds);
     const rows = await executeArchiveQueryWithinDeadline(
       executeQuery,
@@ -674,6 +676,7 @@ export function createArchiveResourceStorage(
          AND resource.status = 'ready'
       `,
       deadline,
+      signal,
     );
     const rowsById = new Map<string, ResourceAvailabilityRow>();
     for (const row of rows) {
@@ -688,7 +691,7 @@ export function createArchiveResourceStorage(
 
     const availability = new Map<string, boolean>();
     for (const resourceId of uniqueResourceIds) {
-      remainingArchiveQueryBudgetMs(deadline);
+      assertArchiveQueryActive(deadline, signal);
       const row = rowsById.get(resourceId);
       availability.set(
         resourceId,
@@ -696,7 +699,7 @@ export function createArchiveResourceStorage(
           ? false
           : await resourceFileIsAvailable(directory, row),
       );
-      remainingArchiveQueryBudgetMs(deadline);
+      assertArchiveQueryActive(deadline, signal);
     }
     return availability;
   }

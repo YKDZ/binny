@@ -1373,6 +1373,7 @@ export type ArchiveOperations = {
    */
   readArchiveBatch(
     input: ArchiveBatchReadRequest,
+    context?: ArchiveOperationContext,
   ): Promise<ArchiveBatchReadOperation<ArchiveBatchReadResponse>>;
 } & ArchiveHistoryOperations &
   ArchiveRelationsOperations;

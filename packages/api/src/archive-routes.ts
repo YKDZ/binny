@@ -244,20 +244,29 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
         return undefined;
       }),
       async (c) => {
-        const result = await operations.readArchiveBatch(c.req.valid("json"));
-        if (!result.ok) {
-          switch (result.status) {
-            case 400:
-              return c.json({ error: result.error }, 400);
-            case 413:
-              return c.json({ error: result.error }, 413);
-            case 422:
-              return c.json({ error: result.error }, 422);
-            case 503:
-              return c.json({ error: result.error }, 503);
+        const signal = c.req.raw.signal;
+        try {
+          const result = await operations.readArchiveBatch(
+            c.req.valid("json"),
+            { signal },
+          );
+          if (!result.ok) {
+            switch (result.status) {
+              case 400:
+                return c.json({ error: result.error }, 400);
+              case 413:
+                return c.json({ error: result.error }, 413);
+              case 422:
+                return c.json({ error: result.error }, 422);
+              case 503:
+                return c.json({ error: result.error }, 503);
+            }
           }
+          return c.json(result.value, 200);
+        } catch (error) {
+          if (signal.aborted) return c.body(null, 204);
+          throw error;
         }
-        return c.json(result.value, 200);
       },
     )
     .get(
