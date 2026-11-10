@@ -1113,6 +1113,35 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     assert.deepEqual(invalidJsonErrors[1], invalidJsonErrors[0]);
     assert.deepEqual(invalidJsonErrors[2], invalidJsonErrors[0]);
 
+    const emptyQuery = "";
+    const emptyQueryFile = path.join(queryDirectory, "empty-query.json");
+    await writeFile(emptyQueryFile, emptyQuery, "utf8");
+    const emptyQueryErrors = [
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query", emptyQuery]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query-file",
+          emptyQueryFile,
+        ]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+          stdin: emptyQuery,
+        }),
+        "invalid_input",
+      ),
+    ];
+    assert.deepEqual(emptyQueryErrors[0]?.path, ["query"]);
+    assert.match(emptyQueryErrors[0]?.message ?? "", /valid JSON/u);
+    assert.deepEqual(emptyQueryErrors[1], emptyQueryErrors[0]);
+    assert.deepEqual(emptyQueryErrors[2], emptyQueryErrors[0]);
+
     const invalidQuery = JSON.stringify({ limit: 0 });
     const invalidQueryFile = path.join(queryDirectory, "invalid-query.json");
     await writeFile(invalidQueryFile, invalidQuery, "utf8");

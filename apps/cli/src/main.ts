@@ -140,7 +140,7 @@ const jsonObjectTextSchema = withPostgresJsonSchemaProjection(
 );
 const cliArchiveSearchInputSchema = z
   .object({
-    query: postgresTextSchema.min(1).optional(),
+    query: postgresTextSchema.optional(),
     queryFile: z.string().min(1).optional(),
     queryStdin: z.boolean().optional(),
   })
