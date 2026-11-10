@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   archiveBatchReadResponseSchema,
   archiveBatchReadReferenceSchema,
+  archiveSearchPageSchema,
   type ArchiveBatchReadReference,
   type ArchiveSubmissionInput,
 } from "@binny/contracts";
@@ -1434,7 +1435,7 @@ async function verifyArchiveSearchSharedRequestBudget(
         labels: { op: "hasAny", values: ["release", "reply"] },
       },
     },
-    includeCandidates: false,
+    includeCandidates: true,
     distribution: {
       by: "date",
       field: "sourcePublishedAt",
@@ -1489,6 +1490,9 @@ async function verifyArchiveSearchSharedRequestBudget(
     signal: AbortSignal.timeout(5_000),
   });
   assert.equal(recovered.status, 200, await recovered.clone().text());
+  const recoveredPage = archiveSearchPageSchema.parse(await recovered.json());
+  assert.equal(recoveredPage.candidatesIncluded, true);
+  assert.equal(recoveredPage.distribution?.by, "date");
 }
 
 async function verifyArchiveBatchReadBudget(
@@ -1547,6 +1551,51 @@ async function verifyArchiveBatchReadBudget(
     signal: AbortSignal.timeout(5_000),
   });
   assert.equal(recovered.status, 200, await recovered.clone().text());
+}
+
+async function verifyArchiveBatchReadBudgetCli(
+  baseUrl: string,
+  reference: ArchiveBatchReadReference,
+): Promise<void> {
+  const lock = await holdArchiveTableReadLock("archive_resource");
+  try {
+    const startedAt = performance.now();
+    const resultPromise = cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify([reference]),
+    ]);
+    await waitForManualRunLockWaiterBlockedBy(lock.backendPid);
+    const result = await resultPromise;
+    const elapsedMs = performance.now() - startedAt;
+    const failure = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+    }>(result, "query_budget_exceeded");
+    assert.match(
+      failure.message,
+      new RegExp(`request budget of ${String(archiveSearchBudgetMs)} ms`, "u"),
+    );
+    assert.match(failure.message, /no partial results were returned/u);
+    assert.ok(
+      elapsedMs < archiveSearchBudgetMs * 1.5,
+      `The installed CLI waited ${String(elapsedMs)} ms for resource metadata.`,
+    );
+  } finally {
+    await lock.release();
+  }
+
+  const recovered = cliData<{ readonly results: readonly unknown[] }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify([reference]),
+    ]),
+    "read",
+  );
+  assert.equal(recovered.results.length, 1);
 }
 
 async function verifyArchiveBatchReadRequestCancellation(
@@ -1925,7 +1974,11 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
 }
 
 async function holdArchiveTableReadLock(
-  table: "archive_item" | "archive_revision" | "bin_configurations",
+  table:
+    | "archive_item"
+    | "archive_revision"
+    | "archive_resource"
+    | "bin_configurations",
 ): Promise<HeldArchiveTableReadLock> {
   const marker = `BINNY_${table.toUpperCase()}_READ_LOCK_HELD`;
   const lock = startManagedProcess("docker", postgresExecArgs([]));
@@ -10480,6 +10533,10 @@ async function main(): Promise<void> {
       await archiveHttpStep("fixed-search", baseUrl);
       const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
       await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
+      await verifyArchiveBatchReadBudgetCli(
+        baseUrl,
+        batchReadFixture.reference,
+      );
       await verifyArchiveBatchReadRequestCancellation(
         baseUrl,
         batchReadFixture.reference,
@@ -10604,6 +10661,10 @@ async function main(): Promise<void> {
         await archiveHttpStep("fixed-search", baseUrl);
         const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
         await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
+        await verifyArchiveBatchReadBudgetCli(
+          baseUrl,
+          batchReadFixture.reference,
+        );
         await verifyArchiveBatchReadRequestCancellation(
           baseUrl,
           batchReadFixture.reference,

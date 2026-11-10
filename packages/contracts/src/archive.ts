@@ -973,6 +973,7 @@ export const archiveErrorSchema = z
           "resource_storage_unavailable",
           "commit_not_found",
           "query_budget_exceeded",
+          "request_cancelled",
           "payload_too_large",
           "relation_not_found",
           "relation_endpoint_conflict",
@@ -1575,9 +1576,14 @@ export type ArchiveOperation<T> =
       readonly error: ArchiveError;
     };
 
-/** Server-only execution metadata passed between the HTTP adapter and archive store. */
+/**
+ * Server-only execution metadata passed between the HTTP adapter and archive
+ * store. One monotonic deadline covers processing and preparing the complete
+ * response after the request has been parsed; it does not bound client network
+ * transfer time.
+ */
 export type ArchiveOperationContext = {
-  /** Monotonic deadline set by the server; never accepted in a serialized request. */
+  /** Monotonic deadline set once by the server; never accepted in a serialized request. */
   readonly deadline?: number;
   /** Aborted when the HTTP client disconnects before the response is complete. */
   readonly signal?: AbortSignal;
@@ -1619,7 +1625,11 @@ export type ArchiveOperations = {
     firstRevisionId: string,
     secondRevisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionDiff>>;
-  /** Search fixed fields at an immutable archive snapshot with stable pagination. */
+  /**
+   * Search an immutable snapshot. Candidates and any requested distribution
+   * share the request deadline through complete HTTP response preparation;
+   * the server does not guarantee client network transfer time.
+   */
   searchArchive(
     input: ArchiveSearchRequest,
     context?: ArchiveOperationContext,
@@ -1631,7 +1641,8 @@ export type ArchiveOperations = {
    * Readable revisions include the complete stored body and report resource
    * availability independently. A request accepts at most 50 references and
    * rejects as a whole if its complete response exceeds 16 MiB or its shared
-   * server request budget expires.
+   * server request budget expires. The deadline includes HTTP response
+   * preparation but does not bound client network transfer time.
    */
   readArchiveBatch(
     input: ArchiveBatchReadRequest,

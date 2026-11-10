@@ -67,7 +67,10 @@ function invalidInput(
   };
 }
 
-/** Read selected immutable item views through one bounded, cancellable query. */
+/**
+ * Read selected immutable item views through bounded, cancellable queries with
+ * one shared deadline covering resource checks and complete result assembly.
+ */
 export function createArchiveBatchReadOperation(
   resourceStorage: ArchiveResourceStorage,
   executeQuery: CancellableQueryExecutor,
