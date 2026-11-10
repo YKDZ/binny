@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { CancellableQueryExecutor } from "@binny/db";
-import type { SQL } from "drizzle-orm";
+import type { SQL, SQLWrapper } from "drizzle-orm";
 
 export class ArchiveQueryBudgetExceeded extends Error {}
 
@@ -25,17 +25,22 @@ export function remainingArchiveQueryBudgetMs(deadline: number): number {
   return remaining;
 }
 
-/** Execute one cancellable SQL statement under the request's shared deadline. */
+/**
+ * Execute a Drizzle query under the request's shared deadline. The cancellable
+ * driver returns raw rows, so callers keep SQL aliases explicit and validate
+ * the public response before returning.
+ */
 export async function executeArchiveQueryWithinDeadline<
   Row extends Record<string, unknown>,
 >(
   executeQuery: CancellableQueryExecutor,
-  query: SQL<Row[]>,
+  query: SQL<Row[]> | SQLWrapper,
   deadline: number,
   signal?: AbortSignal,
 ): Promise<readonly Row[]> {
   const remaining = assertArchiveQueryActive(deadline, signal);
-  const pending = executeQuery<Row>(query);
+  const rawQuery = query.getSQL() as SQL<Row[]>;
+  const pending = executeQuery<Row>(rawQuery);
   let timeout: NodeJS.Timeout | undefined;
   let abortHandler: (() => void) | undefined;
   const cancelled = new Promise<{ readonly kind: "cancelled" }>((resolve) => {

@@ -536,7 +536,7 @@ function hasReceivedMaterial(item: {
   );
 }
 
-/** An immutable source state; capture context and diagnostics do not create revisions. */
+/** An immutable source state; capture context contributes to revision identity, while diagnostics do not. */
 export const archiveItemStateSchema = withArchiveJsonSchemaProjection(
   archiveItemFieldsSchema.refine(hasReceivedMaterial, {
     path: ["body"],
@@ -748,10 +748,31 @@ export type ArchiveResourceResolveResult = z.infer<
 
 // PostgreSQL BIGINT 序号以十进制文本传输，避免超出安全整数范围时舍入。
 export const archiveSequenceSchema = z.string().regex(/^[1-9][0-9]*$/u);
+// Keep the signed BIGINT boundary in the regex so it survives JSON Schema projection.
+const archiveSnapshotSequencePattern = new RegExp(
+  [
+    "^(?:",
+    "0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|",
+    "9[01][0-9]{17}|92[01][0-9]{16}|922[0-2][0-9]{15}|",
+    "9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|",
+    "92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|",
+    "9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|",
+    "922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|",
+    "92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|",
+    "9223372036854775[0-7][0-9]{2}|922337203685477580[0-7]",
+    ")$",
+  ].join(""),
+  "u",
+);
 export const archiveSnapshotSequenceSchema = z
   .string()
-  .regex(/^(?:0|[1-9][0-9]{0,18})$/u)
-  .describe("已提交观察的十进制序号文本；asOf 使用该序号固定历史截点。");
+  .regex(
+    archiveSnapshotSequencePattern,
+    "Archive snapshot sequence must be between 0 and 9223372036854775807.",
+  )
+  .describe(
+    "A decimal archive sequence between 0 and 9223372036854775807, inclusive.",
+  );
 /** 读取在此已提交序号内所知的 current 视图或历史视图。 */
 export const archiveSnapshotSchema = z
   .object({

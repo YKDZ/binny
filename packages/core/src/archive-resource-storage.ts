@@ -661,23 +661,42 @@ export function createArchiveResourceStorage(
 
     assertArchiveQueryActive(deadline, signal);
     const requestJson = JSON.stringify(uniqueResourceIds);
-    const rows = await executeArchiveQueryWithinDeadline(
-      executeQuery,
-      sql<ResourceAvailabilityQueryRow[]>`
-        SELECT
-          resource.resource_id::text AS "resourceId",
-          resource.sha256 AS "sha256",
-          resource.media_type AS "mediaType",
-          resource.byte_size::text AS "byteSize",
-          resource.storage_key::text AS "storageKey"
-        FROM jsonb_array_elements_text(${requestJson}::text::jsonb) AS requested(resource_id)
-        INNER JOIN archive_resource AS resource
-          ON resource.resource_id = requested.resource_id::uuid
-         AND resource.status = 'ready'
-      `,
-      deadline,
-      signal,
+    const requested = database.$with("requested_resources").as(
+      database
+        .select({
+          resource_id: sql`requested.resource_id::uuid`.as("resource_id"),
+        })
+        .from(
+          sql`jsonb_array_elements_text(${requestJson}::text::jsonb) AS requested(resource_id)`,
+        ),
     );
+    const rows =
+      await executeArchiveQueryWithinDeadline<ResourceAvailabilityQueryRow>(
+        executeQuery,
+        database
+          .with(requested)
+          .select({
+            resourceId: sql`${archiveResources.resourceId}::text`.as(
+              "resourceId",
+            ),
+            sha256: sql`${archiveResources.sha256}`.as("sha256"),
+            mediaType: sql`${archiveResources.mediaType}`.as("mediaType"),
+            byteSize: sql`${archiveResources.byteSize}::text`.as("byteSize"),
+            storageKey: sql`${archiveResources.storageKey}::text`.as(
+              "storageKey",
+            ),
+          })
+          .from(requested)
+          .innerJoin(
+            archiveResources,
+            and(
+              eq(archiveResources.resourceId, requested.resource_id),
+              eq(archiveResources.status, "ready"),
+            ),
+          ),
+        deadline,
+        signal,
+      );
     const rowsById = new Map<string, ResourceAvailabilityRow>();
     for (const row of rows) {
       rowsById.set(row.resourceId, {

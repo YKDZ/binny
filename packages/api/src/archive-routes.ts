@@ -715,7 +715,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/search",
       description:
-        "在固定归档截点下按来源和不区分大小写的字面关键词组搜索资料，并稳定分页返回命中来源视图。",
+        "Search items by source and case-insensitive literal term groups at a fixed archive cut, with stable paginated source views.",
       requestSchema: archiveApiSchemas.searchInput,
       responseSchema: archiveApiSchemas.searchPage,
     },

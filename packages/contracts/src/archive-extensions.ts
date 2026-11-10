@@ -5,7 +5,7 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /** Scalar JSON values that can be compared with a declared extension field. */
 export const archiveExtensionScalarSchema = z.union([
-  z.string(),
+  postgresTextSchema,
   z.number().finite(),
   z.boolean(),
 ]);

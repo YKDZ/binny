@@ -1446,7 +1446,8 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "commandGroup",
         parent: "cli",
         name: "archive",
-        description: "搜索、批量读取和管理归档资料、对象关系及观察历史。",
+        description:
+          "Search, batch read, and manage archived items, relationships, and observation history.",
       },
       service: {
         kind: "commandGroup",

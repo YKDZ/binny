@@ -2046,7 +2046,7 @@ async function main(): Promise<void> {
   if (stage === "verify-after-restart") {
     const itemId = process.env.BINNY_E2E_TYPED_ARCHIVE_ITEM_ID;
     if (itemId === undefined)
-      throw new Error("重启后归档读回需要先前条目 ID。");
+      throw new Error("Restarted archive readback requires the prior item ID.");
     await verifyTypedArchiveHistory(itemId);
     return;
   }
