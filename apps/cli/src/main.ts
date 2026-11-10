@@ -1096,42 +1096,48 @@ function createCliContract(identity: CliCommandIdentity) {
   ) =>
     text.lines([
       `Snapshot: ${page.snapshot.asOf}`,
-      `Matches on this page: ${page.results.length}`,
-      ...(page.results.length === 0
-        ? ["No archived items matched."]
-        : page.results.flatMap((result) => [
-            `- ${result.title ?? result.sourceKey.key}`,
-            `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
-            `  Observed: ${result.observedAt}`,
-            `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
-            `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
-            ...(result.timeStatus === undefined
-              ? []
-              : [`  Time review: ${result.timeStatus}`]),
-            `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
-            ...result.matches.flatMap(({ binId, timeMatch }) =>
-              timeMatch === undefined
-                ? []
-                : [
-                    `  Time match ${binId}: ${timeMatch.status}${
-                      timeMatch.status === "undetermined"
-                        ? ` (${timeMatch.reason})`
-                        : ""
-                    }`,
-                  ],
-            ),
-          ])),
+      ...(page.candidatesIncluded
+        ? [
+            `Matches on this page: ${page.results.length}`,
+            ...(page.results.length === 0
+              ? ["No archived items matched."]
+              : page.results.flatMap((result) => [
+                  `- ${result.title ?? result.sourceKey.key}`,
+                  `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
+                  `  Observed: ${result.observedAt}`,
+                  `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+                  `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
+                  ...(result.timeStatus === undefined
+                    ? []
+                    : [`  Time review: ${result.timeStatus}`]),
+                  `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+                  ...result.matches.flatMap(({ binId, timeMatch }) =>
+                    timeMatch === undefined
+                      ? []
+                      : [
+                          `  Time match ${binId}: ${timeMatch.status}${
+                            timeMatch.status === "undetermined"
+                              ? ` (${timeMatch.reason})`
+                              : ""
+                          }`,
+                        ],
+                  ),
+                ])),
+          ]
+        : ["Candidate results were not requested."]),
       ...(page.timeSummary === undefined
         ? []
         : [
             `Certain items: ${page.timeSummary.certainItems}`,
             `Undetermined items: ${page.timeSummary.undeterminedItems}`,
           ]),
-      ...(page.hasMore
-        ? [
-            `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
-          ]
-        : ["End of results."]),
+      ...(page.candidatesIncluded
+        ? page.hasMore
+          ? [
+              `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
+            ]
+          : ["End of results."]
+        : []),
       ...(page.distribution === undefined
         ? []
         : [

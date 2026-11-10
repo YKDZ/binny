@@ -1398,7 +1398,30 @@ export function archiveSearchInputIssue(
     input !== null &&
     Object.hasOwn(input, "extensions");
   const branchIndex = hasExtensionScope ? 0 : 1;
-  const branchIssues = unionIssue.errors[branchIndex];
+  let branchIssues = unionIssue.errors[branchIndex];
+  if (branchIssues === undefined) return issues[0];
+
+  const distribution =
+    typeof input === "object" &&
+    input !== null &&
+    "distribution" in input &&
+    typeof input.distribution === "object" &&
+    input.distribution !== null
+      ? input.distribution
+      : undefined;
+  if (
+    !hasExtensionScope &&
+    distribution !== undefined &&
+    "by" in distribution &&
+    distribution.by === "extension"
+  ) {
+    const distributionUnion = branchIssues.find(
+      (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
+    );
+    if (distributionUnion?.code === "invalid_union") {
+      branchIssues = distributionUnion.errors[1];
+    }
+  }
   if (branchIssues === undefined) return issues[0];
 
   const candidates = nestedArchiveSearchIssues(branchIssues.flat());

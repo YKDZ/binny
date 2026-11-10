@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { publicApiProtocolVersion } from "@binny/contracts";
+import {
+  archiveQueryContractVersion,
+  publicApiProtocolVersion,
+} from "@binny/contracts";
 
 import { runCli } from "../../src/main.ts";
 
@@ -17,7 +20,12 @@ const fetch: typeof globalThis.fetch = async (input, init) => {
       product: { name: "Binny", version: "1.2.3" },
       protocols: { httpApi: publicApiProtocolVersion },
       capabilities: ["archives.search", "archive.query-contract"],
-      contracts: { archiveQuery: { version: 2, path: "/meta/query" } },
+      contracts: {
+        archiveQuery: {
+          version: archiveQueryContractVersion,
+          path: "/meta/query",
+        },
+      },
     });
   }
   if (url.pathname === "/runs") {

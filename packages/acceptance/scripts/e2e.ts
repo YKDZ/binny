@@ -915,6 +915,14 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       categoryDistributionText.stdout,
       /Each group counts distinct items; one item can appear in multiple groups\./u,
     );
+    assert.match(
+      categoryDistributionText.stdout,
+      /Candidate results were not requested\./u,
+    );
+    assert.doesNotMatch(
+      categoryDistributionText.stdout,
+      /No archived items matched\.|End of results\./u,
+    );
     assert.match(categoryDistributionText.stdout, /End of distribution\./u);
     assert.doesNotMatch(categoryDistributionText.stdout, /"kind"\s*:/u);
 
