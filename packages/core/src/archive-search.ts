@@ -1038,10 +1038,11 @@ function pageQuery(
         : distribution.by === "date"
           ? dateDistributionCtes(distribution, distributionCursor, aliases)
           : extensionDistributionCtes(distribution, distributionCursor);
+  // Declare the output columns because this CTE wraps PostgreSQL-specific SQL.
   const distributionResult = database
     .$with("distribution_result", {
-      total_items: sql<string>``,
-      groups: sql``,
+      total_items: sql<string>``.as("total_items"),
+      groups: sql``.as("groups"),
     })
     .as(
       sql`WITH ${distributionSql}
