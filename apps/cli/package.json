@@ -15,7 +15,8 @@
     "binny": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "type": "module",
   "publishConfig": {

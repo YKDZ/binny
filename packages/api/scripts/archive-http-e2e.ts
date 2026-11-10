@@ -3758,7 +3758,7 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
       title: "Beijing window " + key,
       sourcePublishedAt,
       sourceModifiedAt,
-      extensions: {},
+      extensions: { section: "model-news" },
       body: { text: token },
       capture: {
         scope: { case: "time-window" },
