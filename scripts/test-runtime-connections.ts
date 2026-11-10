@@ -6,6 +6,8 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
+
 type ProcessResult = {
   readonly code: number;
   readonly stdout: string;
@@ -16,6 +18,12 @@ type CliWire<T> = {
   readonly kind: string;
   readonly variant: string;
   readonly data: T;
+};
+
+type BinConfigSchemaDiscovery = {
+  readonly sourceAdapterId: string;
+  readonly sourceAdapterVersion: string;
+  readonly configSchema: Record<string, unknown>;
 };
 
 type RuntimeStatus = {
@@ -268,27 +276,48 @@ async function waitForBinRegistration(
     if (result.code === 0) {
       const bin = cliData<{
         readonly id: string;
-        readonly sourceAdapter: Record<string, unknown>;
+        readonly sourceAdapterId: string;
         readonly identityId: string;
         readonly config: Record<string, unknown>;
         readonly execution: RuntimeStatus;
       }>(result, "found");
-      if (
-        bin.sourceAdapter.id === expectedSourceAdapter.id &&
-        bin.sourceAdapter.version === expectedSourceAdapter.version
-      ) {
-        assert.deepEqual(bin.sourceAdapter, expectedSourceAdapter);
-        assert.equal(bin.id, binId);
-        assert.equal(bin.identityId, binId);
-        assert.deepEqual(bin.config, {});
-        assert.equal(bin.execution.status, "incompatible");
-        assert.equal(
-          bin.execution.error?.code,
-          "runtime_configuration_incompatible",
-        );
-        return;
+      if (bin.sourceAdapterId === expectedSourceAdapter.id) {
+        const schemaResult = await cli(["bin", "config-schema", binId]);
+        if (schemaResult.code === 0) {
+          const declaration = cliData<BinConfigSchemaDiscovery>(
+            schemaResult,
+            "discovered",
+          );
+          if (
+            declaration.sourceAdapterId === expectedSourceAdapter.id &&
+            declaration.sourceAdapterVersion === expectedSourceAdapter.version
+          ) {
+            assert.deepEqual(
+              declaration.configSchema,
+              expectedSourceAdapter.configSchema,
+            );
+            await assertBinActionDeclarations(
+              cli,
+              binId,
+              expectedSourceAdapter,
+            );
+            assert.equal(bin.id, binId);
+            assert.equal(bin.identityId, binId);
+            assert.deepEqual(bin.config, {});
+            assert.equal(bin.execution.status, "incompatible");
+            assert.equal(
+              bin.execution.error?.code,
+              "runtime_configuration_incompatible",
+            );
+            return;
+          }
+          lastResult = JSON.stringify({ bin, declaration });
+        } else {
+          lastResult = schemaResult.stderr;
+        }
+      } else {
+        lastResult = JSON.stringify(bin);
       }
-      lastResult = JSON.stringify(bin);
     } else {
       lastResult = result.stderr;
     }

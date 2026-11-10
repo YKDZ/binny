@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Browser as PlaywrightBrowser, Page } from "patchright-core";
 
+import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
 import {
   copyImageBuildContext,
   setBuildContextSourceAdapterVersion,
@@ -97,7 +98,7 @@ type BrowserPower = {
 
 type Bin = {
   readonly id: string;
-  readonly sourceAdapter: Record<string, unknown>;
+  readonly sourceAdapterId: string;
   readonly identityId: string;
   readonly config: Record<string, unknown>;
   readonly browserIdleTimeoutSeconds: number | null;
@@ -112,6 +113,12 @@ type Bin = {
       };
     };
   };
+};
+
+type BinConfigSchemaDiscovery = {
+  readonly sourceAdapterId: string;
+  readonly sourceAdapterVersion: string;
+  readonly configSchema: Record<string, unknown>;
 };
 
 type Gate = {
@@ -903,22 +910,39 @@ async function waitForBinRegistration(
     const result = await cli(["bin", "get", binId]);
     if (result.code === 0) {
       const bin = cliData<Bin>(result, "found");
-      if (
-        bin.sourceAdapter.id === expectedManifest.id &&
-        bin.sourceAdapter.version === expectedManifest.version
-      ) {
-        assert.deepEqual(bin.sourceAdapter, expectedManifest);
-        assert.equal(bin.id, binId);
-        assert.equal(bin.identityId, binId);
-        assert.deepEqual(bin.config, {});
-        assert.equal(bin.execution.status, "incompatible");
-        assert.equal(
-          bin.execution.error?.code,
-          "runtime_configuration_incompatible",
-        );
-        return;
+      if (bin.sourceAdapterId === expectedManifest.id) {
+        const schemaResult = await cli(["bin", "config-schema", binId]);
+        if (schemaResult.code === 0) {
+          const declaration = cliData<BinConfigSchemaDiscovery>(
+            schemaResult,
+            "discovered",
+          );
+          if (
+            declaration.sourceAdapterId === expectedManifest.id &&
+            declaration.sourceAdapterVersion === expectedManifest.version
+          ) {
+            assert.deepEqual(
+              declaration.configSchema,
+              expectedManifest.configSchema,
+            );
+            await assertBinActionDeclarations(cli, binId, expectedManifest);
+            assert.equal(bin.id, binId);
+            assert.equal(bin.identityId, binId);
+            assert.deepEqual(bin.config, {});
+            assert.equal(bin.execution.status, "incompatible");
+            assert.equal(
+              bin.execution.error?.code,
+              "runtime_configuration_incompatible",
+            );
+            return;
+          }
+          lastState = JSON.stringify({ bin, declaration });
+        } else {
+          lastState = schemaResult.stderr;
+        }
+      } else {
+        lastState = JSON.stringify(bin);
       }
-      lastState = JSON.stringify(bin);
     } else {
       lastState = result.stderr;
     }
@@ -929,14 +953,36 @@ async function waitForBinRegistration(
 
 async function waitForSourceAdapterVersion(
   binId: string,
-  version: string,
-): Promise<Bin> {
+  expectedManifest: Record<string, unknown>,
+): Promise<{
+  readonly bin: Bin;
+  readonly declaration: BinConfigSchemaDiscovery;
+}> {
+  const version = sourceAdapterVersion(expectedManifest);
   const deadline = Date.now() + 60_000;
   let lastState = "尚未查询。";
   while (Date.now() < deadline) {
-    const bin = await readBin(binId);
-    if (bin.sourceAdapter.version === version) return bin;
-    lastState = JSON.stringify(bin.sourceAdapter);
+    const schemaResult = await cli(["bin", "config-schema", binId]);
+    if (schemaResult.code === 0) {
+      const declaration = cliData<BinConfigSchemaDiscovery>(
+        schemaResult,
+        "discovered",
+      );
+      if (
+        declaration.sourceAdapterId === expectedManifest.id &&
+        declaration.sourceAdapterVersion === version
+      ) {
+        assert.deepEqual(
+          declaration.configSchema,
+          expectedManifest.configSchema,
+        );
+        await assertBinActionDeclarations(cli, binId, expectedManifest);
+        return { bin: await readBin(binId), declaration };
+      }
+      lastState = JSON.stringify(declaration);
+    } else {
+      lastState = schemaResult.stderr;
+    }
     await delay(250);
   }
   throw new Error(`等待 bin ${binId} 源码版本 ${version} 超时：${lastState}`);
@@ -2276,9 +2322,9 @@ async function main(): Promise<void> {
   );
   const updatedBrowserBin = await waitForSourceAdapterVersion(
     "binny-browser-one",
-    sourceAdapterVersion(browserImageUpdate.candidateManifest),
+    browserImageUpdate.candidateManifest,
   );
-  assert.equal(updatedBrowserBin.id, "binny-browser-one");
+  assert.equal(updatedBrowserBin.bin.id, "binny-browser-one");
   await waitForRuntime("binny-browser-one");
   assert.equal(
     (await readBin("binny-browser-two")).execution.environment?.browser?.power
@@ -2341,11 +2387,11 @@ async function main(): Promise<void> {
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   process.stdout.write(
     `浏览器镜像更新实测：${JSON.stringify({
-      binId: updatedBrowserBin.id,
+      binId: updatedBrowserBin.bin.id,
       baselineVersion: sourceAdapterVersion(
         browserImageUpdate.baselineManifest,
       ),
-      candidateVersion: updatedBrowserBin.sourceAdapter.version,
+      candidateVersion: updatedBrowserBin.declaration.sourceAdapterVersion,
       queuedOldVersionRun: {
         runId: failedOldVersionRun.runId,
         sourceAdapterVersion: failedOldVersionRun.sourceAdapterVersion,

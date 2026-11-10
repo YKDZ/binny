@@ -27,6 +27,7 @@ export type LinuxdoManualRun = {
     | "failed"
     | "cancelled";
   readonly referenceTime?: string;
+  readonly startedAt?: string;
   readonly report?: Record<string, unknown>;
   readonly trigger?: {
     readonly kind: string;
