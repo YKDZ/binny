@@ -4897,7 +4897,7 @@ async function verifySyncCancellationAndRuntimeExit(
       ]),
       "triggered",
     );
-    const active = await waitFor(
+    await waitFor(
       async () =>
         cliData<ManualRun>(
           await cli([
@@ -4913,6 +4913,31 @@ async function verifySyncCancellationAndRuntimeExit(
       "已分配范围的 sync 执行中报告",
     );
     await waitForSourceEvent("post-list", 1);
+    // The first processing report can still list this scope as unstarted with
+    // its previous position. Re-read after the source request starts so the
+    // assertion observes the persisted in-progress position.
+    const active = await waitFor(
+      async () =>
+        cliData<ManualRun>(
+          await cli([
+            "run",
+            "get",
+            "binny-discovery-topic",
+            activeCancellation.runId,
+          ]),
+          "found",
+        ),
+      (run) =>
+        run.status === "executing" &&
+        run.report?.phase === "processing" &&
+        syncReport(run).scopes.some(
+          ({ scope, status: scopeStatus }) =>
+            scope.kind === "category" &&
+            scope.id === 42 &&
+            scopeStatus === "in-progress",
+        ),
+      "Sync report with category:42 in progress",
+    );
     const activeUpperBound = syncReport(active).upperBound;
     assert.equal(
       syncReport(active).scopes.find(
