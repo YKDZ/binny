@@ -174,6 +174,7 @@ const runtimeImageName = projectName + "-lightweight:local";
 const schemaVariantRuntimeImageName =
   projectName + "-schema-two-lightweight:local";
 const rssRuntimeImageName = projectName + "-rss:local";
+const rssCandidateRuntimeImageName = projectName + "-rss-candidate:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
 const articleAdapterRuntimeImageNames = {
@@ -11496,6 +11497,15 @@ async function main(): Promise<void> {
     if (!capacityPhaseOnly && (!manualRunsOnly || archiveModelJourney)) {
       await compose(["build", "runtime-rss"]);
       builtImages.add(rssRuntimeImageName);
+      // Keep the initial candidate referenced by an owned tag so a watch
+      // rebuild can move the runtime tag without leaving a dangling image.
+      const candidateTag = await run(
+        "docker",
+        ["tag", rssRuntimeImageName, rssCandidateRuntimeImageName],
+        { env: composeEnvironment() },
+      );
+      assert.equal(candidateTag.code, 0, candidateTag.stderr);
+      builtImages.add(rssCandidateRuntimeImageName);
     }
     if (archiveModelJourney) {
       await compose(["build", "runtime-fifteen-schema-two"]);
@@ -11963,14 +11973,7 @@ async function main(): Promise<void> {
       } else if (builtImages.size > 0) {
         const imageCleanup = await run(
           "docker",
-          [
-            "image",
-            "rm",
-            ...builtImages,
-            ...(rssImageUpdate === undefined
-              ? []
-              : [rssImageUpdate.candidateImageId]),
-          ],
+          ["image", "rm", ...builtImages],
           { env: composeEnvironment() },
         );
         if (imageCleanup.code !== 0) {
