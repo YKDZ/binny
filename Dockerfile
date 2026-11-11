@@ -1,6 +1,8 @@
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:26.13.0-bookworm-slim AS build
 
-RUN corepack enable
+# Install the same native pnpm release that packageManager declares.
+COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
+RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
 WORKDIR /workspace
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

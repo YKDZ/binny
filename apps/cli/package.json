@@ -23,7 +23,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json --noEmit --pretty false && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node24 --external:@ykdz/cli-contract --external:@ykdz/cli-contract/* --external:zod --outfile=dist/cli.js",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --noEmit --pretty false && esbuild src/cli.ts --bundle --platform=node --format=esm --target=node26 --external:@ykdz/cli-contract --external:@ykdz/cli-contract/* --external:zod --outfile=dist/cli.js",
     "format:check": "oxfmt --list-different .",
     "format:write": "oxfmt --write .",
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
@@ -48,6 +48,6 @@
     "typescript-7": "catalog:"
   },
   "engines": {
-    "node": ">=24"
+    "node": "^26.13.0"
   }
 }
