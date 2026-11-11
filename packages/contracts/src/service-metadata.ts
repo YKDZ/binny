@@ -2,8 +2,12 @@ import * as z from "zod";
 
 import { postgresTextSchema } from "./postgres-text.ts";
 
-/** Public HTTP route compatibility version, independent of the runtime protocol. */
-export const publicApiProtocolVersion = 4;
+/**
+ * Public HTTP route compatibility version, independent of the runtime protocol.
+ * Version 5 adds optional search diagnostic evidence to archive error responses;
+ * strict consumers of the earlier error shape must not be assumed compatible.
+ */
+export const publicApiProtocolVersion = 5;
 
 /** Fixed archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 3;

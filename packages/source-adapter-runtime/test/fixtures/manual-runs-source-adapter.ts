@@ -39,6 +39,10 @@ const extensionsSchema = z
       .array(z.string())
       .describe("Labels assigned to this archived item.")
       .optional(),
+    tiers: z
+      .array(z.enum(["basic", "pro"]))
+      .describe("The access tiers assigned to this archived item.")
+      .optional(),
     featured: z
       .boolean()
       .describe("Whether the source marks this archived item as featured.")

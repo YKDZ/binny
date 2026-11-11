@@ -665,7 +665,19 @@ async function checkPublicArchiveContract(): Promise<void> {
       void result.queryHash;
     }
   } else if (fixedSearch.status === 400 || fixedSearch.status === 422) {
-    void (await fixedSearch.json()).error.path;
+    const failure = (await fixedSearch.json()).error;
+    void failure.path;
+    if (failure.code === "invalid_input") {
+      void failure.diagnostic?.allowedValues;
+      void failure.diagnostic?.allowedItemValues;
+      void failure.diagnostic?.allowedOperations;
+      void failure.diagnostic?.protocolOperations;
+      void failure.diagnostic?.discovery?.sourceAdapterId;
+      void failure.diagnostic?.discovery?.sourceAdapterVersion;
+      void failure.diagnostic?.discovery?.binId;
+      // @ts-expect-error Search diagnostics do not accept arbitrary evidence keys.
+      void failure.diagnostic?.observedValues;
+    }
   }
 
   const distributionSearch = await client.archives.search.$post({

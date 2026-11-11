@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -25,6 +28,10 @@ function fakeService(options: {
   readonly archiveQueryVersion?: number;
   readonly productVersion?: string;
   readonly searchResponse?: unknown;
+  readonly searchFailure?: {
+    readonly status: number;
+    readonly body: unknown;
+  };
 }) {
   const requests: {
     readonly method: string;
@@ -70,6 +77,11 @@ function fakeService(options: {
       });
     }
     if (url.pathname === "/archives/search") {
+      if (options.searchFailure !== undefined) {
+        return Response.json(options.searchFailure.body, {
+          status: options.searchFailure.status,
+        });
+      }
       return Response.json(
         options.searchResponse ?? {
           snapshot: { asOf: "0", mode: "current" },
@@ -135,6 +147,7 @@ function fakeService(options: {
             required: false,
             description: "Labels on the item.",
             itemType: "string",
+            allowedItemValues: ["news", "release"],
             operations: ["has", "hasAny"],
           },
         },
@@ -150,6 +163,7 @@ async function run(
   fetch: typeof globalThis.fetch,
   version = "9.8.7",
   apiUrl: string | null = "http://service.test",
+  readStdin?: () => Promise<string>,
 ) {
   let output = "";
   const exitCode = await runCli({
@@ -157,11 +171,23 @@ async function run(
     identity: { commandName: "binny", version },
     fetch,
     ...(apiUrl === null ? {} : { apiUrl }),
+    ...(readStdin === undefined ? {} : { readStdin }),
     write: async ({ chunk }) => {
       output += chunk;
     },
   });
   return { exitCode, output };
+}
+
+function failureData(output: string): Record<string, unknown> {
+  const wire = JSON.parse(output) as {
+    readonly kind: string;
+    readonly variant: string;
+    readonly data: Record<string, unknown>;
+  };
+  assert.equal(wire.kind, "failure");
+  assert.equal(wire.variant, "apiError");
+  return wire.data;
 }
 
 void describe("查询服务发现", () => {
@@ -213,12 +239,22 @@ void describe("查询服务发现", () => {
       readonly data: {
         readonly sourceAdapterId: string;
         readonly fields: Readonly<
-          Record<string, { readonly operations: readonly string[] }>
+          Record<
+            string,
+            {
+              readonly operations: readonly string[];
+              readonly allowedItemValues?: readonly string[];
+            }
+          >
         >;
       };
     };
     assert.equal(wire.data.sourceAdapterId, "rss");
     assert.deepEqual(wire.data.fields.labels?.operations, ["has", "hasAny"]);
+    assert.deepEqual(wire.data.fields.labels?.allowedItemValues, [
+      "news",
+      "release",
+    ]);
     assert.deepEqual(
       service.requests.map(({ method, path }) => [method, path]),
       [
@@ -240,12 +276,275 @@ void describe("查询服务发现", () => {
     assert.match(result.output, /- category: string/u);
     assert.match(result.output, /Allowed values: \["post","reply"\]/u);
     assert.match(result.output, /- labels: array \(nullable\)/u);
+    assert.match(result.output, /Allowed item values: \["news","release"\]/u);
     assert.match(result.output, /Operations: has, hasAny/u);
     assert.match(
       result.output,
       /Missing and null extension values do not match filters\./u,
     );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
+  });
+
+  void it("returns structured allowed values for a local fixed-search enum failure", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          text: { in: "headline", groups: [["model"]] },
+        }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message: 'Invalid option: expected one of "title"|"body"|"both"',
+      path: ["text", "in"],
+      diagnostic: { allowedValues: ["title", "body", "both"] },
+    });
+    assert.deepEqual(service.requests, []);
+  });
+
+  void it("keeps local fixed-search diagnostics identical across input sources", async () => {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "binny-search-diagnostic-"),
+    );
+    try {
+      const query = JSON.stringify({
+        text: { in: "headline", groups: [["model"]] },
+      });
+      const queryFile = path.join(directory, "query.json");
+      await writeFile(queryFile, query, "utf8");
+      const service = fakeService({});
+      const inline = await run(
+        ["archive", "search", "--query", query],
+        service.fetch,
+      );
+      const fromFile = await run(
+        ["archive", "search", "--query-file", queryFile],
+        service.fetch,
+      );
+      const fromStdin = await run(
+        ["archive", "search", "--query-stdin"],
+        service.fetch,
+        "9.8.7",
+        "http://service.test",
+        async () => query,
+      );
+
+      assert.deepEqual(
+        failureData(fromFile.output),
+        failureData(inline.output),
+      );
+      assert.deepEqual(
+        failureData(fromStdin.output),
+        failureData(inline.output),
+      );
+      assert.deepEqual(service.requests, []);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  void it("renders local fixed-search candidates and paths as readable text", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          text: { in: "headline", groups: [["model"]] },
+        }),
+        "--output-format",
+        "text",
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1, result.output);
+    assert.match(
+      result.output,
+      /Request failed: Invalid option: expected one of "title"\|"body"\|"both"/u,
+    );
+    assert.match(result.output, /Path: text\.in/u);
+    assert.match(result.output, /Allowed values: "title", "body", "both"/u);
+    assert.deepEqual(service.requests, []);
+  });
+
+  void it("labels unresolved extension operations as protocol operations", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["kimi"],
+          extensions: {
+            sourceAdapterId: "kimi",
+            filters: { kind: { op: "contains", value: "changelog" } },
+          },
+        }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message:
+        "Invalid discriminator value. Expected 'eq' | 'in' | 'has' | 'hasAny'",
+      path: ["extensions", "filters", "kind", "op"],
+      diagnostic: {
+        protocolOperations: ["eq", "in", "has", "hasAny"],
+        discovery: { sourceAdapterId: "kimi", binId: "kimi" },
+      },
+    });
+    assert.deepEqual(service.requests, []);
+
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["kimi"],
+          extensions: {
+            sourceAdapterId: "kimi",
+            filters: { kind: { op: "contains", value: "changelog" } },
+          },
+        }),
+        "--output-format",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Path: extensions\.filters\.kind\.op/u);
+    assert.match(
+      text.output,
+      /Protocol operations: "eq", "in", "has", "hasAny"/u,
+    );
+    assert.match(
+      text.output,
+      /Discover extension fields: binny bin extension-fields kimi/u,
+    );
+    assert.doesNotMatch(text.output, /Allowed operations:/u);
+  });
+
+  void it("passes server extension diagnostics through structured and text output", async () => {
+    const diagnostic = {
+      allowedItemValues: ["basic", "pro"],
+      allowedOperations: ["has", "hasAny"],
+      discovery: {
+        sourceAdapterId: "kimi",
+        sourceAdapterVersion: "0.1.0",
+        binId: "kimi-main",
+      },
+    };
+    const service = fakeService({
+      searchFailure: {
+        status: 400,
+        body: {
+          error: {
+            code: "invalid_input",
+            message:
+              'The value for extension field "tiers" must match its declared string type and allowed values ["basic","pro"].',
+            path: ["extensions", "filters", "tiers", "values", 0],
+            diagnostic,
+          },
+        },
+      },
+    });
+    const query = JSON.stringify({
+      bins: ["kimi-main"],
+      extensions: {
+        sourceAdapterId: "kimi",
+        filters: { tiers: { op: "hasAny", values: ["enterprise"] } },
+      },
+    });
+    const structured = await run(
+      ["archive", "search", "--query", query],
+      service.fetch,
+    );
+
+    assert.equal(structured.exitCode, 1);
+    assert.deepEqual(failureData(structured.output), {
+      code: "invalid_input",
+      message:
+        'The value for extension field "tiers" must match its declared string type and allowed values ["basic","pro"].',
+      path: ["extensions", "filters", "tiers", "values", 0],
+      diagnostic,
+    });
+
+    const text = await run(
+      ["archive", "search", "--query", query, "--output-format", "text"],
+      service.fetch,
+    );
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Path: extensions\.filters\.tiers\.values\[0\]/u);
+    assert.match(text.output, /Allowed item values: "basic", "pro"/u);
+    assert.match(text.output, /Allowed operations: "has", "hasAny"/u);
+    assert.match(
+      text.output,
+      /Discover extension fields: binny bin extension-fields kimi-main/u,
+    );
+    assert.doesNotMatch(text.output, /Allowed values:/u);
+  });
+
+  void it("keeps open extension value failures free of invented candidates", async () => {
+    const service = fakeService({
+      searchFailure: {
+        status: 400,
+        body: {
+          error: {
+            code: "invalid_input",
+            message:
+              'The value for extension field "section" must match its declared string type.',
+            path: ["extensions", "filters", "section", "value"],
+            diagnostic: {
+              allowedOperations: ["eq", "in"],
+              discovery: {
+                sourceAdapterId: "kimi",
+                sourceAdapterVersion: "0.1.0",
+                binId: "kimi-main",
+              },
+            },
+          },
+        },
+      },
+    });
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["kimi-main"],
+          extensions: {
+            sourceAdapterId: "kimi",
+            filters: { section: { op: "eq", value: 7 } },
+          },
+        }),
+        "--output-format",
+        "text",
+      ],
+      service.fetch,
+    );
+
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Path: extensions\.filters\.section\.value/u);
+    assert.match(text.output, /Allowed operations: "eq", "in"/u);
+    assert.match(
+      text.output,
+      /Discover extension fields: binny bin extension-fields kimi-main/u,
+    );
+    assert.doesNotMatch(text.output, /Allowed values:|Allowed item values:/u);
   });
 
   void it("产品版本不同但公开协议兼容时仍执行查询", async () => {

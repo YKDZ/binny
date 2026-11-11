@@ -766,11 +766,21 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     const discovered = cliData<{
       readonly sourceAdapterId: string;
       readonly fields: Readonly<
-        Record<string, { readonly operations: readonly string[] }>
+        Record<
+          string,
+          {
+            readonly operations: readonly string[];
+            readonly allowedItemValues?: readonly (string | number | boolean)[];
+          }
+        >
       >;
     }>(await cli(baseUrl, ["bin", "extension-fields", binId]), "discovered");
     assert.equal(discovered.sourceAdapterId, "binny-runs.manual-run-fixture");
     assert.deepEqual(discovered.fields.labels?.operations, ["has", "hasAny"]);
+    assert.deepEqual(discovered.fields.tiers?.allowedItemValues, [
+      "basic",
+      "pro",
+    ]);
     const discoveryText = await cli(baseUrl, [
       "bin",
       "extension-fields",
@@ -781,6 +791,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     assert.equal(discoveryText.code, 0, discoveryText.stderr);
     assert.match(discoveryText.stdout, /- category: string/u);
     assert.match(discoveryText.stdout, /Operations: has, hasAny/u);
+    assert.match(
+      discoveryText.stdout,
+      /Allowed item values: \["basic","pro"\]/u,
+    );
 
     const extensionQuery = {
       bins: ["binny-runs-one", "binny-runs-two"],
@@ -812,6 +826,24 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       ),
       ["binny-runs-one"],
     );
+    const unobservedOpenValue = cliData<{
+      readonly results: readonly unknown[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          ...extensionQuery,
+          extensions: {
+            ...extensionQuery.extensions,
+            filters: { labels: { op: "has", value: "never-archived" } },
+          },
+        }),
+      ]),
+      "found",
+    );
+    assert.deepEqual(unobservedOpenValue.results, []);
 
     const listQuery = {
       ...extensionQuery,
@@ -970,6 +1002,13 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       readonly code: string;
       readonly path?: readonly (string | number)[];
       readonly message: string;
+      readonly diagnostic?: {
+        readonly protocolOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly binId?: string;
+        };
+      };
     }>(
       await cli(baseUrl, [
         "archive",
@@ -994,6 +1033,238 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       "op",
     ]);
     assert.match(invalidOperationFailure.message, /eq.*in.*has.*hasAny/u);
+    assert.deepEqual(invalidOperationFailure.diagnostic, {
+      protocolOperations: ["eq", "in", "has", "hasAny"],
+      discovery: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        binId: "binny-runs-one",
+      },
+    });
+
+    const extensionDiagnosticFailure = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+      readonly diagnostic?: {
+        readonly allowedValues?: readonly (string | number | boolean)[];
+        readonly allowedItemValues?: readonly (string | number | boolean)[];
+        readonly allowedOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly sourceAdapterVersion?: string;
+          readonly binId?: string;
+        };
+      };
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { undeclared: { op: "eq", value: "x" } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(extensionDiagnosticFailure.path, [
+      "extensions",
+      "filters",
+      "undeclared",
+    ]);
+    assert.deepEqual(extensionDiagnosticFailure.diagnostic, {
+      discovery: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        sourceAdapterVersion: "1.0.0",
+        binId: "binny-runs-one",
+      },
+    });
+
+    const unsupportedFieldOperation = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+      readonly diagnostic?: {
+        readonly allowedOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly sourceAdapterVersion?: string;
+          readonly binId?: string;
+        };
+      };
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { category: { op: "has", value: "post" } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(unsupportedFieldOperation.path, [
+      "extensions",
+      "filters",
+      "category",
+      "op",
+    ]);
+    assert.deepEqual(unsupportedFieldOperation.diagnostic, {
+      allowedOperations: ["eq", "in"],
+      discovery: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        sourceAdapterVersion: "1.0.0",
+        binId: "binny-runs-one",
+      },
+    });
+
+    const invalidScalarValue = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+      readonly diagnostic?: {
+        readonly allowedValues?: readonly (string | number | boolean)[];
+        readonly allowedOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly sourceAdapterVersion?: string;
+          readonly binId?: string;
+        };
+      };
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { category: { op: "eq", value: "unknown" } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(invalidScalarValue.path, [
+      "extensions",
+      "filters",
+      "category",
+      "value",
+    ]);
+    assert.deepEqual(invalidScalarValue.diagnostic, {
+      allowedValues: ["post", "comment"],
+      allowedOperations: ["eq", "in"],
+      discovery: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        sourceAdapterVersion: "1.0.0",
+        binId: "binny-runs-one",
+      },
+    });
+
+    const invalidItemValue = cliFailure<{
+      readonly code: string;
+      readonly path?: readonly (string | number)[];
+      readonly message: string;
+      readonly diagnostic?: {
+        readonly allowedItemValues?: readonly (string | number | boolean)[];
+        readonly allowedOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly sourceAdapterVersion?: string;
+          readonly binId?: string;
+        };
+      };
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["binny-runs-one"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { tiers: { op: "hasAny", values: ["enterprise"] } },
+          },
+        }),
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(invalidItemValue.path, [
+      "extensions",
+      "filters",
+      "tiers",
+      "values",
+      0,
+    ]);
+    assert.deepEqual(invalidItemValue.diagnostic, {
+      allowedItemValues: ["basic", "pro"],
+      allowedOperations: ["has", "hasAny"],
+      discovery: {
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        sourceAdapterVersion: "1.0.0",
+        binId: "binny-runs-one",
+      },
+    });
+
+    const unknownFieldText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: ["binny-runs-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: { undeclared: { op: "eq", value: "x" } },
+        },
+      }),
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(unknownFieldText.code, 1);
+    assert.match(
+      unknownFieldText.stderr,
+      /Path: extensions\.filters\.undeclared/u,
+    );
+    assert.match(
+      unknownFieldText.stderr,
+      /Discover extension fields: binny bin extension-fields binny-runs-one/u,
+    );
+
+    const invalidItemValueText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: ["binny-runs-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: { tiers: { op: "hasAny", values: ["enterprise"] } },
+        },
+      }),
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(invalidItemValueText.code, 1);
+    assert.match(
+      invalidItemValueText.stderr,
+      /Path: extensions\.filters\.tiers\.values\[0\]/u,
+    );
+    assert.match(
+      invalidItemValueText.stderr,
+      /Allowed item values: "basic", "pro"/u,
+    );
+    assert.match(
+      invalidItemValueText.stderr,
+      /Allowed operations: "has", "hasAny"/u,
+    );
   }
   const query = {
     bins: [binId],
@@ -1090,6 +1361,14 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       readonly code: string;
       readonly path?: readonly (string | number)[];
       readonly message: string;
+      readonly diagnostic?: {
+        readonly allowedValues?: readonly (string | number | boolean)[];
+        readonly protocolOperations?: readonly string[];
+        readonly discovery?: {
+          readonly sourceAdapterId: string;
+          readonly binId?: string;
+        };
+      };
     };
     const invalidJson = "{broken";
     const invalidJsonFile = path.join(queryDirectory, "invalid-json.json");
@@ -1176,6 +1455,60 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     assert.deepEqual(invalidQueryErrors[0]?.path, ["limit"]);
     assert.deepEqual(invalidQueryErrors[1], invalidQueryErrors[0]);
     assert.deepEqual(invalidQueryErrors[2], invalidQueryErrors[0]);
+
+    const invalidEnumQuery = JSON.stringify({
+      text: { in: "headline", groups: [["Needle"]] },
+    });
+    const invalidEnumFile = path.join(queryDirectory, "invalid-enum.json");
+    await writeFile(invalidEnumFile, invalidEnumQuery, "utf8");
+    const invalidEnumErrors = [
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query", invalidEnumQuery]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query-file",
+          invalidEnumFile,
+        ]),
+        "invalid_input",
+      ),
+      cliFailure<SearchInputError>(
+        await cli(baseUrl, ["archive", "search", "--query-stdin"], {
+          stdin: invalidEnumQuery,
+        }),
+        "invalid_input",
+      ),
+    ];
+    assert.deepEqual(invalidEnumErrors[0]?.path, ["text", "in"]);
+    assert.deepEqual(invalidEnumErrors[0]?.diagnostic, {
+      allowedValues: ["title", "body", "both"],
+    });
+    assert.deepEqual(invalidEnumErrors[1], invalidEnumErrors[0]);
+    assert.deepEqual(invalidEnumErrors[2], invalidEnumErrors[0]);
+
+    const invalidEnumText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      invalidEnumQuery,
+      "--output-format",
+      "text",
+    ]);
+    assert.equal(invalidEnumText.code, 1);
+    const invalidEnumTextOutput =
+      invalidEnumText.stderr + invalidEnumText.stdout;
+    assert.match(
+      invalidEnumTextOutput,
+      /Request failed: Invalid option: expected one of "title"\|"body"\|"both"/u,
+    );
+    assert.match(invalidEnumTextOutput, /Path: text\.in/u);
+    assert.match(
+      invalidEnumTextOutput,
+      /Allowed values: "title", "body", "both"/u,
+    );
   } finally {
     await rm(queryDirectory, { recursive: true, force: true });
   }

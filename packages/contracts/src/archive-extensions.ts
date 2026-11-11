@@ -10,6 +10,14 @@ export const archiveExtensionScalarSchema = z.union([
   z.boolean(),
 ]);
 
+/** Supported comparison operations for declared extension fields. */
+export const archiveExtensionOperationSchema = z.enum([
+  "eq",
+  "in",
+  "has",
+  "hasAny",
+]);
+
 export const archiveExtensionFieldFilterSchema = z.discriminatedUnion("op", [
   z
     .object({ op: z.literal("eq"), value: archiveExtensionScalarSchema })
@@ -73,7 +81,7 @@ export const archiveExtensionFieldDiscoverySchema = z
     itemType: z.enum(["string", "number", "integer", "boolean"]).optional(),
     allowedValues: z.array(archiveExtensionScalarSchema).optional(),
     allowedItemValues: z.array(archiveExtensionScalarSchema).optional(),
-    operations: z.array(z.enum(["eq", "in", "has", "hasAny"])),
+    operations: z.array(archiveExtensionOperationSchema),
   })
   .strict();
 
@@ -388,6 +396,9 @@ export function discoverSourceAdapterExtensionFields(input: {
 
 export type ArchiveExtensionScalar = z.infer<
   typeof archiveExtensionScalarSchema
+>;
+export type ArchiveExtensionOperation = z.infer<
+  typeof archiveExtensionOperationSchema
 >;
 export type ArchiveExtensionFieldFilter = z.infer<
   typeof archiveExtensionFieldFilterSchema

@@ -355,6 +355,11 @@ void describe("offline CLI command contract", () => {
       ["archiveSearch"],
     );
     assert.ok("apiError" in errorDocument.data.contract.errors.variants);
+    assert.match(errors.output, /"diagnostic"/u);
+    assert.match(errors.output, /"allowedValues"/u);
+    assert.match(errors.output, /"allowedItemValues"/u);
+    assert.match(errors.output, /"allowedOperations"/u);
+    assert.match(errors.output, /"protocolOperations"/u);
 
     const fullDocument = JSON.parse(full.output) as {
       readonly data: {
