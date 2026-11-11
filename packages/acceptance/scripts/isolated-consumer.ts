@@ -296,106 +296,137 @@ export async function createIsolatedCliConsumer({
         consumerDirectory,
         offlineEnvironment,
       );
-      assert.match(rootHelp.stdout, /binny schema/u);
+      assert.match(rootHelp.stdout, /--schema/u);
+      assert.match(rootHelp.stdout, /binny contract/u);
 
       const directory = await runChecked(
         binary,
-        ["schema"],
+        ["--schema"],
         consumerDirectory,
         offlineEnvironment,
       );
       const listed = JSON.parse(directory.stdout) as {
         readonly kind: string;
-        readonly variant: string;
-        readonly data: {
+        readonly schemaVersion: string;
+        readonly name: string;
+        readonly children: readonly {
+          readonly path: readonly string[];
           readonly kind: string;
-          readonly commands: readonly {
-            readonly path: readonly string[];
-            readonly kind: string;
-          }[];
-        };
+          readonly nextArgv: readonly string[];
+        }[];
       };
-      assert.equal(listed.kind, "data");
-      assert.equal(listed.variant, "document");
-      assert.equal(listed.data.kind, "directory");
+      assert.equal(listed.kind, "directory");
+      assert.equal(listed.schemaVersion, "5");
+      assert.equal(listed.name, "binny");
       assert.ok(
-        listed.data.commands.some(({ path }) => path.join(" ") === "schema"),
+        listed.children.some(
+          ({ path, kind }) => path.join(" ") === "archive" && kind === "group",
+        ),
       );
       assert.ok(
-        listed.data.commands.some(
+        listed.children.some(
+          ({ path, kind }) =>
+            path.join(" ") === "contract" && kind === "command",
+        ),
+      );
+      const archiveDirectory = await runChecked(
+        binary,
+        ["archive", "--schema"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const archiveChildren = JSON.parse(archiveDirectory.stdout) as {
+        readonly children: readonly { readonly path: readonly string[] }[];
+      };
+      assert.ok(
+        archiveChildren.children.some(
           ({ path }) => path.join(" ") === "archive search",
         ),
       );
 
+      const selected = await runChecked(
+        binary,
+        ["archive", "search", "--schema"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const summary = JSON.parse(selected.stdout) as {
+        readonly kind: string;
+        readonly path: readonly string[];
+        readonly outputs: { readonly default: string };
+      };
+      assert.equal(summary.kind, "summary");
+      assert.deepEqual(summary.path, ["archive", "search"]);
+      assert.equal(summary.outputs.default, "structured");
+      assert.doesNotMatch(selected.stdout, /inputSchema|outputSchema/u);
+
       const catalogFull = await runChecked(
         binary,
-        ["schema", "--part", "full"],
+        ["contract"],
         consumerDirectory,
         offlineEnvironment,
       );
       const catalog = JSON.parse(catalogFull.stdout) as {
+        readonly kind: string;
+        readonly variant: string;
         readonly data: {
-          readonly contract: {
-            readonly grammar: {
-              readonly nodes: readonly { readonly id: string }[];
-            };
-            readonly manifest: {
-              readonly commands: Readonly<Record<string, unknown>>;
-            };
+          readonly grammar: {
+            readonly root: { readonly name: string };
+            readonly nodes: readonly { readonly id: string }[];
+          };
+          readonly manifest: {
+            readonly schemaVersion: string;
+            readonly commands: Readonly<Record<string, unknown>>;
+            readonly usageFailure: { readonly wire: unknown };
           };
         };
       };
+      assert.equal(catalog.kind, "data");
+      assert.equal(catalog.variant, "exported");
+      assert.equal(catalog.data.grammar.root.name, "binny");
       assert.ok(
-        catalog.data.contract.grammar.nodes.some(
-          ({ id }) => id === "cliSchema",
-        ),
+        catalog.data.grammar.nodes.some(({ id }) => id === "archiveSearch"),
       );
-      assert.ok("archiveSearch" in catalog.data.contract.manifest.commands);
-      assert.ok("binConfigSchema" in catalog.data.contract.manifest.commands);
+      assert.equal(catalog.data.manifest.schemaVersion, "5");
+      assert.ok("archiveSearch" in catalog.data.manifest.commands);
+      assert.ok("binConfigSchema" in catalog.data.manifest.commands);
+      assert.notEqual(catalog.data.manifest.usageFailure.wire, undefined);
+      assert.ok(catalogFull.stdout.length > directory.stdout.length * 10);
 
-      const selected = await runChecked(
+      const detail = await runChecked(
         binary,
-        ["schema", "archive", "search", "--part", "input"],
+        ["archive", "search", "--schema=input"],
         consumerDirectory,
         offlineEnvironment,
       );
-      const detail = JSON.parse(selected.stdout) as {
-        readonly data: {
-          readonly contract: {
-            readonly input: {
-              readonly schema: {
-                readonly properties: Readonly<
-                  Record<string, { readonly type?: string }>
-                >;
-              };
-            };
+      const input = JSON.parse(detail.stdout) as {
+        readonly kind: string;
+        readonly input: {
+          readonly inputSchema: {
+            readonly properties: Readonly<
+              Record<string, { readonly type?: string }>
+            >;
           };
         };
       };
-      assert.equal(
-        detail.data.contract.input.schema.properties.query?.type,
-        "string",
-      );
+      assert.equal(input.kind, "input");
+      assert.equal(input.input.inputSchema.properties.query?.type, "string");
 
       const unknown = await run(
         binary,
-        ["schema", "archive", "unknown"],
+        ["archive", "search", "--schema=records:structured"],
         consumerDirectory,
         offlineEnvironment,
       );
       assert.equal(unknown.code, 2, unknown.stdout + unknown.stderr);
       const failure = JSON.parse(unknown.stderr) as {
         readonly kind: string;
-        readonly variant: string;
-        readonly data: {
-          readonly path: readonly string[];
-          readonly message: string;
-        };
+        readonly issues: readonly { readonly code: string }[];
       };
-      assert.equal(failure.kind, "failure");
-      assert.equal(failure.variant, "unknownPath");
-      assert.deepEqual(failure.data.path, ["archive", "unknown"]);
-      assert.match(failure.data.message, /does not exist/u);
+      assert.equal(failure.kind, "usageFailure");
+      assert.ok(
+        failure.issues.some(({ code }) => code === "invalidSchemaQuery"),
+      );
     }
 
     const invoke = async (

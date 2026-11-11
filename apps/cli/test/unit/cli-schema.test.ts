@@ -12,7 +12,8 @@ async function run(
   args: readonly string[],
   fetchImplementation?: typeof globalThis.fetch,
 ) {
-  let output = "";
+  let stdout = "";
+  let stderr = "";
   let requestCount = 0;
   const exitCode = await runCli({
     argv: ["node", "binny", ...args],
@@ -23,64 +24,68 @@ async function run(
         return fetchImplementation(input, init);
       throw new Error("Offline commands must not request the service.");
     },
-    write: async ({ chunk }) => {
-      output += chunk;
+    write: async ({ destination, chunk }) => {
+      if (destination === "stdout") stdout += chunk;
+      else stderr += chunk;
     },
   });
-  return { exitCode, output, requestCount };
+  return { exitCode, stdout, stderr, requestCount };
 }
 
-void describe("offline CLI command contract", () => {
-  void it("projects bin update presence rules through resolvable schema references", async () => {
-    const input = await run(["schema", "bin", "update", "--part", "input"]);
+type JsonSchema = Readonly<Record<string, unknown>>;
 
-    assert.equal(input.exitCode, 0);
-    assert.equal(input.requestCount, 0);
-    const document = JSON.parse(input.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly input: {
-            readonly schema: Readonly<Record<string, unknown>> & {
-              readonly $defs?: Readonly<Record<string, unknown>>;
-            };
-          };
-        };
-      };
-    };
-    const schema = document.data.contract.input.schema;
-    const definitions = schema.$defs;
-    assert.ok(definitions !== undefined);
-    assert.ok(Object.keys(definitions).length > 0);
-
-    const references: string[] = [];
-    const collectReferences = (value: unknown): void => {
-      if (Array.isArray(value)) {
-        for (const entry of value) collectReferences(entry);
-        return;
-      }
-      if (value === null || typeof value !== "object") return;
-      const reference = Reflect.get(value, "$ref");
-      if (typeof reference === "string") references.push(reference);
-      for (const entry of Object.values(value)) collectReferences(entry);
-    };
-    collectReferences(schema);
-    assert.ok(references.length > 0);
-
-    for (const reference of references) {
-      assert.match(reference, /^#\//u);
-      let resolved: unknown = schema;
-      for (const token of reference
-        .slice(2)
-        .split("/")
-        .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
-        if (resolved === null || typeof resolved !== "object") {
-          resolved = undefined;
-          break;
-        }
-        resolved = Reflect.get(resolved, token);
-      }
-      assert.notEqual(resolved, undefined, `${reference} must resolve locally`);
+function collectReferences(value: unknown): readonly string[] {
+  const references: string[] = [];
+  const visit = (entry: unknown): void => {
+    if (Array.isArray(entry)) {
+      for (const child of entry) visit(child);
+      return;
     }
+    if (entry === null || typeof entry !== "object") return;
+    const reference = Reflect.get(entry, "$ref");
+    if (typeof reference === "string") references.push(reference);
+    for (const child of Object.values(entry)) visit(child);
+  };
+  visit(value);
+  return references;
+}
+
+function assertLocalReferencesResolve(schema: JsonSchema): void {
+  const references = collectReferences(schema);
+  assert.ok(references.length > 0, "schema should contain local references");
+  for (const reference of references) {
+    assert.match(reference, /^#\//u);
+    let resolved: unknown = schema;
+    for (const token of reference
+      .slice(2)
+      .split("/")
+      .map((part) => part.replaceAll("~1", "/").replaceAll("~0", "~"))) {
+      if (resolved === null || typeof resolved !== "object") {
+        resolved = undefined;
+        break;
+      }
+      resolved = Reflect.get(resolved, token);
+    }
+    assert.notEqual(resolved, undefined, `${reference} must resolve locally`);
+  }
+}
+
+void describe("native offline CLI contract discovery", () => {
+  void it("resolves bin update presence rules through native input discovery", async () => {
+    const input = await run(["bin", "update", "--schema=input"]);
+
+    assert.equal(input.exitCode, 0, input.stderr);
+    assert.equal(input.requestCount, 0);
+    const document = JSON.parse(input.stdout) as {
+      readonly kind: string;
+      readonly schemaVersion: string;
+      readonly path: readonly string[];
+      readonly input: { readonly inputSchema: JsonSchema };
+    };
+    assert.equal(document.kind, "input");
+    assert.equal(document.schemaVersion, "5");
+    assert.deepEqual(document.path, ["bin", "update"]);
+    assertLocalReferencesResolve(document.input.inputSchema);
 
     const missingChanges = await run(["bin", "update", "rss-main"]);
     assert.equal(missingChanges.exitCode, 2);
@@ -138,7 +143,7 @@ void describe("offline CLI command contract", () => {
         });
       },
     );
-    assert.equal(validChange.exitCode, 0);
+    assert.equal(validChange.exitCode, 0, validChange.stderr);
     assert.equal(validChange.requestCount, 2);
     assert.deepEqual(
       requests.map((request) => new URL(request.url).pathname),
@@ -151,473 +156,291 @@ void describe("offline CLI command contract", () => {
     });
   });
 
-  void it("lists command groups and commands by path without expanding their schemas", async () => {
-    const directory = await run(["schema"]);
+  void it("lists direct root children without expanding command schemas", async () => {
+    const directory = await run(["--schema"]);
 
-    assert.equal(directory.exitCode, 0);
+    assert.equal(directory.exitCode, 0, directory.stderr);
     assert.equal(directory.requestCount, 0);
-    const listed = JSON.parse(directory.output) as {
-      readonly data: {
+    const listed = JSON.parse(directory.stdout) as {
+      readonly kind: string;
+      readonly schemaVersion: string;
+      readonly command: string;
+      readonly name: string;
+      readonly children: readonly {
+        readonly path: readonly string[];
         readonly kind: string;
-        readonly commands: readonly {
-          readonly path: readonly string[];
-          readonly kind: string;
-          readonly description: string;
-          readonly inputSchema?: unknown;
-          readonly outputSchema?: unknown;
-        }[];
-      };
+        readonly nextArgv: readonly string[];
+      }[];
     };
-    assert.equal(listed.data.kind, "directory");
-    assert.ok(
-      listed.data.commands.some(
-        ({ path, kind }) => path.join(" ") === "bin" && kind === "group",
-      ),
+    assert.equal(listed.kind, "directory");
+    assert.equal(listed.schemaVersion, "5");
+    assert.equal(listed.command, "cli");
+    assert.equal(listed.name, "binny");
+    assert.deepEqual(
+      listed.children.map(({ path }) => path.join(" ")),
+      ["bin", "archive", "service", "run", "human", "schedule", "contract"],
     );
-    assert.ok(
-      listed.data.commands.some(
-        ({ path, kind }) => path.join(" ") === "bin get" && kind === "command",
-      ),
-    );
-    assert.ok(
-      listed.data.commands.every(
-        ({ inputSchema, outputSchema }) =>
-          inputSchema === undefined && outputSchema === undefined,
-      ),
-    );
+    assert.ok(listed.children.every(({ path }) => path.length === 1));
+    for (const child of listed.children) {
+      assert.deepEqual(child.nextArgv, [...child.path, "--schema"]);
+    }
     assert.doesNotMatch(
-      directory.output,
-      /inputSchema|outputSchema|usageFailure|wire/u,
+      directory.stdout,
+      /inputSchema|outputSchema|usageFailure|"wire"/u,
     );
   });
 
-  void it("shows a selected command summary with its syntax and field choices", async () => {
-    const selected = await run(["schema", "schedule", "create"]);
+  void it("shows a command summary with syntax, field choices, and output modes", async () => {
+    const selected = await run(["schedule", "create", "--schema"]);
 
-    assert.equal(selected.exitCode, 0);
+    assert.equal(selected.exitCode, 0, selected.stderr);
     assert.equal(selected.requestCount, 0);
-    const summary = JSON.parse(selected.output) as {
-      readonly data: {
-        readonly kind: string;
-        readonly path: readonly string[];
-        readonly usage: string;
-        readonly fields: readonly {
-          readonly key: string;
-          readonly kind: string;
-          readonly default?: unknown;
-          readonly choices?: readonly string[];
-        }[];
-        readonly parts: readonly string[];
-        readonly fullAvailable: boolean;
+    const summary = JSON.parse(selected.stdout) as {
+      readonly kind: string;
+      readonly path: readonly string[];
+      readonly usage: { readonly synopsis: string };
+      readonly fields: readonly {
+        readonly key: string;
+        readonly default?: unknown;
+        readonly choices?: readonly string[];
+      }[];
+      readonly outputs: {
+        readonly default: string;
+        readonly modes: Readonly<
+          Record<string, { readonly delivery: string; readonly format: string }>
+        >;
       };
+      readonly next: readonly {
+        readonly target: string;
+        readonly argv: readonly string[];
+      }[];
     };
-    assert.equal(summary.data.kind, "command");
-    assert.deepEqual(summary.data.path, ["schedule", "create"]);
-    assert.match(summary.data.usage, /schedule create/u);
-    assert.deepEqual(summary.data.parts, ["input", "output", "errors"]);
-    assert.equal(summary.data.fullAvailable, true);
+    assert.equal(summary.kind, "summary");
+    assert.deepEqual(summary.path, ["schedule", "create"]);
+    assert.match(summary.usage.synopsis, /schedule create/u);
     assert.deepEqual(
-      summary.data.fields.find(({ key }) => key === "overlapPolicy")?.choices,
+      summary.fields.find(({ key }) => key === "overlapPolicy")?.choices,
       ["queue", "skip"],
     );
     assert.equal(
-      summary.data.fields.find(({ key }) => key === "overlapPolicy")?.default,
+      summary.fields.find(({ key }) => key === "overlapPolicy")?.default,
       "queue",
     );
+    assert.equal(summary.outputs.default, "structured");
+    assert.deepEqual(summary.outputs.modes.structured, {
+      description: "Machine-readable schedule details",
+      delivery: "atomic",
+      format: "structured",
+    });
+    assert.deepEqual(summary.outputs.modes.text, {
+      description: "Readable schedule details",
+      delivery: "atomic",
+      format: "text",
+    });
+    assert.ok(
+      summary.next.some(({ target }) => target === "input") &&
+        summary.next.some(({ target }) => target === "success:structured") &&
+        summary.next.some(({ target }) => target === "failures:structured") &&
+        summary.next.some(({ target }) => target === "wire:structured"),
+    );
     assert.doesNotMatch(
-      selected.output,
-      /inputSchema|outputSchema|usageFailure|wire/u,
+      selected.stdout,
+      /inputSchema|outputSchema|usageFailure|"wire"/u,
     );
   });
 
-  void it("includes applicable global output controls in command summaries", async () => {
-    const selected = await run(["schema", "bin", "get"]);
-
-    assert.equal(selected.exitCode, 0);
-    assert.equal(selected.requestCount, 0);
-    const summary = JSON.parse(selected.output) as {
-      readonly data: {
-        readonly fields: readonly { readonly key: string }[];
-        readonly controls: {
-          readonly output: {
-            readonly selector?: string;
-            readonly defaultFormat: string;
-            readonly formats: readonly string[];
-          };
-        };
-      };
-    };
-    assert.deepEqual(
-      summary.data.fields.map(({ key }) => key),
-      ["id", "apiUrl"],
-    );
-    assert.equal(summary.data.controls.output.selector, "--output-format");
-    assert.equal(summary.data.controls.output.defaultFormat, "structured");
-    assert.deepEqual(summary.data.controls.output.formats, [
-      "structured",
-      "text",
-    ]);
-  });
-
-  void it("reads only the requested contract part and keeps the full result explicit", async () => {
-    const summary = await run(["schema", "archive", "search"]);
-    const catalogFull = await run(["schema", "--part", "full"]);
-    const input = await run(["schema", "archive", "search", "--part", "input"]);
-    const output = await run([
-      "schema",
+  void it("selects exact input, success, failure, and wire parts", async () => {
+    const input = await run(["archive", "search", "--schema=input"]);
+    const success = await run([
       "archive",
       "search",
-      "--part",
-      "output",
+      "--schema=success:structured",
     ]);
-    const errors = await run([
-      "schema",
+    const failures = await run([
       "archive",
       "search",
-      "--part",
-      "errors",
+      "--schema=failures:structured",
     ]);
-    const full = await run(["schema", "archive", "search", "--part", "full"]);
+    const wire = await run(["archive", "search", "--schema=wire:structured"]);
+    const records = await run([
+      "archive",
+      "search",
+      "--schema=records:structured",
+    ]);
 
-    for (const result of [summary, catalogFull, input, output, errors, full]) {
-      assert.equal(result.exitCode, 0);
+    for (const result of [input, success, failures, wire]) {
+      assert.equal(result.exitCode, 0, result.stderr);
       assert.equal(result.requestCount, 0);
     }
-    assert.ok(summary.output.length < 10_000);
-    assert.ok(catalogFull.output.length > 100_000);
-    assert.ok(input.output.length < 10_000);
-    assert.match(output.output, /nextCursor/u);
-    assert.match(output.output, /hasMore/u);
-    assert.match(output.output, /revisionId/u);
-    assert.ok(full.output.length > output.output.length);
-
-    const inputDocument = JSON.parse(input.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly input: {
-            readonly schema: {
-              readonly properties: Readonly<Record<string, unknown>>;
-            };
-          };
+    const inputDocument = JSON.parse(input.stdout) as {
+      readonly kind: string;
+      readonly input: {
+        readonly inputSchema: {
+          readonly properties: Readonly<Record<string, unknown>>;
         };
       };
     };
-    assert.deepEqual(Object.keys(inputDocument.data.contract), ["input"]);
-    assert.deepEqual(
-      Object.keys(inputDocument.data.contract.input.schema.properties),
-      ["query", "queryFile", "queryStdin", "apiUrl"],
-    );
-
-    const outputDocument = JSON.parse(output.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly output: {
-            readonly kind: string;
-            readonly variants: Readonly<
-              Record<string, { readonly schema: unknown }>
-            >;
-          };
-        };
-      };
-    };
-    assert.deepEqual(Object.keys(outputDocument.data.contract), ["output"]);
-    assert.equal(outputDocument.data.contract.output.kind, "data");
-    assert.ok(output.output.includes("nextCursor"));
-    assert.ok(output.output.includes("hasMore"));
-
-    const errorDocument = JSON.parse(errors.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly errors: {
-            readonly usage: {
-              readonly exitCode: number;
-              readonly schema: {
-                readonly oneOf: readonly {
-                  readonly properties: {
-                    readonly command: { readonly const: string };
-                  };
-                }[];
-              };
-            };
-            readonly variants: Readonly<
-              Record<string, { readonly schema: unknown }>
-            >;
-          };
-        };
-      };
-    };
-    assert.deepEqual(Object.keys(errorDocument.data.contract), ["errors"]);
-    assert.equal(errorDocument.data.contract.errors.usage.exitCode, 2);
-    assert.deepEqual(
-      errorDocument.data.contract.errors.usage.schema.oneOf.map(
-        ({ properties }) => properties.command.const,
-      ),
-      ["archiveSearch"],
-    );
-    assert.ok("apiError" in errorDocument.data.contract.errors.variants);
-    assert.match(errors.output, /"diagnostic"/u);
-    assert.match(errors.output, /"allowedValues"/u);
-    assert.match(errors.output, /"allowedItemValues"/u);
-    assert.match(errors.output, /"allowedOperations"/u);
-    assert.match(errors.output, /"protocolOperations"/u);
-
-    const fullDocument = JSON.parse(full.output) as {
-      readonly data: {
-        readonly contract: Readonly<Record<string, unknown>>;
-      };
-    };
-    assert.deepEqual(Object.keys(fullDocument.data.contract), [
-      "summary",
-      "input",
-      "output",
-      "errors",
+    assert.equal(inputDocument.kind, "input");
+    assert.deepEqual(Object.keys(inputDocument.input.inputSchema.properties), [
+      "query",
+      "queryFile",
+      "queryStdin",
+      "apiUrl",
     ]);
 
-    const catalogFullDocument = JSON.parse(catalogFull.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly grammar: { readonly nodes: readonly unknown[] };
-          readonly manifest: {
-            readonly commands: Readonly<Record<string, unknown>>;
-            readonly wire: Readonly<Record<string, unknown>>;
-          };
-        };
-      };
-    };
-    assert.deepEqual(Object.keys(catalogFullDocument.data.contract), [
-      "grammar",
-      "manifest",
-    ]);
-    assert.ok(
-      "archiveSearch" in catalogFullDocument.data.contract.manifest.commands,
-    );
-    assert.ok(
-      "archiveSearch" in catalogFullDocument.data.contract.manifest.wire,
-    );
-  });
-
-  void it("points help to schema, action, configuration, and query discovery", async () => {
-    const rootHelp = await run(["--help"]);
-    assert.equal(rootHelp.exitCode, 0);
-    assert.match(rootHelp.output, /binny schema/u);
-
-    const configHelp = await run(["bin", "update", "--help"]);
-    assert.equal(configHelp.exitCode, 0);
-    assert.match(configHelp.output, /bin config-schema/u);
-    assert.match(
-      configHelp.output,
-      /Provide at least 1 of: identityId, config, browserIdleTimeoutSeconds/u,
-    );
-
-    const binGroupHelp = await run(["bin", "--help"]);
-    assert.equal(binGroupHelp.exitCode, 0);
-    assert.match(binGroupHelp.output, /binny bin list/u);
-    assert.match(binGroupHelp.output, /binny bin get rss-main/u);
-    assert.match(binGroupHelp.output, /binny bin config-schema rss-main/u);
-    assert.match(binGroupHelp.output, /binny bin actions rss-main collect/u);
-
-    const configSchemaHelp = await run(["bin", "config-schema", "--help"]);
-    assert.equal(configSchemaHelp.exitCode, 0);
-    assert.match(configSchemaHelp.output, /does not contact the source/u);
-
-    const actionHelp = await run(["run", "trigger", "--help"]);
-    assert.equal(actionHelp.exitCode, 0);
-    assert.match(actionHelp.output, /bin actions/u);
-    assert.match(actionHelp.output, /network requests/u);
-    assert.match(actionHelp.output, /archived content/u);
-
-    const actionsHelp = await run(["bin", "actions", "--help"]);
-    assert.equal(actionsHelp.exitCode, 0);
-    assert.match(actionsHelp.output, /bin actions <id> \[<action>\]/u);
-    assert.match(actionsHelp.output, /saved declarations only/u);
-    assert.match(actionsHelp.output, /may access their source/u);
-
-    const runGroupHelp = await run(["run", "--help"]);
-    assert.equal(runGroupHelp.exitCode, 0);
-    assert.match(runGroupHelp.output, /触发已声明的动作并查询运行结果/u);
-
-    const scheduleGroupHelp = await run(["schedule", "--help"]);
-    assert.equal(scheduleGroupHelp.exitCode, 0);
-    assert.match(scheduleGroupHelp.output, /管理运行计划/u);
-
-    const scheduleHelp = await run(["schedule", "create", "--help"]);
-    assert.equal(scheduleHelp.exitCode, 0);
-    assert.match(
-      scheduleHelp.output,
-      /Declared action name; discover actions with bin actions/u,
-    );
-
-    const archiveHelp = await run(["archive", "search", "--help"]);
-    assert.equal(archiveHelp.exitCode, 0);
-    assert.match(archiveHelp.output, /literal keyword groups/u);
-    assert.match(archiveHelp.output, /model/u);
-    assert.match(archiveHelp.output, /extension-fields <bin-id>/u);
-    assert.match(archiveHelp.output, /explicit bin scope/u);
-    assert.match(archiveHelp.output, /hasAny/u);
-
-    const extensionHelp = await run(["bin", "extension-fields", "--help"]);
-    assert.equal(extensionHelp.exitCode, 0);
-    assert.match(extensionHelp.output, /declared extension fields/u);
-    assert.match(extensionHelp.output, /archive search/u);
-  });
-
-  void it("exposes schedule field choices in the selected input contract", async () => {
-    const create = await run([
-      "schema",
-      "schedule",
-      "create",
-      "--part",
-      "input",
-    ]);
-    const update = await run([
-      "schema",
-      "schedule",
-      "update",
-      "--part",
-      "input",
-    ]);
-
-    assert.equal(create.exitCode, 0);
-    assert.equal(update.exitCode, 0);
-    const creation = JSON.parse(create.output) as {
-      readonly data: {
-        readonly contract: {
-          readonly input: {
-            readonly schema: {
-              readonly properties: Readonly<
-                Record<string, { readonly enum?: readonly string[] }>
-              >;
-            };
-          };
-        };
-      };
-    };
-    assert.deepEqual(
-      creation.data.contract.input.schema.properties.overlapPolicy?.enum,
-      ["queue", "skip"],
-    );
-    const modification = JSON.parse(update.output) as typeof creation;
-    assert.deepEqual(
-      modification.data.contract.input.schema.properties.overlapPolicy?.enum,
-      ["queue", "skip"],
-    );
-
-    const invalidPolicy = await run([
-      "schedule",
-      "create",
-      "binny-runs-one",
-      "--expression",
-      "0 0 0 1 1 *",
-      "--time-zone",
-      "UTC",
-      "--action",
-      "collect",
-      "--overlap-policy",
-      "parallel",
-    ]);
-    assert.equal(invalidPolicy.exitCode, 2);
-    assert.equal(invalidPolicy.requestCount, 0);
-  });
-
-  void it("supports argv paths, text summaries, and actionable command path errors", async () => {
-    const commandHelp = await run(["schema", "--help"]);
-    assert.equal(commandHelp.exitCode, 0);
-    assert.doesNotMatch(commandHelp.output, /--url/u);
-    assert.match(commandHelp.output, /command path as separate CLI tokens/u);
-    assert.match(
-      commandHelp.output,
-      /binny schema archive search --part input/u,
-    );
-    assert.match(
-      commandHelp.output,
-      /binny schema archive search --part full/u,
-    );
-    assert.match(commandHelp.output, /binny schema --part full/u);
-    assert.match(
-      commandHelp.output,
-      /Discover service capabilities with binny service info/u,
-    );
-
-    const directory = await run(["schema"]);
-    assert.equal(directory.exitCode, 0);
-    const textDirectory = await run(["schema", "--output-format", "text"]);
-    assert.equal(textDirectory.exitCode, 0);
-    assert.equal(textDirectory.requestCount, 0);
-    assert.match(textDirectory.output, /Local CLI command catalog: binny/u);
-    assert.match(textDirectory.output, /\[Command group\] bin/u);
-    assert.match(textDirectory.output, /\[Command\] bin get/u);
-    assert.doesNotMatch(
-      textDirectory.output,
-      /inputSchema|outputSchema|"grammar"/u,
-    );
-
-    const structured = await run(["schema", "archive", "search"]);
-    assert.equal(structured.exitCode, 0);
-    const structuredWire = JSON.parse(structured.output) as {
-      readonly data: {
+    const successDocument = JSON.parse(success.stdout) as {
+      readonly kind: string;
+      readonly success: {
         readonly kind: string;
-        readonly path: readonly string[];
-        readonly fields: readonly { readonly key: string }[];
+        readonly variants: Readonly<
+          Record<string, { readonly outputSchema: unknown }>
+        >;
       };
     };
-    assert.equal(structuredWire.data.kind, "command");
-    assert.deepEqual(structuredWire.data.path, ["archive", "search"]);
-    assert.ok(structuredWire.data.fields.some(({ key }) => key === "query"));
+    assert.equal(successDocument.kind, "success");
+    assert.equal(successDocument.success.kind, "data");
+    assert.ok("found" in successDocument.success.variants);
+    assert.match(success.stdout, /nextCursor/u);
+    assert.match(success.stdout, /hasMore/u);
 
-    const textOutput = await run([
-      "schema",
-      "archive",
-      "search",
-      "--output-format",
-      "text",
-    ]);
-    assert.equal(textOutput.exitCode, 0);
-    assert.match(textOutput.output, /Command: binny archive search/u);
-    assert.match(textOutput.output, /Parameters and options:/u);
-    assert.match(textOutput.output, /--query/u);
-    assert.match(textOutput.output, /literal keyword groups/u);
-    assert.match(textOutput.output, /distribution\.cursor/u);
-    assert.match(textOutput.output, /extension-fields/u);
-    assert.match(textOutput.output, /explicit bin scope/u);
-    assert.match(
-      textOutput.output,
-      /--output-format <structured\|text> — default structured/u,
-    );
-    assert.match(
-      textOutput.output,
-      /Available contract parts: input, output, errors/u,
-    );
-    assert.doesNotMatch(
-      textOutput.output,
-      /inputSchema|outputSchema|"grammar"/u,
-    );
+    const failuresDocument = JSON.parse(failures.stdout) as {
+      readonly kind: string;
+      readonly failures: Readonly<Record<string, unknown>>;
+    };
+    assert.equal(failuresDocument.kind, "failures");
+    assert.ok("apiError" in failuresDocument.failures);
+    assert.ok(!("usageFailure" in failuresDocument));
+    assert.match(failures.stdout, /"diagnostic"/u);
+    assert.match(failures.stdout, /"allowedValues"/u);
+    assert.match(failures.stdout, /"allowedItemValues"/u);
+    assert.match(failures.stdout, /"allowedOperations"/u);
+    assert.match(failures.stdout, /"protocolOperations"/u);
 
-    const unknownPath = await run(["schema", "archive", "unknown"]);
-    assert.equal(unknownPath.exitCode, 2);
-    const failure = JSON.parse(unknownPath.output) as {
+    const wireDocument = JSON.parse(wire.stdout) as {
+      readonly kind: string;
+      readonly wire: {
+        readonly data?: Readonly<Record<string, unknown>>;
+        readonly failure?: Readonly<Record<string, unknown>>;
+        readonly stream?: unknown;
+      };
+    };
+    assert.equal(wireDocument.kind, "wire");
+    assert.ok(wireDocument.wire.data?.found !== undefined);
+    assert.ok(wireDocument.wire.failure?.apiError !== undefined);
+    assert.equal("usageFailure" in wireDocument.wire, false);
+    assert.equal("stream" in wireDocument.wire, false);
+
+    assert.equal(records.exitCode, 2);
+    assert.equal(records.requestCount, 0);
+    const recordsFailure = JSON.parse(records.stderr) as {
+      readonly schemaVersion: string;
+      readonly kind: string;
+      readonly issues: readonly { readonly code: string }[];
+    };
+    assert.equal(recordsFailure.schemaVersion, "3");
+    assert.equal(recordsFailure.kind, "usageFailure");
+    assert.ok(
+      recordsFailure.issues.some(({ code }) => code === "invalidSchemaQuery"),
+    );
+  });
+
+  void it("exports the complete grammar and manifest offline with resolvable references", async () => {
+    const directory = await run(["--schema"]);
+    const exported = await run(["contract"]);
+
+    assert.equal(exported.exitCode, 0, exported.stderr);
+    assert.equal(exported.requestCount, 0);
+    const envelope = JSON.parse(exported.stdout) as {
+      readonly schemaVersion: string;
+      readonly command: string;
+      readonly outputMode: string;
       readonly kind: string;
       readonly variant: string;
       readonly data: {
-        readonly path: readonly string[];
-        readonly message: string;
-        readonly suggestion: string;
+        readonly grammar: {
+          readonly root: { readonly name: string };
+          readonly controls: { readonly schema?: unknown };
+        };
+        readonly manifest: {
+          readonly schemaVersion: string;
+          readonly commands: Readonly<Record<string, unknown>>;
+          readonly wire: Readonly<Record<string, unknown>>;
+          readonly usageFailure: {
+            readonly exitCode: number;
+            readonly wire: {
+              readonly oneOf: readonly {
+                readonly properties: {
+                  readonly schemaVersion: { readonly const: string };
+                };
+              }[];
+            };
+          };
+        };
       };
     };
-    assert.equal(failure.kind, "failure");
-    assert.equal(failure.variant, "unknownPath");
-    assert.deepEqual(failure.data.path, ["archive", "unknown"]);
-    assert.match(failure.data.message, /does not exist/u);
-    assert.match(failure.data.suggestion, /binny schema/u);
+    assert.equal(envelope.schemaVersion, "3");
+    assert.equal(envelope.command, "cliContract");
+    assert.equal(envelope.outputMode, "structured");
+    assert.equal(envelope.kind, "data");
+    assert.equal(envelope.variant, "exported");
+    assert.equal(envelope.data.manifest.schemaVersion, "5");
+    assert.deepEqual(envelope.data.grammar.root.name, "binny");
+    assert.ok(envelope.data.grammar.controls.schema !== undefined);
+    assert.equal(envelope.data.manifest.usageFailure.exitCode, 2);
+    assert.equal(
+      envelope.data.manifest.usageFailure.wire.oneOf[0]?.properties
+        .schemaVersion.const,
+      "3",
+    );
+    for (const command of [
+      "archiveSearch",
+      "binUpdate",
+      "scheduleCreate",
+      "cliContract",
+    ]) {
+      assert.ok(command in envelope.data.manifest.commands);
+      assert.ok(command in envelope.data.manifest.wire);
+    }
+    const binUpdate = envelope.data.manifest.commands.binUpdate as {
+      readonly input: { readonly inputSchema: JsonSchema };
+    };
+    assertLocalReferencesResolve(binUpdate.input.inputSchema);
+    assert.ok(exported.stdout.length > directory.stdout.length * 10);
+  });
 
-    const dottedPath = await run(["schema", "archive.search"]);
-    assert.equal(dottedPath.exitCode, 2);
-    const dottedFailure = JSON.parse(dottedPath.output) as {
-      readonly data: {
-        readonly path: readonly string[];
-        readonly suggestion: string;
-      };
-    };
-    assert.deepEqual(dottedFailure.data.path, ["archive.search"]);
-    assert.match(dottedFailure.data.suggestion, /binny schema archive search/u);
+  void it("points help at native discovery and the explicit full export", async () => {
+    const rootHelp = await run(["--help"]);
+    assert.equal(rootHelp.exitCode, 0);
+    assert.match(rootHelp.stdout, /--schema/u);
+    assert.match(rootHelp.stdout, /binny contract/u);
+    assert.doesNotMatch(rootHelp.stdout, /binny schema/u);
+
+    const updateHelp = await run(["bin", "update", "--help"]);
+    assert.equal(updateHelp.exitCode, 0);
+    assert.match(updateHelp.stdout, /--output/u);
+    assert.match(updateHelp.stdout, /bin config-schema/u);
+    assert.match(
+      updateHelp.stdout,
+      /Provide at least 1 of: identityId, config, browserIdleTimeoutSeconds/u,
+    );
+
+    const contractHelp = await run(["contract", "--help"]);
+    assert.equal(contractHelp.exitCode, 0);
+    assert.match(contractHelp.stdout, /complete local CLI contract/u);
+    assert.match(contractHelp.stdout, /offline/u);
+
+    const binGroupHelp = await run(["bin", "--help"]);
+    assert.equal(binGroupHelp.exitCode, 0);
+    assert.match(binGroupHelp.stdout, /binny bin list/u);
+    assert.match(binGroupHelp.stdout, /binny bin get rss-main/u);
+    assert.match(binGroupHelp.stdout, /binny bin config-schema rss-main/u);
+    assert.match(binGroupHelp.stdout, /binny bin actions rss-main collect/u);
+
+    const archiveHelp = await run(["archive", "search", "--help"]);
+    assert.equal(archiveHelp.exitCode, 0);
+    assert.match(archiveHelp.stdout, /literal keyword groups/u);
+    assert.match(archiveHelp.stdout, /extension-fields <bin-id>/u);
+    assert.match(archiveHelp.stdout, /explicit bin scope/u);
+    assert.match(archiveHelp.stdout, /hasAny/u);
   });
 });

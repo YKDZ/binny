@@ -216,7 +216,7 @@ void describe("查询服务发现", () => {
   void it("service info text lists capabilities and contract links", async () => {
     const service = fakeService({});
     const result = await run(
-      ["service", "info", "--output-format", "text"],
+      ["service", "info", "--output", "text"],
       service.fetch,
     );
 
@@ -267,7 +267,7 @@ void describe("查询服务发现", () => {
   void it("renders extension-field discovery as concise readable text", async () => {
     const service = fakeService({});
     const result = await run(
-      ["bin", "extension-fields", "rss-main", "--output-format", "text"],
+      ["bin", "extension-fields", "rss-main", "--output", "text"],
       service.fetch,
     );
 
@@ -360,7 +360,7 @@ void describe("查询服务发现", () => {
         JSON.stringify({
           text: { in: "headline", groups: [["model"]] },
         }),
-        "--output-format",
+        "--output",
         "text",
       ],
       service.fetch,
@@ -419,7 +419,7 @@ void describe("查询服务发现", () => {
             filters: { kind: { op: "contains", value: "changelog" } },
           },
         }),
-        "--output-format",
+        "--output",
         "text",
       ],
       service.fetch,
@@ -483,7 +483,7 @@ void describe("查询服务发现", () => {
     });
 
     const text = await run(
-      ["archive", "search", "--query", query, "--output-format", "text"],
+      ["archive", "search", "--query", query, "--output", "text"],
       service.fetch,
     );
     assert.equal(text.exitCode, 1, text.output);
@@ -531,7 +531,7 @@ void describe("查询服务发现", () => {
             filters: { section: { op: "eq", value: 7 } },
           },
         }),
-        "--output-format",
+        "--output",
         "text",
       ],
       service.fetch,
@@ -585,7 +585,7 @@ void describe("查询服务发现", () => {
             filters: { category: { op: "eq", value: "news" } },
           },
         }),
-        "--output-format",
+        "--output",
         "text",
       ],
       service.fetch,
@@ -915,7 +915,7 @@ void describe("查询服务发现", () => {
     assert.equal("params" in listedWire.data.actions.collect!, false);
 
     const listedText = await run(
-      ["bin", "actions", "rss-main", "--output-format", "text"],
+      ["bin", "actions", "rss-main", "--output", "text"],
       service.fetch,
     );
     assert.equal(listedText.exitCode, 0, listedText.output);
@@ -953,7 +953,7 @@ void describe("查询服务发现", () => {
     assert.equal(Object.hasOwn(selectedWire.data, "environment"), false);
 
     const selectedText = await run(
-      ["bin", "actions", "rss-main", "collect", "--output-format", "text"],
+      ["bin", "actions", "rss-main", "collect", "--output", "text"],
       service.fetch,
     );
     assert.equal(selectedText.exitCode, 0, selectedText.output);
@@ -1016,7 +1016,7 @@ void describe("查询服务发现", () => {
     );
 
     const textResult = await run(
-      ["bin", "config-schema", "rss-main", "--output-format", "text"],
+      ["bin", "config-schema", "rss-main", "--output", "text"],
       service.fetch,
     );
     assert.equal(textResult.exitCode, 0, textResult.output);

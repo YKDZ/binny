@@ -151,7 +151,7 @@ void describe("bin discovery", () => {
     assert.equal(Object.hasOwn(wire.data, "persistentState"), false);
 
     const textResult = await run(
-      ["bin", "get", "rss-main", "--output-format", "text"],
+      ["bin", "get", "rss-main", "--output", "text"],
       service.fetch,
     );
     assert.equal(textResult.exitCode, 0, textResult.output);
@@ -164,7 +164,7 @@ void describe("bin discovery", () => {
   void it("renders list output as readable text without changing structured shape", async () => {
     const service = createService();
     const result = await run(
-      ["bin", "list", "--output-format", "text"],
+      ["bin", "list", "--output", "text"],
       service.fetch,
     );
 
@@ -178,7 +178,7 @@ void describe("bin discovery", () => {
   void it("renders an empty list with a readable text message", async () => {
     const service = createService([]);
     const result = await run(
-      ["bin", "list", "--output-format", "text"],
+      ["bin", "list", "--output", "text"],
       service.fetch,
     );
 
