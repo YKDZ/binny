@@ -2691,6 +2691,67 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       allowedValues: ["title", "body", "both"],
     });
   }
+  const invalidDiscoveryIdentities = [
+    {
+      body: {
+        bins: ["rss-main"],
+        extensions: {
+          sourceAdapterId: "",
+          filters: { category: { op: "eq", value: "news" } },
+        },
+      },
+      path: ["extensions", "sourceAdapterId"],
+      diagnostic: undefined,
+    },
+    {
+      body: {
+        bins: ["rss-main"],
+        extensions: {
+          sourceAdapterId: "",
+          filters: { kind: { op: "contains", value: "news" } },
+        },
+      },
+      path: ["extensions", "filters", "kind", "op"],
+      diagnostic: {
+        protocolOperations: ["eq", "in", "has", "hasAny"],
+      },
+    },
+    {
+      body: {
+        bins: ["invalid bin"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: { kind: { op: "contains", value: "news" } },
+        },
+      },
+      path: ["extensions", "filters", "kind", "op"],
+      diagnostic: {
+        protocolOperations: ["eq", "in", "has", "hasAny"],
+        discovery: { sourceAdapterId: "binny-runs.manual-run-fixture" },
+      },
+    },
+  ] as const;
+  for (const { body, path, diagnostic } of invalidDiscoveryIdentities) {
+    const response = await fetch(new URL("/archives/search", baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 400);
+    if (response.status !== 400) continue;
+    const error = (
+      (await response.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly path: readonly (string | number)[];
+          readonly diagnostic?: unknown;
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, path);
+    assert.deepEqual(error.diagnostic, diagnostic);
+  }
   assert.equal(
     searchInput({
       extensions: {

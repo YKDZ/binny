@@ -1521,15 +1521,18 @@ function archiveSearchInputExtensionDiscovery(
   const distribution = isPlainJsonObject(input.distribution)
     ? input.distribution
     : undefined;
-  const sourceAdapterId =
-    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId;
-  if (typeof sourceAdapterId !== "string") return undefined;
+  // Discovery navigation is optional evidence; never let an invalid identity
+  // turn an otherwise normal input failure into a diagnostic construction error.
+  const checkedSourceAdapterId = sourceAdapterIdSchema.safeParse(
+    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId,
+  );
+  if (!checkedSourceAdapterId.success) return undefined;
   const bins = Array.isArray(input.bins) ? input.bins : undefined;
-  const binId =
-    bins?.length === 1 && typeof bins[0] === "string" ? bins[0] : undefined;
+  const checkedBinId =
+    bins?.length === 1 ? binIdSchema.safeParse(bins[0]) : undefined;
   return {
-    sourceAdapterId,
-    ...(binId === undefined ? {} : { binId }),
+    sourceAdapterId: checkedSourceAdapterId.data,
+    ...(checkedBinId?.success === true ? { binId: checkedBinId.data } : {}),
   };
 }
 

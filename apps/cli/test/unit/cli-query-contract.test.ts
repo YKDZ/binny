@@ -547,6 +547,115 @@ void describe("查询服务发现", () => {
     assert.doesNotMatch(text.output, /Allowed values:|Allowed item values:/u);
   });
 
+  void it("keeps invalid discovery identities inside the input error envelope", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["rss-main"],
+          extensions: {
+            sourceAdapterId: "",
+            filters: { category: { op: "eq", value: "news" } },
+          },
+        }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1, result.output);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message: "信源适配器标识不能为空。",
+      path: ["extensions", "sourceAdapterId"],
+    });
+    assert.deepEqual(service.requests, []);
+
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["rss-main"],
+          extensions: {
+            sourceAdapterId: "",
+            filters: { category: { op: "eq", value: "news" } },
+          },
+        }),
+        "--output-format",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Request failed: 信源适配器标识不能为空。/u);
+    assert.match(text.output, /Path: extensions\.sourceAdapterId/u);
+    assert.doesNotMatch(
+      text.output,
+      /Allowed values:|Allowed item values:|Protocol operations:|Discover extension fields:/u,
+    );
+  });
+
+  void it("omits invalid identities from extension discovery hints", async () => {
+    const service = fakeService({});
+    const emptyAdapter = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["rss-main"],
+          extensions: {
+            sourceAdapterId: "",
+            filters: { kind: { op: "contains", value: "changelog" } },
+          },
+        }),
+      ],
+      service.fetch,
+    );
+    assert.equal(emptyAdapter.exitCode, 1, emptyAdapter.output);
+    assert.deepEqual(failureData(emptyAdapter.output), {
+      code: "invalid_input",
+      message:
+        "Invalid discriminator value. Expected 'eq' | 'in' | 'has' | 'hasAny'",
+      path: ["extensions", "filters", "kind", "op"],
+      diagnostic: {
+        protocolOperations: ["eq", "in", "has", "hasAny"],
+      },
+    });
+
+    const invalidBin = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: [""],
+          extensions: {
+            sourceAdapterId: "kimi",
+            filters: { kind: { op: "contains", value: "changelog" } },
+          },
+        }),
+      ],
+      service.fetch,
+    );
+    assert.equal(invalidBin.exitCode, 1, invalidBin.output);
+    assert.deepEqual(failureData(invalidBin.output), {
+      code: "invalid_input",
+      message:
+        "Invalid discriminator value. Expected 'eq' | 'in' | 'has' | 'hasAny'",
+      path: ["extensions", "filters", "kind", "op"],
+      diagnostic: {
+        protocolOperations: ["eq", "in", "has", "hasAny"],
+        discovery: { sourceAdapterId: "kimi" },
+      },
+    });
+    assert.deepEqual(service.requests, []);
+  });
+
   void it("产品版本不同但公开协议兼容时仍执行查询", async () => {
     const service = fakeService({ productVersion: "2.4.0" });
     const result = await run(
