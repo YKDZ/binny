@@ -2947,7 +2947,7 @@ function createCliContract(identity: CliCommandIdentity) {
         commands: "命令",
         arguments: "参数",
         options: "选项",
-        schema: "契约查询",
+        schema: "Schema",
         examples: "Examples",
       },
       wording: {
@@ -2974,7 +2974,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "配置和管理 Binny 垃圾桶。",
         helpSupplement: text.lines([
           "联网命令可在具体命令后添加 --url <服务地址>；未指定时读取 BINNY_API_URL，否则使用 http://localhost:3000。",
-          "使用 binny --schema 查看离线命令目录，或按 --schema=<target> 读取输入、输出、失败与线表示契约；binny contract 显式导出完整契约。",
+          "Use binny --schema to browse the offline command catalog, or --schema=<target> to read input, output, failure, and wire schemas; binny contract exports the complete contract.",
         ]),
       },
       bin: {
