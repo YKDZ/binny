@@ -1539,7 +1539,10 @@ function archiveSearchInputExtensionDiscovery(
 /**
  * Extract public correction evidence from the selected fixed-search issue.
  * The selected Zod issue already preserves the applicable union branch and
- * list position; no message parsing or duplicated enum table is involved.
+ * list position. A discriminated union exposes its closed candidate set as
+ * `options`; an `op` discriminator instead describes protocol operations
+ * rather than a field's values. No message parsing or duplicated enum table
+ * is involved.
  */
 export function archiveSearchInputDiagnostic(
   input: unknown,
@@ -1549,7 +1552,11 @@ export function archiveSearchInputDiagnostic(
   const values =
     issue.code === "invalid_value"
       ? archiveExtensionScalarCandidates(issue.values)
-      : undefined;
+      : issue.code === "invalid_union" &&
+          "options" in issue &&
+          issue.discriminator !== "op"
+        ? archiveExtensionScalarCandidates(issue.options)
+        : undefined;
   const protocolOperations =
     issue.code === "invalid_union" &&
     "options" in issue &&

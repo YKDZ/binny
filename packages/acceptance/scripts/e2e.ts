@@ -1722,6 +1722,38 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       /Allowed values: "title", "body", "both"/u,
     );
 
+    const invalidDistributionEnumQuery = JSON.stringify({
+      distribution: { by: "foo" },
+    });
+    const invalidDistributionEnum = cliFailure<SearchInputError>(
+      await cli(baseUrl, [
+        "archive",
+        "search",
+        "--query",
+        invalidDistributionEnumQuery,
+      ]),
+      "invalid_input",
+    );
+    assert.deepEqual(invalidDistributionEnum.path, ["distribution", "by"]);
+    assert.deepEqual(invalidDistributionEnum.diagnostic, {
+      allowedValues: ["bin", "date"],
+    });
+
+    const invalidDistributionEnumText = await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      invalidDistributionEnumQuery,
+      "--output",
+      "text",
+    ]);
+    assert.equal(invalidDistributionEnumText.code, 1);
+    assert.match(invalidDistributionEnumText.stderr, /Path: distribution\.by/u);
+    assert.match(
+      invalidDistributionEnumText.stderr,
+      /Allowed values: "bin", "date"/u,
+    );
+
     const invalidDiscoveryIdentities = [
       {
         query: {
