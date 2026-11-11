@@ -47,6 +47,6 @@
     "typescript-7": "catalog:"
   },
   "engines": {
-    "node": "24.21.0"
+    "node": "26.13.0"
   }
 }

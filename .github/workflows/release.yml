@@ -25,13 +25,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 配置 Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: 读取 Node 版本
+        id: node-runtime
+        run: echo "runtime=node@$(jq -er '.engines.node' package.json)" >> "$GITHUB_OUTPUT"
+      - name: 安装 pnpm 与 Node.js
+        uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2
         with:
-          node-version-file: package.json
-      - name: 配置 pnpm
-        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
-        with:
+          runtime: ${{ steps.node-runtime.outputs.runtime }}
+          install: false
           cache: true
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
@@ -60,13 +61,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 配置 Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: 读取 Node 版本
+        id: node-runtime
+        run: echo "runtime=node@$(jq -er '.engines.node' package.json)" >> "$GITHUB_OUTPUT"
+      - name: 安装 pnpm 与 Node.js
+        uses: pnpm/setup@fa36a5ef7dcdefc3a7cb25655c122e00cf6e636e # v3.1.2
         with:
-          node-version-file: package.json
-          package-manager-cache: false
-      - name: 配置 pnpm
-        uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
+          runtime: ${{ steps.node-runtime.outputs.runtime }}
+          install: false
+          cache: false
       - name: 安装依赖
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: 发布已打包版本

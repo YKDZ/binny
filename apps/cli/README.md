@@ -1,6 +1,6 @@
 # Binny CLI
 
-Binny CLI 用于搜索 Binny 服务中已经归档的资料，不会抓取信源网站。需要 Node.js 24 或更高版本。
+Binny CLI 用于搜索 Binny 服务中已经归档的资料，不会抓取信源网站。需要 Node.js 26.13.0 或更高版本。
 
 ## 安装并连接服务
 

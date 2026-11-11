@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 ARG BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/browser-session-source-adapter.js
 
-FROM node:24.21.0-bookworm-slim AS browser-base
+FROM node:26.13.0-bookworm-slim AS browser-base
 
 ADD --checksum=sha256:be1a1e161419f5c8272432f6860912550d8e29985e925913fa800493a0d0c955 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.79-1_amd64.deb /tmp/google-chrome-stable.deb
 
@@ -44,12 +44,13 @@ RUN apt-get update \
     xfonts-scalable \
     xvfb \
   && rm -rf /var/lib/apt/lists/* /tmp/google-chrome-stable.deb \
-    /etc/apt/sources.list.d/google-chrome.list \
-  && corepack enable \
-  && corepack prepare pnpm@12.9.1 --activate
+    /etc/apt/sources.list.d/google-chrome.list
 
 FROM browser-base AS build
 
+# Install pnpm only in the build stage; the browser runtime needs Node alone.
+COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
+RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
 WORKDIR /workspace
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/cli/package.json apps/cli/

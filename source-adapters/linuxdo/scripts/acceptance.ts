@@ -2905,7 +2905,7 @@ async function verifyTopicArchive(
     rootState.body?.markdown?.includes(
       `binny://resource/${pdfResource.resourceId}`,
     ),
-    rootState.body?.markdown,
+    rootState.body?.markdown ?? "Markdown body is missing",
   );
   const jsonResourceIndex = resourceTypes.indexOf("application/json");
   assert.ok(jsonResourceIndex >= 0);
@@ -2921,7 +2921,7 @@ async function verifyTopicArchive(
     rootState.body?.markdown?.includes(
       `binny://resource/${jsonResource.resourceId}`,
     ),
-    rootState.body?.markdown,
+    rootState.body?.markdown ?? "Markdown body is missing",
   );
   const imageResourceIndex = resourceTypes.indexOf("image/png");
   assert.ok(imageResourceIndex >= 0);
@@ -2931,17 +2931,17 @@ async function verifyTopicArchive(
     rootState.body?.markdown?.includes(
       `![主题封面](binny://resource/${imageResource.resourceId})`,
     ),
-    rootState.body?.markdown,
+    rootState.body?.markdown ?? "Markdown body is missing",
   );
   assert.ok(!rootState.body?.markdown?.includes("topic-photo-download-hash"));
   assert.ok(
     !rootState.body?.markdown?.includes("srcset="),
-    rootState.body?.markdown,
+    rootState.body?.markdown ?? "Markdown body is missing",
   );
   assert.ok(
     !rootState.body?.markdown?.includes("topic-photo-small.webp") &&
       !rootState.body?.markdown?.includes("topic-photo-large.webp"),
-    rootState.body?.markdown,
+    rootState.body?.markdown ?? "Markdown body is missing",
   );
   assert.ok(
     firstCollection.result?.output?.completedScopes?.includes("topic:2401"),
@@ -3212,7 +3212,7 @@ async function verifyTopicArchive(
     challengedRootState.body?.markdown?.includes(
       "/uploads/default/original/2X/topic-photo.png",
     ),
-    challengedRootState.body?.markdown,
+    challengedRootState.body?.markdown ?? "Markdown body is missing",
   );
   const challengedRevisionCount = challengedRoot.revisions.length;
   await updateFixtureState({ unavailableMedia: [] });
@@ -3241,7 +3241,7 @@ async function verifyTopicArchive(
     !backfilledRootState.body?.markdown?.includes(
       "/uploads/default/original/2X/topic-photo.png",
     ),
-    backfilledRootState.body?.markdown,
+    backfilledRootState.body?.markdown ?? "Markdown body is missing",
   );
   assert.equal((await readOutgoingRelations(root.itemId)).length, 3);
   await updateFixtureState({

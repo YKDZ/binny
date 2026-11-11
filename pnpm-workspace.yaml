@@ -17,10 +17,10 @@ packages:
   - source-adapters/*
 catalog:
   "@changesets/cli": 3.0.3
-  "@types/node": ^24.13.3
+  "@types/node": ^26.0.0
   "@ykdz/cli-contract": 0.3.0
-  oxfmt: ^0.71.0
-  oxlint: ^1.77.0
+  oxfmt: ^0.74.0
+  oxlint: ^1.89.0
   oxlint-tsgolint: ^7.0.2001
   turbo: 2.11.10
   typescript-7: npm:typescript@^7.0.2
