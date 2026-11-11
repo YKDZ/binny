@@ -25,3 +25,5 @@ catalog:
   turbo: 2.11.10
   typescript-7: npm:typescript@^7.0.2
   zod: ^4.6.7
+patchedDependencies:
+  postgres@3.4.9: patches/postgres@3.4.9.patch

@@ -1,0 +1,56 @@
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..a83c19c5253c68ca8533573c1c22b850810f8dbb 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -236,13 +236,21 @@ function Postgres(a, b) {
+     const queries = Queue()
+     let savepoints = 0
+       , connection
++      , closedError
+       , prepare = null
+ 
+     try {
+       await sql.unsafe('begin ' + options.replace(/[^a-z ]/ig, ''), [], { onexecute }).execute()
+       return await Promise.race([
+         scope(connection, fn),
+-        new Promise((_, reject) => connection.onclose = reject)
++        new Promise((_, reject) => {
++          connection.onclose = error => {
++            closedError = error
++            // Queries queued behind the in-flight one will never be sent.
++            while (queries.length) queries.shift().reject(error)
++            reject(error)
++          }
++        })
+       ])
+     } catch (error) {
+       throw error
+@@ -265,10 +273,13 @@ function Postgres(a, b) {
+         if (uncaughtError)
+           throw uncaughtError
+       } catch (e) {
+-        await (name
+-          ? sql`rollback to ${ sql(name) }`
+-          : sql`rollback`
+-        )
++        // A closed connection cannot roll back; reject later scoped queries instead.
++        if (!closedError) {
++          await (name
++            ? sql`rollback to ${ sql(name) }`
++            : sql`rollback`
++          )
++        }
+         throw e instanceof PostgresError && e.code === '25P02' && uncaughtError || e
+       }
+ 
+@@ -290,6 +301,10 @@ function Postgres(a, b) {
+ 
+       function handler(q) {
+         q.catch(e => uncaughtError || (uncaughtError = e))
++        if (closedError) {
++          q.reject(closedError)
++          return
++        }
+         c.queue === full
+           ? queries.push(q)
+           : c.execute(q) || move(c, full)

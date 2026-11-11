@@ -86,7 +86,8 @@
         "packages/server/src/**",
         "source-adapters/linuxdo/package.json",
         "source-adapters/linuxdo/scripts/**",
-        "packages/acceptance/**"
+        "packages/acceptance/**",
+        "patches/**"
       ],
       "outputs": [],
       "cache": false,
@@ -115,7 +116,8 @@
         "packages/server/package.json",
         "package.json",
         "pnpm-lock.yaml",
-        "pnpm-workspace.yaml"
+        "pnpm-workspace.yaml",
+        "patches/**"
       ],
       "outputs": [],
       "cache": false,
@@ -149,7 +151,8 @@
         "scripts/browser-session-source.ts",
         "package.json",
         "pnpm-lock.yaml",
-        "pnpm-workspace.yaml"
+        "pnpm-workspace.yaml",
+        "patches/**"
       ],
       "outputs": [],
       "cache": false,
@@ -176,7 +179,8 @@
         "packages/core/package.json",
         "packages/db/**",
         "packages/server/package.json",
-        "packages/server/src/**"
+        "packages/server/src/**",
+        "patches/**"
       ],
       "outputs": [],
       "cache": false,

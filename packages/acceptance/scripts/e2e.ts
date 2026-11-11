@@ -9226,8 +9226,103 @@ async function verifyRestartAndRemoval(
     "disabled",
   );
   assert.equal(disabled.status, "disabled");
-  await compose(["restart", "postgres"]);
-  await waitForApiAndDatabase(baseUrl);
+
+  const inspectServer = async (): Promise<{
+    readonly id: string;
+    readonly restartCount: number;
+    readonly startedAt: string;
+    readonly status: string;
+  }> => {
+    const containerId = await runningContainerId("server");
+    const result = await run(
+      "docker",
+      [
+        "inspect",
+        "--format",
+        "{{.Id}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.State.Status}}",
+        containerId,
+      ],
+      { env: composeEnvironment() },
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const [id, startedAt, restartCountText, status] = result.stdout
+      .trim()
+      .split("|");
+    assert.ok(id !== undefined && startedAt !== undefined);
+    assert.ok(restartCountText !== undefined && status !== undefined);
+    assert.match(restartCountText, /^\d+$/u);
+    return {
+      id,
+      restartCount: Number(restartCountText),
+      startedAt,
+      status,
+    };
+  };
+  const serverBeforePostgresRestart = await inspectServer();
+  assert.equal(serverBeforePostgresRestart.status, "running");
+
+  const loadAbort = new AbortController();
+  let loadAttempts = 0;
+  const loadWorker = async (): Promise<void> => {
+    while (!loadAbort.signal.aborted) {
+      loadAttempts += 1;
+      try {
+        const response = await fetch(`${baseUrl}/bins`, {
+          signal: AbortSignal.any([
+            loadAbort.signal,
+            AbortSignal.timeout(2_000),
+          ]),
+        });
+        await response.arrayBuffer();
+      } catch {
+        // Restarting PostgreSQL may abort an individual request.
+      }
+      await wait(10);
+    }
+  };
+  const loadWorkers = Array.from({ length: 16 }, () => loadWorker());
+  await wait(100);
+
+  let waitFailure: unknown;
+  try {
+    await compose(["restart", "postgres"]);
+    try {
+      await waitForApiAndDatabase(baseUrl);
+    } catch (error) {
+      waitFailure = error;
+    }
+  } finally {
+    loadAbort.abort();
+    await Promise.all(loadWorkers);
+  }
+  assert.ok(
+    loadAttempts > 0,
+    "The PostgreSQL restart must overlap real /bins requests.",
+  );
+  assert.equal(
+    apiBaseUrl(),
+    baseUrl,
+    "PostgreSQL restart must not change the server base URL.",
+  );
+  const serverAfterPostgresRestart = await inspectServer();
+  assert.equal(serverAfterPostgresRestart.status, "running");
+  assert.equal(
+    serverAfterPostgresRestart.id,
+    serverBeforePostgresRestart.id,
+    "PostgreSQL restart must not replace the server container.",
+  );
+  assert.equal(
+    serverAfterPostgresRestart.startedAt,
+    serverBeforePostgresRestart.startedAt,
+    "PostgreSQL restart must not restart the server process.",
+  );
+  assert.equal(
+    serverAfterPostgresRestart.restartCount,
+    serverBeforePostgresRestart.restartCount,
+    "PostgreSQL restart must not trigger the server restart policy.",
+  );
+  if (waitFailure !== undefined) throw waitFailure;
+
   await compose(["restart", "server"]);
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();

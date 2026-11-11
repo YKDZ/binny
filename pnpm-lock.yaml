@@ -192,6 +192,9 @@ catalogs:
       specifier: ^4.6.7
       version: 4.6.7
 
+patchedDependencies:
+  postgres@3.4.9: bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e
+
 importers:
 
   .:
@@ -372,7 +375,7 @@ importers:
         version: 5.10.2
       drizzle-orm:
         specifier: 1.0.0-rc.5
-        version: 1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)
+        version: 1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7)
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -397,10 +400,10 @@ importers:
     dependencies:
       drizzle-orm:
         specifier: 1.0.0-rc.5
-        version: 1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)
+        version: 1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7)
       postgres:
         specifier: ^3.4.9
-        version: 3.4.9
+        version: 3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e)
     devDependencies:
       '@binny/tooling-config':
         specifier: workspace:*
@@ -410,7 +413,7 @@ importers:
         version: 26.6.6
       drizzle-kit:
         specifier: 1.0.0-rc.5
-        version: 1.0.0-rc.5(drizzle-orm@1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7))
+        version: 1.0.0-rc.5(drizzle-orm@1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7))
       oxfmt:
         specifier: 'catalog:'
         version: 0.74.0
@@ -1539,9 +1542,6 @@ packages:
     cpu: [arm64]
     os: [win32]
 
-  '@types/node@24.19.2':
-    resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
-
   '@types/node@26.6.6':
     resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
 
@@ -2030,9 +2030,6 @@ packages:
     engines: {node: '>=16.20.0'}
     hasBin: true
 
-  undici-types@7.24.6:
-    resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
-
   undici-types@8.9.0:
     resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
@@ -2443,10 +2440,6 @@ snapshots:
   '@turbo/windows-arm64@2.11.10':
     optional: true
 
-  '@types/node@24.19.2':
-    dependencies:
-      undici-types: 7.24.6
-
   '@types/node@26.6.6':
     dependencies:
       undici-types: 8.9.0
@@ -2539,13 +2532,13 @@ snapshots:
     dependencies:
       luxon: 3.7.2
 
-  drizzle-kit@1.0.0-rc.5(drizzle-orm@1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)):
+  drizzle-kit@1.0.0-rc.5(drizzle-orm@1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7)):
     optionalDependencies:
-      drizzle-orm: 1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7)
+      drizzle-orm: 1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7)
 
-  drizzle-orm@1.0.0-rc.5(postgres@3.4.9)(zod@4.6.7):
+  drizzle-orm@1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7):
     optionalDependencies:
-      postgres: 3.4.9
+      postgres: 3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e)
       zod: 4.6.7
 
   entities@8.1.0: {}
@@ -2704,7 +2697,7 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  postgres@3.4.9: {}
+  postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e): {}
 
   require-from-string@2.0.2: {}
 
@@ -2758,8 +2751,6 @@ snapshots:
       '@typescript/typescript-sunos-x64': 7.0.2
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
-
-  undici-types@7.24.6: {}
 
   undici-types@8.9.0: {}
 

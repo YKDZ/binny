@@ -6,6 +6,7 @@ RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; 
 WORKDIR /workspace
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 COPY apps/cli/package.json apps/cli/turbo.json apps/cli/
 COPY packages/api/package.json packages/api/turbo.json packages/api/
 COPY packages/contracts/package.json packages/contracts/turbo.json packages/contracts/

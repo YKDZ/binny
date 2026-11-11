@@ -7,6 +7,7 @@ COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
 RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
 WORKDIR /workspace
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY patches ./patches
 COPY apps/cli/package.json apps/cli/
 COPY packages/api/package.json packages/api/
 COPY packages/source-adapter-runtime/package.json packages/source-adapter-runtime/
@@ -40,8 +41,8 @@ RUN test -n "$BINNY_SOURCE_ADAPTER_PACKAGE" \
   && pnpm --filter "${BINNY_SOURCE_ADAPTER_PACKAGE}..." build \
   && pnpm --filter @binny/source-adapter-runtime build \
   && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then pnpm --filter @binny/source-adapter-runtime build:fixture; fi \
-  && pnpm --filter @binny/source-adapter-runtime --prod deploy --legacy /runtime-deploy \
-  && pnpm --filter "$BINNY_SOURCE_ADAPTER_PACKAGE" --prod deploy --legacy /deploy \
+  && pnpm --filter @binny/source-adapter-runtime --prod deploy --config.allow-unused-patches=true /runtime-deploy \
+  && pnpm --filter "$BINNY_SOURCE_ADAPTER_PACKAGE" --prod deploy --config.allow-unused-patches=true /deploy \
   && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then cp -r packages/source-adapter-runtime/fixture-dist /deploy/fixture-dist; fi \
   && test -f "/deploy/${BINNY_SOURCE_ADAPTER_ENTRY}" \
   && cp -r /runtime-deploy /deploy/binny-runtime
