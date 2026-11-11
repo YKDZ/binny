@@ -489,7 +489,7 @@ void describe("native offline CLI contract discovery", () => {
 
     const help = await run(["archive", "search", "--help"]);
     assert.equal(help.exitCode, 0);
-    assert.match(help.stdout, /示例/u);
+    assert.match(help.stdout, /Examples/u);
     for (const { shell } of document.examples)
       assert.ok(
         help.stdout.includes(shell),

@@ -2588,7 +2588,7 @@ function createCliContract(identity: CliCommandIdentity) {
         arguments: "参数",
         options: "选项",
         schema: "契约查询",
-        examples: "示例",
+        examples: "Examples",
       },
       wording: {
         commandPlaceholder: "命令",
