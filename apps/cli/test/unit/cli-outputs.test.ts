@@ -195,3 +195,66 @@ void describe("native CLI output modes", () => {
     }
   });
 });
+
+void describe("native command examples", () => {
+  void it("executes argv discovered from the installed contract", async () => {
+    const offline = await run(["archive", "search", "--schema"], async () => {
+      throw new Error("Schema discovery must not request the service.");
+    });
+    assert.equal(offline.exitCode, 0, offline.stderr);
+    const summary = JSON.parse(offline.stdout) as {
+      readonly examples: readonly {
+        readonly argv: readonly string[];
+        readonly shell: string;
+        readonly outputMode?: string;
+      }[];
+    };
+    const structuredExample = summary.examples.find(
+      ({ shell, outputMode }) =>
+        outputMode === undefined &&
+        shell.includes("--query=") &&
+        !shell.includes('"distribution"') &&
+        !shell.includes("timeWindow"),
+    );
+    assert.ok(structuredExample, "search should publish a minimal example");
+    const textExample = summary.examples.find(
+      ({ outputMode }) => outputMode === "text",
+    );
+    assert.ok(textExample, "search should publish an explicit text example");
+
+    let requests = 0;
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      requests += 1;
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/meta") return Response.json(metadata);
+      if (url.pathname === "/archives/search")
+        return Response.json({
+          snapshot: { asOf: "0", mode: "current" },
+          candidatesIncluded: true,
+          results: [],
+          hasMore: false,
+        });
+      return new Response("Not found", { status: 404 });
+    };
+
+    const structured = await run(structuredExample.argv, fetch);
+    assert.equal(structured.exitCode, 0, structured.stderr);
+    const envelope = JSON.parse(structured.stdout) as {
+      readonly outputMode: string;
+      readonly kind: string;
+      readonly variant: string;
+    };
+    assert.equal(envelope.outputMode, "structured");
+    assert.equal(envelope.kind, "data");
+    assert.equal(envelope.variant, "found");
+
+    requests = 0;
+    const text = await run(textExample.argv, fetch);
+    assert.equal(text.exitCode, 0, text.stderr);
+    assert.match(text.stdout, /Snapshot: 0/u);
+    assert.match(text.stdout, /No archived items matched\./u);
+    assert.doesNotMatch(text.stdout, /"kind"\s*:/u);
+    assert.equal(requests, 2);
+  });
+});

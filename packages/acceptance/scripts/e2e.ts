@@ -515,13 +515,14 @@ function startManagedProcess(
 async function cli(
   baseUrl: string,
   args: readonly string[],
-  options: { readonly stdin?: string } = {},
+  options: { readonly stdin?: string; readonly cwd?: string } = {},
 ): Promise<ProcessResult> {
   assert.ok(installedCliConsumer !== undefined, "未安装独立 CLI 消费者。");
   return await installedCliConsumer.run(args, {
     apiUrl: baseUrl,
     environmentApiUrl: "http://127.0.0.1:1",
     ...(options.stdin === undefined ? {} : { stdin: options.stdin }),
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
   });
 }
 
@@ -820,6 +821,145 @@ async function archiveBatchReadCliStep(
   assert.match(payloadFailure.message, /archive revision <revision-id>/u);
 }
 
+type NativeCommandExample = {
+  readonly argv: readonly string[];
+  readonly shell: string;
+  readonly outputMode?: string;
+};
+
+/**
+ * Runs the single-command examples from installed-CLI discovery against the
+ * real service. File and stdin examples use prepared input in a controlled
+ * working directory; definition-time validation alone cannot prove the query
+ * content is accepted.
+ */
+async function verifyNativeCommandExamples(baseUrl: string): Promise<void> {
+  const summaryResult = await cli(baseUrl, ["archive", "search", "--schema"]);
+  assert.equal(summaryResult.code, 0, summaryResult.stderr);
+  const summary = JSON.parse(summaryResult.stdout) as {
+    readonly examples: readonly NativeCommandExample[];
+  };
+  assert.ok(
+    summary.examples.length > 0,
+    "archive search must publish native examples",
+  );
+  const help = await cli(baseUrl, ["archive", "search", "--help"]);
+  assert.equal(help.code, 0, help.stderr);
+  for (const example of summary.examples)
+    assert.ok(
+      help.stdout.includes(example.shell),
+      `help must render the discovered example ${example.shell}`,
+    );
+
+  const minimal = summary.examples.find(
+    ({ shell, outputMode }) =>
+      outputMode === undefined &&
+      shell.includes("--query=") &&
+      !shell.includes('"distribution"') &&
+      !shell.includes("timeWindow"),
+  );
+  assert.ok(minimal, "archive search should publish a minimal example");
+  const queryOption = minimal.argv.find((argument) =>
+    argument.startsWith("--query="),
+  );
+  assert.ok(queryOption, "minimal example should use --query");
+  const queryJson = queryOption.slice("--query=".length);
+  assert.doesNotThrow(() => JSON.parse(queryJson));
+
+  const structured = await cli(baseUrl, [...minimal.argv]);
+  assert.equal(structured.code, 0, structured.stderr);
+  const structuredEnvelope = JSON.parse(structured.stdout) as {
+    readonly outputMode: string;
+    readonly kind: string;
+    readonly variant: string;
+  };
+  assert.equal(structuredEnvelope.outputMode, "structured");
+  assert.equal(structuredEnvelope.kind, "data");
+  assert.equal(structuredEnvelope.variant, "found");
+  const minimalResults = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(structured, "found");
+  assert.ok(
+    minimalResults.results.length > 0,
+    "the minimal search example should match an archived view",
+  );
+
+  const textExample = summary.examples.find(
+    ({ outputMode }) => outputMode === "text",
+  );
+  assert.ok(
+    textExample,
+    "archive search should publish an explicit text example",
+  );
+  const text = await cli(baseUrl, [...textExample.argv]);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /Snapshot:/u);
+  assert.doesNotMatch(text.stdout, /"kind"\s*:/u);
+
+  const distributionExample = summary.examples.find(({ shell }) =>
+    shell.includes('"distribution"'),
+  );
+  assert.ok(distributionExample);
+  const distribution = cliData<{
+    readonly distribution?: { readonly by: string };
+  }>(await cli(baseUrl, [...distributionExample.argv]), "found");
+  assert.equal(distribution.distribution?.by, "bin");
+
+  const timeWindowExample = summary.examples.find(({ shell }) =>
+    shell.includes("timeWindow"),
+  );
+  assert.ok(timeWindowExample);
+  const timeWindow = cliData<{
+    readonly timeSummary: {
+      readonly certainItems: string;
+      readonly undeterminedItems: string;
+    };
+  }>(await cli(baseUrl, [...timeWindowExample.argv]), "found");
+  assert.ok(
+    Number(timeWindow.timeSummary.certainItems) > 0,
+    "the time window example should match archived views",
+  );
+
+  const fileExample = summary.examples.find(({ shell }) =>
+    shell.includes("--query-file"),
+  );
+  assert.ok(fileExample, "archive search should publish a file example");
+  const exampleDirectory = await mkdtemp(
+    path.join(tmpdir(), "binny-native-example-"),
+  );
+  try {
+    await writeFile(
+      path.join(exampleDirectory, "search.json"),
+      queryJson + "\n",
+      "utf8",
+    );
+    const fileSearch = cliData<{
+      readonly results: readonly { readonly itemId: string }[];
+    }>(
+      await cli(baseUrl, [...fileExample.argv], { cwd: exampleDirectory }),
+      "found",
+    );
+    assert.deepEqual(
+      fileSearch.results.map(({ itemId }) => itemId),
+      minimalResults.results.map(({ itemId }) => itemId),
+    );
+  } finally {
+    await rm(exampleDirectory, { recursive: true, force: true });
+  }
+
+  const stdinExample = summary.examples.find(({ argv }) =>
+    argv.includes("--query-stdin"),
+  );
+  assert.ok(stdinExample, "archive search should publish a stdin example");
+  const stdinSearch = cliData<{
+    readonly results: readonly { readonly itemId: string }[];
+  }>(await cli(baseUrl, [...stdinExample.argv], { stdin: queryJson }), "found");
+  assert.deepEqual(
+    stdinSearch.results.map(({ itemId }) => itemId),
+    minimalResults.results.map(({ itemId }) => itemId),
+  );
+}
+
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const requestSchema = await serviceQueryContractCliStep(
     baseUrl,
@@ -829,6 +969,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   const serializedRequestSchema = JSON.stringify(requestSchema);
   assert.match(serializedRequestSchema, /"text"/u);
   assert.match(serializedRequestSchema, /"limit"/u);
+  await verifyNativeCommandExamples(baseUrl);
   const binId = "binny-runs-one";
   if (archiveModelJourney) {
     const discovered = cliData<{
@@ -1037,7 +1178,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
 
     const searchHelp = await cli(baseUrl, ["archive", "search", "--help"]);
     assert.equal(searchHelp.code, 0, searchHelp.stderr);
-    assert.match(searchHelp.stdout, /distribute.*by bin, local date period/u);
+    assert.match(
+      searchHelp.stdout,
+      /Distribution groups can use bin, local date period/u,
+    );
     assert.match(searchHelp.stdout, /distribution\.cursor/u);
     assert.match(
       searchHelp.stdout,
@@ -1706,6 +1850,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     "The global distribution should include the selected bin.",
   );
 
+  // README onboarding chain: prepared file search, same-snapshot pagination, exact batch read.
   const onboardingDirectory = await mkdtemp(
     path.join(tmpdir(), "binny-search-onboarding-"),
   );

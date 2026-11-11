@@ -25,6 +25,8 @@ export type CliRunOptions = {
   readonly apiUrl?: string;
   readonly environmentApiUrl?: string | null;
   readonly stdin?: string;
+  /** Run the installed binary from this directory; defaults to the consumer root. */
+  readonly cwd?: string;
 };
 
 export type IsolatedCliConsumer = {
@@ -459,7 +461,7 @@ export async function createIsolatedCliConsumer({
       return await run(
         binary,
         invocation,
-        consumerDirectory,
+        options.cwd ?? consumerDirectory,
         consumerEnvironment(environmentApiUrl),
         options.stdin,
       );

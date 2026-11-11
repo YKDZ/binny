@@ -2948,6 +2948,7 @@ function createCliContract(identity: CliCommandIdentity) {
         arguments: "参数",
         options: "选项",
         schema: "契约查询",
+        examples: "Examples",
       },
       wording: {
         commandPlaceholder: "命令",
@@ -2981,14 +2982,6 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "bin",
         description: "Inspect and manage configured bins and declared actions.",
-        helpSupplement: text.lines([
-          "Examples:",
-          "  binny bin list",
-          "  binny bin get rss-main",
-          "  binny bin config-schema rss-main",
-          "  binny bin actions rss-main",
-          "  binny bin actions rss-main collect",
-        ]),
       },
       archive: {
         kind: "commandGroup",
@@ -3080,17 +3073,45 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. A request can also distribute its complete match set by bin, local date period, or a declared top-level scalar or scalar-list extension field. Extension filters and distributions require an explicit bin scope. Date groups require a time zone and include only source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. Candidate results and distribution groups have independent limits and cursors. Repeat with top-level cursor for candidates or distribution.cursor for groups; reuse snapshot.asOf when continuing the same result set.',
+          "Search archived items with literal text groups and optional bin, extension, time-window, and distribution filters.",
         helpSupplement: text.lines([
           "Provide exactly one request source: --query <json>, --query-file <path>, or --query-stdin.",
-          "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
-          "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
-          'Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"floor":{"op":"in","values":[8,9]}}}}\'.',
-          "Every selected bin must use the declared adapter and schema. Missing and null extension values do not match.",
-          'Example: binny archive search --query \'{"bins":["forum"],"includeCandidates":false,"distribution":{"by":"date","field":"sourcePublishedAt","period":"month","timeZone":"Europe/Paris"}}\'.',
-          "One distribution dimension is available per request. Candidate pages and distribution pages advance independently; set includeCandidates to false to return only distribution groups.",
-          "Each group counts an item once; an item can appear in multiple groups, so group counts may exceed the distinct total. Missing extension values share one missing group.",
+          "Examples validate the CLI input contract only; the service still validates the search request JSON.",
+          "File and stdin examples expect a request prepared as described in the README; native examples do not carry file contents or stdin bytes.",
+          "Text matching is case-insensitive and literal. Values in one group use OR; multiple groups use AND.",
+          "Extension filters require an explicit bin and the sourceAdapterId declared by bin extension-fields <bin-id>. String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. All filters combine with AND; missing and null extension values do not match.",
+          'A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; set review to "undetermined" to inspect views whose stored time or zone cannot decide membership.',
+          "Distribution groups can use bin, local date period, or a declared extension field. Date groups require a time zone and only count source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason.",
+          "Candidate pages and distribution groups have independent limits and cursors. Reuse snapshot.asOf and the previous top-level cursor or distribution.cursor.",
+          "Set includeCandidates to false to return distribution groups only. Each group counts an item once, so group counts may exceed the distinct total. One distribution dimension is available per request.",
         ]),
+        examples: [
+          {
+            input: {
+              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+            },
+          },
+          {
+            input: {
+              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+            },
+            outputMode: "text",
+          },
+          {
+            input: {
+              query:
+                '{"includeCandidates":false,"distribution":{"by":"bin","limit":100}}',
+            },
+          },
+          {
+            input: {
+              query:
+                '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}',
+            },
+          },
+          { input: { queryFile: "./search.json" } },
+          { input: { queryStdin: true } },
+        ],
         fields: {
           query: {
             kind: "valueOption",
@@ -3128,8 +3149,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "Read exact revisions selected from search results without resolving the current view.",
         helpSupplement: text.lines([
-          "Run archive search, select a result and one of its matches, then copy the result itemId and that match's binId, revisionId, and archiveSeq into the JSON array passed with --references.",
-          'Example: binny archive batch-read --references \'[{"itemId":"650e8400-e29b-41d4-a716-446655440000","binId":"forum","revisionId":"750e8400-e29b-41d4-a716-446655440000","archiveSeq":"42"}]\'.',
+          "Run archive search first, then pass the result itemId with that result's match binId, revisionId, and archiveSeq in one JSON array with --references.",
           "A request accepts 1 to 50 references and returns every result in input order, including duplicates and unreadable references. Complete responses are limited to 16 MiB; split the request into smaller batches if it exceeds the limit.",
           "Stored body representations are returned in full. Missing media is reported per resource and does not prevent an available body from being read.",
         ]),
@@ -3302,12 +3322,12 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "List action runs across all bins with optional action, status, and creation-time filters.",
         helpSupplement: text.lines([
-          "Examples:",
-          `  ${identity.commandName} run list --status failed --limit 10`,
-          `  ${identity.commandName} run list --bin-id forum --created-from 2026-11-01T00:00:00Z`,
-          `  ${identity.commandName} run get forum <runId>`,
           "The lower creation-time bound is inclusive; the upper bound is exclusive. Continue with the same filters and page size.",
         ]),
+        examples: [
+          { input: { status: "failed", limit: "10" } },
+          { input: { createdFrom: "2026-11-01T00:00:00Z" } },
+        ],
         fields: {
           binId: {
             kind: "valueOption",
@@ -3458,12 +3478,9 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "List schedules across all bins with optional action and enabled-state filters.",
         helpSupplement: text.lines([
-          "Examples:",
-          `  ${identity.commandName} schedule list`,
-          `  ${identity.commandName} schedule list --bin-id forum --enabled false`,
-          `  ${identity.commandName} schedule get forum <scheduleId>`,
           "Continue with the same filters and page size to read every matching schedule.",
         ]),
+        examples: [{ input: { enabled: "true", limit: "10" } }],
         fields: {
           binId: {
             kind: "valueOption",
