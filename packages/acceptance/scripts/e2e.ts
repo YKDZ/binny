@@ -1509,6 +1509,77 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       invalidEnumTextOutput,
       /Allowed values: "title", "body", "both"/u,
     );
+
+    const invalidDiscoveryIdentities = [
+      {
+        query: {
+          bins: ["rss-main"],
+          extensions: {
+            sourceAdapterId: "",
+            filters: { category: { op: "eq", value: "news" } },
+          },
+        },
+        expected: {
+          code: "invalid_input",
+          message: "信源适配器标识不能为空。",
+          path: ["extensions", "sourceAdapterId"],
+        },
+      },
+      {
+        query: {
+          bins: ["rss-main"],
+          extensions: {
+            sourceAdapterId: "",
+            filters: { kind: { op: "contains", value: "news" } },
+          },
+        },
+        expected: {
+          code: "invalid_input",
+          message:
+            "Invalid discriminator value. Expected 'eq' | 'in' | 'has' | 'hasAny'",
+          path: ["extensions", "filters", "kind", "op"],
+          diagnostic: {
+            protocolOperations: ["eq", "in", "has", "hasAny"],
+          },
+        },
+      },
+      {
+        query: {
+          bins: ["invalid bin"],
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: { kind: { op: "contains", value: "news" } },
+          },
+        },
+        expected: {
+          code: "invalid_input",
+          message:
+            "Invalid discriminator value. Expected 'eq' | 'in' | 'has' | 'hasAny'",
+          path: ["extensions", "filters", "kind", "op"],
+          diagnostic: {
+            protocolOperations: ["eq", "in", "has", "hasAny"],
+            discovery: {
+              sourceAdapterId: "binny-runs.manual-run-fixture",
+            },
+          },
+        },
+      },
+    ] as const;
+    for (const {
+      query: invalidDiscoveryQuery,
+      expected,
+    } of invalidDiscoveryIdentities) {
+      const failure = cliFailure<SearchInputError>(
+        await cli(baseUrl, [
+          "archive",
+          "search",
+          "--query",
+          JSON.stringify(invalidDiscoveryQuery),
+        ]),
+        "invalid_input",
+      );
+      assert.deepEqual(failure, expected);
+    }
   } finally {
     await rm(queryDirectory, { recursive: true, force: true });
   }
