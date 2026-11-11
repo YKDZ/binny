@@ -431,16 +431,91 @@ void describe("native offline CLI contract discovery", () => {
 
     const binGroupHelp = await run(["bin", "--help"]);
     assert.equal(binGroupHelp.exitCode, 0);
-    assert.match(binGroupHelp.stdout, /binny bin list/u);
-    assert.match(binGroupHelp.stdout, /binny bin get rss-main/u);
-    assert.match(binGroupHelp.stdout, /binny bin config-schema rss-main/u);
-    assert.match(binGroupHelp.stdout, /binny bin actions rss-main collect/u);
+    assert.match(binGroupHelp.stdout, /extension-fields/u);
+    assert.match(binGroupHelp.stdout, /config-schema/u);
+    assert.doesNotMatch(binGroupHelp.stdout, /binny bin get rss-main/u);
+    assert.doesNotMatch(
+      binGroupHelp.stdout,
+      /binny bin actions rss-main collect/u,
+    );
 
     const archiveHelp = await run(["archive", "search", "--help"]);
     assert.equal(archiveHelp.exitCode, 0);
-    assert.match(archiveHelp.stdout, /literal keyword groups/u);
+    assert.match(archiveHelp.stdout, /literal text groups/u);
     assert.match(archiveHelp.stdout, /extension-fields <bin-id>/u);
-    assert.match(archiveHelp.stdout, /explicit bin scope/u);
+    assert.match(archiveHelp.stdout, /explicit bin/u);
     assert.match(archiveHelp.stdout, /hasAny/u);
+  });
+
+  void it("publishes one native example source for machine argv and help", async () => {
+    const summary = await run(["archive", "search", "--schema"]);
+    assert.equal(summary.exitCode, 0, summary.stderr);
+    const document = JSON.parse(summary.stdout) as {
+      readonly examples: readonly {
+        readonly argv: readonly string[];
+        readonly shell: string;
+        readonly outputMode?: string;
+      }[];
+    };
+    assert.ok(document.examples.length > 0, "search examples should exist");
+    for (const example of document.examples) {
+      assert.ok(Array.isArray(example.argv));
+      assert.match(example.shell, /binny/u);
+      assert.match(example.shell, /archive/u);
+      assert.match(example.shell, /search/u);
+    }
+    assert.ok(
+      document.examples.some(({ outputMode }) => outputMode === "text"),
+      "search should show explicit text output",
+    );
+    assert.ok(
+      document.examples.some(({ argv }) =>
+        argv.includes("--query-file=./search.json"),
+      ),
+      "search should show file input",
+    );
+    assert.ok(
+      document.examples.some(({ argv }) => argv.includes("--query-stdin")),
+      "search should show stdin input",
+    );
+    assert.ok(
+      document.examples.some(({ shell }) => /distribution/u.test(shell)),
+      "search should show a distribution example",
+    );
+    assert.ok(
+      document.examples.some(({ shell }) => /timeWindow/u.test(shell)),
+      "search should show a time window example",
+    );
+
+    const help = await run(["archive", "search", "--help"]);
+    assert.equal(help.exitCode, 0);
+    assert.match(help.stdout, /Examples/u);
+    for (const { shell } of document.examples)
+      assert.ok(
+        help.stdout.includes(shell),
+        `help should render ${shell} from the same example`,
+      );
+    assert.doesNotMatch(help.stdout, /Example: binny archive search/u);
+  });
+
+  void it("publishes native examples for existing list commands", async () => {
+    for (const args of [
+      ["run", "list"],
+      ["schedule", "list"],
+    ] as const) {
+      const summary = await run([...args, "--schema"]);
+      assert.equal(summary.exitCode, 0, summary.stderr);
+      const document = JSON.parse(summary.stdout) as {
+        readonly examples: readonly {
+          readonly argv: readonly string[];
+          readonly shell: string;
+        }[];
+      };
+      assert.ok(document.examples.length > 0, `${args.join(" ")} examples`);
+      const help = await run([...args, "--help"]);
+      assert.equal(help.exitCode, 0);
+      for (const { shell } of document.examples)
+        assert.ok(help.stdout.includes(shell), `help should render ${shell}`);
+    }
   });
 });

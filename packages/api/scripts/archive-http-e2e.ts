@@ -2691,6 +2691,52 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       allowedValues: ["title", "body", "both"],
     });
   }
+  const invalidDistributionEnumCases = [
+    {
+      body: { distribution: { by: "foo" } },
+      diagnostic: { allowedValues: ["bin", "date"] },
+    },
+    {
+      body: {
+        bins: ["binny-runs-one"],
+        extensions: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          filters: {
+            section: { op: "eq", value: "archive-model-extension-change" },
+          },
+        },
+        distribution: { by: "foo" },
+      },
+      diagnostic: {
+        allowedValues: ["bin", "date", "extension"],
+        discovery: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          binId: "binny-runs-one",
+        },
+      },
+    },
+  ] as const;
+  for (const { body, diagnostic } of invalidDistributionEnumCases) {
+    const response = await fetch(new URL("/archives/search", baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 400);
+    if (response.status !== 400) continue;
+    const error = (
+      (await response.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly path: readonly (string | number)[];
+          readonly diagnostic?: unknown;
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["distribution", "by"]);
+    assert.deepEqual(error.diagnostic, diagnostic);
+  }
   const invalidDiscoveryIdentities = [
     {
       body: {

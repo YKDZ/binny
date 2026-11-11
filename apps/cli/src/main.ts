@@ -270,6 +270,7 @@ const outputInputs = new WeakMap<object, z.ZodType>();
 // Query commands run their own compatibility checks; service info must inspect incompatible services.
 const commandsWithoutAutomaticProtocolCheck = new Set([
   "serviceInfo",
+  "serviceQueryContract",
   "archiveSearch",
   "archiveBatchRead",
 ]);
@@ -389,6 +390,7 @@ const errorOutputSchema = z.union([
     .object({
       code: z.enum([
         "service_metadata_unavailable",
+        "service_query_contract_unavailable",
         "incompatible_http_api_protocol",
         "incompatible_archive_query_contract",
         "service_capability_unavailable",
@@ -402,30 +404,34 @@ type CliApiError = z.infer<typeof errorOutputSchema>;
 type ServiceCompatibilityFailure = {
   readonly code:
     | "service_metadata_unavailable"
+    | "service_query_contract_unavailable"
     | "incompatible_http_api_protocol"
     | "incompatible_archive_query_contract"
     | "service_capability_unavailable";
   readonly message: string;
 };
 
+function httpApiProtocolFailure(
+  httpApiVersion: number,
+): ServiceCompatibilityFailure | undefined {
+  if (httpApiVersion === publicApiProtocolVersion) return undefined;
+  return {
+    code: "incompatible_http_api_protocol",
+    message:
+      "服务使用 HTTP API 协议 " +
+      String(httpApiVersion) +
+      "；当前 CLI 支持协议 " +
+      String(publicApiProtocolVersion) +
+      "。",
+  };
+}
+
 async function httpApiCompatibilityFailure(
   dependencies: CliDependencies,
 ): Promise<ServiceCompatibilityFailure | undefined> {
   const result = await dependencies.getServiceMetadata();
   if (!result.ok) return result.error;
-
-  if (result.metadata.protocols.httpApi !== publicApiProtocolVersion) {
-    return {
-      code: "incompatible_http_api_protocol",
-      message:
-        "服务使用 HTTP API 协议 " +
-        String(result.metadata.protocols.httpApi) +
-        "；当前 CLI 支持协议 " +
-        String(publicApiProtocolVersion) +
-        "。",
-    };
-  }
-  return undefined;
+  return httpApiProtocolFailure(result.metadata.protocols.httpApi);
 }
 
 async function queryCompatibilityFailure(
@@ -462,6 +468,302 @@ async function queryCompatibilityFailure(
     };
   }
   return undefined;
+}
+
+const serviceQueryOperationNames = ["search", "batch-read"] as const;
+const serviceQueryPartNames = ["request", "response"] as const;
+type ServiceQueryOperationName = (typeof serviceQueryOperationNames)[number];
+type ServiceQueryPartName = (typeof serviceQueryPartNames)[number];
+
+// The service contract uses camelCase operation keys; CLI selectors are kebab-case.
+const serviceQueryOperationSourceKeys = {
+  search: "search",
+  "batch-read": "batchRead",
+} as const satisfies Record<ServiceQueryOperationName, string>;
+
+const serviceQueryJsonSchema = z.record(z.string(), z.unknown());
+// Only the discovery envelope is validated; each query schema stays owned by the service.
+const serviceQueryContractOperationSchema = z.looseObject({
+  method: z.string().min(1),
+  path: z.string().min(1),
+  description: z.string().optional(),
+  requestSchema: serviceQueryJsonSchema.optional(),
+  responseSchema: serviceQueryJsonSchema.optional(),
+});
+const serviceQueryContractDocumentSchema = z.looseObject({
+  version: z.int().positive(),
+  operations: z.record(z.string(), serviceQueryContractOperationSchema),
+});
+type ServiceQueryContractDocument = z.infer<
+  typeof serviceQueryContractDocumentSchema
+>;
+
+const serviceQueryContractInputSchema = z.object({
+  operation: z.enum(serviceQueryOperationNames).optional(),
+  part: z.enum(serviceQueryPartNames).optional(),
+});
+
+/**
+ * CLI response shape. Schema values are copied from the service unchanged so
+ * their internal references remain resolvable; unselected operations and parts
+ * are omitted rather than truncated.
+ */
+const serviceQueryOperationOutputSchema = z
+  .object({
+    method: z.string(),
+    path: z.string(),
+    description: z.string().optional(),
+    requestSchema: serviceQueryJsonSchema.optional(),
+    responseSchema: serviceQueryJsonSchema.optional(),
+  })
+  .strict();
+type ServiceQueryOperationOutput = z.infer<
+  typeof serviceQueryOperationOutputSchema
+>;
+const serviceQueryContractOutputSchema = z
+  .object({
+    service: z
+      .object({
+        name: z.string(),
+        version: z.string(),
+      })
+      .strict(),
+    queryContract: z
+      .object({
+        version: z.int().positive(),
+        path: z.string(),
+        operations: z.record(z.string(), serviceQueryOperationOutputSchema),
+      })
+      .strict(),
+  })
+  .strict();
+type ServiceQueryContractOutput = z.infer<
+  typeof serviceQueryContractOutputSchema
+>;
+
+type ServiceQueryContractReadResult =
+  | {
+      readonly ok: true;
+      readonly metadata: z.infer<typeof serviceMetadataSchema>;
+      readonly document: ServiceQueryContractDocument;
+    }
+  | { readonly ok: false; readonly error: ServiceCompatibilityFailure };
+
+/**
+ * Reads the connected service's current query declarations. The CLI's local
+ * archive query version is deliberately not used as a fallback: a differing
+ * service version is still discoverable, but service metadata and the
+ * `/meta/query` document must agree with each other.
+ */
+async function readServiceQueryContract(
+  dependencies: CliDependencies,
+): Promise<ServiceQueryContractReadResult> {
+  const metadataResult = await dependencies.getServiceMetadata();
+  if (!metadataResult.ok) return { ok: false, error: metadataResult.error };
+  const metadata = metadataResult.metadata;
+
+  const protocolFailure = httpApiProtocolFailure(metadata.protocols.httpApi);
+  if (protocolFailure !== undefined)
+    return { ok: false, error: protocolFailure };
+
+  if (metadata.contracts.archiveQuery.path !== archiveQueryContractPath) {
+    return {
+      ok: false,
+      error: {
+        code: "incompatible_archive_query_contract",
+        message:
+          "The service advertises archive query contract path " +
+          metadata.contracts.archiveQuery.path +
+          "; this CLI reads " +
+          archiveQueryContractPath +
+          ".",
+      },
+    };
+  }
+  if (
+    !metadata.capabilities.includes(serviceCapabilities.archiveQueryContract)
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "service_capability_unavailable",
+        message:
+          "The service does not advertise the archive query contract capability: " +
+          serviceCapabilities.archiveQueryContract +
+          ".",
+      },
+    };
+  }
+
+  let response: Response;
+  try {
+    response = await dependencies.createClient().meta.query.$get();
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "service_query_contract_unavailable",
+        message:
+          "Cannot read the service archive query contract from " +
+          archiveQueryContractPath +
+          "; no local declarations were used.",
+      },
+    };
+  }
+  if (response.status !== 200) {
+    return {
+      ok: false,
+      error: {
+        code: "service_query_contract_unavailable",
+        message:
+          "The service did not return its archive query contract from " +
+          archiveQueryContractPath +
+          " (HTTP " +
+          String(response.status) +
+          "); no local declarations were used.",
+      },
+    };
+  }
+
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "service_query_contract_unavailable",
+        message:
+          "The service returned an invalid archive query contract; no local declarations were used.",
+      },
+    };
+  }
+  const checked = serviceQueryContractDocumentSchema.safeParse(value);
+  if (!checked.success) {
+    return {
+      ok: false,
+      error: {
+        code: "service_query_contract_unavailable",
+        message:
+          "The service returned an invalid archive query contract; no local declarations were used.",
+      },
+    };
+  }
+  if (checked.data.version !== metadata.contracts.archiveQuery.version) {
+    return {
+      ok: false,
+      error: {
+        code: "incompatible_archive_query_contract",
+        message:
+          "The service archive query contract reports version " +
+          String(checked.data.version) +
+          " but service metadata advertises version " +
+          String(metadata.contracts.archiveQuery.version) +
+          ".",
+      },
+    };
+  }
+  return { ok: true, metadata, document: checked.data };
+}
+
+function selectedServiceQueryOperations(
+  document: ServiceQueryContractDocument,
+  operation: ServiceQueryOperationName | undefined,
+): readonly ServiceQueryOperationName[] {
+  if (operation !== undefined) return [operation];
+  return serviceQueryOperationNames.filter(
+    (name) =>
+      document.operations[serviceQueryOperationSourceKeys[name]] !== undefined,
+  );
+}
+
+function selectedServiceQueryOperation(
+  read: Extract<ServiceQueryContractReadResult, { readonly ok: true }>,
+  name: ServiceQueryOperationName,
+  part: ServiceQueryPartName | undefined,
+): ServiceQueryOperationOutput | ServiceCompatibilityFailure {
+  const source =
+    read.document.operations[serviceQueryOperationSourceKeys[name]];
+  if (source === undefined) {
+    return {
+      code: "service_capability_unavailable",
+      message:
+        "The service archive query contract does not declare the " +
+        name +
+        " operation.",
+    };
+  }
+  const operation: {
+    method: string;
+    path: string;
+    description?: string;
+    requestSchema?: Readonly<Record<string, unknown>>;
+    responseSchema?: Readonly<Record<string, unknown>>;
+  } = {
+    method: source.method,
+    path: source.path,
+    ...(source.description === undefined
+      ? {}
+      : { description: source.description }),
+  };
+  if (part === undefined || part === "request") {
+    if (source.requestSchema === undefined) {
+      return {
+        code: "service_query_contract_unavailable",
+        message:
+          "The service archive query contract does not declare a request schema for the " +
+          name +
+          " operation.",
+      };
+    }
+    operation.requestSchema = source.requestSchema;
+  }
+  if (part === undefined || part === "response") {
+    if (source.responseSchema === undefined) {
+      return {
+        code: "service_query_contract_unavailable",
+        message:
+          "The service archive query contract does not declare a response schema for the " +
+          name +
+          " operation.",
+      };
+    }
+    operation.responseSchema = source.responseSchema;
+  }
+  return serviceQueryOperationOutputSchema.parse(operation);
+}
+
+function serviceQueryContractData(
+  read: Extract<ServiceQueryContractReadResult, { readonly ok: true }>,
+  operation: ServiceQueryOperationName | undefined,
+  part: ServiceQueryPartName | undefined,
+): ServiceQueryContractOutput | ServiceCompatibilityFailure {
+  const operations: Record<string, ServiceQueryOperationOutput> = {};
+  for (const name of selectedServiceQueryOperations(read.document, operation)) {
+    const selected = selectedServiceQueryOperation(read, name, part);
+    if ("code" in selected) return selected;
+    operations[name] = selected;
+  }
+  if (Object.keys(operations).length === 0) {
+    return {
+      code: "service_capability_unavailable",
+      message:
+        "The service archive query contract declares none of the supported operations: " +
+        serviceQueryOperationNames.join(", ") +
+        ".",
+    };
+  }
+  return {
+    service: {
+      name: read.metadata.product.name,
+      version: read.metadata.product.version,
+    },
+    queryContract: {
+      version: read.document.version,
+      path: read.metadata.contracts.archiveQuery.path,
+      operations,
+    },
+  };
 }
 
 function createCliContract(identity: CliCommandIdentity) {
@@ -681,7 +983,32 @@ function createCliContract(identity: CliCommandIdentity) {
       `Capabilities: ${metadata.capabilities.join(", ")}`,
       "Contracts:",
       `  Archive query v${metadata.contracts.archiveQuery.version}: ${metadata.contracts.archiveQuery.path}`,
+      `Read the current service query rules: ${identity.commandName} service query-contract --operation search`,
     ]);
+  const serviceQueryContractText = (discovery: ServiceQueryContractOutput) => {
+    const lines: [string, ...string[]] = [
+      `Service: ${discovery.service.name} ${discovery.service.version}`,
+      `Query contract: v${String(discovery.queryContract.version)} at ${discovery.queryContract.path}`,
+    ];
+    for (const [name, operation] of Object.entries(
+      discovery.queryContract.operations,
+    )) {
+      lines.push(
+        "",
+        `Operation: ${name} (${operation.method} ${operation.path})`,
+        ...(operation.description === undefined
+          ? []
+          : [`Description: ${operation.description}`]),
+        ...(operation.requestSchema === undefined
+          ? []
+          : jsonSection("Request schema", operation.requestSchema)),
+        ...(operation.responseSchema === undefined
+          ? []
+          : jsonSection("Response schema", operation.responseSchema)),
+      );
+    }
+    return text.lines(lines);
+  };
   const binListText = ({ bins }: z.infer<typeof cliBinListSchema>) =>
     bins.length === 0
       ? text.line("No bins configured.")
@@ -1055,6 +1382,39 @@ function createCliContract(identity: CliCommandIdentity) {
     textFailures: failureText,
     handler: serviceInfoHandler,
   });
+
+  const serviceQueryContractSuccess = {
+    discovered: {
+      description: "Selected archive query contract declared by the service",
+      exitCode: 0,
+      schema: serviceQueryContractOutputSchema,
+    },
+  } as const;
+  const serviceQueryContractHandler: Handler<
+    "serviceQueryContract",
+    typeof serviceQueryContractInputSchema,
+    typeof serviceQueryContractSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const read = await readServiceQueryContract(dependencies);
+    if (!read.ok) return outcome.failure.apiError(read.error);
+    const data = serviceQueryContractData(read, input.operation, input.part);
+    if ("code" in data) return outcome.failure.apiError(data);
+    return outcome.data.discovered(data);
+  };
+  const serviceQueryContractOutputs = businessOutputs(
+    "serviceQueryContract",
+    serviceQueryContractInputSchema,
+    {
+      structuredDescription: "Machine-readable selected service query contract",
+      textDescription: "Readable selected service query contract",
+      success: serviceQueryContractSuccess,
+      failures: failureSchemas,
+      textSuccess: { discovered: serviceQueryContractText },
+      textFailures: failureText,
+      handler: serviceQueryContractHandler,
+    },
+  );
 
   const archiveSearchSuccess = {
     found: {
@@ -2587,7 +2947,8 @@ function createCliContract(identity: CliCommandIdentity) {
         commands: "命令",
         arguments: "参数",
         options: "选项",
-        schema: "契约查询",
+        schema: "Schema",
+        examples: "Examples",
       },
       wording: {
         commandPlaceholder: "命令",
@@ -2613,7 +2974,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "配置和管理 Binny 垃圾桶。",
         helpSupplement: text.lines([
           "联网命令可在具体命令后添加 --url <服务地址>；未指定时读取 BINNY_API_URL，否则使用 http://localhost:3000。",
-          "使用 binny --schema 查看离线命令目录，或按 --schema=<target> 读取输入、输出、失败与线表示契约；binny contract 显式导出完整契约。",
+          "Use binny --schema to browse the offline command catalog, or --schema=<target> to read input, output, failure, and wire schemas; binny contract exports the complete contract.",
         ]),
       },
       bin: {
@@ -2621,14 +2982,6 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "bin",
         description: "Inspect and manage configured bins and declared actions.",
-        helpSupplement: text.lines([
-          "Examples:",
-          "  binny bin list",
-          "  binny bin get rss-main",
-          "  binny bin config-schema rss-main",
-          "  binny bin actions rss-main",
-          "  binny bin actions rss-main collect",
-        ]),
       },
       archive: {
         kind: "commandGroup",
@@ -2642,6 +2995,12 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "cli",
         name: "service",
         description: "发现服务版本、能力和公开查询契约。",
+        helpSupplement: text.lines([
+          "Examples:",
+          `  ${identity.commandName} service info`,
+          `  ${identity.commandName} service query-contract --operation search`,
+          `  ${identity.commandName} service query-contract --operation batch-read --part response`,
+        ]),
       },
       run: {
         kind: "commandGroup",
@@ -2666,26 +3025,93 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "service",
         name: "info",
         description: "Read service version, capabilities, and contract links.",
+        helpSupplement: text.lines([
+          "Use service query-contract --operation search to read the current service's search rules, or --operation batch-read to read its exact-read rules.",
+        ]),
         fields: {},
         input: emptyInputSchema,
         outputs: serviceInfoOutputs,
+      }),
+      ...command("serviceQueryContract")({
+        kind: "command",
+        parent: "service",
+        name: "query-contract",
+        description:
+          "Read the connected service's search and batch-read query rules.",
+        helpSupplement: text.lines([
+          "Reads /meta/query from the selected service. The response carries the service version and the contract version returned by that service.",
+          "Uses the same service selection as other online commands: --url, then BINNY_API_URL, then http://localhost:3000.",
+          "Without --operation and --part, returns search and batch-read request and response schemas. Narrow the selection to avoid unrelated large schemas.",
+          "This command never falls back to the installed CLI's local declarations. Offline --schema and binny contract describe only the installed CLI.",
+          "Fails with a structured error when the service is unreachable, its contract is invalid, or the selected operation or part is not declared.",
+        ]),
+        fields: {
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description: "Limit discovery to search or batch-read",
+          },
+          part: {
+            kind: "valueOption",
+            longOption: "--part",
+            description: "Limit discovery to the request or response schema",
+          },
+        },
+        examples: [
+          { input: { operation: "search" } },
+          { input: { operation: "batch-read", part: "request" } },
+          {
+            input: { operation: "search", part: "response" },
+            outputMode: "text",
+          },
+        ],
+        input: serviceQueryContractInputSchema,
+        outputs: serviceQueryContractOutputs,
       }),
       ...command("archiveSearch")({
         kind: "command",
         parent: "archive",
         name: "search",
         description:
-          'Search archived items with literal keyword groups, such as binny archive search --query \'{"text":{"groups":[["model"],["release"]]},"limit":20}\'. A request can also distribute its complete match set by bin, local date period, or a declared top-level scalar or scalar-list extension field. Extension filters and distributions require an explicit bin scope. Date groups require a time zone and include only source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason. A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; select review "undetermined" to inspect views whose stored precision or zone cannot decide membership. Example: binny archive search --query \'{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}\'. Candidate results and distribution groups have independent limits and cursors. Repeat with top-level cursor for candidates or distribution.cursor for groups; reuse snapshot.asOf when continuing the same result set.',
+          "Search archived items with literal text groups and optional bin, extension, time-window, and distribution filters.",
         helpSupplement: text.lines([
           "Provide exactly one request source: --query <json>, --query-file <path>, or --query-stdin.",
-          "Discover the selected adapter's top-level fields and allowed operations with bin extension-fields <bin-id>.",
-          "String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. Fields are combined with AND, and each value list uses OR.",
-          'Example: binny archive search --query \'{"bins":["forum"],"extensions":{"sourceAdapterId":"forum.example","filters":{"floor":{"op":"in","values":[8,9]}}}}\'.',
-          "Every selected bin must use the declared adapter and schema. Missing and null extension values do not match.",
-          'Example: binny archive search --query \'{"bins":["forum"],"includeCandidates":false,"distribution":{"by":"date","field":"sourcePublishedAt","period":"month","timeZone":"Europe/Paris"}}\'.',
-          "One distribution dimension is available per request. Candidate pages and distribution pages advance independently; set includeCandidates to false to return only distribution groups.",
-          "Each group counts an item once; an item can appear in multiple groups, so group counts may exceed the distinct total. Missing extension values share one missing group.",
+          "Examples validate the CLI input contract only; the service still validates the search request JSON.",
+          "File and stdin examples expect a request prepared as described in the README; native examples do not carry file contents or stdin bytes.",
+          "Text matching is case-insensitive and literal. Values in one group use OR; multiple groups use AND.",
+          "Extension filters require an explicit bin and the sourceAdapterId declared by bin extension-fields <bin-id>. String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. All filters combine with AND; missing and null extension values do not match.",
+          'A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; set review to "undetermined" to inspect views whose stored time or zone cannot decide membership.',
+          "Distribution groups can use bin, local date period, or a declared extension field. Date groups require a time zone and only count source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason.",
+          "Candidate pages and distribution groups have independent limits and cursors. Reuse snapshot.asOf and the previous top-level cursor or distribution.cursor.",
+          "Set includeCandidates to false to return distribution groups only. Each group counts an item once, so group counts may exceed the distinct total. One distribution dimension is available per request.",
         ]),
+        examples: [
+          {
+            input: {
+              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+            },
+          },
+          {
+            input: {
+              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+            },
+            outputMode: "text",
+          },
+          {
+            input: {
+              query:
+                '{"includeCandidates":false,"distribution":{"by":"bin","limit":100}}',
+            },
+          },
+          {
+            input: {
+              query:
+                '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}',
+            },
+          },
+          { input: { queryFile: "./search.json" } },
+          { input: { queryStdin: true } },
+        ],
         fields: {
           query: {
             kind: "valueOption",
@@ -2723,8 +3149,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "Read exact revisions selected from search results without resolving the current view.",
         helpSupplement: text.lines([
-          "Run archive search, select a result and one of its matches, then copy the result itemId and that match's binId, revisionId, and archiveSeq into the JSON array passed with --references.",
-          'Example: binny archive batch-read --references \'[{"itemId":"650e8400-e29b-41d4-a716-446655440000","binId":"forum","revisionId":"750e8400-e29b-41d4-a716-446655440000","archiveSeq":"42"}]\'.',
+          "Run archive search first, then pass the result itemId with that result's match binId, revisionId, and archiveSeq in one JSON array with --references.",
           "A request accepts 1 to 50 references and returns every result in input order, including duplicates and unreadable references. Complete responses are limited to 16 MiB; split the request into smaller batches if it exceeds the limit.",
           "Stored body representations are returned in full. Missing media is reported per resource and does not prevent an available body from being read.",
         ]),
@@ -2897,12 +3322,12 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "List action runs across all bins with optional action, status, and creation-time filters.",
         helpSupplement: text.lines([
-          "Examples:",
-          `  ${identity.commandName} run list --status failed --limit 10`,
-          `  ${identity.commandName} run list --bin-id forum --created-from 2026-11-01T00:00:00Z`,
-          `  ${identity.commandName} run get forum <runId>`,
           "The lower creation-time bound is inclusive; the upper bound is exclusive. Continue with the same filters and page size.",
         ]),
+        examples: [
+          { input: { status: "failed", limit: "10" } },
+          { input: { createdFrom: "2026-11-01T00:00:00Z" } },
+        ],
         fields: {
           binId: {
             kind: "valueOption",
@@ -3053,12 +3478,9 @@ function createCliContract(identity: CliCommandIdentity) {
         description:
           "List schedules across all bins with optional action and enabled-state filters.",
         helpSupplement: text.lines([
-          "Examples:",
-          `  ${identity.commandName} schedule list`,
-          `  ${identity.commandName} schedule list --bin-id forum --enabled false`,
-          `  ${identity.commandName} schedule get forum <scheduleId>`,
           "Continue with the same filters and page size to read every matching schedule.",
         ]),
+        examples: [{ input: { enabled: "true", limit: "10" } }],
         fields: {
           binId: {
             kind: "valueOption",
@@ -3367,27 +3789,40 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
     let serviceMetadataRequest: Promise<ServiceMetadataDocument> | undefined;
     const getServiceMetadata = (): Promise<ServiceMetadataDocument> => {
       serviceMetadataRequest ??= (async () => {
-        const response = await createClient().meta.$get();
-        if (response.status !== 200) {
+        try {
+          const response = await createClient().meta.$get();
+          if (response.status !== 200) {
+            return {
+              ok: false,
+              error: {
+                code: "service_metadata_unavailable",
+                message: "服务未提供公开元信息。",
+              },
+            };
+          }
+          const metadata = serviceMetadataSchema.safeParse(
+            await response.json(),
+          );
+          if (!metadata.success) {
+            return {
+              ok: false,
+              error: {
+                code: "service_metadata_unavailable",
+                message: "服务公开的元信息格式无效。",
+              },
+            };
+          }
+          return { ok: true, metadata: metadata.data };
+        } catch {
           return {
             ok: false,
             error: {
               code: "service_metadata_unavailable",
-              message: "服务未提供公开元信息。",
+              message:
+                "Cannot read service metadata; check that --url or BINNY_API_URL points to a running service.",
             },
           };
         }
-        const metadata = serviceMetadataSchema.safeParse(await response.json());
-        if (!metadata.success) {
-          return {
-            ok: false,
-            error: {
-              code: "service_metadata_unavailable",
-              message: "服务公开的元信息格式无效。",
-            },
-          };
-        }
-        return { ok: true, metadata: metadata.data };
       })();
       return serviceMetadataRequest;
     };

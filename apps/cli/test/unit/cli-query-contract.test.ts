@@ -309,6 +309,76 @@ void describe("查询服务发现", () => {
     assert.deepEqual(service.requests, []);
   });
 
+  void it("returns structured allowed values for a local distribution discriminator failure", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ distribution: { by: "foo" } }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message: "Invalid discriminator value. Expected 'bin' | 'date'",
+      path: ["distribution", "by"],
+      diagnostic: { allowedValues: ["bin", "date"] },
+    });
+    assert.deepEqual(service.requests, []);
+
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ distribution: { by: "foo" } }),
+        "--output",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Path: distribution\.by/u);
+    assert.match(text.output, /Allowed values: "bin", "date"/u);
+  });
+
+  void it("uses extension-scoped distribution candidates when extension filters are present", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["kimi"],
+          extensions: {
+            sourceAdapterId: "kimi",
+            filters: { section: { op: "eq", value: "changelog" } },
+          },
+          distribution: { by: "foo" },
+        }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message:
+        "Invalid discriminator value. Expected 'bin' | 'date' | 'extension'",
+      path: ["distribution", "by"],
+      diagnostic: {
+        allowedValues: ["bin", "date", "extension"],
+        discovery: { sourceAdapterId: "kimi", binId: "kimi" },
+      },
+    });
+    assert.deepEqual(service.requests, []);
+  });
+
   void it("keeps local fixed-search diagnostics identical across input sources", async () => {
     const directory = await mkdtemp(
       path.join(tmpdir(), "binny-search-diagnostic-"),
