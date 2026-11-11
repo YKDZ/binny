@@ -3088,12 +3088,12 @@ function createCliContract(identity: CliCommandIdentity) {
         examples: [
           {
             input: {
-              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+              query: '{"text":{"in":"both","groups":[["model"],["release"]]}}',
             },
           },
           {
             input: {
-              query: '{"text":{"in":"title","groups":[["model"],["release"]]}}',
+              query: '{"text":{"in":"both","groups":[["model"],["release"]]}}',
             },
             outputMode: "text",
           },
