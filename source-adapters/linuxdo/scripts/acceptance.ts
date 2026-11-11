@@ -4936,7 +4936,7 @@ async function verifySyncCancellationAndRuntimeExit(
             scope.id === 42 &&
             scopeStatus === "in-progress",
         ),
-      "category:42 进入执行的 sync 报告",
+      "Sync report with category:42 in progress",
     );
     const activeUpperBound = syncReport(active).upperBound;
     assert.equal(
