@@ -57,6 +57,20 @@ binny bin extension-fields "$BIN_ID"
 
 发现结果会给出 `sourceAdapterId`、顶层字段、字段类型、已声明的允许值及支持的操作。扩展筛选要求所选 bin 使用同一个适配器。只能使用发现结果中声明的字段、操作和值；不要从归档 JSON 中猜测可用字段。
 
+## 读取当前服务的查询契约
+
+`--schema` 与 `binny contract` 只描述已安装的 CLI。search 和 batch-read 的业务请求、响应规则属于当前连接的服务；使用与其他联网命令相同的服务选择（`--url`、`BINNY_API_URL` 或默认地址）按需读取：
+
+```sh
+binny service query-contract --operation search
+binny service query-contract --operation search --part request
+binny service query-contract --operation batch-read --part response
+```
+
+省略 `--operation` 时同时读取 search 与 batch-read，省略 `--part` 时同时返回 request 与 response。`data.service.version` 是当前服务版本，`data.queryContract.version` 是该服务声明的查询契约版本；两个 schema 原样来自服务。CLI 不会用本地声明补齐或静默回退；服务不可达、契约无效或所选操作/部分不存在时返回结构化错误。
+
+先读取 request schema 构造调用；真实 search 结果中的 `itemId`、`binId`、`revisionId` 和 `archiveSeq` 可直接用于 batch-read。选择 `text` 可以按字段名阅读同一份所选契约。
+
 ## 查看完整分布
 
 搜索可以按 bin 分组返回完整匹配集合，而不返回候选条目：
