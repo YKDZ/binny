@@ -578,6 +578,60 @@ function cliFailure<T extends { readonly code: string }>(
   return wire.data;
 }
 
+async function serviceQueryContractCliStep(
+  baseUrl: string,
+  operation: "search" | "batch-read",
+  part: "request" | "response",
+): Promise<Readonly<Record<string, unknown>>> {
+  const discovery = cliData<{
+    readonly service: { readonly name: string; readonly version: string };
+    readonly queryContract: {
+      readonly version: number;
+      readonly path: string;
+      readonly operations: Readonly<
+        Record<
+          string,
+          {
+            readonly requestSchema?: Readonly<Record<string, unknown>>;
+            readonly responseSchema?: Readonly<Record<string, unknown>>;
+          }
+        >
+      >;
+    };
+  }>(
+    await cli(baseUrl, [
+      "service",
+      "query-contract",
+      "--operation",
+      operation,
+      "--part",
+      part,
+    ]),
+    "discovered",
+  );
+  assert.equal(discovery.queryContract.path, "/meta/query");
+  assert.ok(
+    Number.isSafeInteger(discovery.queryContract.version) &&
+      discovery.queryContract.version > 0,
+  );
+  assert.deepEqual(Object.keys(discovery.queryContract.operations), [
+    operation,
+  ]);
+  const selected = discovery.queryContract.operations[operation];
+  assert.ok(selected !== undefined);
+  const schema =
+    part === "request" ? selected.requestSchema : selected.responseSchema;
+  assert.ok(schema !== undefined);
+  assert.equal(
+    Object.hasOwn(
+      selected,
+      part === "request" ? "responseSchema" : "requestSchema",
+    ),
+    false,
+  );
+  return schema;
+}
+
 async function archiveHttpStep(
   stage: "fixed-search" | "submit" | "after-restart",
   baseUrl: string,
@@ -679,6 +733,12 @@ async function archiveBatchReadCliStep(
   baseUrl: string,
   fixture: ArchiveBatchReadAcceptanceFixture,
 ): Promise<void> {
+  const requestSchema = await serviceQueryContractCliStep(
+    baseUrl,
+    "batch-read",
+    "request",
+  );
+  assert.match(JSON.stringify(requestSchema), /"references"/u);
   const args = [
     "archive",
     "batch-read",
@@ -761,6 +821,14 @@ async function archiveBatchReadCliStep(
 }
 
 async function archiveSearchCliStep(baseUrl: string): Promise<void> {
+  const requestSchema = await serviceQueryContractCliStep(
+    baseUrl,
+    "search",
+    "request",
+  );
+  const serializedRequestSchema = JSON.stringify(requestSchema);
+  assert.match(serializedRequestSchema, /"text"/u);
+  assert.match(serializedRequestSchema, /"limit"/u);
   const binId = "binny-runs-one";
   if (archiveModelJourney) {
     const discovered = cliData<{
@@ -1735,6 +1803,12 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       4,
     );
 
+    const batchReadResponseSchema = await serviceQueryContractCliStep(
+      baseUrl,
+      "batch-read",
+      "response",
+    );
+    assert.match(JSON.stringify(batchReadResponseSchema), /"results"/u);
     const selected = firstPage.results[0];
     assert.ok(selected !== undefined);
     const selectedMatch = selected.matches.find(

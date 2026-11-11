@@ -343,6 +343,20 @@ export async function createIsolatedCliConsumer({
           ({ path }) => path.join(" ") === "archive search",
         ),
       );
+      const serviceDirectory = await runChecked(
+        binary,
+        ["service", "--schema"],
+        consumerDirectory,
+        offlineEnvironment,
+      );
+      const serviceChildren = JSON.parse(serviceDirectory.stdout) as {
+        readonly children: readonly { readonly path: readonly string[] }[];
+      };
+      assert.ok(
+        serviceChildren.children.some(
+          ({ path }) => path.join(" ") === "service query-contract",
+        ),
+      );
 
       const selected = await runChecked(
         binary,
@@ -478,6 +492,98 @@ export async function createIsolatedCliConsumer({
         );
         assert.equal(Object.hasOwn(serviceInfo.data, "queryContract"), false);
 
+        const metadataResponse = await fetch(apiUrl + "/meta");
+        assert.equal(metadataResponse.status, 200);
+        const metadata = (await metadataResponse.json()) as {
+          readonly product: {
+            readonly name: string;
+            readonly version: string;
+          };
+          readonly contracts: {
+            readonly archiveQuery: {
+              readonly version: number;
+              readonly path: string;
+            };
+          };
+        };
+        const queryContract = await invoke(
+          [
+            "service",
+            "query-contract",
+            "--operation",
+            "search",
+            "--part",
+            "request",
+          ],
+          { apiUrl },
+        );
+        assert.equal(
+          queryContract.code,
+          0,
+          `安装 CLI 应读取服务查询契约：\n${queryContract.stdout}${queryContract.stderr}`,
+        );
+        const contract = JSON.parse(queryContract.stdout) as {
+          readonly data: {
+            readonly service: {
+              readonly name: string;
+              readonly version: string;
+            };
+            readonly queryContract: {
+              readonly version: number;
+              readonly path: string;
+              readonly operations: Readonly<
+                Record<
+                  string,
+                  {
+                    readonly requestSchema?: Readonly<Record<string, unknown>>;
+                    readonly responseSchema?: unknown;
+                  }
+                >
+              >;
+            };
+          };
+        };
+        assert.deepEqual(contract.data.service, metadata.product);
+        assert.equal(
+          contract.data.queryContract.version,
+          metadata.contracts.archiveQuery.version,
+        );
+        assert.equal(
+          contract.data.queryContract.path,
+          metadata.contracts.archiveQuery.path,
+        );
+        assert.deepEqual(Object.keys(contract.data.queryContract.operations), [
+          "search",
+        ]);
+        const searchRequestSchema = JSON.stringify(
+          contract.data.queryContract.operations.search?.requestSchema,
+        );
+        assert.match(searchRequestSchema, /"text"/u);
+        assert.match(searchRequestSchema, /"bins"/u);
+        assert.equal(
+          Object.hasOwn(
+            contract.data.queryContract.operations.search ?? {},
+            "responseSchema",
+          ),
+          false,
+        );
+        const contractText = await invoke(
+          [
+            "service",
+            "query-contract",
+            "--operation",
+            "search",
+            "--part",
+            "request",
+            "--output",
+            "text",
+          ],
+          { apiUrl },
+        );
+        assert.equal(contractText.code, 0, contractText.stderr);
+        assert.match(contractText.stdout, /Service: Binny /u);
+        assert.match(contractText.stdout, /Request schema:/u);
+
         const environment = await invoke(["service", "info"], {
           environmentApiUrl: apiUrl,
         });
@@ -496,6 +602,29 @@ export async function createIsolatedCliConsumer({
           wrongExplicitUrl.code,
           0,
           "错误显式地址不能回退到可用的 BINNY_API_URL。",
+        );
+
+        const unreachableContract = await invoke(
+          ["service", "query-contract"],
+          {
+            apiUrl: "http://127.0.0.1:1",
+            environmentApiUrl: apiUrl,
+          },
+        );
+        assert.equal(
+          unreachableContract.code,
+          1,
+          `服务不可达时应明确失败，而不是本地回退：\n${unreachableContract.stdout}${unreachableContract.stderr}`,
+        );
+        assert.equal(unreachableContract.stdout, "");
+        const unreachableFailure = JSON.parse(unreachableContract.stderr) as {
+          readonly kind: string;
+          readonly data: { readonly code: string };
+        };
+        assert.equal(unreachableFailure.kind, "failure");
+        assert.equal(
+          unreachableFailure.data.code,
+          "service_metadata_unavailable",
         );
       },
       async close() {
