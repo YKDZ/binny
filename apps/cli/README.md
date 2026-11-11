@@ -17,13 +17,13 @@ binny service info
 默认输出结构化 JSON，终端与脚本得到相同的数据形状。命令信封使用版本 3，包含 `schemaVersion`、`command`、`outputMode` 和 `kind`，业务结果放在 `data` 字段中：
 
 ```sh
-binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}'
+binny archive search --query '{"text":{"in":"both","groups":[["model"],["release"]]}}'
 ```
 
 直接阅读结果时可在叶命令之后显式选择 `text`：
 
 ```sh
-binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}' --output text
+binny archive search --query '{"text":{"in":"both","groups":[["model"],["release"]]}}' --output text
 ```
 
 两种方式执行同一业务处理并产生相同业务含义，切换输出不会增加请求次数。
@@ -143,7 +143,7 @@ binny archive search --query-file ./window-search.json > first-page.json
 同一请求也可以通过内联 JSON 或标准输入提交：
 
 ```sh
-binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}'
+binny archive search --query '{"text":{"in":"both","groups":[["model"],["release"]]}}'
 binny archive search --query-stdin < ./window-search.json > stdin-page.json
 ```
 
