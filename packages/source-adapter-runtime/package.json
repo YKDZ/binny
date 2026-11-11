@@ -36,13 +36,13 @@
     "@binny/contracts": "workspace:*",
     "@binny/source-adapter-sdk": "workspace:*",
     "patchright-core": "1.64.2",
-    "ws": "8.18.3",
+    "ws": "8.22.1",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
-    "@types/ws": "8.18.1",
+    "@types/ws": "8.18.2",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
