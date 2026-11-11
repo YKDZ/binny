@@ -441,6 +441,11 @@ const runtimeProxy = createServer((request, response) => {
 
 runtimeProxy.on("upgrade", (request, client, head) => {
   const upstream = createConnection(3000, "server");
+  // A runtime reset is expected I/O; tear down only this tunnel, never the proxy process.
+  const closeTunnel = (): void => {
+    client.destroy();
+    upstream.destroy();
+  };
   upstream.once("connect", () => {
     const headers = [...request.rawHeaders];
     let hasHost = false;
@@ -460,7 +465,9 @@ runtimeProxy.on("upgrade", (request, client, head) => {
     if (head.length > 0) upstream.write(head);
     client.pipe(upstream).pipe(client);
   });
-  upstream.once("error", () => client.destroy());
+  upstream.once("error", closeTunnel);
+  client.once("error", closeTunnel);
+  upstream.once("close", () => client.destroy());
   client.once("close", () => upstream.destroy());
 });
 
