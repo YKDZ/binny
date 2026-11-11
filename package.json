@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "format:check": "oxfmt --list-different --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose*.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
-    "format:write": "oxfmt --write --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose*.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template",
+    "format:check": "oxfmt --list-different --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose*.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template patches/*.patch",
+    "format:write": "oxfmt --write --no-error-on-unmatched-pattern *.json pnpm-workspace.yaml pnpm-lock.yaml *.config.ts .gitignore .dockerignore Dockerfile compose*.yaml TODO.md rust-toolchain.toml .vscode .github .changeset/config.json .devcontainer resources scripts template patches/*.patch",
     "lint": "oxlint --quiet --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template",
     "lint:fix": "oxlint --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template --fix",
     "typecheck": "tsc --build --noEmit --pretty false",
