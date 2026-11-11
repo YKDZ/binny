@@ -1,6 +1,6 @@
 {
   "name": "@ykdz/binny",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Binny 归档、查询与垃圾桶管理命令行工具。",
   "homepage": "https://github.com/YKDZ/binny",
   "bugs": {
