@@ -2628,6 +2628,15 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       itemType: "string",
       operations: ["has", "hasAny"],
     });
+    assert.deepEqual(extensionFields.fields.tiers, {
+      type: "array",
+      nullable: false,
+      required: false,
+      description: "The access tiers assigned to this archived item.",
+      itemType: "string",
+      allowedItemValues: ["basic", "pro"],
+      operations: ["has", "hasAny"],
+    });
     assert.deepEqual(extensionFields.fields.featured, {
       type: "boolean",
       nullable: false,
@@ -2655,6 +2664,33 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
   const searchContract = discovery.queryContract.operations.search;
   const searchInput = compileJsonSchema(archiveApiSchemas.searchInput);
   const searchOutput = compileJsonSchema(archiveApiSchemas.searchPage);
+  const invalidFixedEnumResponse = await fetch(
+    new URL("/archives/search", baseUrl),
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        text: { in: "headline", groups: [["model"]] },
+      }),
+    },
+  );
+  assert.equal(invalidFixedEnumResponse.status, 400);
+  if (invalidFixedEnumResponse.status === 400) {
+    const error = (
+      (await invalidFixedEnumResponse.json()) as {
+        readonly error: {
+          readonly code: string;
+          readonly path: readonly (string | number)[];
+          readonly diagnostic?: unknown;
+        };
+      }
+    ).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["text", "in"]);
+    assert.deepEqual(error.diagnostic, {
+      allowedValues: ["title", "body", "both"],
+    });
+  }
   assert.equal(
     searchInput({
       extensions: {
@@ -3059,6 +3095,10 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       text: { groups: [["release"]] },
     });
     assert.equal(sameViewMiss.results.length, 0);
+    const unobservedOpenListValue = await extensionSearch(
+      scopedExtensionQuery({ labels: { op: "has", value: "never-archived" } }),
+    );
+    assert.equal(unobservedOpenListValue.results.length, 0);
     for (const query of [
       scopedExtensionQuery({ category: { op: "eq", value: "post" } }),
       scopedExtensionQuery({ labels: { op: "has", value: "news" } }),
@@ -3076,11 +3116,17 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       );
     }
 
+    const extensionDiscovery = {
+      sourceAdapterId: "binny-runs.manual-run-fixture",
+      sourceAdapterVersion: "1.0.0",
+      binId: "binny-runs-one",
+    };
     const invalidExtensionQueries = [
       {
         query: scopedExtensionQuery({ undeclared: { op: "eq", value: "x" } }),
         path: ["extensions", "filters", "undeclared"],
         message: /does not declare/u,
+        diagnostic: { discovery: extensionDiscovery },
       },
       {
         query: scopedExtensionQuery({
@@ -3088,11 +3134,16 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
         }),
         path: ["extensions", "filters", "sourceDetails.category"],
         message: /top-level/u,
+        diagnostic: { discovery: extensionDiscovery },
       },
       {
         query: scopedExtensionQuery({ floor: { op: "eq", value: "7" } }),
         path: ["extensions", "filters", "floor", "value"],
         message: /declared integer type/u,
+        diagnostic: {
+          allowedOperations: ["eq", "in"],
+          discovery: extensionDiscovery,
+        },
       },
       {
         query: scopedExtensionQuery({
@@ -3100,6 +3151,10 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
         }),
         path: ["extensions", "filters", "category", "op"],
         message: /allowed operations: eq, in/u,
+        diagnostic: {
+          allowedOperations: ["eq", "in"],
+          discovery: extensionDiscovery,
+        },
       },
       {
         query: scopedExtensionQuery({
@@ -3107,9 +3162,31 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
         }),
         path: ["extensions", "filters", "category", "values", 1],
         message: /allowed values \["post","comment"\]/u,
+        diagnostic: {
+          allowedValues: ["post", "comment"],
+          allowedOperations: ["eq", "in"],
+          discovery: extensionDiscovery,
+        },
+      },
+      {
+        query: scopedExtensionQuery({
+          tiers: { op: "hasAny", values: ["enterprise"] },
+        }),
+        path: ["extensions", "filters", "tiers", "values", 0],
+        message: /allowed values \["basic","pro"\]/u,
+        diagnostic: {
+          allowedItemValues: ["basic", "pro"],
+          allowedOperations: ["has", "hasAny"],
+          discovery: extensionDiscovery,
+        },
       },
     ] as const;
-    for (const { query, path, message } of invalidExtensionQueries) {
+    for (const {
+      query,
+      path,
+      message,
+      diagnostic,
+    } of invalidExtensionQueries) {
       const response = await client.archives.search.$post({
         json: query as never,
       });
@@ -3119,6 +3196,7 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
       assert.equal(error.code, "invalid_input");
       assert.deepEqual(error.path, path);
       assert.match(error.message, message);
+      assert.deepEqual(error.diagnostic, diagnostic);
     }
 
     const mixedAdapterRange = await client.archives.search.$post({
@@ -3158,6 +3236,15 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
         "value",
       ]);
       assert.match(error.message, /allowed values \["comment"\]/u);
+      assert.deepEqual(error.diagnostic, {
+        allowedValues: ["comment"],
+        allowedOperations: ["eq", "in"],
+        discovery: {
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          sourceAdapterVersion: "2.0.0",
+          binId: "binny-runs-schema-two",
+        },
+      });
     }
   }
 

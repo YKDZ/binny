@@ -6,8 +6,10 @@ import type {
   ArchiveBatchReadResponse,
 } from "./archive-batch-read.ts";
 import {
+  archiveExtensionOperationSchema,
   archiveExtensionScalarSchema,
   archiveSearchExtensionsSchema,
+  type ArchiveExtensionOperation,
   type ArchiveExtensionScalar,
 } from "./archive-extensions.ts";
 import type { ArchiveHistoryOperations } from "./archive-history.ts";
@@ -977,6 +979,41 @@ export const archiveRevisionDiffSchema = withArchiveJsonSchemaProjection(
     .strict(),
 );
 
+/**
+ * Machine-readable correction evidence for a search input failure.
+ *
+ * Candidate values are closed sets taken from the active request contract or
+ * the selected adapter's declared extension fields. They are never derived
+ * from archived data, and a missing field means no finite candidate set is
+ * known. `allowedOperations` describes one declared field; `protocolOperations`
+ * only lists operations the request protocol accepts when no field declaration
+ * is available.
+ */
+export const archiveSearchDiagnosticSchema = z
+  .object({
+    allowedValues: z.array(archiveExtensionScalarSchema).min(1).optional(),
+    allowedItemValues: z.array(archiveExtensionScalarSchema).min(1).optional(),
+    allowedOperations: z.array(archiveExtensionOperationSchema).optional(),
+    protocolOperations: z
+      .array(archiveExtensionOperationSchema)
+      .min(1)
+      .optional(),
+    discovery: z
+      .object({
+        sourceAdapterId: sourceAdapterIdSchema,
+        sourceAdapterVersion: postgresTextSchema.min(1).optional(),
+        binId: binIdSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/**
+ * Public archive failure envelope. `diagnostic` appears only when the failing
+ * input has a closed correction set or a discoverable extension declaration;
+ * consumers must not infer candidates from archived data.
+ */
 export const archiveErrorSchema = z
   .object({
     error: z
@@ -1001,6 +1038,7 @@ export const archiveErrorSchema = z
         ]),
         message: z.string(),
         path: z.array(z.union([z.string(), z.number()])).optional(),
+        diagnostic: archiveSearchDiagnosticSchema.optional(),
       })
       .strict(),
   })
@@ -1454,6 +1492,88 @@ export function archiveSearchInputIssue(
         : selected,
     undefined,
   );
+}
+
+/** Optional correction evidence attached to an archive search failure. */
+export type ArchiveSearchDiagnostic = z.infer<
+  typeof archiveSearchDiagnosticSchema
+>;
+
+function archiveExtensionScalarCandidates(
+  values: readonly unknown[],
+): ArchiveExtensionScalar[] | undefined {
+  const scalars = values.filter(
+    (value): value is ArchiveExtensionScalar =>
+      typeof value === "string" ||
+      (typeof value === "number" && Number.isFinite(value)) ||
+      typeof value === "boolean",
+  );
+  return scalars.length === 0 ? undefined : scalars;
+}
+
+function archiveSearchInputExtensionDiscovery(
+  input: unknown,
+): ArchiveSearchDiagnostic["discovery"] {
+  if (!isPlainJsonObject(input)) return undefined;
+  const extensions = isPlainJsonObject(input.extensions)
+    ? input.extensions
+    : undefined;
+  const distribution = isPlainJsonObject(input.distribution)
+    ? input.distribution
+    : undefined;
+  const sourceAdapterId =
+    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId;
+  if (typeof sourceAdapterId !== "string") return undefined;
+  const bins = Array.isArray(input.bins) ? input.bins : undefined;
+  const binId =
+    bins?.length === 1 && typeof bins[0] === "string" ? bins[0] : undefined;
+  return {
+    sourceAdapterId,
+    ...(binId === undefined ? {} : { binId }),
+  };
+}
+
+/**
+ * Extract public correction evidence from the selected fixed-search issue.
+ * The selected Zod issue already preserves the applicable union branch and
+ * list position; no message parsing or duplicated enum table is involved.
+ */
+export function archiveSearchInputDiagnostic(
+  input: unknown,
+  issue: z.core.$ZodIssue | undefined,
+): ArchiveSearchDiagnostic | undefined {
+  if (issue === undefined) return undefined;
+  const values =
+    issue.code === "invalid_value"
+      ? archiveExtensionScalarCandidates(issue.values)
+      : undefined;
+  const protocolOperations =
+    issue.code === "invalid_union" &&
+    "options" in issue &&
+    issue.discriminator === "op"
+      ? issue.options.filter(
+          (option): option is ArchiveExtensionOperation =>
+            archiveExtensionOperationSchema.safeParse(option).success,
+        )
+      : undefined;
+  const extensionIssue =
+    issue.path[0] === "extensions" || issue.path[0] === "distribution";
+  const discovery = extensionIssue
+    ? archiveSearchInputExtensionDiscovery(input)
+    : undefined;
+  const diagnostic = {
+    ...(values === undefined
+      ? {}
+      : typeof issue.path.at(-1) === "number"
+        ? { allowedItemValues: values }
+        : { allowedValues: values }),
+    ...(protocolOperations === undefined || protocolOperations.length === 0
+      ? {}
+      : { protocolOperations }),
+    ...(discovery === undefined ? {} : { discovery }),
+  };
+  if (Object.keys(diagnostic).length === 0) return undefined;
+  return archiveSearchDiagnosticSchema.parse(diagnostic);
 }
 
 const archiveSearchMatchSchema = z

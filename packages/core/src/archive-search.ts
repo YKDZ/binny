@@ -4,6 +4,7 @@ import {
   archiveIdentifierSchema,
   archiveSearchInputSchema,
   archiveSearchInputIssue,
+  archiveSearchInputDiagnostic,
   archiveSearchPageSchema,
   archiveSearchDistributionPageSchema,
   archiveSnapshotSchema,
@@ -13,6 +14,7 @@ import {
   type ArchiveOperationContext,
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
+  type ArchiveSearchDiagnostic,
   type ArchiveSearchDistributionRequest,
   type ArchiveSearchOperation,
   type ArchiveSearchRequest,
@@ -241,11 +243,20 @@ function decodeSearchDistributionCursor(
   }
 }
 
-function invalidInput(message: string, path: readonly (string | number)[]) {
+function invalidInput(
+  message: string,
+  path: readonly (string | number)[],
+  diagnostic?: ArchiveSearchDiagnostic,
+) {
   return {
     ok: false as const,
     status: 400 as const,
-    error: { code: "invalid_input" as const, message, path: [...path] },
+    error: {
+      code: "invalid_input" as const,
+      message,
+      path: [...path],
+      ...(diagnostic === undefined ? {} : { diagnostic }),
+    },
   };
 }
 
@@ -947,6 +958,11 @@ function validateExtensionScope(
         ["bins"],
       );
     }
+    const discovery = {
+      sourceAdapterId: bin.sourceAdapter.id,
+      sourceAdapterVersion: bin.sourceAdapter.version,
+      binId: bin.binId,
+    };
     const fields = discoverSourceAdapterExtensionFields({
       sourceAdapterId: bin.sourceAdapter.id,
       sourceAdapterVersion: bin.sourceAdapter.version,
@@ -960,22 +976,21 @@ function validateExtensionScope(
           return invalidInput(
             `The selected adapter does not declare the top-level extension field "${fieldName}".`,
             path,
+            { discovery },
           );
         }
         if (!field.operations.includes(filter.op)) {
           return invalidInput(
             `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
             [...path, "op"],
+            { allowedOperations: [...field.operations], discovery },
           );
         }
-        const type =
-          filter.op === "has" || filter.op === "hasAny"
-            ? field.itemType
-            : field.type;
-        const allowedValues =
-          filter.op === "has" || filter.op === "hasAny"
-            ? field.allowedItemValues
-            : field.allowedValues;
+        const itemOperation = filter.op === "has" || filter.op === "hasAny";
+        const type = itemOperation ? field.itemType : field.type;
+        const allowedValues = itemOperation
+          ? field.allowedItemValues
+          : field.allowedValues;
         for (const candidate of extensionFilterValues(filter)) {
           if (
             !extensionFilterValueMatches(candidate.value, type, allowedValues)
@@ -983,6 +998,15 @@ function validateExtensionScope(
             return invalidInput(
               `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
               [...path, ...candidate.path],
+              {
+                ...(allowedValues === undefined
+                  ? {}
+                  : itemOperation
+                    ? { allowedItemValues: [...allowedValues] }
+                    : { allowedValues: [...allowedValues] }),
+                allowedOperations: [...field.operations],
+                discovery,
+              },
             );
           }
         }
@@ -995,12 +1019,14 @@ function validateExtensionScope(
         return invalidInput(
           `The selected adapter does not declare the top-level extension field "${distribution.field}".`,
           path,
+          { discovery },
         );
       }
       if (field.operations.length === 0) {
         return invalidInput(
           `The extension field "${distribution.field}" is not a scalar or scalar list.`,
           path,
+          { discovery },
         );
       }
     }
@@ -1568,6 +1594,7 @@ export function createArchiveSearchOperation(
           (issue?.path ?? []).map((part) =>
             typeof part === "symbol" ? String(part) : part,
           ),
+          archiveSearchInputDiagnostic(request, issue),
         );
       }
 

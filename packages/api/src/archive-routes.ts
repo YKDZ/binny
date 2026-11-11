@@ -16,6 +16,7 @@ import {
   archiveRevisionReadSchema,
   archiveSearchInputSchema,
   archiveSearchInputIssue,
+  archiveSearchInputDiagnostic,
   archiveSearchPageSchema,
   archiveQueryContractVersion,
   archiveTimelinePageSchema,
@@ -272,11 +273,18 @@ function makeArchiveRoutes(
         if (!result.success) {
           const input = await c.req.json().catch(() => undefined);
           const issue = archiveSearchInputIssue(input, result.error.issues);
+          const diagnostic = archiveSearchInputDiagnostic(input, issue);
+          const failure = validationFailure(
+            issue === undefined ? result.error.issues : [issue],
+            { preserveOriginalMessage: true },
+          );
           return c.json(
-            validationFailure(
-              issue === undefined ? result.error.issues : [issue],
-              { preserveOriginalMessage: true },
-            ),
+            {
+              error: {
+                ...failure.error,
+                ...(diagnostic === undefined ? {} : { diagnostic }),
+              },
+            },
             400,
           );
         }

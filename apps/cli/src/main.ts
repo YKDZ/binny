@@ -19,6 +19,7 @@ import {
   archiveRevisionDiffSchema,
   archiveRevisionReadSchema,
   archiveSearchInputIssue,
+  archiveSearchInputDiagnostic,
   archiveSearchInputSchema,
   archiveSearchPageSchema,
   archiveSnapshotSequenceSchema,
@@ -828,8 +829,10 @@ const cliScheduleUpdateInputSchema = withPostgresJsonSchemaProjection(
     ),
 );
 const errorOutputSchema = z.union([
-  binErrorSchema.shape.error,
+  // Keep the strict archive error first: earlier non-strict variants would
+  // strip optional diagnostic evidence while accepting the same fields.
   archiveErrorSchema.shape.error,
+  binErrorSchema.shape.error,
   manualRunErrorSchema.shape.error,
   humanSessionErrorSchema.shape.error,
   scheduleErrorSchema.shape.error,
@@ -1371,9 +1374,71 @@ function createCliContract(identity: CliCommandIdentity) {
               ...(field.allowedValues === undefined
                 ? []
                 : [`  Allowed values: ${JSON.stringify(field.allowedValues)}`]),
+              ...(field.allowedItemValues === undefined
+                ? []
+                : [
+                    `  Allowed item values: ${JSON.stringify(field.allowedItemValues)}`,
+                  ]),
             ]),
           ]),
       "Missing and null extension values do not match filters.",
+    ]);
+  };
+  const errorPathText = (parts: readonly (string | number)[]) =>
+    parts.reduce<string>(
+      (result, part) =>
+        typeof part === "number"
+          ? `${result}[${part}]`
+          : result.length === 0
+            ? part
+            : `${result}.${part}`,
+      "",
+    );
+  const candidateValuesText = (values: readonly unknown[]) =>
+    values.map((value) => JSON.stringify(value)).join(", ");
+  const extensionDiscoveryText = (
+    discovery: NonNullable<
+      NonNullable<
+        z.infer<typeof archiveErrorSchema>["error"]["diagnostic"]
+      >["discovery"]
+    >,
+  ) => [
+    discovery.binId === undefined
+      ? `Discover extension fields declared by source adapter ${discovery.sourceAdapterId}${discovery.sourceAdapterVersion === undefined ? "" : "@" + discovery.sourceAdapterVersion} with the current service.`
+      : `Discover extension fields: ${identity.commandName} bin extension-fields ${discovery.binId}`,
+  ];
+  const apiErrorText = (error: CliApiError) => {
+    const diagnostic = "diagnostic" in error ? error.diagnostic : undefined;
+    return text.lines([
+      "Request failed: " + error.message,
+      ...("path" in error && error.path !== undefined
+        ? [`Path: ${errorPathText(error.path)}`]
+        : []),
+      ...(diagnostic?.allowedValues === undefined
+        ? []
+        : [`Allowed values: ${candidateValuesText(diagnostic.allowedValues)}`]),
+      ...(diagnostic?.allowedItemValues === undefined
+        ? []
+        : [
+            `Allowed item values: ${candidateValuesText(diagnostic.allowedItemValues)}`,
+          ]),
+      ...(diagnostic?.allowedOperations === undefined
+        ? []
+        : [
+            `Allowed operations: ${
+              diagnostic.allowedOperations.length === 0
+                ? "none"
+                : candidateValuesText(diagnostic.allowedOperations)
+            }`,
+          ]),
+      ...(diagnostic?.protocolOperations === undefined
+        ? []
+        : [
+            `Protocol operations: ${candidateValuesText(diagnostic.protocolOperations)}`,
+          ]),
+      ...(diagnostic?.discovery === undefined
+        ? []
+        : extensionDiscoveryText(diagnostic.discovery)),
     ]);
   };
   let getCliSchemaDocument: (
@@ -1390,7 +1455,7 @@ function createCliContract(identity: CliCommandIdentity) {
       description: "请求未能完成",
       exitCode: 1,
       schema: errorOutputSchema,
-      text: ({ message }: CliApiError) => text.line("操作未完成：" + message),
+      text: apiErrorText,
     },
   };
   const contract = define({
@@ -1689,12 +1754,15 @@ function createCliContract(identity: CliCommandIdentity) {
               request,
               checked.error.issues,
             );
-            return outcome.failure.apiError(
-              validationFailure(
-                issue === undefined ? checked.error.issues : [issue],
-                { preserveOriginalMessage: true },
-              ).error,
+            const failure = validationFailure(
+              issue === undefined ? checked.error.issues : [issue],
+              { preserveOriginalMessage: true },
             );
+            const diagnostic = archiveSearchInputDiagnostic(request, issue);
+            return outcome.failure.apiError({
+              ...failure.error,
+              ...(diagnostic === undefined ? {} : { diagnostic }),
+            });
           }
           const compatibilityFailure = await queryCompatibilityFailure(
             dependencies,
