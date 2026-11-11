@@ -67,10 +67,17 @@ import {
   defineCli,
   executeCli,
   helpCapability,
-  outputCapability,
   parseCliInvocation,
+  schemaCapability,
   text,
   versionCapability,
+  type AtomicTextPresenter,
+  type DataFactUnion,
+  type DataOutcome,
+  type FailureFactUnion,
+  type FailureOutcome,
+  type OutputModeDefinition,
+  type OutputModesDefinition,
   type WriteCliOutput,
 } from "@ykdz/cli-contract";
 import { isNodeBrokenPipe } from "@ykdz/cli-contract/node";
@@ -202,7 +209,7 @@ type CommandWithApiUrl<Definition> = Definition extends {
     }
   : Definition;
 
-type CommandWithApiUrlByName<Name, Definition> = Name extends "cliSchema"
+type CommandWithApiUrlByName<Name, Definition> = Name extends "cliContract"
   ? Definition
   : CommandWithApiUrl<Definition>;
 
@@ -221,6 +228,16 @@ function parsedApiUrl(invocation: unknown): string | undefined {
   }
   return invocation.input.apiUrl;
 }
+
+type CliHandlerContext = {
+  readonly input: Record<string, unknown>;
+  readonly dependencies: CliDependencies;
+  readonly outcome: {
+    readonly failure: {
+      readonly apiError: (failure: ServiceCompatibilityFailure) => unknown;
+    };
+  };
+};
 
 function stripApiUrlFromHandlerInput(
   handler: unknown,
@@ -247,6 +264,16 @@ function stripApiUrlFromHandlerInput(
   };
 }
 
+// Output modes capture the input schema at construction; command definitions must reuse it.
+const outputInputs = new WeakMap<object, z.ZodType>();
+
+// Query commands run their own compatibility checks; service info must inspect incompatible services.
+const commandsWithoutAutomaticProtocolCheck = new Set([
+  "serviceInfo",
+  "archiveSearch",
+  "archiveBatchRead",
+]);
+
 function addApiUrlOption<Commands extends Record<string, unknown>>(
   commands: Commands,
 ): {
@@ -255,20 +282,21 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
     Commands[Command]
   >;
 } {
-  // 查询命令先校验专用契约；服务信息命令用于查看不兼容服务。
-  const commandsWithoutAutomaticProtocolCheck = new Set([
-    "serviceInfo",
-    "archiveSearch",
-    "archiveBatchRead",
-  ]);
+  const offlineCommands = new Set(["cliContract"]);
   const extendedCommands = Object.fromEntries(
     Object.entries(commands).map(([name, definition]) => {
       if (!isRecord(definition) || definition.kind !== "command") {
         return [name, definition];
       }
-      if (name === "cliSchema") return [name, definition];
+      if (offlineCommands.has(name)) return [name, definition];
       if (!(definition.input instanceof z.ZodObject)) {
         throw new Error(`CLI 命令 ${name} 的输入必须是对象 schema。`);
+      }
+      const input = outputInputs.get(definition.outputs as object);
+      if (input === undefined) {
+        throw new Error(
+          `CLI command ${name} must build output modes from its input schema.`,
+        );
       }
       return [
         name,
@@ -278,16 +306,8 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
             ...(isRecord(definition.fields) ? definition.fields : {}),
             apiUrl: apiUrlOptionField,
           },
-          handler: stripApiUrlFromHandlerInput(
-            definition.handler,
-            !commandsWithoutAutomaticProtocolCheck.has(name),
-          ),
-          // safeExtend 会创建新对象；重新绑定投影以保留归档自定义 JSON 节点。
-          input: withPostgresJsonSchemaProjection(
-            definition.input.safeExtend({
-              apiUrl: z.string().url().optional(),
-            }),
-          ),
+          // Output modes were assembled with the extended input; reuse the same schema object here.
+          input,
         },
       ];
     }),
@@ -301,482 +321,11 @@ function addApiUrlOption<Commands extends Record<string, unknown>>(
   };
 }
 
-type CliSchemaField = z.infer<typeof cliSchemaFieldSchema>;
-type CliSchemaControls = {
-  readonly help: {
-    readonly longOption: string;
-    readonly shortAlias?: string;
-  };
-  readonly version?: {
-    readonly longOption: string;
-    readonly shortAlias?: string;
-    readonly value: string;
-  };
-  readonly output: {
-    readonly defaultFormat: "structured" | "text";
-    readonly formats: readonly ("structured" | "text")[];
-    readonly selector?: string;
-    readonly compatibilityFlags?: Readonly<
-      Record<string, "structured" | "text">
-    >;
-  };
-};
-
-type CliSchemaNode = {
-  readonly kind: string;
-  readonly id: string;
-  readonly parent: string;
-  readonly name: string;
-  readonly aliases: readonly string[];
-  readonly description: string;
-  readonly helpSupplement?: readonly string[];
-  readonly fields?: readonly CliSchemaField[];
-  readonly usageConstraints?: readonly unknown[];
-  readonly usage: { readonly synopsis: string };
-};
-
-type CliSchemaSource = {
-  readonly grammar: {
-    readonly root: {
-      readonly id: string;
-      readonly name: string;
-      readonly kind: string;
-    };
-    readonly nodes: readonly CliSchemaNode[];
-    readonly controls: CliSchemaControls;
-  };
-  readonly manifest: {
-    readonly commands: Readonly<Record<string, unknown>>;
-    readonly usageFailure: {
-      readonly exitCode: number;
-      readonly wire: unknown;
-    };
-    readonly wire: Readonly<Record<string, unknown>>;
-  };
-};
-
-type CliSchemaPart = z.infer<typeof cliSchemaPartSchema>;
-type CliSchemaDirectoryEntry = z.infer<typeof cliSchemaDirectoryEntrySchema>;
-type CliSchemaOutput = z.infer<typeof cliSchemaOutputContractSchema>;
-
-type CliSchemaCommandManifest = {
-  readonly input: { readonly inputSchema: unknown };
-  readonly success:
-    | { readonly kind: "completion" }
-    | {
-        readonly kind: "data";
-        readonly variants: Readonly<
-          Record<
-            string,
-            { readonly description: string; readonly exitCode: number }
-          >
-        >;
-      }
-    | {
-        readonly kind: "stream";
-        readonly records: Readonly<
-          Record<string, { readonly description: string }>
-        >;
-      };
-  readonly failures: Readonly<
-    Record<string, { readonly description: string; readonly exitCode: number }>
-  >;
-};
-
-type CliSchemaCommandWire = {
-  readonly completion?: unknown;
-  readonly data?: Readonly<Record<string, unknown>>;
-  readonly failure?: Readonly<Record<string, unknown>>;
-  readonly stream?: unknown;
-};
-
-type CliSchemaDocument = z.infer<typeof cliSchemaDocumentOutputSchema>;
-
-type CliSchemaLookup =
-  | { readonly ok: true; readonly document: CliSchemaDocument }
-  | {
-      readonly ok: false;
-      readonly reason: "unknownPath" | "invalidSelection";
-      readonly message: string;
-      readonly suggestion: string;
-    };
-
-function cliSchemaDirectoryEntries(
-  contract: CliSchemaSource,
-): readonly CliSchemaDirectoryEntry[] {
-  const nodesById = new Map(
-    contract.grammar.nodes.map((node) => [node.id, node] as const),
-  );
-  const pathFor = (id: string): string[] => {
-    const node = nodesById.get(id);
-    if (node === undefined) return [];
-    return [...pathFor(node.parent), node.name];
-  };
-
-  return contract.grammar.nodes.map((node) => ({
-    path: pathFor(node.id),
-    kind: node.kind === "command" ? "command" : "group",
-    description: node.description,
-    ...(node.aliases.length === 0 ? {} : { aliases: node.aliases }),
-  }));
-}
-
-function cliSchemaOutput(
-  command: CliSchemaCommandManifest,
-  wire: CliSchemaCommandWire,
-): CliSchemaOutput {
-  if (command.success.kind === "completion") {
-    if (wire.completion === undefined) {
-      throw new Error("CLI completion command has no compiled wire contract.");
-    }
-    return { kind: "completion", schema: wire.completion };
-  }
-  if (command.success.kind === "stream") {
-    if (wire.stream === undefined) {
-      throw new Error("CLI stream command has no compiled wire contract.");
-    }
-    return { kind: "stream", schema: wire.stream };
-  }
-
-  const variants = Object.fromEntries(
-    Object.entries(command.success.variants).map(([name, variant]) => {
-      const schema = wire.data?.[name];
-      if (schema === undefined) {
-        throw new Error(
-          `CLI command ${name} has no compiled success contract.`,
-        );
-      }
-      return [
-        name,
-        {
-          description: variant.description,
-          exitCode: variant.exitCode,
-          schema,
-        },
-      ];
-    }),
-  );
-  return { kind: "data", variants };
-}
-
-function cliSchemaUsageFailure(
-  usageFailure: { readonly exitCode: number; readonly wire: unknown },
-  commandId: string,
-): { readonly exitCode: number; readonly schema: unknown } {
-  if (!isRecord(usageFailure.wire) || !Array.isArray(usageFailure.wire.oneOf)) {
-    throw new Error("The CLI usage failure contract is invalid.");
-  }
-  const variants = usageFailure.wire.oneOf.filter((variant) => {
-    if (!isRecord(variant) || !isRecord(variant.properties)) return false;
-    const command = variant.properties.command;
-    return isRecord(command) && command.const === commandId;
-  });
-  if (variants.length !== 1) {
-    throw new Error(
-      `The CLI usage failure contract for ${commandId} is invalid.`,
-    );
-  }
-  return {
-    exitCode: usageFailure.exitCode,
-    schema: { ...usageFailure.wire, oneOf: variants },
-  };
-}
-
-/**
- * Builds the offline `schema` command result from cli-contract's compiled declaration.
- * `commandPath` contains the same command tokens accepted after `schema`; an omitted
- * path returns a small directory, a group path returns its immediate children, and
- * an executable path returns its summary unless a contract part is requested. A
- * pathless `full` selection returns the complete declaration; a command-scoped `full`
- * selection remains limited to that command. Each
- * JSON Schema subtree is copied intact so its local `$defs` and `$ref` links remain
- * resolvable. The errors part includes the selected command's usage failures and
- * declared failure variants. Unknown paths and invalid part selections include a corrective hint.
- * This lookup only reads the in-process CLI declaration; it never contacts the service
- * or discovers deployment-specific adapter declarations.
- */
-function cliSchemaDocument(
-  contract: CliSchemaSource,
-  commandPath: readonly string[],
-  part?: CliSchemaPart,
-): CliSchemaLookup {
-  const directoryEntries = cliSchemaDirectoryEntries(contract);
-  const rootName = contract.grammar.root.name;
-  if (commandPath.length === 0) {
-    if (part === undefined) {
-      return {
-        ok: true,
-        document: {
-          kind: "directory",
-          root: rootName,
-          commands: directoryEntries,
-        },
-      };
-    }
-    if (part === "full") {
-      return {
-        ok: true,
-        document: {
-          kind: "contract",
-          root: rootName,
-          path: [],
-          part,
-          contract: {
-            grammar: contract.grammar,
-            manifest: contract.manifest,
-          },
-        },
-      };
-    }
-    return {
-      ok: false,
-      reason: "invalidSelection",
-      message:
-        "Select an executable command before requesting a contract part.",
-      suggestion: `Run ${rootName} schema to browse commands, then select one, for example: ${rootName} schema archive search --part input.`,
-    };
-  }
-
-  let parent = contract.grammar.root.id;
-  const resolvedNodes: CliSchemaNode[] = [];
-  let selectedNode: CliSchemaNode | undefined;
-  for (const segment of commandPath) {
-    selectedNode = contract.grammar.nodes.find(
-      (node) =>
-        node.parent === parent &&
-        (node.name === segment || node.aliases.includes(segment)),
-    );
-    if (selectedNode === undefined) {
-      const invalidSegment = commandPath[resolvedNodes.length] ?? segment;
-      const dotSegments = invalidSegment.split(".");
-      let correctedParent = parent;
-      let correctionIsValid = dotSegments.length > 1;
-      for (const dotSegment of dotSegments) {
-        const correctedNode = contract.grammar.nodes.find(
-          (node) =>
-            node.parent === correctedParent &&
-            (node.name === dotSegment || node.aliases.includes(dotSegment)),
-        );
-        if (correctedNode === undefined) {
-          correctionIsValid = false;
-          break;
-        }
-        correctedParent = correctedNode.id;
-      }
-      const suggestion = correctionIsValid
-        ? `Use separate command tokens: ${rootName} schema ${[...commandPath.slice(0, resolvedNodes.length), ...dotSegments, ...commandPath.slice(resolvedNodes.length + 1)].join(" ")}.`
-        : `Run ${rootName} schema to see valid command paths. Pass each command token as a separate argument.`;
-      return {
-        ok: false,
-        reason: "unknownPath",
-        message: `Command path "${commandPath.join(" ")}" does not exist.`,
-        suggestion,
-      };
-    }
-    resolvedNodes.push(selectedNode);
-    parent = selectedNode.id;
-  }
-
-  selectedNode = resolvedNodes[resolvedNodes.length - 1];
-  if (selectedNode === undefined) {
-    return {
-      ok: false,
-      reason: "unknownPath",
-      message: `Command path "${commandPath.join(" ")}" does not exist.`,
-      suggestion: `Run ${rootName} schema to see valid command paths.`,
-    };
-  }
-  const path = resolvedNodes.map(({ name }) => name);
-
-  if (selectedNode.kind !== "command") {
-    if (part !== undefined) {
-      return {
-        ok: false,
-        reason: "invalidSelection",
-        message: `Command group "${path.join(" ")}" has no contract parts.`,
-        suggestion: `Select an executable command in this group, for example: ${rootName} schema ${path.join(" ")} <command> --part input.`,
-      };
-    }
-    return {
-      ok: true,
-      document: {
-        kind: "group",
-        root: rootName,
-        path,
-        description: selectedNode.description,
-        ...(selectedNode.helpSupplement === undefined
-          ? {}
-          : { helpSupplement: selectedNode.helpSupplement }),
-        usage: selectedNode.usage.synopsis,
-        commands: directoryEntries.filter(
-          (entry) =>
-            entry.path.length === path.length + 1 &&
-            path.every((segment, index) => entry.path[index] === segment),
-        ),
-      },
-    };
-  }
-
-  const summary = {
-    root: rootName,
-    path,
-    description: selectedNode.description,
-    ...(selectedNode.helpSupplement === undefined
-      ? {}
-      : { helpSupplement: selectedNode.helpSupplement }),
-    usage: selectedNode.usage.synopsis,
-    fields: selectedNode.fields ?? [],
-    controls: contract.grammar.controls,
-    ...(selectedNode.usageConstraints === undefined ||
-    selectedNode.usageConstraints.length === 0
-      ? {}
-      : { usageConstraints: selectedNode.usageConstraints }),
-    parts: ["input", "output", "errors"] as const,
-    fullAvailable: true as const,
-  };
-  const commandSummary = { kind: "command" as const, ...summary };
-  if (part === undefined) {
-    return { ok: true, document: commandSummary };
-  }
-
-  const manifestCommand = contract.manifest.commands[
-    selectedNode.id
-  ] as CliSchemaCommandManifest;
-  const commandWire = contract.manifest.wire[
-    selectedNode.id
-  ] as CliSchemaCommandWire;
-  const input = { schema: manifestCommand.input.inputSchema };
-  const output = cliSchemaOutput(manifestCommand, commandWire);
-  const errors = {
-    usage: cliSchemaUsageFailure(
-      contract.manifest.usageFailure,
-      selectedNode.id,
-    ),
-    variants: Object.fromEntries(
-      Object.entries(manifestCommand.failures).map(([name, failure]) => {
-        const schema = commandWire.failure?.[name];
-        if (schema === undefined) {
-          throw new Error(`CLI failure ${name} has no compiled wire contract.`);
-        }
-        return [
-          name,
-          {
-            description: failure.description,
-            exitCode: failure.exitCode,
-            schema,
-          },
-        ];
-      }),
-    ),
-  };
-  const contractDocument =
-    part === "full"
-      ? { summary: commandSummary, input, output, errors }
-      : {
-          [part]:
-            part === "input" ? input : part === "output" ? output : errors,
-        };
-  return {
-    ok: true,
-    document: {
-      kind: "contract",
-      root: rootName,
-      path,
-      part,
-      contract: contractDocument,
-    },
-  };
-}
-
 const cliBinDetailsSchema = withPostgresJsonSchemaProjection(binDetailsSchema);
 const cliBinListSchema = withPostgresJsonSchemaProjection(binListSchema);
 const cliBinConfigSchemaDiscoverySchema = withPostgresJsonSchemaProjection(
   binConfigSchemaDiscoverySchema,
 );
-
-function cliSchemaCommandLine(root: string, path: readonly string[]): string {
-  return [root, ...path].join(" ");
-}
-
-function cliSchemaFieldText(
-  field: z.infer<typeof cliSchemaFieldSchema>,
-): string {
-  const spelling =
-    field.longOption ??
-    (field.kind === "positional" || field.kind === "variadicPositional"
-      ? `<${field.key}>`
-      : field.key);
-  const aliases = field.shortAlias === undefined ? "" : `, ${field.shortAlias}`;
-  const requirement = field.required ? "Required" : "Optional";
-  const defaultValue =
-    field.default === undefined
-      ? ""
-      : `; default ${JSON.stringify(field.default)}`;
-  const choices =
-    field.choices === undefined
-      ? ""
-      : `; allowed values ${field.choices.join(", ")}`;
-  return `  ${spelling}${aliases} (${requirement}) — ${field.description}${defaultValue}${choices}`;
-}
-
-function renderCliSchemaText(
-  document: CliSchemaDocument,
-): ReturnType<typeof text.lines> {
-  if (document.kind === "directory") {
-    return text.lines([
-      `Local CLI command catalog: ${document.root}`,
-      ...document.commands.map(
-        ({ path, kind, description }) =>
-          `  [${kind === "group" ? "Command group" : "Command"}] ${path.join(" ")} — ${description}`,
-      ),
-    ]);
-  }
-  if (document.kind === "group") {
-    return text.lines([
-      `Command group: ${cliSchemaCommandLine(document.root, document.path)}`,
-      `Description: ${document.description}`,
-      `Usage: ${document.usage}`,
-      "Commands:",
-      ...document.commands.map(
-        ({ path, kind, description }) =>
-          `  [${kind === "group" ? "Command group" : "Command"}] ${path.join(" ")} — ${description}`,
-      ),
-      ...(document.helpSupplement ?? []),
-    ]);
-  }
-  if (document.kind === "command") {
-    return text.lines([
-      `Command: ${cliSchemaCommandLine(document.root, document.path)}`,
-      `Description: ${document.description}`,
-      `Usage: ${document.usage}`,
-      "Parameters and options:",
-      ...document.fields.map(cliSchemaFieldText),
-      "Global controls:",
-      `  ${document.controls.help.longOption}${document.controls.help.shortAlias === undefined ? "" : `, ${document.controls.help.shortAlias}`} — show help`,
-      ...(document.controls.version === undefined
-        ? []
-        : [
-            `  ${document.controls.version.longOption}${document.controls.version.shortAlias === undefined ? "" : `, ${document.controls.version.shortAlias}`} — show version`,
-          ]),
-      ...(document.controls.output.selector === undefined
-        ? []
-        : [
-            `  ${document.controls.output.selector} <${document.controls.output.formats.join("|")}> — default ${document.controls.output.defaultFormat}`,
-          ]),
-      ...(document.usageConstraints ?? []).map(
-        (constraint) => `  Input constraint: ${JSON.stringify(constraint)}`,
-      ),
-      `Available contract parts: ${document.parts.join(", ")}; use --part full to read the complete contract.`,
-      ...(document.helpSupplement ?? []),
-    ]);
-  }
-  const prettyContract = JSON.stringify(document.contract, null, 2);
-  return text.lines([
-    `CLI contract: ${cliSchemaCommandLine(document.root, document.path)}`,
-    `Contract part: ${document.part}`,
-    ...prettyContract.split("\n"),
-  ]);
-}
 
 const cliBinActionDiscoverySchema = withPostgresJsonSchemaProjection(
   z.union([sourceAdapterActionListSchema, sourceAdapterActionDiscoverySchema]),
@@ -848,165 +397,6 @@ const errorOutputSchema = z.union([
     })
     .strict(),
 ]);
-const cliSchemaPartSchema = z.enum(["input", "output", "errors", "full"]);
-const cliSchemaDirectoryEntrySchema = z
-  .object({
-    path: z.array(z.string()).readonly(),
-    kind: z.enum(["group", "command"]),
-    description: z.string(),
-    aliases: z.array(z.string()).readonly().optional(),
-  })
-  .strict();
-const cliSchemaFieldSchema = z
-  .object({
-    kind: z.enum([
-      "flag",
-      "positional",
-      "repeatableOption",
-      "variadicPositional",
-      "valueOption",
-    ]),
-    key: z.string(),
-    description: z.string(),
-    required: z.boolean(),
-    default: z.unknown().optional(),
-    choices: z.array(z.string()).readonly().optional(),
-    longOption: z.string().optional(),
-    shortAlias: z.string().optional(),
-    negatedLongOption: z.string().optional(),
-  })
-  .strict();
-const cliSchemaControlsSchema = z
-  .object({
-    help: z
-      .object({
-        longOption: z.string(),
-        shortAlias: z.string().optional(),
-        headings: z.unknown().optional(),
-        wording: z.unknown().optional(),
-      })
-      .strict(),
-    version: z
-      .object({
-        longOption: z.string(),
-        shortAlias: z.string().optional(),
-        value: z.string(),
-        description: z.string().optional(),
-      })
-      .strict()
-      .optional(),
-    output: z
-      .object({
-        defaultFormat: z.enum(["structured", "text"]),
-        formats: z.array(z.enum(["structured", "text"])).readonly(),
-        selector: z.string().optional(),
-        compatibilityFlags: z
-          .record(z.string(), z.enum(["structured", "text"]))
-          .optional(),
-      })
-      .strict(),
-  })
-  .strict();
-const cliSchemaCommandSummarySchema = z
-  .object({
-    kind: z.literal("command"),
-    root: z.string(),
-    path: z.array(z.string()).readonly(),
-    description: z.string(),
-    helpSupplement: z.array(z.string()).readonly().optional(),
-    usage: z.string(),
-    fields: z.array(cliSchemaFieldSchema).readonly(),
-    controls: cliSchemaControlsSchema,
-    usageConstraints: z.array(z.unknown()).readonly().optional(),
-    parts: z.array(z.enum(["input", "output", "errors"])).readonly(),
-    fullAvailable: z.literal(true),
-  })
-  .strict();
-const cliSchemaOutputVariantSchema = z
-  .object({
-    description: z.string(),
-    exitCode: z.number(),
-    schema: z.unknown(),
-  })
-  .strict();
-const cliSchemaOutputContractSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("completion"), schema: z.unknown() }).strict(),
-  z
-    .object({
-      kind: z.literal("data"),
-      variants: z.record(z.string(), cliSchemaOutputVariantSchema),
-    })
-    .strict(),
-  z.object({ kind: z.literal("stream"), schema: z.unknown() }).strict(),
-]);
-const cliSchemaErrorsContractSchema = z
-  .object({
-    usage: z.object({ exitCode: z.number(), schema: z.unknown() }).strict(),
-    variants: z.record(z.string(), cliSchemaOutputVariantSchema),
-  })
-  .strict();
-/**
- * Structured response for offline command discovery. The directory and summaries
- * omit command data schemas; callers request input, output, or errors separately.
- * Each selected JSON Schema is returned as a complete subtree, including its local
- * definitions. A pathless `full` request returns the complete declaration; a
- * command-scoped `full` request returns that command's summary and all three parts.
- */
-const cliSchemaDocumentOutputSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("directory"),
-      root: z.string(),
-      commands: z.array(cliSchemaDirectoryEntrySchema).readonly(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("group"),
-      root: z.string(),
-      path: z.array(z.string()).readonly(),
-      description: z.string(),
-      helpSupplement: z.array(z.string()).readonly().optional(),
-      usage: z.string(),
-      commands: z.array(cliSchemaDirectoryEntrySchema).readonly(),
-    })
-    .strict(),
-  cliSchemaCommandSummarySchema,
-  z
-    .object({
-      kind: z.literal("contract"),
-      root: z.string(),
-      path: z.array(z.string()).readonly(),
-      part: cliSchemaPartSchema,
-      contract: z
-        .object({
-          grammar: z.unknown().optional(),
-          manifest: z.unknown().optional(),
-          summary: cliSchemaCommandSummarySchema.optional(),
-          input: z.object({ schema: z.unknown() }).strict().optional(),
-          output: cliSchemaOutputContractSchema.optional(),
-          errors: cliSchemaErrorsContractSchema.optional(),
-        })
-        .strict(),
-    })
-    .strict(),
-]);
-/** Path errors preserve the exact command tokens and provide a runnable correction. */
-const cliSchemaPathFailureSchema = z
-  .object({
-    message: z.string(),
-    path: z.array(z.string()).readonly(),
-    suggestion: z.string(),
-  })
-  .strict();
-const cliSchemaSelectionFailureSchema = z
-  .object({
-    message: z.string(),
-    path: z.array(z.string()).readonly(),
-    part: cliSchemaPartSchema.optional(),
-    suggestion: z.string(),
-  })
-  .strict();
 type CliApiError = z.infer<typeof errorOutputSchema>;
 
 type ServiceCompatibilityFailure = {
@@ -1016,16 +406,6 @@ type ServiceCompatibilityFailure = {
     | "incompatible_archive_query_contract"
     | "service_capability_unavailable";
   readonly message: string;
-};
-
-type CliHandlerContext = {
-  readonly input: Record<string, unknown>;
-  readonly dependencies: CliDependencies;
-  readonly outcome: {
-    readonly failure: {
-      readonly apiError: (failure: ServiceCompatibilityFailure) => unknown;
-    };
-  };
 };
 
 async function httpApiCompatibilityFailure(
@@ -1384,6 +764,122 @@ function createCliContract(identity: CliCommandIdentity) {
       "Missing and null extension values do not match filters.",
     ]);
   };
+
+  type Variants = Readonly<
+    Record<
+      string,
+      Readonly<{
+        description: string;
+        schema: z.ZodType;
+        exitCode: number;
+      }>
+    >
+  >;
+  type TextPresenters<Definitions extends Variants> = {
+    readonly [Variant in keyof Definitions]: Definitions[Variant] extends {
+      readonly schema: infer Schema extends z.ZodType;
+    }
+      ? AtomicTextPresenter<z.output<Schema>>
+      : never;
+  };
+  type Handler<
+    Command extends string,
+    InputSchema extends z.ZodType,
+    Success extends Variants,
+    Failures extends Variants,
+  > = (
+    context: Readonly<{
+      input: z.output<InputSchema>;
+      dependencies: CliDependencies;
+      outcome: DataOutcome<Command, Success> &
+        FailureOutcome<Command, Failures>;
+    }>,
+  ) => Promise<
+    DataFactUnion<Command, Success> | FailureFactUnion<Command, Failures>
+  >;
+
+  /**
+   * Defines the two public modes of a business command from one handler and one
+   * success/failure shape. The structured mode keeps only wire schemas; the text
+   * mode adds presenters. Each invocation still executes exactly one handler.
+   */
+  function businessOutputs<
+    const Command extends string,
+    const InputSchema extends z.ZodType,
+    const Success extends Variants,
+    const Failures extends Variants,
+  >(
+    commandId: Command,
+    input: InputSchema,
+    definition: Readonly<{
+      structuredDescription: string;
+      textDescription: string;
+      success: Success;
+      failures: Failures;
+      textSuccess: TextPresenters<Success>;
+      textFailures: TextPresenters<Failures>;
+      handler: Handler<Command, InputSchema, Success, Failures>;
+    }>,
+  ): OutputModesDefinition<Command, InputSchema> {
+    const handler = stripApiUrlFromHandlerInput(
+      definition.handler,
+      !commandsWithoutAutomaticProtocolCheck.has(commandId),
+    );
+    const textSuccess = Object.fromEntries(
+      Object.entries(definition.success).map(([variant, declaration]) => [
+        variant,
+        {
+          ...declaration,
+          text: definition.textSuccess[variant as keyof Success],
+        },
+      ]),
+    );
+    const textFailures = Object.fromEntries(
+      Object.entries(definition.failures).map(([variant, declaration]) => [
+        variant,
+        {
+          ...declaration,
+          text: definition.textFailures[variant as keyof Failures],
+        },
+      ]),
+    );
+    // The library's per-command generics cannot infer this shared handler shape;
+    // defineCli still validates the compiled contract at construction time.
+    const build = (mode: {
+      readonly atomic: (definition: unknown) => OutputModeDefinition;
+    }) => ({
+      default: "structured",
+      modes: {
+        structured: mode.atomic({
+          description: definition.structuredDescription,
+          format: "structured",
+          success: { kind: "data", variants: definition.success },
+          failures: definition.failures,
+          handler,
+        }),
+        text: mode.atomic({
+          description: definition.textDescription,
+          format: "text",
+          success: { kind: "data", variants: textSuccess },
+          failures: textFailures,
+          handler,
+        }),
+      },
+    });
+    const extendedInput = withPostgresJsonSchemaProjection(
+      (input as unknown as z.ZodObject).safeExtend({
+        apiUrl: z.string().url().optional(),
+      }),
+    ) as unknown as InputSchema;
+    const outputs = define.outputModes(
+      commandId,
+      extendedInput,
+      build as never,
+    ) as OutputModesDefinition<Command, InputSchema>;
+    outputInputs.set(outputs, extendedInput);
+    return outputs;
+  }
+
   const errorPathText = (parts: readonly (string | number)[]) =>
     parts.reduce<string>(
       (result, part) =>
@@ -1441,23 +937,1647 @@ function createCliContract(identity: CliCommandIdentity) {
         : extensionDiscoveryText(diagnostic.discovery)),
     ]);
   };
-  let getCliSchemaDocument: (
-    commandPath: readonly string[],
-    part?: CliSchemaPart,
-  ) => CliSchemaLookup = () => ({
-    ok: false,
-    reason: "unknownPath",
-    message: "The local CLI command contract is not ready.",
-    suggestion: "Try again later.",
-  });
-  const failures = {
+  const failureSchemas = {
     apiError: {
       description: "请求未能完成",
       exitCode: 1,
       schema: errorOutputSchema,
-      text: apiErrorText,
     },
+  } as const;
+  const failureText = {
+    apiError: apiErrorText,
+  } as const;
+
+  const emptyInputSchema = z.object({});
+  const archiveSearchCliInputSchema = cliArchiveSearchInputSchema;
+  const archiveBatchReadCliInputSchema = z.object({
+    references: postgresTextSchema.min(1),
+  });
+  const binIdInputSchema = z.object({ id: binIdSchema });
+  const binActionsInputSchema = z.object({
+    id: binIdSchema,
+    action: sourceAdapterActionNameSchema.optional(),
+  });
+  const binUpdateInputSchema = withPostgresJsonSchemaProjection(
+    z.object({
+      id: binIdSchema,
+      identityId: identityIdSchema.optional(),
+      config: jsonObjectTextSchema.optional(),
+      browserIdleTimeoutSeconds: browserIdleTimeoutOptionSchema.optional(),
+    }),
+  );
+  const runTriggerInputSchema = withPostgresJsonSchemaProjection(
+    z.object({
+      binId: binIdSchema,
+      action: sourceAdapterActionNameSchema,
+      params: jsonObjectTextSchema.optional(),
+    }),
+  );
+  const runGetInputSchema = z.object({
+    binId: binIdSchema,
+    runId: z.string().uuid(),
+  });
+  const humanSessionInputSchema = z.object({
+    binId: binIdSchema,
+    sessionId: z.string().uuid(),
+  });
+  const scheduleIdInputSchema = z.object({
+    binId: binIdSchema,
+    scheduleId: z.string().uuid(),
+  });
+  const archiveItemInputSchema = z.object({
+    itemId: archiveIdentifierSchema,
+    binId: binIdSchema.optional(),
+    asOf: archiveSnapshotSequenceSchema.optional(),
+  });
+  const archiveDeleteInputSchema = z.object({
+    itemId: archiveIdentifierSchema,
+  });
+  const archiveTimelineInputSchema = z.object({
+    itemId: archiveIdentifierSchema,
+    binId: binIdSchema.optional(),
+    asOf: archiveSnapshotSequenceSchema.optional(),
+    limit: z
+      .string()
+      .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
+      .optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+  });
+  const archiveRelationsInputSchema = z.object({
+    itemId: archiveIdentifierSchema,
+    binId: binIdSchema,
+    direction: z.enum(["outgoing", "incoming"]),
+    asOf: archiveSnapshotSequenceSchema.optional(),
+    limit: z
+      .string()
+      .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
+      .optional(),
+    cursor: z.string().min(1).max(4096).optional(),
+  });
+  const archiveRevisionInputSchema = z.object({
+    revisionId: archiveIdentifierSchema,
+  });
+  const archiveRevisionDiffInputSchema = z.object({
+    firstRevisionId: archiveIdentifierSchema,
+    secondRevisionId: archiveIdentifierSchema,
+  });
+  const archiveCommitInputSchema = z.object({
+    commitId: archiveIdentifierSchema,
+  });
+  const archiveResourceInputSchema = z.object({
+    resourceId: archiveIdentifierSchema,
+    saveTo: z.string().min(1),
+  });
+
+  const serviceInfoSuccess = {
+    discovered: {
+      description: "Service metadata and contract links",
+      exitCode: 0,
+      schema: serviceMetadataSchema,
+    },
+  } as const;
+  const serviceInfoHandler: Handler<
+    "serviceInfo",
+    typeof emptyInputSchema,
+    typeof serviceInfoSuccess,
+    typeof failureSchemas
+  > = async ({ dependencies, outcome }) => {
+    const metadata = await dependencies.getServiceMetadata();
+    if (!metadata.ok) return outcome.failure.apiError(metadata.error);
+    return outcome.data.discovered(metadata.metadata);
   };
+  const serviceInfoOutputs = businessOutputs("serviceInfo", emptyInputSchema, {
+    structuredDescription: "Machine-readable service metadata",
+    textDescription: "Readable service metadata",
+    success: serviceInfoSuccess,
+    failures: failureSchemas,
+    textSuccess: { discovered: serviceMetadataText },
+    textFailures: failureText,
+    handler: serviceInfoHandler,
+  });
+
+  const archiveSearchSuccess = {
+    found: {
+      description: "归档搜索结果页",
+      exitCode: 0,
+      schema: archiveSearchPageSchema,
+    },
+  } as const;
+  const archiveSearchHandler: Handler<
+    "archiveSearch",
+    typeof archiveSearchCliInputSchema,
+    typeof archiveSearchSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    let source: string;
+    if (input.query !== undefined) {
+      source = input.query;
+    } else if (input.queryFile !== undefined) {
+      try {
+        source = await readFile(input.queryFile, "utf8");
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return outcome.failure.apiError({
+          code: "invalid_input",
+          message: `Cannot read search request file: ${detail}`,
+          path: ["queryFile"],
+        });
+      }
+    } else if (input.queryStdin === true) {
+      try {
+        if (dependencies.readStdin === undefined)
+          throw new Error("Standard input is not available.");
+        source = await dependencies.readStdin();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return outcome.failure.apiError({
+          code: "invalid_input",
+          message: `Cannot read search request from standard input: ${detail}`,
+          path: ["queryStdin"],
+        });
+      }
+    } else {
+      throw new Error("The archive search source constraint was bypassed.");
+    }
+
+    let request: unknown;
+    try {
+      request = JSON.parse(source) as unknown;
+    } catch {
+      const error = {
+        code: "invalid_input" as const,
+        message: "Search request must be valid JSON.",
+        path: ["query"],
+      };
+      return outcome.failure.apiError(error);
+    }
+    const checked = archiveSearchInputSchema.safeParse(request);
+    if (!checked.success) {
+      const issue = archiveSearchInputIssue(request, checked.error.issues);
+      const failure = validationFailure(
+        issue === undefined ? checked.error.issues : [issue],
+        { preserveOriginalMessage: true },
+      );
+      const diagnostic = archiveSearchInputDiagnostic(request, issue);
+      return outcome.failure.apiError({
+        ...failure.error,
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      });
+    }
+    const compatibilityFailure = await queryCompatibilityFailure(
+      dependencies,
+      serviceCapabilities.archiveSearch,
+    );
+    if (compatibilityFailure !== undefined) {
+      return outcome.failure.apiError(compatibilityFailure);
+    }
+    const response = await dependencies
+      .createClient()
+      .archives.search.$post({ json: checked.data });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (response.status === 400 || response.status === 422)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档搜索状态。");
+  };
+  const archiveSearchOutputs = businessOutputs(
+    "archiveSearch",
+    archiveSearchCliInputSchema,
+    {
+      structuredDescription: "Machine-readable archive search page",
+      textDescription: "Readable archive search page",
+      success: archiveSearchSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: archiveSearchPageText },
+      textFailures: failureText,
+      handler: archiveSearchHandler,
+    },
+  );
+
+  const archiveBatchReadSuccess = {
+    read: {
+      description: "One exact read result for every supplied reference",
+      exitCode: 0,
+      schema: archiveBatchReadResponseSchema,
+    },
+  } as const;
+  const archiveBatchReadHandler: Handler<
+    "archiveBatchRead",
+    typeof archiveBatchReadCliInputSchema,
+    typeof archiveBatchReadSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    let request: unknown;
+    try {
+      request = {
+        references: JSON.parse(input.references) as unknown,
+      };
+    } catch {
+      return outcome.failure.apiError({
+        code: "invalid_input",
+        message: "Batch read references must be valid JSON.",
+        path: ["references"],
+      });
+    }
+    const checked = archiveBatchReadInputSchema.safeParse(request);
+    if (!checked.success) {
+      return outcome.failure.apiError(
+        validationFailure(checked.error.issues, {
+          preserveOriginalMessage: true,
+        }).error,
+      );
+    }
+    const compatibilityFailure = await queryCompatibilityFailure(
+      dependencies,
+      serviceCapabilities.archiveBatchRead,
+    );
+    if (compatibilityFailure !== undefined) {
+      return outcome.failure.apiError(compatibilityFailure);
+    }
+    const response = await dependencies
+      .createClient()
+      .archives["batch-read"].$post({ json: checked.data });
+    if (response.status === 200)
+      return outcome.data.read(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 413 ||
+      response.status === 422 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("The service returned an undeclared batch-read status.");
+  };
+  const archiveBatchReadOutputs = businessOutputs(
+    "archiveBatchRead",
+    archiveBatchReadCliInputSchema,
+    {
+      structuredDescription: "Machine-readable exact revision read",
+      textDescription: "Readable exact revision read",
+      success: archiveBatchReadSuccess,
+      failures: failureSchemas,
+      textSuccess: { read: archiveBatchReadText },
+      textFailures: failureText,
+      handler: archiveBatchReadHandler,
+    },
+  );
+
+  const binListSuccess = {
+    listed: {
+      description: "bin 列表",
+      exitCode: 0,
+      schema: cliBinListSchema,
+    },
+  } as const;
+  const binListHandler: Handler<
+    "binList",
+    typeof emptyInputSchema,
+    typeof binListSuccess,
+    typeof failureSchemas
+  > = async ({ dependencies, outcome }) => {
+    const response = await dependencies.createClient().bins.$get();
+    const result = await response.json();
+    return outcome.data.listed({ bins: [...result.bins] });
+  };
+  const binListOutputs = businessOutputs("binList", emptyInputSchema, {
+    structuredDescription: "Machine-readable bin list",
+    textDescription: "Readable bin list",
+    success: binListSuccess,
+    failures: failureSchemas,
+    textSuccess: { listed: binListText },
+    textFailures: failureText,
+    handler: binListHandler,
+  });
+
+  const binGetSuccess = {
+    found: {
+      description: "Bin configuration and status",
+      exitCode: 0,
+      schema: cliBinDetailsSchema,
+    },
+  } as const;
+  const binGetHandler: Handler<
+    "binGet",
+    typeof binIdInputSchema,
+    typeof binGetSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].$get({ param: { binId: input.id } });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的读取状态。");
+  };
+  const binGetOutputs = businessOutputs("binGet", binIdInputSchema, {
+    structuredDescription: "Machine-readable bin configuration and status",
+    textDescription: "Readable bin configuration and status",
+    success: binGetSuccess,
+    failures: failureSchemas,
+    textSuccess: { found: binDetailsText },
+    textFailures: failureText,
+    handler: binGetHandler,
+  });
+
+  const binActionsSuccess = {
+    discovered: {
+      description: "Action names or one selected action declaration",
+      exitCode: 0,
+      schema: cliBinActionDiscoverySchema,
+    },
+  } as const;
+  const binActionsHandler: Handler<
+    "binActions",
+    typeof binActionsInputSchema,
+    typeof binActionsSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].actions.$get({
+        param: { binId: input.id },
+        query: input.action === undefined ? {} : { action: input.action },
+      });
+    if (response.status === 200)
+      return outcome.data.discovered(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的动作查询状态。");
+  };
+  const binActionsOutputs = businessOutputs(
+    "binActions",
+    binActionsInputSchema,
+    {
+      structuredDescription: "Machine-readable action descriptions",
+      textDescription: "Readable action descriptions",
+      success: binActionsSuccess,
+      failures: failureSchemas,
+      textSuccess: { discovered: actionDiscoveryText },
+      textFailures: failureText,
+      handler: binActionsHandler,
+    },
+  );
+
+  const binExtensionFieldsSuccess = {
+    discovered: {
+      description: "Declared extension fields and supported operations",
+      exitCode: 0,
+      schema: sourceAdapterExtensionFieldsDiscoverySchema,
+    },
+  } as const;
+  const binExtensionFieldsHandler: Handler<
+    "binExtensionFields",
+    typeof binIdInputSchema,
+    typeof binExtensionFieldsSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"]["extension-fields"].$get({
+        param: { binId: input.id },
+      });
+    if (response.status === 200)
+      return outcome.data.discovered(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error(
+      "The service returned an undeclared extension-field status.",
+    );
+  };
+  const binExtensionFieldsOutputs = businessOutputs(
+    "binExtensionFields",
+    binIdInputSchema,
+    {
+      structuredDescription: "Machine-readable extension-field declaration",
+      textDescription: "Readable extension-field declaration",
+      success: binExtensionFieldsSuccess,
+      failures: failureSchemas,
+      textSuccess: { discovered: extensionFieldsText },
+      textFailures: failureText,
+      handler: binExtensionFieldsHandler,
+    },
+  );
+
+  const binConfigSchemaSuccess = {
+    discovered: {
+      description: "Configuration schema declaration",
+      exitCode: 0,
+      schema: cliBinConfigSchemaDiscoverySchema,
+    },
+  } as const;
+  const binConfigSchemaText = (
+    declaration: z.infer<typeof cliBinConfigSchemaDiscoverySchema>,
+  ) =>
+    text.lines([
+      `Source adapter: ${declaration.sourceAdapterId}@${declaration.sourceAdapterVersion}`,
+      "Configuration schema:",
+      ...JSON.stringify(declaration.configSchema, null, 2).split("\n"),
+    ]);
+  const binConfigSchemaHandler: Handler<
+    "binConfigSchema",
+    typeof binIdInputSchema,
+    typeof binConfigSchemaSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"]["config-schema"].$get({
+        param: { binId: input.id },
+      });
+    if (response.status === 200)
+      return outcome.data.discovered(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("The service returned an undeclared schema status.");
+  };
+  const binConfigSchemaOutputs = businessOutputs(
+    "binConfigSchema",
+    binIdInputSchema,
+    {
+      structuredDescription: "Machine-readable configuration schema",
+      textDescription: "Readable configuration schema",
+      success: binConfigSchemaSuccess,
+      failures: failureSchemas,
+      textSuccess: { discovered: binConfigSchemaText },
+      textFailures: failureText,
+      handler: binConfigSchemaHandler,
+    },
+  );
+
+  const binUpdateSuccess = {
+    updated: {
+      description: "Updated bin configuration and status",
+      exitCode: 0,
+      schema: cliBinDetailsSchema,
+    },
+  } as const;
+  const binUpdateHandler: Handler<
+    "binUpdate",
+    typeof binUpdateInputSchema,
+    typeof binUpdateSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const { id, browserIdleTimeoutSeconds, ...fields } = input;
+    const idleTimeout =
+      browserIdleTimeoutSeconds === undefined
+        ? undefined
+        : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
+    if (idleTimeout !== undefined && "error" in idleTimeout)
+      return outcome.failure.apiError(idleTimeout.error);
+    const patch =
+      idleTimeout === undefined
+        ? fields
+        : {
+            ...fields,
+            browserIdleTimeoutSeconds: idleTimeout.value,
+          };
+    const response = await dependencies.createClient().bins[":binId"].$patch({
+      param: { binId: id },
+      json: patch,
+    });
+    if (response.status === 200)
+      return outcome.data.updated(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的修改状态。");
+  };
+  const binUpdateOutputs = businessOutputs("binUpdate", binUpdateInputSchema, {
+    structuredDescription: "Machine-readable updated bin configuration",
+    textDescription: "Readable updated bin configuration",
+    success: binUpdateSuccess,
+    failures: failureSchemas,
+    textSuccess: { updated: binDetailsText },
+    textFailures: failureText,
+    handler: binUpdateHandler,
+  });
+
+  const binDisableSuccess = {
+    disabled: {
+      description: "Disabled bin configuration and status",
+      exitCode: 0,
+      schema: cliBinDetailsSchema,
+    },
+  } as const;
+  const binDisableHandler: Handler<
+    "binDisable",
+    typeof binIdInputSchema,
+    typeof binDisableSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].disable.$post({ param: { binId: input.id } });
+    if (response.status === 200)
+      return outcome.data.disabled(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的停用状态。");
+  };
+  const binDisableOutputs = businessOutputs("binDisable", binIdInputSchema, {
+    structuredDescription: "Machine-readable disabled bin configuration",
+    textDescription: "Readable disabled bin configuration",
+    success: binDisableSuccess,
+    failures: failureSchemas,
+    textSuccess: { disabled: binDetailsText },
+    textFailures: failureText,
+    handler: binDisableHandler,
+  });
+
+  const binEnableSuccess = {
+    enabled: {
+      description: "Enabled bin configuration and status",
+      exitCode: 0,
+      schema: cliBinDetailsSchema,
+    },
+  } as const;
+  const binEnableHandler: Handler<
+    "binEnable",
+    typeof binIdInputSchema,
+    typeof binEnableSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].enable.$post({ param: { binId: input.id } });
+    if (response.status === 200)
+      return outcome.data.enabled(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的启用状态。");
+  };
+  const binEnableOutputs = businessOutputs("binEnable", binIdInputSchema, {
+    structuredDescription: "Machine-readable enabled bin configuration",
+    textDescription: "Readable enabled bin configuration",
+    success: binEnableSuccess,
+    failures: failureSchemas,
+    textSuccess: { enabled: binDetailsText },
+    textFailures: failureText,
+    handler: binEnableHandler,
+  });
+
+  const binRemoveSuccess = {
+    removed: {
+      description: "已移除的 bin 配置",
+      exitCode: 0,
+      schema: z.object({ removed: z.literal(true), id: binIdSchema }),
+    },
+  } as const;
+  const binRemoveHandler: Handler<
+    "binRemove",
+    typeof binIdInputSchema,
+    typeof binRemoveSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].$delete({ param: { binId: input.id } });
+    if (response.status === 200)
+      return outcome.data.removed(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的移除状态。");
+  };
+  const binRemoveOutputs = businessOutputs("binRemove", binIdInputSchema, {
+    structuredDescription: "Machine-readable removed bin configuration",
+    textDescription: "Readable removed bin configuration",
+    success: binRemoveSuccess,
+    failures: failureSchemas,
+    textSuccess: {
+      removed: ({ id }) => text.line("已移除 bin 配置：" + id),
+    },
+    textFailures: failureText,
+    handler: binRemoveHandler,
+  });
+
+  const runTriggerSuccess = {
+    triggered: {
+      description: "已排队的运行",
+      exitCode: 0,
+      schema: manualRunSchema,
+    },
+  } as const;
+  const runTriggerHandler: Handler<
+    "runTrigger",
+    typeof runTriggerInputSchema,
+    typeof runTriggerSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].runs.$post({
+        param: { binId: input.binId },
+        json: { action: input.action, params: input.params ?? {} },
+      });
+    if (response.status === 202)
+      return outcome.data.triggered(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行触发状态。");
+  };
+  const runTriggerOutputs = businessOutputs(
+    "runTrigger",
+    runTriggerInputSchema,
+    {
+      structuredDescription: "Machine-readable queued run",
+      textDescription: "Readable queued run",
+      success: runTriggerSuccess,
+      failures: failureSchemas,
+      textSuccess: { triggered: (run) => outputText("已触发运行", run) },
+      textFailures: failureText,
+      handler: runTriggerHandler,
+    },
+  );
+
+  const runListSuccess = {
+    listed: {
+      description: "Run summaries and next-page cursor",
+      exitCode: 0,
+      schema: manualRunListPageSchema,
+    },
+  } as const;
+  const runListText = (page: z.infer<typeof manualRunListPageSchema>) =>
+    text.lines([
+      "Runs",
+      ...page.runs.map(
+        (run) =>
+          `${run.createdAt}  ${run.binId}  ${run.action}  ${run.status}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
+      ),
+      ...(page.nextCursor === undefined
+        ? []
+        : [
+            `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
+          ]),
+    ]);
+  const runListHandler: Handler<
+    "runList",
+    typeof manualRunListQuerySchema,
+    typeof runListSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .runs.$get({ query: input });
+    if (response.status === 200)
+      return outcome.data.listed(await response.json());
+    if (response.status === 400)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("Service returned an undeclared run-list status.");
+  };
+  const runListOutputs = businessOutputs("runList", manualRunListQuerySchema, {
+    structuredDescription: "Machine-readable run list",
+    textDescription: "Readable run list",
+    success: runListSuccess,
+    failures: failureSchemas,
+    textSuccess: { listed: runListText },
+    textFailures: failureText,
+    handler: runListHandler,
+  });
+
+  const runGetSuccess = {
+    found: {
+      description: "Run status and result",
+      exitCode: 0,
+      schema: manualRunSchema,
+    },
+  } as const;
+  const runGetHandler: Handler<
+    "runGet",
+    typeof runGetInputSchema,
+    typeof runGetSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].runs[":runId"].$get({
+        param: { binId: input.binId, runId: input.runId },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("Service returned an undeclared run-detail status.");
+  };
+  const runGetOutputs = businessOutputs("runGet", runGetInputSchema, {
+    structuredDescription: "Machine-readable run details",
+    textDescription: "Readable run details",
+    success: runGetSuccess,
+    failures: failureSchemas,
+    textSuccess: { found: runDetailText },
+    textFailures: failureText,
+    handler: runGetHandler,
+  });
+
+  const runCancelSuccess = {
+    cancellation: {
+      description: "取消请求及停止状态",
+      exitCode: 0,
+      schema: manualRunSchema,
+    },
+  } as const;
+  const runCancelHandler: Handler<
+    "runCancel",
+    typeof runGetInputSchema,
+    typeof runCancelSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].runs[":runId"].cancel.$post({
+        param: { binId: input.binId, runId: input.runId },
+      });
+    if (response.status === 200)
+      return outcome.data.cancellation(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行取消状态。");
+  };
+  const runCancelOutputs = businessOutputs("runCancel", runGetInputSchema, {
+    structuredDescription: "Machine-readable run cancellation status",
+    textDescription: "Readable run cancellation status",
+    success: runCancelSuccess,
+    failures: failureSchemas,
+    textSuccess: {
+      cancellation: (run) => outputText("运行取消状态", run),
+    },
+    textFailures: failureText,
+    handler: runCancelHandler,
+  });
+
+  const humanOpenInputSchema = z.object({ binId: binIdSchema });
+  const humanOpenSuccess = {
+    opened: {
+      description: "人工会话状态和临时入口",
+      exitCode: 0,
+      schema: humanSessionCreatedSchema.extend({
+        viewerUrl: z.url(),
+      }),
+    },
+  } as const;
+  const humanOpenHandler: Handler<
+    "humanOpen",
+    typeof humanOpenInputSchema,
+    typeof humanOpenSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"]["human-sessions"].$post({
+        param: { binId: input.binId },
+      });
+    if (response.status === 201) {
+      const session = await response.json();
+      return outcome.data.opened({
+        ...session,
+        viewerUrl: new URL(session.viewerPath, dependencies.apiUrl).href,
+      });
+    }
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的浏览器会话状态。");
+  };
+  const humanOpenOutputs = businessOutputs("humanOpen", humanOpenInputSchema, {
+    structuredDescription: "Machine-readable browser session",
+    textDescription: "Readable browser session",
+    success: humanOpenSuccess,
+    failures: failureSchemas,
+    textSuccess: { opened: (session) => outputText("浏览器维护入口", session) },
+    textFailures: failureText,
+    handler: humanOpenHandler,
+  });
+
+  const humanGetSuccess = {
+    found: {
+      description: "人工会话状态",
+      exitCode: 0,
+      schema: humanSessionSchema,
+    },
+  } as const;
+  const humanGetHandler: Handler<
+    "humanGet",
+    typeof humanSessionInputSchema,
+    typeof humanGetSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"]["human-sessions"][":sessionId"].$get({
+        param: { binId: input.binId, sessionId: input.sessionId },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的浏览器会话读取状态。");
+  };
+  const humanGetOutputs = businessOutputs("humanGet", humanSessionInputSchema, {
+    structuredDescription: "Machine-readable browser session state",
+    textDescription: "Readable browser session state",
+    success: humanGetSuccess,
+    failures: failureSchemas,
+    textSuccess: { found: (session) => outputText("浏览器会话状态", session) },
+    textFailures: failureText,
+    handler: humanGetHandler,
+  });
+
+  const humanCloseSuccess = {
+    closed: {
+      description: "人工会话关闭状态",
+      exitCode: 0,
+      schema: humanSessionSchema,
+    },
+  } as const;
+  const humanCloseHandler: Handler<
+    "humanClose",
+    typeof humanSessionInputSchema,
+    typeof humanCloseSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"]["human-sessions"][":sessionId"].close.$post({
+        param: { binId: input.binId, sessionId: input.sessionId },
+      });
+    if (response.status === 200)
+      return outcome.data.closed(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的浏览器会话关闭状态。");
+  };
+  const humanCloseOutputs = businessOutputs(
+    "humanClose",
+    humanSessionInputSchema,
+    {
+      structuredDescription: "Machine-readable browser session closure",
+      textDescription: "Readable browser session closure",
+      success: humanCloseSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        closed: (session) => outputText("浏览器会话关闭状态", session),
+      },
+      textFailures: failureText,
+      handler: humanCloseHandler,
+    },
+  );
+
+  const scheduleCreateSuccess = {
+    created: {
+      description: "已声明的运行计划",
+      exitCode: 0,
+      schema: scheduleSchema,
+    },
+  } as const;
+  const scheduleCreateHandler: Handler<
+    "scheduleCreate",
+    typeof cliScheduleCreateInputSchema,
+    typeof scheduleCreateSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const json = scheduleCreateInputSchema.parse({
+      expression: input.expression,
+      timeZone: input.timeZone,
+      action: input.action,
+      params: input.params ?? {},
+      overlapPolicy: input.overlapPolicy,
+      enabled: !(input.disabled ?? false),
+    });
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules.$post({
+        param: { binId: input.binId },
+        json,
+      });
+    if (response.status === 201)
+      return outcome.data.created(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行计划创建状态。");
+  };
+  const scheduleCreateOutputs = businessOutputs(
+    "scheduleCreate",
+    cliScheduleCreateInputSchema,
+    {
+      structuredDescription: "Machine-readable schedule details",
+      textDescription: "Readable schedule details",
+      success: scheduleCreateSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        created: (schedule) => outputText("已创建运行计划", schedule),
+      },
+      textFailures: failureText,
+      handler: scheduleCreateHandler,
+    },
+  );
+
+  const scheduleListSuccess = {
+    listed: {
+      description: "Schedule summaries and next-page cursor",
+      exitCode: 0,
+      schema: scheduleListPageSchema,
+    },
+  } as const;
+  const scheduleListText = (page: z.infer<typeof scheduleListPageSchema>) =>
+    text.lines([
+      "Schedules",
+      ...page.schedules.map(
+        (schedule) =>
+          `${schedule.enabled ? "enabled" : "disabled"}  ${schedule.binId}  ${schedule.action}  ${schedule.nextDueAt}  ${schedule.scheduleId}  ${identity.commandName} schedule get ${schedule.binId} ${schedule.scheduleId}`,
+      ),
+      ...(page.nextCursor === undefined
+        ? []
+        : [
+            `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
+          ]),
+    ]);
+  const scheduleListHandler: Handler<
+    "scheduleList",
+    typeof scheduleListQuerySchema,
+    typeof scheduleListSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .schedules.$get({ query: input });
+    if (response.status === 200)
+      return outcome.data.listed(await response.json());
+    if (response.status === 400)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("Service returned an undeclared schedule-list status.");
+  };
+  const scheduleListOutputs = businessOutputs(
+    "scheduleList",
+    scheduleListQuerySchema,
+    {
+      structuredDescription: "Machine-readable schedule list",
+      textDescription: "Readable schedule list",
+      success: scheduleListSuccess,
+      failures: failureSchemas,
+      textSuccess: { listed: scheduleListText },
+      textFailures: failureText,
+      handler: scheduleListHandler,
+    },
+  );
+
+  const scheduleGetSuccess = {
+    found: {
+      description: "Schedule details and action parameters",
+      exitCode: 0,
+      schema: scheduleSchema,
+    },
+  } as const;
+  const scheduleGetHandler: Handler<
+    "scheduleGet",
+    typeof scheduleIdInputSchema,
+    typeof scheduleGetSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules[":scheduleId"].$get({
+        param: input,
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("Service returned an undeclared schedule-detail status.");
+  };
+  const scheduleGetOutputs = businessOutputs(
+    "scheduleGet",
+    scheduleIdInputSchema,
+    {
+      structuredDescription: "Machine-readable schedule details",
+      textDescription: "Readable schedule details",
+      success: scheduleGetSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: scheduleDetailText },
+      textFailures: failureText,
+      handler: scheduleGetHandler,
+    },
+  );
+
+  const scheduleUpdateSuccess = {
+    updated: {
+      description: "已修改的运行计划",
+      exitCode: 0,
+      schema: scheduleSchema,
+    },
+  } as const;
+  const scheduleUpdateHandler: Handler<
+    "scheduleUpdate",
+    typeof cliScheduleUpdateInputSchema,
+    typeof scheduleUpdateSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const { binId, scheduleId, ...patch } = input;
+    const json = scheduleUpdateInputSchema.parse(patch);
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules[":scheduleId"].$patch({
+        param: { binId, scheduleId },
+        json,
+      });
+    if (response.status === 200)
+      return outcome.data.updated(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行计划修改状态。");
+  };
+  const scheduleUpdateOutputs = businessOutputs(
+    "scheduleUpdate",
+    cliScheduleUpdateInputSchema,
+    {
+      structuredDescription: "Machine-readable updated schedule",
+      textDescription: "Readable updated schedule",
+      success: scheduleUpdateSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        updated: (schedule) => outputText("已修改运行计划", schedule),
+      },
+      textFailures: failureText,
+      handler: scheduleUpdateHandler,
+    },
+  );
+
+  const scheduleDisableSuccess = {
+    disabled: {
+      description: "已停用的运行计划",
+      exitCode: 0,
+      schema: scheduleSchema,
+    },
+  } as const;
+  const scheduleDisableHandler: Handler<
+    "scheduleDisable",
+    typeof scheduleIdInputSchema,
+    typeof scheduleDisableSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules[":scheduleId"].disable.$post({
+        param: input,
+      });
+    if (response.status === 200)
+      return outcome.data.disabled(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行计划停用状态。");
+  };
+  const scheduleDisableOutputs = businessOutputs(
+    "scheduleDisable",
+    scheduleIdInputSchema,
+    {
+      structuredDescription: "Machine-readable disabled schedule",
+      textDescription: "Readable disabled schedule",
+      success: scheduleDisableSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        disabled: (schedule) => outputText("已停用运行计划", schedule),
+      },
+      textFailures: failureText,
+      handler: scheduleDisableHandler,
+    },
+  );
+
+  const scheduleEnableSuccess = {
+    enabled: {
+      description: "已启用的运行计划",
+      exitCode: 0,
+      schema: scheduleSchema,
+    },
+  } as const;
+  const scheduleEnableHandler: Handler<
+    "scheduleEnable",
+    typeof scheduleIdInputSchema,
+    typeof scheduleEnableSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules[":scheduleId"].enable.$post({
+        param: input,
+      });
+    if (response.status === 200)
+      return outcome.data.enabled(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行计划启用状态。");
+  };
+  const scheduleEnableOutputs = businessOutputs(
+    "scheduleEnable",
+    scheduleIdInputSchema,
+    {
+      structuredDescription: "Machine-readable enabled schedule",
+      textDescription: "Readable enabled schedule",
+      success: scheduleEnableSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        enabled: (schedule) => outputText("已启用运行计划", schedule),
+      },
+      textFailures: failureText,
+      handler: scheduleEnableHandler,
+    },
+  );
+
+  const scheduleRemoveSuccess = {
+    removed: {
+      description: "已移除的运行计划",
+      exitCode: 0,
+      schema: scheduleDeleteResultSchema,
+    },
+  } as const;
+  const scheduleRemoveHandler: Handler<
+    "scheduleRemove",
+    typeof scheduleIdInputSchema,
+    typeof scheduleRemoveSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .bins[":binId"].schedules[":scheduleId"].$delete({
+        param: input,
+      });
+    if (response.status === 200)
+      return outcome.data.removed(await response.json());
+    if (response.status === 400 || response.status === 404)
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的运行计划移除状态。");
+  };
+  const scheduleRemoveOutputs = businessOutputs(
+    "scheduleRemove",
+    scheduleIdInputSchema,
+    {
+      structuredDescription: "Machine-readable removed schedule",
+      textDescription: "Readable removed schedule",
+      success: scheduleRemoveSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        removed: ({ scheduleId }) => text.line("已移除运行计划：" + scheduleId),
+      },
+      textFailures: failureText,
+      handler: scheduleRemoveHandler,
+    },
+  );
+
+  const archiveItemSuccess = {
+    found: {
+      description: "归档条目及观察历史",
+      exitCode: 0,
+      schema: archiveItemReadSchema,
+    },
+  } as const;
+  const archiveItemHandler: Handler<
+    "archiveItem",
+    typeof archiveItemInputSchema,
+    typeof archiveItemSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.items[":itemId"].$get({
+        param: { itemId: input.itemId },
+        query: {
+          ...(input.binId === undefined ? {} : { binId: input.binId }),
+          ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+        },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档条目读取状态。");
+  };
+  const archiveItemOutputs = businessOutputs(
+    "archiveItem",
+    archiveItemInputSchema,
+    {
+      structuredDescription: "Machine-readable archive item",
+      textDescription: "Readable archive item",
+      success: archiveItemSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (item) => outputText("归档条目", item) },
+      textFailures: failureText,
+      handler: archiveItemHandler,
+    },
+  );
+
+  const archiveDeleteSuccess = {
+    deleted: {
+      description: "已删除的归档条目",
+      exitCode: 0,
+      schema: archiveItemDeletionResultSchema,
+    },
+  } as const;
+  const archiveDeleteHandler: Handler<
+    "archiveDelete",
+    typeof archiveDeleteInputSchema,
+    typeof archiveDeleteSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.items[":itemId"].$delete({
+        param: { itemId: input.itemId },
+      });
+    if (response.status === 200)
+      return outcome.data.deleted(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档条目删除状态。");
+  };
+  const archiveDeleteOutputs = businessOutputs(
+    "archiveDelete",
+    archiveDeleteInputSchema,
+    {
+      structuredDescription: "Machine-readable archive deletion result",
+      textDescription: "Readable archive deletion result",
+      success: archiveDeleteSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        deleted: ({ itemId, deletedItemIds }) =>
+          text.line(
+            "已删除归档条目：" +
+              itemId +
+              "；本次共删除 " +
+              String(deletedItemIds.length) +
+              " 项，包含各 bin 当前未撤回声明指向的条目。",
+          ),
+      },
+      textFailures: failureText,
+      handler: archiveDeleteHandler,
+    },
+  );
+
+  const archiveTimelineSuccess = {
+    found: {
+      description: "一页观察时间线",
+      exitCode: 0,
+      schema: archiveTimelinePageSchema,
+    },
+  } as const;
+  const archiveTimelineHandler: Handler<
+    "archiveTimeline",
+    typeof archiveTimelineInputSchema,
+    typeof archiveTimelineSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.items[":itemId"].timeline.$get({
+        param: { itemId: input.itemId },
+        query: {
+          ...(input.binId === undefined ? {} : { binId: input.binId }),
+          ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的时间线读取状态。");
+  };
+  const archiveTimelineOutputs = businessOutputs(
+    "archiveTimeline",
+    archiveTimelineInputSchema,
+    {
+      structuredDescription: "Machine-readable observation timeline",
+      textDescription: "Readable observation timeline",
+      success: archiveTimelineSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (timeline) => outputText("观察时间线", timeline) },
+      textFailures: failureText,
+      handler: archiveTimelineHandler,
+    },
+  );
+
+  const archiveRelationsSuccess = {
+    found: {
+      description: "一页入向或出向关系",
+      exitCode: 0,
+      schema: archiveRelationPageSchema,
+    },
+  } as const;
+  const archiveRelationsHandler: Handler<
+    "archiveRelations",
+    typeof archiveRelationsInputSchema,
+    typeof archiveRelationsSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.items[":itemId"].relations.$get({
+        param: { itemId: input.itemId },
+        query: {
+          binId: input.binId,
+          direction: input.direction,
+          ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的关系读取状态。");
+  };
+  const archiveRelationsOutputs = businessOutputs(
+    "archiveRelations",
+    archiveRelationsInputSchema,
+    {
+      structuredDescription: "Machine-readable object relations",
+      textDescription: "Readable object relations",
+      success: archiveRelationsSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (page) => outputText("对象关系", page) },
+      textFailures: failureText,
+      handler: archiveRelationsHandler,
+    },
+  );
+
+  const archiveRevisionSuccess = {
+    found: {
+      description: "不可变内容版本",
+      exitCode: 0,
+      schema: archiveRevisionReadSchema,
+    },
+  } as const;
+  const archiveRevisionHandler: Handler<
+    "archiveRevision",
+    typeof archiveRevisionInputSchema,
+    typeof archiveRevisionSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.revisions[":revisionId"].$get({
+        param: { revisionId: input.revisionId },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档版本读取状态。");
+  };
+  const archiveRevisionOutputs = businessOutputs(
+    "archiveRevision",
+    archiveRevisionInputSchema,
+    {
+      structuredDescription: "Machine-readable content revision",
+      textDescription: "Readable content revision",
+      success: archiveRevisionSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (revision) => outputText("内容版本", revision) },
+      textFailures: failureText,
+      handler: archiveRevisionHandler,
+    },
+  );
+
+  const archiveRevisionDiffSuccess = {
+    found: {
+      description: "内容版本差异",
+      exitCode: 0,
+      schema: archiveRevisionDiffSchema,
+    },
+  } as const;
+  const archiveRevisionDiffHandler: Handler<
+    "archiveRevisionDiff",
+    typeof archiveRevisionDiffInputSchema,
+    typeof archiveRevisionDiffSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.revisions[":firstRevisionId"].diff[":secondRevisionId"].$get({
+        param: {
+          firstRevisionId: input.firstRevisionId,
+          secondRevisionId: input.secondRevisionId,
+        },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档版本比较状态。");
+  };
+  const archiveRevisionDiffOutputs = businessOutputs(
+    "archiveRevisionDiff",
+    archiveRevisionDiffInputSchema,
+    {
+      structuredDescription: "Machine-readable content revision diff",
+      textDescription: "Readable content revision diff",
+      success: archiveRevisionDiffSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (diff) => outputText("内容版本差异", diff) },
+      textFailures: failureText,
+      handler: archiveRevisionDiffHandler,
+    },
+  );
+
+  const archiveCommitSuccess = {
+    found: {
+      description: "归档提交依据",
+      exitCode: 0,
+      schema: archiveCommitSchema,
+    },
+  } as const;
+  const archiveCommitHandler: Handler<
+    "archiveCommit",
+    typeof archiveCommitInputSchema,
+    typeof archiveCommitSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .archives.commits[":commitId"].$get({
+        param: { commitId: input.commitId },
+      });
+    if (response.status === 200)
+      return outcome.data.found(await response.json());
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档提交读取状态。");
+  };
+  const archiveCommitOutputs = businessOutputs(
+    "archiveCommit",
+    archiveCommitInputSchema,
+    {
+      structuredDescription: "Machine-readable archive commit",
+      textDescription: "Readable archive commit",
+      success: archiveCommitSuccess,
+      failures: failureSchemas,
+      textSuccess: { found: (commit) => outputText("归档提交", commit) },
+      textFailures: failureText,
+      handler: archiveCommitHandler,
+    },
+  );
+
+  const archiveResourceSuccess = {
+    downloaded: {
+      description: "归档资源元信息与本地保存位置",
+      exitCode: 0,
+      schema: archiveResourceMetadataSchema.extend({
+        savedTo: z.string(),
+      }),
+    },
+  } as const;
+  const archiveResourceHandler: Handler<
+    "archiveResource",
+    typeof archiveResourceInputSchema,
+    typeof archiveResourceSuccess,
+    typeof failureSchemas
+  > = async ({ input, dependencies, outcome }) => {
+    const response = await dependencies
+      .createClient()
+      .resources[":resourceId"].$get({
+        param: { resourceId: input.resourceId },
+      });
+    if (response.status === 200) {
+      const checkedMetadata = archiveResourceMetadataSchema.safeParse({
+        resourceId:
+          response.headers.get("x-binny-resource-id") ?? input.resourceId,
+        sha256: response.headers.get("etag")?.replace(/^"|"$/gu, ""),
+        mediaType: response.headers.get("content-type"),
+        size: Number(response.headers.get("content-length")),
+      });
+      if (!checkedMetadata.success) {
+        throw new Error("服务返回的归档资源元信息无效。");
+      }
+      await saveResourceBody(response, input.saveTo);
+      return outcome.data.downloaded({
+        ...checkedMetadata.data,
+        savedTo: input.saveTo,
+      });
+    }
+    if (
+      response.status === 400 ||
+      response.status === 404 ||
+      response.status === 409 ||
+      response.status === 503
+    )
+      return outcome.failure.apiError((await response.json()).error);
+    throw new Error("服务返回了未声明的归档资源读取状态。");
+  };
+  const archiveResourceOutputs = businessOutputs(
+    "archiveResource",
+    archiveResourceInputSchema,
+    {
+      structuredDescription: "Machine-readable saved archive resource",
+      textDescription: "Readable saved archive resource",
+      success: archiveResourceSuccess,
+      failures: failureSchemas,
+      textSuccess: {
+        downloaded: ({ savedTo, size }) =>
+          text.line(`已保存归档资源至 ${savedTo}（${size} 字节）。`),
+      },
+      textFailures: failureText,
+      handler: archiveResourceHandler,
+    },
+  );
+
+  let getFullContract:
+    | (() => {
+        readonly grammar: unknown;
+        readonly manifest: unknown;
+      })
+    | undefined;
+  const cliContractSuccess = {
+    exported: {
+      description: "Complete installed CLI grammar and manifest",
+      exitCode: 0,
+      schema: z.object({ grammar: z.unknown(), manifest: z.unknown() }),
+    },
+  } as const;
+  const cliContractOutputs = define.outputModes(
+    "cliContract",
+    emptyInputSchema,
+    (mode) => ({
+      default: "structured",
+      modes: {
+        structured: mode.atomic({
+          description: "Complete installed CLI contract",
+          format: "structured",
+          success: { kind: "data", variants: cliContractSuccess },
+          failures: {},
+          handler: ({ outcome }) => {
+            if (getFullContract === undefined)
+              throw new Error("The CLI contract is not ready.");
+            return outcome.data.exported(getFullContract());
+          },
+        }),
+      },
+    }),
+  );
+
   const contract = define({
     root: "cli",
     help: helpCapability({
@@ -1467,6 +2587,7 @@ function createCliContract(identity: CliCommandIdentity) {
         commands: "命令",
         arguments: "参数",
         options: "选项",
+        schema: "契约查询",
       },
       wording: {
         commandPlaceholder: "命令",
@@ -1481,7 +2602,9 @@ function createCliContract(identity: CliCommandIdentity) {
       value: text.line(identity.commandName + " " + identity.version),
       shortAlias: "-V",
     }),
-    output: outputCapability({ defaultFormat: "structured", text: true }),
+    schema: schemaCapability({
+      description: text.line("Query the installed CLI contract offline."),
+    }),
     usageFailureExitCode: 2,
     commands: addApiUrlOption({
       cli: {
@@ -1490,7 +2613,7 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "配置和管理 Binny 垃圾桶。",
         helpSupplement: text.lines([
           "联网命令可在具体命令后添加 --url <服务地址>；未指定时读取 BINNY_API_URL，否则使用 http://localhost:3000。",
-          "使用 binny schema 查看离线命令目录，或在其后添加命令路径查看语法、输入输出与错误契约。",
+          "使用 binny --schema 查看离线命令目录，或按 --schema=<target> 读取输入、输出、失败与线表示契约；binny contract 显式导出完整契约。",
         ]),
       },
       bin: {
@@ -1538,112 +2661,14 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "schedule",
         description: "管理运行计划。",
       },
-      ...command("cliSchema")({
-        kind: "command",
-        parent: "cli",
-        name: "schema",
-        description: "Browse the local CLI command contract offline.",
-        helpSupplement: text.lines([
-          "Examples:",
-          `  ${identity.commandName} schema`,
-          `  ${identity.commandName} schema archive search`,
-          `  ${identity.commandName} schema archive search --part input`,
-          `  ${identity.commandName} schema archive search --part full`,
-          `  ${identity.commandName} schema --part full`,
-          "Omit the path to list commands. Select a command to see its usage summary, or use --part input, output, or errors; --part full returns every part.",
-          `This is the local CLI contract. Discover service capabilities with ${identity.commandName} service info and deployed adapter actions with ${identity.commandName} bin actions <id>.`,
-        ]),
-        fields: {
-          commandPath: {
-            kind: "variadicPositional",
-            description: "Optional command path as separate CLI tokens",
-          },
-          part: {
-            kind: "valueOption",
-            longOption: "--part",
-            description:
-              "Read one contract part; full explicitly includes every part",
-          },
-        },
-        input: z.object({
-          commandPath: z.array(z.string()).default([]),
-          part: cliSchemaPartSchema.optional(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            document: {
-              description:
-                "Local command directory, summary, or selected contract parts",
-              exitCode: 0,
-              schema: cliSchemaDocumentOutputSchema,
-              text: renderCliSchemaText,
-            },
-          },
-        },
-        failures: {
-          unknownPath: {
-            description: "Command path does not exist",
-            exitCode: 2,
-            schema: cliSchemaPathFailureSchema,
-            text: ({ message, suggestion }) =>
-              text.lines(["Invalid command path: " + message, suggestion]),
-          },
-          invalidSelection: {
-            description: "Contract part does not apply to the selected path",
-            exitCode: 2,
-            schema: cliSchemaSelectionFailureSchema,
-            text: ({ message, suggestion }) =>
-              text.lines([
-                "Invalid contract selection: " + message,
-                suggestion,
-              ]),
-          },
-        },
-        async handler({ input, outcome }) {
-          const result = getCliSchemaDocument(input.commandPath, input.part);
-          if (!result.ok) {
-            if (result.reason === "invalidSelection") {
-              return outcome.failure.invalidSelection({
-                message: result.message,
-                path: input.commandPath,
-                ...(input.part === undefined ? {} : { part: input.part }),
-                suggestion: result.suggestion,
-              });
-            }
-            return outcome.failure.unknownPath({
-              message: result.message,
-              path: input.commandPath,
-              suggestion: result.suggestion,
-            });
-          }
-          return outcome.data.document(result.document);
-        },
-      }),
       ...command("serviceInfo")({
         kind: "command",
         parent: "service",
         name: "info",
         description: "Read service version, capabilities, and contract links.",
-        input: z.object({}),
         fields: {},
-        success: {
-          kind: "data",
-          variants: {
-            discovered: {
-              description: "Service metadata and contract links",
-              exitCode: 0,
-              schema: serviceMetadataSchema,
-              text: serviceMetadataText,
-            },
-          },
-        },
-        failures,
-        async handler({ dependencies, outcome }) {
-          const metadata = await dependencies.getServiceMetadata();
-          if (!metadata.ok) return outcome.failure.apiError(metadata.error);
-          return outcome.data.discovered(metadata.metadata);
-        },
+        input: emptyInputSchema,
+        outputs: serviceInfoOutputs,
       }),
       ...command("archiveSearch")({
         kind: "command",
@@ -1688,98 +2713,8 @@ function createCliContract(identity: CliCommandIdentity) {
             max: 1,
           },
         ],
-        input: cliArchiveSearchInputSchema,
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "归档搜索结果页",
-              exitCode: 0,
-              schema: archiveSearchPageSchema,
-              text: archiveSearchPageText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          let source: string;
-          if (input.query !== undefined) {
-            source = input.query;
-          } else if (input.queryFile !== undefined) {
-            try {
-              source = await readFile(input.queryFile, "utf8");
-            } catch (error) {
-              const detail =
-                error instanceof Error ? error.message : String(error);
-              return outcome.failure.apiError({
-                code: "invalid_input",
-                message: `Cannot read search request file: ${detail}`,
-                path: ["queryFile"],
-              });
-            }
-          } else if (input.queryStdin === true) {
-            try {
-              if (dependencies.readStdin === undefined)
-                throw new Error("Standard input is not available.");
-              source = await dependencies.readStdin();
-            } catch (error) {
-              const detail =
-                error instanceof Error ? error.message : String(error);
-              return outcome.failure.apiError({
-                code: "invalid_input",
-                message: `Cannot read search request from standard input: ${detail}`,
-                path: ["queryStdin"],
-              });
-            }
-          } else {
-            throw new Error(
-              "The archive search source constraint was bypassed.",
-            );
-          }
-
-          let request: unknown;
-          try {
-            request = JSON.parse(source) as unknown;
-          } catch {
-            const error = {
-              code: "invalid_input" as const,
-              message: "Search request must be valid JSON.",
-              path: ["query"],
-            };
-            return outcome.failure.apiError(error);
-          }
-          const checked = archiveSearchInputSchema.safeParse(request);
-          if (!checked.success) {
-            const issue = archiveSearchInputIssue(
-              request,
-              checked.error.issues,
-            );
-            const failure = validationFailure(
-              issue === undefined ? checked.error.issues : [issue],
-              { preserveOriginalMessage: true },
-            );
-            const diagnostic = archiveSearchInputDiagnostic(request, issue);
-            return outcome.failure.apiError({
-              ...failure.error,
-              ...(diagnostic === undefined ? {} : { diagnostic }),
-            });
-          }
-          const compatibilityFailure = await queryCompatibilityFailure(
-            dependencies,
-            serviceCapabilities.archiveSearch,
-          );
-          if (compatibilityFailure !== undefined) {
-            return outcome.failure.apiError(compatibilityFailure);
-          }
-          const response = await dependencies
-            .createClient()
-            .archives.search.$post({ json: checked.data });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (response.status === 400 || response.status === 422)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档搜索状态。");
-        },
+        input: archiveSearchCliInputSchema,
+        outputs: archiveSearchOutputs,
       }),
       ...command("archiveBatchRead")({
         kind: "command",
@@ -1801,90 +2736,17 @@ function createCliContract(identity: CliCommandIdentity) {
               "JSON array of exact references copied from archive search results.",
           },
         },
-        input: z.object({
-          references: postgresTextSchema.min(1),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            read: {
-              description: "One exact read result for every supplied reference",
-              exitCode: 0,
-              schema: archiveBatchReadResponseSchema,
-              text: archiveBatchReadText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          let request: unknown;
-          try {
-            request = {
-              references: JSON.parse(input.references) as unknown,
-            };
-          } catch {
-            return outcome.failure.apiError({
-              code: "invalid_input",
-              message: "Batch read references must be valid JSON.",
-              path: ["references"],
-            });
-          }
-          const checked = archiveBatchReadInputSchema.safeParse(request);
-          if (!checked.success) {
-            return outcome.failure.apiError(
-              validationFailure(checked.error.issues, {
-                preserveOriginalMessage: true,
-              }).error,
-            );
-          }
-          const compatibilityFailure = await queryCompatibilityFailure(
-            dependencies,
-            serviceCapabilities.archiveBatchRead,
-          );
-          if (compatibilityFailure !== undefined) {
-            return outcome.failure.apiError(compatibilityFailure);
-          }
-          const response = await dependencies
-            .createClient()
-            .archives["batch-read"].$post({ json: checked.data });
-          if (response.status === 200)
-            return outcome.data.read(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 413 ||
-            response.status === 422 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error(
-            "The service returned an undeclared batch-read status.",
-          );
-        },
+        input: archiveBatchReadCliInputSchema,
+        outputs: archiveBatchReadOutputs,
       }),
       ...command("binList")({
         kind: "command",
         parent: "bin",
         name: "list",
         description: "列出已配置的 bin。",
-        input: z.object({}),
+        input: emptyInputSchema,
         fields: {},
-        success: {
-          kind: "data",
-          variants: {
-            listed: {
-              description: "bin 列表",
-              exitCode: 0,
-              schema: cliBinListSchema,
-              text: binListText,
-            },
-          },
-        },
-        failures,
-        async handler({ dependencies, outcome }) {
-          const response = await dependencies.createClient().bins.$get();
-          const result = await response.json();
-          return outcome.data.listed({ bins: [...result.bins] });
-        },
+        outputs: binListOutputs,
       }),
       ...command("binGet")({
         kind: "command",
@@ -1895,29 +2757,8 @@ function createCliContract(identity: CliCommandIdentity) {
           "The response includes configuration values and runtime status. Read the full configuration schema with bin config-schema <bin-id>.",
         ]),
         fields: { id: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "Bin configuration and status",
-              exitCode: 0,
-              schema: cliBinDetailsSchema,
-              text: binDetailsText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].$get({ param: { binId: input.id } });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的读取状态。");
-        },
+        input: binIdInputSchema,
+        outputs: binGetOutputs,
       }),
       ...command("binActions")({
         kind: "command",
@@ -1934,35 +2775,8 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "Optional declared action name",
           },
         },
-        input: z.object({
-          id: binIdSchema,
-          action: sourceAdapterActionNameSchema.optional(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            discovered: {
-              description: "Action names or one selected action declaration",
-              exitCode: 0,
-              schema: cliBinActionDiscoverySchema,
-              text: actionDiscoveryText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].actions.$get({
-              param: { binId: input.id },
-              query: input.action === undefined ? {} : { action: input.action },
-            });
-          if (response.status === 200)
-            return outcome.data.discovered(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的动作查询状态。");
-        },
+        input: binActionsInputSchema,
+        outputs: binActionsOutputs,
       }),
       ...command("binExtensionFields")({
         kind: "command",
@@ -1974,33 +2788,8 @@ function createCliContract(identity: CliCommandIdentity) {
           "Use the returned top-level field names and operations in archive search with an explicit bin scope.",
         ]),
         fields: { id: { kind: "positional", description: "Bin identifier" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            discovered: {
-              description: "Declared extension fields and supported operations",
-              exitCode: 0,
-              schema: sourceAdapterExtensionFieldsDiscoverySchema,
-              text: extensionFieldsText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"]["extension-fields"].$get({
-              param: { binId: input.id },
-            });
-          if (response.status === 200)
-            return outcome.data.discovered(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error(
-            "The service returned an undeclared extension-field status.",
-          );
-        },
+        input: binIdInputSchema,
+        outputs: binExtensionFieldsOutputs,
       }),
       ...command("binConfigSchema")({
         kind: "command",
@@ -2011,38 +2800,8 @@ function createCliContract(identity: CliCommandIdentity) {
           "This command reads the saved schema declaration only and does not contact the source.",
         ]),
         fields: { id: { kind: "positional", description: "Bin identifier" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            discovered: {
-              description: "Configuration schema declaration",
-              exitCode: 0,
-              schema: cliBinConfigSchemaDiscoverySchema,
-              text: (declaration) =>
-                text.lines([
-                  `Source adapter: ${declaration.sourceAdapterId}@${declaration.sourceAdapterVersion}`,
-                  "Configuration schema:",
-                  ...JSON.stringify(declaration.configSchema, null, 2).split(
-                    "\n",
-                  ),
-                ]),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"]["config-schema"].$get({
-              param: { binId: input.id },
-            });
-          if (response.status === 200)
-            return outcome.data.discovered(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("The service returned an undeclared schema status.");
-        },
+        input: binIdInputSchema,
+        outputs: binConfigSchemaOutputs,
       }),
       ...command("binUpdate")({
         kind: "command",
@@ -2076,58 +2835,8 @@ function createCliContract(identity: CliCommandIdentity) {
             min: 1,
           },
         ],
-        input: withPostgresJsonSchemaProjection(
-          z.object({
-            id: binIdSchema,
-            identityId: identityIdSchema.optional(),
-            config: jsonObjectTextSchema.optional(),
-            browserIdleTimeoutSeconds:
-              browserIdleTimeoutOptionSchema.optional(),
-          }),
-        ),
-        success: {
-          kind: "data",
-          variants: {
-            updated: {
-              description: "Updated bin configuration and status",
-              exitCode: 0,
-              schema: cliBinDetailsSchema,
-              text: binDetailsText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const { id, browserIdleTimeoutSeconds, ...fields } = input;
-          const idleTimeout =
-            browserIdleTimeoutSeconds === undefined
-              ? undefined
-              : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
-          if (idleTimeout !== undefined && "error" in idleTimeout)
-            return outcome.failure.apiError(idleTimeout.error);
-          const patch =
-            idleTimeout === undefined
-              ? fields
-              : {
-                  ...fields,
-                  browserIdleTimeoutSeconds: idleTimeout.value,
-                };
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].$patch({
-              param: { binId: id },
-              json: patch,
-            });
-          if (response.status === 200)
-            return outcome.data.updated(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的修改状态。");
-        },
+        input: binUpdateInputSchema,
+        outputs: binUpdateOutputs,
       }),
       ...command("binDisable")({
         kind: "command",
@@ -2135,29 +2844,8 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "disable",
         description: "停用信源适配器配置，但保留已归档内容。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            disabled: {
-              description: "Disabled bin configuration and status",
-              exitCode: 0,
-              schema: cliBinDetailsSchema,
-              text: binDetailsText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].disable.$post({ param: { binId: input.id } });
-          if (response.status === 200)
-            return outcome.data.disabled(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的停用状态。");
-        },
+        input: binIdInputSchema,
+        outputs: binDisableOutputs,
       }),
       ...command("binEnable")({
         kind: "command",
@@ -2165,29 +2853,8 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "enable",
         description: "重新启用信源适配器配置。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            enabled: {
-              description: "Enabled bin configuration and status",
-              exitCode: 0,
-              schema: cliBinDetailsSchema,
-              text: binDetailsText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].enable.$post({ param: { binId: input.id } });
-          if (response.status === 200)
-            return outcome.data.enabled(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的启用状态。");
-        },
+        input: binIdInputSchema,
+        outputs: binEnableOutputs,
       }),
       ...command("binRemove")({
         kind: "command",
@@ -2195,33 +2862,8 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "remove",
         description: "移除配置，不删除已归档内容。",
         fields: { id: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ id: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            removed: {
-              description: "已移除的 bin 配置",
-              exitCode: 0,
-              schema: z.object({ removed: z.literal(true), id: binIdSchema }),
-              text: ({ id }) => text.line("已移除 bin 配置：" + id),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].$delete({ param: { binId: input.id } });
-          if (response.status === 200)
-            return outcome.data.removed(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的移除状态。");
-        },
+        input: binIdInputSchema,
+        outputs: binRemoveOutputs,
       }),
       ...command("runTrigger")({
         kind: "command",
@@ -2245,42 +2887,8 @@ function createCliContract(identity: CliCommandIdentity) {
               "JSON parameters for this run; use bin actions <bin-id> <action> to inspect the declaration",
           },
         },
-        input: withPostgresJsonSchemaProjection(
-          z.object({
-            binId: binIdSchema,
-            action: sourceAdapterActionNameSchema,
-            params: jsonObjectTextSchema.optional(),
-          }),
-        ),
-        success: {
-          kind: "data",
-          variants: {
-            triggered: {
-              description: "已排队的运行",
-              exitCode: 0,
-              schema: manualRunSchema,
-              text: (run) => outputText("已触发运行", run),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].runs.$post({
-              param: { binId: input.binId },
-              json: { action: input.action, params: input.params ?? {} },
-            });
-          if (response.status === 202)
-            return outcome.data.triggered(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行触发状态。");
-        },
+        input: runTriggerInputSchema,
+        outputs: runTriggerOutputs,
       }),
       ...command("runList")({
         kind: "command",
@@ -2333,40 +2941,7 @@ function createCliContract(identity: CliCommandIdentity) {
           },
         },
         input: manualRunListQuerySchema,
-        success: {
-          kind: "data",
-          variants: {
-            listed: {
-              description: "Run summaries and next-page cursor",
-              exitCode: 0,
-              schema: manualRunListPageSchema,
-              text: (page) =>
-                text.lines([
-                  "Runs",
-                  ...page.runs.map(
-                    (run) =>
-                      `${run.createdAt}  ${run.binId}  ${run.action}  ${run.status}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
-                  ),
-                  ...(page.nextCursor === undefined
-                    ? []
-                    : [
-                        `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
-                      ]),
-                ]),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .runs.$get({ query: input });
-          if (response.status === 200)
-            return outcome.data.listed(await response.json());
-          if (response.status === 400)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("Service returned an undeclared run-list status.");
-        },
+        outputs: runListOutputs,
       }),
       ...command("runGet")({
         kind: "command",
@@ -2377,34 +2952,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "Bin ID" },
           runId: { kind: "positional", description: "Run ID" },
         },
-        input: z.object({
-          binId: binIdSchema,
-          runId: z.string().uuid(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "Run status and result",
-              exitCode: 0,
-              schema: manualRunSchema,
-              text: runDetailText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].runs[":runId"].$get({
-              param: { binId: input.binId, runId: input.runId },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("Service returned an undeclared run-detail status.");
-        },
+        input: runGetInputSchema,
+        outputs: runGetOutputs,
       }),
       ...command("runCancel")({
         kind: "command",
@@ -2415,38 +2964,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           runId: { kind: "positional", description: "运行标识" },
         },
-        input: z.object({
-          binId: binIdSchema,
-          runId: z.string().uuid(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            cancellation: {
-              description: "取消请求及停止状态",
-              exitCode: 0,
-              schema: manualRunSchema,
-              text: (run) => outputText("运行取消状态", run),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].runs[":runId"].cancel.$post({
-              param: { binId: input.binId, runId: input.runId },
-            });
-          if (response.status === 200)
-            return outcome.data.cancellation(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行取消状态。");
-        },
+        input: runGetInputSchema,
+        outputs: runCancelOutputs,
       }),
       ...command("humanOpen")({
         kind: "command",
@@ -2454,42 +2973,8 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "open",
         description: "开启同一持久浏览器的临时维护入口。",
         fields: { binId: { kind: "positional", description: "bin 标识" } },
-        input: z.object({ binId: binIdSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            opened: {
-              description: "人工会话状态和临时入口",
-              exitCode: 0,
-              schema: humanSessionCreatedSchema.extend({
-                viewerUrl: z.url(),
-              }),
-              text: (session) => outputText("浏览器维护入口", session),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"]["human-sessions"].$post({
-              param: { binId: input.binId },
-            });
-          if (response.status === 201) {
-            const session = await response.json();
-            return outcome.data.opened({
-              ...session,
-              viewerUrl: new URL(session.viewerPath, dependencies.apiUrl).href,
-            });
-          }
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的浏览器会话状态。");
-        },
+        input: humanOpenInputSchema,
+        outputs: humanOpenOutputs,
       }),
       ...command("humanGet")({
         kind: "command",
@@ -2500,31 +2985,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           sessionId: { kind: "positional", description: "人工会话标识" },
         },
-        input: z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "人工会话状态",
-              exitCode: 0,
-              schema: humanSessionSchema,
-              text: (session) => outputText("浏览器会话状态", session),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"]["human-sessions"][":sessionId"].$get({
-              param: { binId: input.binId, sessionId: input.sessionId },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的浏览器会话读取状态。");
-        },
+        input: humanSessionInputSchema,
+        outputs: humanGetOutputs,
       }),
       ...command("humanClose")({
         kind: "command",
@@ -2535,35 +2997,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           sessionId: { kind: "positional", description: "人工会话标识" },
         },
-        input: z.object({ binId: binIdSchema, sessionId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            closed: {
-              description: "人工会话关闭状态",
-              exitCode: 0,
-              schema: humanSessionSchema,
-              text: (session) => outputText("浏览器会话关闭状态", session),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"]["human-sessions"][":sessionId"].close.$post({
-              param: { binId: input.binId, sessionId: input.sessionId },
-            });
-          if (response.status === 200)
-            return outcome.data.closed(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的浏览器会话关闭状态。");
-        },
+        input: humanSessionInputSchema,
+        outputs: humanCloseOutputs,
       }),
       ...command("scheduleCreate")({
         kind: "command",
@@ -2609,43 +3044,7 @@ function createCliContract(identity: CliCommandIdentity) {
         helpSupplement: text.lines([
           "A scheduled action may make network requests to its source and may write archived content whenever it runs.",
         ]),
-        success: {
-          kind: "data",
-          variants: {
-            created: {
-              description: "已声明的运行计划",
-              exitCode: 0,
-              schema: scheduleSchema,
-              text: (schedule) => outputText("已创建运行计划", schedule),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const json = scheduleCreateInputSchema.parse({
-            expression: input.expression,
-            timeZone: input.timeZone,
-            action: input.action,
-            params: input.params ?? {},
-            overlapPolicy: input.overlapPolicy,
-            enabled: !(input.disabled ?? false),
-          });
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules.$post({
-              param: { binId: input.binId },
-              json,
-            });
-          if (response.status === 201)
-            return outcome.data.created(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划创建状态。");
-        },
+        outputs: scheduleCreateOutputs,
       }),
       ...command("scheduleList")({
         kind: "command",
@@ -2688,42 +3087,7 @@ function createCliContract(identity: CliCommandIdentity) {
           },
         },
         input: scheduleListQuerySchema,
-        success: {
-          kind: "data",
-          variants: {
-            listed: {
-              description: "Schedule summaries and next-page cursor",
-              exitCode: 0,
-              schema: scheduleListPageSchema,
-              text: (page) =>
-                text.lines([
-                  "Schedules",
-                  ...page.schedules.map(
-                    (schedule) =>
-                      `${schedule.enabled ? "enabled" : "disabled"}  ${schedule.binId}  ${schedule.action}  ${schedule.nextDueAt}  ${schedule.scheduleId}  ${identity.commandName} schedule get ${schedule.binId} ${schedule.scheduleId}`,
-                  ),
-                  ...(page.nextCursor === undefined
-                    ? []
-                    : [
-                        `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
-                      ]),
-                ]),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .schedules.$get({ query: input });
-          if (response.status === 200)
-            return outcome.data.listed(await response.json());
-          if (response.status === 400)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error(
-            "Service returned an undeclared schedule-list status.",
-          );
-        },
+        outputs: scheduleListOutputs,
       }),
       ...command("scheduleGet")({
         kind: "command",
@@ -2734,33 +3098,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "Bin ID" },
           scheduleId: { kind: "positional", description: "Schedule ID" },
         },
-        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "Schedule details and action parameters",
-              exitCode: 0,
-              schema: scheduleSchema,
-              text: scheduleDetailText,
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules[":scheduleId"].$get({
-              param: input,
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error(
-            "Service returned an undeclared schedule-detail status.",
-          );
-        },
+        input: scheduleIdInputSchema,
+        outputs: scheduleGetOutputs,
       }),
       ...command("scheduleUpdate")({
         kind: "command",
@@ -2799,37 +3138,7 @@ function createCliContract(identity: CliCommandIdentity) {
           },
         },
         input: cliScheduleUpdateInputSchema,
-        success: {
-          kind: "data",
-          variants: {
-            updated: {
-              description: "已修改的运行计划",
-              exitCode: 0,
-              schema: scheduleSchema,
-              text: (schedule) => outputText("已修改运行计划", schedule),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const { binId, scheduleId, ...patch } = input;
-          const json = scheduleUpdateInputSchema.parse(patch);
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules[":scheduleId"].$patch({
-              param: { binId, scheduleId },
-              json,
-            });
-          if (response.status === 200)
-            return outcome.data.updated(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划修改状态。");
-        },
+        outputs: scheduleUpdateOutputs,
       }),
       ...command("scheduleDisable")({
         kind: "command",
@@ -2840,31 +3149,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           scheduleId: { kind: "positional", description: "计划标识" },
         },
-        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            disabled: {
-              description: "已停用的运行计划",
-              exitCode: 0,
-              schema: scheduleSchema,
-              text: (schedule) => outputText("已停用运行计划", schedule),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules[":scheduleId"].disable.$post({
-              param: input,
-            });
-          if (response.status === 200)
-            return outcome.data.disabled(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划停用状态。");
-        },
+        input: scheduleIdInputSchema,
+        outputs: scheduleDisableOutputs,
       }),
       ...command("scheduleEnable")({
         kind: "command",
@@ -2875,31 +3161,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           scheduleId: { kind: "positional", description: "计划标识" },
         },
-        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            enabled: {
-              description: "已启用的运行计划",
-              exitCode: 0,
-              schema: scheduleSchema,
-              text: (schedule) => outputText("已启用运行计划", schedule),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules[":scheduleId"].enable.$post({
-              param: input,
-            });
-          if (response.status === 200)
-            return outcome.data.enabled(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划启用状态。");
-        },
+        input: scheduleIdInputSchema,
+        outputs: scheduleEnableOutputs,
       }),
       ...command("scheduleRemove")({
         kind: "command",
@@ -2910,32 +3173,8 @@ function createCliContract(identity: CliCommandIdentity) {
           binId: { kind: "positional", description: "bin 标识" },
           scheduleId: { kind: "positional", description: "计划标识" },
         },
-        input: z.object({ binId: binIdSchema, scheduleId: z.string().uuid() }),
-        success: {
-          kind: "data",
-          variants: {
-            removed: {
-              description: "已移除的运行计划",
-              exitCode: 0,
-              schema: scheduleDeleteResultSchema,
-              text: ({ scheduleId }) =>
-                text.line("已移除运行计划：" + scheduleId),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .bins[":binId"].schedules[":scheduleId"].$delete({
-              param: input,
-            });
-          if (response.status === 200)
-            return outcome.data.removed(await response.json());
-          if (response.status === 400 || response.status === 404)
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的运行计划移除状态。");
-        },
+        input: scheduleIdInputSchema,
+        outputs: scheduleRemoveOutputs,
       }),
       ...command("archiveItem")({
         kind: "command",
@@ -2955,44 +3194,8 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "使用这个归档序号作为读取截点",
           },
         },
-        input: z.object({
-          itemId: archiveIdentifierSchema,
-          binId: binIdSchema.optional(),
-          asOf: archiveSnapshotSequenceSchema.optional(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "归档条目及观察历史",
-              exitCode: 0,
-              schema: archiveItemReadSchema,
-              text: (item) => outputText("归档条目", item),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.items[":itemId"].$get({
-              param: { itemId: input.itemId },
-              query: {
-                ...(input.binId === undefined ? {} : { binId: input.binId }),
-                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
-              },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档条目读取状态。");
-        },
+        input: archiveItemInputSchema,
+        outputs: archiveItemOutputs,
       }),
       ...command("archiveDelete")({
         kind: "command",
@@ -3002,43 +3205,8 @@ function createCliContract(identity: CliCommandIdentity) {
         fields: {
           itemId: { kind: "positional", description: "归档条目 ID" },
         },
-        input: z.object({ itemId: archiveIdentifierSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            deleted: {
-              description: "已删除的归档条目",
-              exitCode: 0,
-              schema: archiveItemDeletionResultSchema,
-              text: ({ itemId, deletedItemIds }) =>
-                text.line(
-                  "已删除归档条目：" +
-                    itemId +
-                    "；本次共删除 " +
-                    String(deletedItemIds.length) +
-                    " 项，包含各 bin 当前未撤回声明指向的条目。",
-                ),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.items[":itemId"].$delete({
-              param: { itemId: input.itemId },
-            });
-          if (response.status === 200)
-            return outcome.data.deleted(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档条目删除状态。");
-        },
+        input: archiveDeleteInputSchema,
+        outputs: archiveDeleteOutputs,
       }),
       ...command("archiveTimeline")({
         kind: "command",
@@ -3068,51 +3236,8 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "继续读取上一页返回的游标",
           },
         },
-        input: z.object({
-          itemId: archiveIdentifierSchema,
-          binId: binIdSchema.optional(),
-          asOf: archiveSnapshotSequenceSchema.optional(),
-          limit: z
-            .string()
-            .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
-            .optional(),
-          cursor: z.string().min(1).max(4096).optional(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "一页观察时间线",
-              exitCode: 0,
-              schema: archiveTimelinePageSchema,
-              text: (timeline) => outputText("观察时间线", timeline),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.items[":itemId"].timeline.$get({
-              param: { itemId: input.itemId },
-              query: {
-                ...(input.binId === undefined ? {} : { binId: input.binId }),
-                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
-                ...(input.limit === undefined ? {} : { limit: input.limit }),
-                ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-              },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的时间线读取状态。");
-        },
+        input: archiveTimelineInputSchema,
+        outputs: archiveTimelineOutputs,
       }),
       ...command("archiveRelations")({
         kind: "command",
@@ -3147,52 +3272,8 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "继续读取上一页返回的游标",
           },
         },
-        input: z.object({
-          itemId: archiveIdentifierSchema,
-          binId: binIdSchema,
-          direction: z.enum(["outgoing", "incoming"]),
-          asOf: archiveSnapshotSequenceSchema.optional(),
-          limit: z
-            .string()
-            .regex(/^(?:[1-9]|[1-9][0-9]|100)$/u)
-            .optional(),
-          cursor: z.string().min(1).max(4096).optional(),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "一页入向或出向关系",
-              exitCode: 0,
-              schema: archiveRelationPageSchema,
-              text: (page) => outputText("对象关系", page),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.items[":itemId"].relations.$get({
-              param: { itemId: input.itemId },
-              query: {
-                binId: input.binId,
-                direction: input.direction,
-                ...(input.asOf === undefined ? {} : { asOf: input.asOf }),
-                ...(input.limit === undefined ? {} : { limit: input.limit }),
-                ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-              },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的关系读取状态。");
-        },
+        input: archiveRelationsInputSchema,
+        outputs: archiveRelationsOutputs,
       }),
       ...command("archiveRevision")({
         kind: "command",
@@ -3202,36 +3283,8 @@ function createCliContract(identity: CliCommandIdentity) {
         fields: {
           revisionId: { kind: "positional", description: "内容版本 ID" },
         },
-        input: z.object({ revisionId: archiveIdentifierSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "不可变内容版本",
-              exitCode: 0,
-              schema: archiveRevisionReadSchema,
-              text: (revision) => outputText("内容版本", revision),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.revisions[":revisionId"].$get({
-              param: { revisionId: input.revisionId },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档版本读取状态。");
-        },
+        input: archiveRevisionInputSchema,
+        outputs: archiveRevisionOutputs,
       }),
       ...command("archiveRevisionDiff")({
         kind: "command",
@@ -3248,44 +3301,8 @@ function createCliContract(identity: CliCommandIdentity) {
             description: "第二个比较位置的内容版本 ID",
           },
         },
-        input: z.object({
-          firstRevisionId: archiveIdentifierSchema,
-          secondRevisionId: archiveIdentifierSchema,
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "内容版本差异",
-              exitCode: 0,
-              schema: archiveRevisionDiffSchema,
-              text: (diff) => outputText("内容版本差异", diff),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.revisions[":firstRevisionId"].diff[
-              ":secondRevisionId"
-            ].$get({
-              param: {
-                firstRevisionId: input.firstRevisionId,
-                secondRevisionId: input.secondRevisionId,
-              },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档版本比较状态。");
-        },
+        input: archiveRevisionDiffInputSchema,
+        outputs: archiveRevisionDiffOutputs,
       }),
       ...command("archiveCommit")({
         kind: "command",
@@ -3295,36 +3312,8 @@ function createCliContract(identity: CliCommandIdentity) {
         fields: {
           commitId: { kind: "positional", description: "归档提交 ID" },
         },
-        input: z.object({ commitId: archiveIdentifierSchema }),
-        success: {
-          kind: "data",
-          variants: {
-            found: {
-              description: "归档提交依据",
-              exitCode: 0,
-              schema: archiveCommitSchema,
-              text: (commit) => outputText("归档提交", commit),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .archives.commits[":commitId"].$get({
-              param: { commitId: input.commitId },
-            });
-          if (response.status === 200)
-            return outcome.data.found(await response.json());
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档提交读取状态。");
-        },
+        input: archiveCommitInputSchema,
+        outputs: archiveCommitOutputs,
       }),
       ...command("archiveResource")({
         kind: "command",
@@ -3333,68 +3322,34 @@ function createCliContract(identity: CliCommandIdentity) {
         description: "将归档资源保存到本地文件。",
         fields: {
           resourceId: { kind: "positional", description: "归档资源 ID" },
-          output: {
+          saveTo: {
             kind: "valueOption",
-            longOption: "--output",
-            description: "本地输出文件路径",
+            longOption: "--save-to",
+            description: "Local file path for the resource bytes",
           },
         },
-        input: z.object({
-          resourceId: archiveIdentifierSchema,
-          output: z.string().min(1),
-        }),
-        success: {
-          kind: "data",
-          variants: {
-            downloaded: {
-              description: "归档资源元信息与本地保存位置",
-              exitCode: 0,
-              schema: archiveResourceMetadataSchema.extend({
-                savedTo: z.string(),
-              }),
-              text: ({ savedTo, size }) =>
-                text.line(`已保存归档资源至 ${savedTo}（${size} 字节）。`),
-            },
-          },
-        },
-        failures,
-        async handler({ input, dependencies, outcome }) {
-          const response = await dependencies
-            .createClient()
-            .resources[":resourceId"].$get({
-              param: { resourceId: input.resourceId },
-            });
-          if (response.status === 200) {
-            const checkedMetadata = archiveResourceMetadataSchema.safeParse({
-              resourceId:
-                response.headers.get("x-binny-resource-id") ?? input.resourceId,
-              sha256: response.headers.get("etag")?.replace(/^"|"$/gu, ""),
-              mediaType: response.headers.get("content-type"),
-              size: Number(response.headers.get("content-length")),
-            });
-            if (!checkedMetadata.success) {
-              throw new Error("服务返回的归档资源元信息无效。");
-            }
-            await saveResourceBody(response, input.output);
-            return outcome.data.downloaded({
-              ...checkedMetadata.data,
-              savedTo: input.output,
-            });
-          }
-          if (
-            response.status === 400 ||
-            response.status === 404 ||
-            response.status === 409 ||
-            response.status === 503
-          )
-            return outcome.failure.apiError((await response.json()).error);
-          throw new Error("服务返回了未声明的归档资源读取状态。");
-        },
+        input: archiveResourceInputSchema,
+        outputs: archiveResourceOutputs,
+      }),
+      ...command("cliContract")({
+        kind: "command",
+        parent: "cli",
+        name: "contract",
+        description: "Export the complete local CLI contract offline.",
+        helpSupplement: text.lines([
+          "This explicit export includes the complete grammar, command manifests, wire schemas, and usage failure declarations.",
+          "Use --schema for layered discovery; this command is the offline complete export.",
+        ]),
+        fields: {},
+        input: emptyInputSchema,
+        outputs: cliContractOutputs,
       }),
     } as const),
   });
-  getCliSchemaDocument = (commandPath, part) =>
-    cliSchemaDocument(contract, commandPath, part);
+  getFullContract = () => ({
+    grammar: contract.grammar,
+    manifest: contract.manifest,
+  });
   return contract;
 }
 

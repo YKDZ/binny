@@ -709,7 +709,7 @@ async function archiveBatchReadCliStep(
     { resourceId: fixture.resourceId, status: "missing" },
   ]);
 
-  const readableText = await cli(baseUrl, [...args, "--output-format", "text"]);
+  const readableText = await cli(baseUrl, [...args, "--output", "text"]);
   assert.equal(readableText.code, 0, readableText.stderr);
   assert.ok(readableText.stdout.includes(fixture.bodySuffix));
   assert.ok(readableText.stdout.includes(fixture.resourceId + ": missing"));
@@ -785,7 +785,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       "bin",
       "extension-fields",
       binId,
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(discoveryText.code, 0, discoveryText.stderr);
@@ -857,7 +857,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       "search",
       "--query",
       JSON.stringify(listQuery),
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(extensionText.code, 0, extensionText.stderr);
@@ -932,7 +932,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
           field: "category",
         },
       }),
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(
@@ -1225,7 +1225,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
           filters: { undeclared: { op: "eq", value: "x" } },
         },
       }),
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(unknownFieldText.code, 1);
@@ -1249,7 +1249,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
           filters: { tiers: { op: "hasAny", values: ["enterprise"] } },
         },
       }),
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(invalidItemValueText.code, 1);
@@ -1494,7 +1494,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       "search",
       "--query",
       invalidEnumQuery,
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(invalidEnumText.code, 1);
@@ -1688,7 +1688,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       "search",
       "--query-file",
       firstQueryPath,
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(firstPageText.code, 0, firstPageText.stderr);
@@ -1901,7 +1901,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     "search",
     "--query",
     JSON.stringify({ bins: [binId], limit: 1 }),
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(readable.code, 0, readable.stderr);
@@ -1918,7 +1918,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     "search",
     "--query",
     JSON.stringify(timeWindowQuery),
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(timeWindowReadable.code, 0, timeWindowReadable.stderr);
@@ -1942,7 +1942,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     "search",
     "--query",
     JSON.stringify(sourceTimeQuery),
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(
@@ -1971,7 +1971,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       ...sourceTimeQuery,
       timeWindow: { ...sourceTimeQuery.timeWindow, review: "undetermined" },
     }),
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(
@@ -2020,7 +2020,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
         timeZone: "Asia/Shanghai",
       },
     }),
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(
@@ -2701,7 +2701,7 @@ async function verifyEmptyBinList(baseUrl: string): Promise<void> {
   );
   assert.deepEqual(listed.bins, []);
 
-  const text = await cli(baseUrl, ["bin", "list", "--output-format", "text"]);
+  const text = await cli(baseUrl, ["bin", "list", "--output", "text"]);
   assert.equal(text.code, 0, text.stderr);
   assert.match(text.stdout, /No bins configured\./u);
 }
@@ -3622,7 +3622,7 @@ async function createLinuxdoBin(
     "actions",
     binId,
     "collect",
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(collectText.code, 0, collectText.stderr);
@@ -6060,7 +6060,7 @@ async function manualRunsCliStep(
     "binny-runs-one",
     "--limit",
     "10",
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(readableRunHistory.code, 0, readableRunHistory.stderr);
@@ -6621,7 +6621,7 @@ async function manualRunsCliStep(
     "list",
     "--bin-id",
     "binny-runs-one",
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
@@ -6837,7 +6837,7 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
     "get",
     selectedRun.binId,
     selectedRun.runId,
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(readableRunDetail.code, 0, readableRunDetail.stderr);
@@ -6852,7 +6852,7 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
   const readableRunList = await cli(baseUrl, [
     "run",
     "list",
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(readableRunList.code, 0, readableRunList.stderr);
@@ -6975,7 +6975,7 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
       "get",
       disabledPlans.schedules[0]!.binId,
       disabledPlans.schedules[0]!.scheduleId,
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(readableScheduleDetail.code, 0, readableScheduleDetail.stderr);
@@ -6994,7 +6994,7 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
     const readableScheduleList = await cli(baseUrl, [
       "schedule",
       "list",
-      "--output-format",
+      "--output",
       "text",
     ]);
     assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
@@ -8780,7 +8780,7 @@ async function verifyConfigurationJourney(
   const cliBinListText = await cli(baseUrl, [
     "bin",
     "list",
-    "--output-format",
+    "--output",
     "text",
   ]);
   assert.equal(cliBinListText.code, 0, cliBinListText.stderr);
@@ -9144,7 +9144,7 @@ async function verifyRestartAndRemoval(
         "archive",
         "resource",
         expectedArchive.sdkResourceMetadata.resourceId,
-        "--output",
+        "--save-to",
         localResourcePath,
       ]),
       "downloaded",

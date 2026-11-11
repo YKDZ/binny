@@ -1,6 +1,6 @@
 # Binny CLI
 
-Binny CLI 用于搜索 Binny 服务中已经归档的资料，不会抓取信源网站。需要 Node.js 26.13.0 或更高版本。
+Binny CLI 用于搜索 Binny 服务中已经归档的资料，不会抓取信源网站。需要 Node.js 26.13.0 或更高的 26.x 版本。
 
 ## 安装并连接服务
 
@@ -14,30 +14,39 @@ binny service info
 
 ## 结构化输出与文本输出
 
-默认输出结构化 JSON，终端与脚本得到相同的数据形状。命令信封将结果放在 `data` 字段中：
+默认输出结构化 JSON，终端与脚本得到相同的数据形状。命令信封使用版本 3，包含 `schemaVersion`、`command`、`outputMode` 和 `kind`，业务结果放在 `data` 字段中：
 
 ```sh
 binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}'
 ```
 
-直接阅读结果时可显式选择 `text`：
+直接阅读结果时可显式选择 `text`。输出选择器是叶命令之后的 `--output`：
 
 ```sh
-binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}' --output-format text
+binny archive search --query '{"text":{"in":"title","groups":[["model"],["release"]]}}' --output text
 ```
 
 ## 发现服务与查询字段
 
-先查看精简的离线命令目录；需要时再读取某条命令的指定契约部分，或显式读取完整离线契约：
+先查看精简的离线命令目录；需要时按原生 `--schema` 逐层导航，或读取某条命令的指定契约部分：
 
 ```sh
-binny schema
-binny schema archive search --part input
-binny schema archive search --part output
-binny schema archive search --part errors
-binny schema archive search --part full
-binny schema --part full
+binny --schema
+binny archive --schema
+binny archive search --schema
+binny archive search --schema=input
+binny archive search --schema=success:structured
+binny archive search --schema=failures:structured
+binny archive search --schema=wire:structured
 ```
+
+原生发现直接输出库定义的 JSON 文档；目录只列直接子项，摘要不展开完整业务 schema。需要一份完整离线契约时，显式执行：
+
+```sh
+binny contract
+```
+
+完整导出直接复用已安装 CLI 的 grammar 与 manifest，包含用法失败等分部发现未覆盖的声明。人读帮助优先使用 `--help`，不需要解析这些 JSON。
 
 `binny service info` 会返回服务能力和公开契约链接。要使用信源专属筛选，先从搜索分布中选一个 bin，再查看该 bin 所用适配器声明的字段：
 
