@@ -44,6 +44,46 @@
       "inputs": ["$TURBO_DEFAULT$"],
       "outputs": [],
       "tags": ["quality:light"]
+    },
+    "image:build": {
+      "dependsOn": ["@binny/source-adapter-runtime#image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_DOCUMENT_KIMI_IMAGE",
+        "BINNY_IMAGE_BUILD_CONTEXT"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "../../**",
+        "../../.dockerignore",
+        "../../.gitignore",
+        "!../../.git/**",
+        "!../../.agents/**",
+        "!../../.codex/**",
+        "!../../.scratch/**",
+        "!../../.template/**",
+        "!../../.changeset/**",
+        "!../../.github/**",
+        "!../../.vscode/**",
+        "!../../docs/**",
+        "!../../AGENTS.md",
+        "!../../**/AGENTS.md",
+        "!../../GLOSSARY*.md",
+        "!../../**/GLOSSARY*.md",
+        "!../../node_modules/**",
+        "!../../**/node_modules/**",
+        "!../../**/dist/**",
+        "!../../**/fixture-dist/**",
+        "!../../coverage/**",
+        "!../../**/coverage/**",
+        "!../../*.log",
+        "!../../**/*.log",
+        "!../../.turbo/**",
+        "!../../.env",
+        "!../../.env.*"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
     }
   }
 }
