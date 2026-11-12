@@ -195,7 +195,11 @@
       "tags": ["quality:heavy"]
     },
     "//#test:runtime-connections": {
-      "dependsOn": ["@ykdz/binny#build"],
+      "dependsOn": [
+        "@ykdz/binny#build",
+        "//#test:lightweight-image",
+        "//#test:binny:e2e"
+      ],
       "passThroughEnv": [
         "BINNY_RUNTIME_PUBLISHED_HOST",
         "BINNY_RUNTIME_SUBNET"
