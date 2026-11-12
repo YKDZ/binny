@@ -59,6 +59,108 @@
       "cache": false,
       "tags": ["work:preparation"]
     },
+    "image:build:protocol-fixture": {
+      "dependsOn": ["image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_LIGHTWEIGHT_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.protocol-fixture",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/helper.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/source-adapter.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/tsconfig.fixture.json",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "image:build:configuration-fixture": {
+      "dependsOn": ["image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_CONFIGURATION_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.configuration-fixture",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/config-validation-source-adapter.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/tsconfig.fixture.json",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "image:build:manual-runs-fixture": {
+      "dependsOn": ["image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_RUNNER_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.manual-runs-fixture",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/manual-runs-source-adapter.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/helper.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/tsconfig.fixture.json",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "image:build:schema-fixture": {
+      "dependsOn": ["image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_RUNNER_SCHEMA_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.schema-fixture",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/test/fixtures/manual-runs-schema-v2-source-adapter.ts",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/tsconfig.fixture.json",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],

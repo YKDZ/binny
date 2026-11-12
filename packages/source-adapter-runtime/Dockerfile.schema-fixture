@@ -1,0 +1,21 @@
+FROM node:26.13.0-bookworm-slim AS build
+
+COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
+RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
+WORKDIR /workspace
+COPY . .
+RUN --mount=type=cache,id=binny-pnpm-v12,target=/pnpm/store,sharing=locked \
+  pnpm install --frozen-lockfile --store-dir=/pnpm/store \
+    --filter @binny/source-adapter-runtime... --filter '!binny'
+RUN pnpm --filter @binny/source-adapter-runtime... build \
+  && pnpm --filter @binny/source-adapter-runtime build:fixture \
+  && pnpm --filter @binny/source-adapter-runtime --prod deploy --config.allow-unused-patches=true /adapter-deploy \
+  && mkdir -p /adapter-deploy/fixture-dist \
+  && cp packages/source-adapter-runtime/fixture-dist/manual-runs-schema-v2-source-adapter.js /adapter-deploy/fixture-dist/manual-runs-schema-v2-source-adapter.js
+
+FROM binny/source-adapter-runtime:lightweight-v1
+
+ENV BINNY_SOURCE_ADAPTER_ENTRY=/app/adapter/fixture-dist/manual-runs-schema-v2-source-adapter.js
+WORKDIR /app
+COPY --from=build --chown=node:node /adapter-deploy /app/adapter
+USER node
