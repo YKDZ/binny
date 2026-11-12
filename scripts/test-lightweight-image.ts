@@ -12,9 +12,14 @@ const network = `binny-runtime-validation-${suffix}`;
 const runtimePort = 8080;
 const publishedHost = process.env.BINNY_RUNTIME_PUBLISHED_HOST ?? "172.17.0.1";
 
-async function run(command: string, args: readonly string[]): Promise<string> {
+async function run(
+  command: string,
+  args: readonly string[],
+  options: { readonly env?: Readonly<Record<string, string>> } = {},
+): Promise<string> {
   const child = spawn(command, args, {
     cwd: workspaceRoot,
+    env: { ...process.env, ...options.env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stdout: Buffer[] = [];
@@ -57,20 +62,21 @@ async function waitForManifest(baseUrl: string): Promise<unknown> {
 
 try {
   await run("docker", ["network", "create", network]);
-  await run("docker", [
-    "build",
-    "--file",
-    "packages/source-adapter-runtime/Dockerfile.lightweight",
-    "--build-arg",
-    "BINNY_SOURCE_ADAPTER_PACKAGE=@binny/source-adapter-runtime",
-    "--build-arg",
-    "BINNY_SOURCE_ADAPTER_ENTRY=fixture-dist/config-validation-source-adapter.js",
-    "--build-arg",
-    "BINNY_BUILD_FIXTURE=1",
-    "--tag",
-    image,
-    ".",
-  ]);
+  await run(
+    "pnpm",
+    [
+      "exec",
+      "turbo",
+      "run",
+      "@binny/source-adapter-runtime#image:build:configuration-fixture",
+    ],
+    {
+      env: {
+        BINNY_IMAGE_BUILD_CONTEXT: workspaceRoot,
+        BINNY_TEST_CONFIGURATION_IMAGE: image,
+      },
+    },
+  );
   await run("docker", [
     "run",
     "--detach",

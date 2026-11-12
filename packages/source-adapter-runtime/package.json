@@ -31,7 +31,11 @@
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
     "build:fixture": "rm -rf fixture-dist && tsc -p tsconfig.fixture.json --pretty false",
     "image:build:lightweight": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.lightweight\" --tag binny/source-adapter-runtime:lightweight-v1 \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
-    "image:build:browser": "docker build --platform=linux/amd64 --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.browser\" --tag binny/source-adapter-runtime:browser-v1 \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+    "image:build:browser": "docker build --platform=linux/amd64 --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.browser\" --tag binny/source-adapter-runtime:browser-v1 \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
+    "image:build:protocol-fixture": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.protocol-fixture\" --tag \"${BINNY_TEST_LIGHTWEIGHT_IMAGE:-binny/lightweight-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
+    "image:build:configuration-fixture": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.configuration-fixture\" --tag \"${BINNY_TEST_CONFIGURATION_IMAGE:-binny/configuration-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
+    "image:build:manual-runs-fixture": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.manual-runs-fixture\" --tag \"${BINNY_TEST_RUNNER_IMAGE:-binny/runner-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
+    "image:build:schema-fixture": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/packages/source-adapter-runtime/Dockerfile.schema-fixture\" --tag \"${BINNY_TEST_RUNNER_SCHEMA_IMAGE:-binny/runner-schema-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
   },
   "dependencies": {
     "@binny/api": "workspace:*",
