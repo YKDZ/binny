@@ -406,7 +406,13 @@ async function buildPackageImages(
     imageEnvironment[imageVariable] = image;
   const result = await run(
     "pnpm",
-    ["exec", "turbo", "run", ...tasks.map(({ task }) => task)],
+    [
+      "exec",
+      "turbo",
+      "run",
+      "--concurrency=2",
+      ...tasks.map(({ task }) => task),
+    ],
     { cwd: repositoryRoot, env: imageEnvironment },
   );
   assert.equal(
@@ -11603,6 +11609,45 @@ async function main(): Promise<void> {
       for (const imageName of Object.values(articleAdapterRuntimeImageNames))
         builtImages.add(imageName);
     }
+    if (qoderAdapterOnly) {
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-qoder#image:build",
+        imageVariable: "BINNY_DOCUMENT_QODER_IMAGE",
+        image: documentAdapterRuntimeImageNames.qoder,
+      });
+      builtImages.add(documentAdapterRuntimeImageNames.qoder);
+    }
+    if (documentAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-deepseek#image:build",
+          imageVariable: "BINNY_DOCUMENT_DEEPSEEK_IMAGE",
+          image: documentAdapterRuntimeImageNames.deepseek,
+        },
+        {
+          task: "@binny/source-adapter-qwen#image:build",
+          imageVariable: "BINNY_DOCUMENT_QWEN_IMAGE",
+          image: documentAdapterRuntimeImageNames.qwen,
+        },
+        {
+          task: "@binny/source-adapter-kimi#image:build",
+          imageVariable: "BINNY_DOCUMENT_KIMI_IMAGE",
+          image: documentAdapterRuntimeImageNames.kimi,
+        },
+        {
+          task: "@binny/source-adapter-minimax#image:build",
+          imageVariable: "BINNY_DOCUMENT_MINIMAX_IMAGE",
+          image: documentAdapterRuntimeImageNames.minimax,
+        },
+        {
+          task: "@binny/source-adapter-qoder#image:build",
+          imageVariable: "BINNY_DOCUMENT_QODER_IMAGE",
+          image: documentAdapterRuntimeImageNames.qoder,
+        },
+      );
+      for (const imageName of Object.values(documentAdapterRuntimeImageNames))
+        builtImages.add(imageName);
+    }
     if (lightweightImageTasks.length > 0)
       await buildPackageImages(lightweightImageTasks);
     if (rssCandidateImageBuilt) {
@@ -11615,16 +11660,6 @@ async function main(): Promise<void> {
       );
       assert.equal(candidateTag.code, 0, candidateTag.stderr);
       builtImages.add(rssCandidateRuntimeImageName);
-    }
-    if (qoderAdapterOnly) {
-      await compose(["build", qoderAdapterRuntimeService]);
-      builtImages.add(documentAdapterRuntimeImageNames.qoder);
-    }
-    if (documentAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
-      await compose(["build", ...documentAdapterRuntimeServices]);
-      for (const imageName of Object.values(documentAdapterRuntimeImageNames)) {
-        builtImages.add(imageName);
-      }
     }
     if (runFunctionalJourney || rssAdapterOnly) {
       rssImageUpdate = await buildRssImageUpdate(
