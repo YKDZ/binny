@@ -321,9 +321,6 @@ services:
   runtime-document-deepseek:
     image: ${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/document-deepseek:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/deepseek/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -338,9 +335,6 @@ services:
   runtime-document-qwen:
     image: ${BINNY_DOCUMENT_QWEN_IMAGE:-binny/document-qwen:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/qwen/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -355,9 +349,6 @@ services:
   runtime-document-kimi:
     image: ${BINNY_DOCUMENT_KIMI_IMAGE:-binny/document-kimi:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/kimi/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -372,9 +363,6 @@ services:
   runtime-document-minimax:
     image: ${BINNY_DOCUMENT_MINIMAX_IMAGE:-binny/document-minimax:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/minimax/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -389,9 +377,6 @@ services:
   runtime-document-qoder:
     image: ${BINNY_DOCUMENT_QODER_IMAGE:-binny/document-qoder:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/qoder/Dockerfile
     depends_on:
       server:
         condition: service_started
