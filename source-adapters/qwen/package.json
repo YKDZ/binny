@@ -29,7 +29,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "test": "node --conditions=source --test 'test/**/*.test.ts'",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
-    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/qwen/Dockerfile\" --tag \"${BINNY_DOCUMENT_QWEN_IMAGE:-binny/document-qwen:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/qwen/Dockerfile\" --tag \"${BINNY_DOCUMENT_QWEN_IMAGE:-binny/qwen:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
   },
   "dependencies": {
     "@binny/source-adapter-sdk": "workspace:*",
