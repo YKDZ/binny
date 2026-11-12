@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM node:26.13.0-bookworm-slim AS build
 
 # Keep the package manager version aligned with the repository lockfile.
