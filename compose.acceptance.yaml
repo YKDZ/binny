@@ -482,14 +482,8 @@ services:
     restart: unless-stopped
 
   browser-one:
-    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/source-adapter-browser-session-fixture:browser-v1}
     profiles: [binny-browser]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/browser-session-source-adapter.js
     depends_on:
       server:
         condition: service_started
@@ -502,19 +496,11 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-one-owner:/var/lib/binny/browser-profile
-    develop:
-      watch: *binny-runtime-watch
     restart: unless-stopped
 
   browser-two:
-    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/source-adapter-browser-session-fixture:browser-v1}
     profiles: [binny-browser]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/browser-session-source-adapter.js
     depends_on:
       server:
         condition: service_started
@@ -527,12 +513,10 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-two-owner:/var/lib/binny/browser-profile
-    develop:
-      watch: *binny-runtime-watch
     restart: unless-stopped
 
   browser-one-contender:
-    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/browser-fixture:local}
+    image: ${BINNY_TEST_BROWSER_IMAGE:-binny/source-adapter-browser-session-fixture:browser-v1}
     profiles: [binny-browser-lock]
     depends_on:
       server:
@@ -549,14 +533,8 @@ services:
     restart: "no"
 
   runtime-linuxdo:
-    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
+    image: ${BINNY_LINUXDO_IMAGE:-binny/source-adapter-linuxdo:browser-v1}
     profiles: [binny-linuxdo]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.browser
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-linuxdo"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
