@@ -11516,7 +11516,8 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
+  const runFunctionalJourney =
+    !manualRunsOnly && !capacityPhaseOnly && !rssAdapterOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
