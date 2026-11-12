@@ -19,6 +19,46 @@
       "outputs": ["fixture-dist/**"],
       "tags": ["work:preparation"]
     },
+    "image:build:lightweight": {
+      "passThroughEnv": ["BINNY_IMAGE_BUILD_CONTEXT"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "../../.dockerignore",
+        "../../packages/api/src/**",
+        "../../packages/contracts/src/**",
+        "../../packages/source-adapter-sdk/src/**",
+        "../../packages/source-adapter-runtime/Dockerfile.lightweight",
+        "../../packages/source-adapter-runtime/src/**",
+        "../../packages/source-adapter-runtime/tsconfig.build.json",
+        "../../package.json",
+        "../../pnpm-lock.yaml",
+        "../../pnpm-workspace.yaml",
+        "../../patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "image:build:browser": {
+      "passThroughEnv": ["BINNY_IMAGE_BUILD_CONTEXT"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "../../.dockerignore",
+        "../../packages/source-adapter-runtime/Dockerfile.browser",
+        "../../packages/source-adapter-runtime/package.json",
+        "../../packages/source-adapter-runtime/src/**",
+        "../../packages/source-adapter-sdk/src/**",
+        "../../packages/api/src/**",
+        "../../packages/contracts/src/**",
+        "../../package.json",
+        "../../pnpm-lock.yaml",
+        "../../pnpm-workspace.yaml",
+        "../../patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],
