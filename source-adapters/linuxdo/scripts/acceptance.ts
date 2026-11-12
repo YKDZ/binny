@@ -521,7 +521,16 @@ async function setTestClockOffset(offsetMilliseconds: number): Promise<void> {
 }
 
 async function provisionClockShim(): Promise<void> {
-  await compose(["build", "server", "runtime-linuxdo"]);
+  const imageBuild = await run("turbo", [
+    "run",
+    "@binny/source-adapter-linuxdo#image:build",
+  ]);
+  assert.equal(
+    imageBuild.code,
+    0,
+    `Linux.do image build failed:\n${(imageBuild.stdout + imageBuild.stderr).slice(-12_000)}`,
+  );
+  await compose(["build", "server"]);
   await compose(["create", "server"]);
   const containerId = (
     await compose(["ps", "--all", "--quiet", "server"])

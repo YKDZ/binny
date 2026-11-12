@@ -9,6 +9,26 @@
       "cache": false,
       "tags": ["work:preparation"]
     },
+    "image:build": {
+      "dependsOn": ["@binny/source-adapter-runtime#image:build:browser"],
+      "passThroughEnv": ["BINNY_IMAGE_BUILD_CONTEXT", "BINNY_LINUXDO_IMAGE"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**",
+        "$TURBO_ROOT$/packages/api/**",
+        "$TURBO_ROOT$/packages/contracts/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/**",
+        "$TURBO_ROOT$/packages/tooling-config/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],
@@ -57,6 +77,7 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/compose.acceptance.yaml",
         "$TURBO_ROOT$/Dockerfile",
+        "$TURBO_ROOT$/source-adapters/linuxdo/Dockerfile",
         "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser",
         "$TURBO_ROOT$/scripts/binny-e2e-test-clock.ts",
         "$TURBO_ROOT$/packages/api/src/**",
