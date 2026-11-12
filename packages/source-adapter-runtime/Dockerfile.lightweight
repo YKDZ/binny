@@ -1,59 +1,21 @@
-ARG BINNY_SOURCE_ADAPTER_ENTRY=dist/index.js
-
 FROM node:26.13.0-bookworm-slim AS build
 
 # Install the same native pnpm release that packageManager declares.
 COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
 RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
 WORKDIR /workspace
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY patches ./patches
-COPY apps/cli/package.json apps/cli/
-COPY packages/api/package.json packages/api/
-COPY packages/source-adapter-runtime/package.json packages/source-adapter-runtime/
-COPY packages/source-adapter-sdk/package.json packages/source-adapter-sdk/
-COPY packages/contracts/package.json packages/contracts/
-COPY packages/core/package.json packages/core/
-COPY packages/db/package.json packages/db/
-COPY packages/server/package.json packages/server/
-COPY packages/tooling-config/package.json packages/tooling-config/
-COPY source-adapters/anthropic/package.json source-adapters/anthropic/
-COPY source-adapters/deepseek/package.json source-adapters/deepseek/
-COPY source-adapters/google/package.json source-adapters/google/
-COPY source-adapters/huggingface/package.json source-adapters/huggingface/
-COPY source-adapters/kimi/package.json source-adapters/kimi/
-COPY source-adapters/linuxdo/package.json source-adapters/linuxdo/
-COPY source-adapters/minimax/package.json source-adapters/minimax/
-COPY source-adapters/mistral/package.json source-adapters/mistral/
-COPY source-adapters/openai/package.json source-adapters/openai/
-COPY source-adapters/qoder/package.json source-adapters/qoder/
-COPY source-adapters/qwen/package.json source-adapters/qwen/
-COPY source-adapters/rss/package.json source-adapters/rss/
-RUN pnpm install --frozen-lockfile
 COPY . .
-
-ARG BINNY_SOURCE_ADAPTER_PACKAGE
-ARG BINNY_SOURCE_ADAPTER_ENTRY
-ARG BINNY_BUILD_FIXTURE=0
-
-RUN test -n "$BINNY_SOURCE_ADAPTER_PACKAGE" \
-  && test -n "$BINNY_SOURCE_ADAPTER_ENTRY" \
-  && pnpm --filter "${BINNY_SOURCE_ADAPTER_PACKAGE}..." build \
-  && pnpm --filter @binny/source-adapter-runtime build \
-  && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then pnpm --filter @binny/source-adapter-runtime build:fixture; fi \
-  && pnpm --filter @binny/source-adapter-runtime --prod deploy --config.allow-unused-patches=true /runtime-deploy \
-  && pnpm --filter "$BINNY_SOURCE_ADAPTER_PACKAGE" --prod deploy --config.allow-unused-patches=true /deploy \
-  && if [ "$BINNY_BUILD_FIXTURE" = "1" ]; then cp -r packages/source-adapter-runtime/fixture-dist /deploy/fixture-dist; fi \
-  && test -f "/deploy/${BINNY_SOURCE_ADAPTER_ENTRY}" \
-  && cp -r /runtime-deploy /deploy/binny-runtime
+RUN --mount=type=cache,id=binny-pnpm-v12,target=/pnpm/store,sharing=locked \
+  pnpm install --frozen-lockfile --store-dir=/pnpm/store \
+    --filter @binny/source-adapter-runtime... --filter '!binny'
+RUN pnpm --filter @binny/source-adapter-runtime... build \
+  && pnpm --filter @binny/source-adapter-runtime --prod deploy --config.allow-unused-patches=true /runtime-deploy
 
 FROM node:26.13.0-bookworm-slim AS lightweight
 
-ARG BINNY_SOURCE_ADAPTER_ENTRY
 ENV NODE_ENV=production
-ENV BINNY_SOURCE_ADAPTER_ENTRY="/app/${BINNY_SOURCE_ADAPTER_ENTRY}"
 WORKDIR /app
-COPY --from=build --chown=node:node /deploy /app
+COPY --from=build --chown=node:node /runtime-deploy /app/binny-runtime
 USER node
 EXPOSE 8080
 ENTRYPOINT ["node", "/app/binny-runtime/dist/entry.js"]
