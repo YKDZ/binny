@@ -11,7 +11,10 @@
     },
     "image:build": {
       "dependsOn": ["@binny/source-adapter-runtime#image:build:browser"],
-      "passThroughEnv": ["BINNY_IMAGE_BUILD_CONTEXT", "BINNY_LINUXDO_IMAGE"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_LINUXDO_IMAGE"
+      ],
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/.dockerignore",
