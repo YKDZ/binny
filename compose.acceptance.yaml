@@ -552,7 +552,7 @@ services:
     restart: unless-stopped
 
   runtime-linuxdo-two:
-    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
+    image: ${BINNY_LINUXDO_IMAGE:-binny/source-adapter-linuxdo:browser-v1}
     profiles: [binny-linuxdo]
     depends_on:
       server:
