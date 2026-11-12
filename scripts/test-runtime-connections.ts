@@ -116,7 +116,8 @@ async function createNetworkOverlay(): Promise<void> {
     composeOverlayDirectory,
     "compose.network.yaml",
   );
-  const subnet = process.env.BINNY_RUNTIME_SUBNET ?? "10.253.151.0/24";
+  // The aggregate E2E gate can run alongside this leaf gate.
+  const subnet = process.env.BINNY_RUNTIME_SUBNET ?? "10.253.154.0/24";
   const subnetMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/24$/u.exec(
     subnet,
   );

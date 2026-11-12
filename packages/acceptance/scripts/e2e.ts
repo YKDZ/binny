@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   archiveBatchReadResponseSchema,
@@ -127,10 +126,6 @@ const artifactRoot = (() => {
   assert.ok(value !== undefined, "集成验收需要准备好的临时构建制品。");
   return value;
 })();
-const repositoryRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../..",
-);
 const composeFile = path.join(artifactRoot, "compose.acceptance.yaml");
 const capacityProfile = process.env.BINNY_E2E_CAPACITY_PROFILE ?? "smoke";
 assert.ok(
@@ -422,7 +417,7 @@ async function buildPackageImages(
       "--concurrency=2",
       ...tasks.map(({ task }) => task),
     ],
-    { cwd: repositoryRoot, env: imageEnvironment },
+    { cwd: artifactRoot, env: imageEnvironment },
   );
   assert.equal(
     result.code,

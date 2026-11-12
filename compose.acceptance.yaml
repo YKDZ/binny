@@ -245,7 +245,7 @@ services:
     restart: unless-stopped
 
   runtime-article-openai:
-    image: ${BINNY_ARTICLE_OPENAI_IMAGE:-binny/article-openai:local}
+    image: ${BINNY_ARTICLE_OPENAI_IMAGE:-binny/openai:local}
     profiles: [binny-articles]
     depends_on:
       server:
@@ -259,7 +259,7 @@ services:
     restart: unless-stopped
 
   runtime-article-anthropic:
-    image: ${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/article-anthropic:local}
+    image: ${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/anthropic:local}
     profiles: [binny-articles]
     depends_on:
       server:
@@ -273,7 +273,7 @@ services:
     restart: unless-stopped
 
   runtime-article-google:
-    image: ${BINNY_ARTICLE_GOOGLE_IMAGE:-binny/article-google:local}
+    image: ${BINNY_ARTICLE_GOOGLE_IMAGE:-binny/google:local}
     profiles: [binny-articles]
     depends_on:
       server:
@@ -287,7 +287,7 @@ services:
     restart: unless-stopped
 
   runtime-article-huggingface:
-    image: ${BINNY_ARTICLE_HUGGINGFACE_IMAGE:-binny/article-huggingface:local}
+    image: ${BINNY_ARTICLE_HUGGINGFACE_IMAGE:-binny/huggingface:local}
     profiles: [binny-articles]
     depends_on:
       server:
@@ -303,7 +303,7 @@ services:
     restart: unless-stopped
 
   runtime-article-mistral:
-    image: ${BINNY_ARTICLE_MISTRAL_IMAGE:-binny/article-mistral:local}
+    image: ${BINNY_ARTICLE_MISTRAL_IMAGE:-binny/mistral:local}
     profiles: [binny-articles]
     depends_on:
       server:
@@ -319,7 +319,7 @@ services:
     restart: unless-stopped
 
   runtime-document-deepseek:
-    image: ${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/document-deepseek:local}
+    image: ${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/deepseek:local}
     profiles: [binny-documents]
     depends_on:
       server:
@@ -333,7 +333,7 @@ services:
     restart: unless-stopped
 
   runtime-document-qwen:
-    image: ${BINNY_DOCUMENT_QWEN_IMAGE:-binny/document-qwen:local}
+    image: ${BINNY_DOCUMENT_QWEN_IMAGE:-binny/qwen:local}
     profiles: [binny-documents]
     depends_on:
       server:
@@ -347,7 +347,7 @@ services:
     restart: unless-stopped
 
   runtime-document-kimi:
-    image: ${BINNY_DOCUMENT_KIMI_IMAGE:-binny/document-kimi:local}
+    image: ${BINNY_DOCUMENT_KIMI_IMAGE:-binny/kimi:local}
     profiles: [binny-documents]
     depends_on:
       server:
@@ -361,7 +361,7 @@ services:
     restart: unless-stopped
 
   runtime-document-minimax:
-    image: ${BINNY_DOCUMENT_MINIMAX_IMAGE:-binny/document-minimax:local}
+    image: ${BINNY_DOCUMENT_MINIMAX_IMAGE:-binny/minimax:local}
     profiles: [binny-documents]
     depends_on:
       server:
@@ -375,7 +375,7 @@ services:
     restart: unless-stopped
 
   runtime-document-qoder:
-    image: ${BINNY_DOCUMENT_QODER_IMAGE:-binny/document-qoder:local}
+    image: ${BINNY_DOCUMENT_QODER_IMAGE:-binny/qoder:local}
     profiles: [binny-documents]
     depends_on:
       server:
@@ -440,7 +440,7 @@ services:
     restart: "no"
 
   runtime-linuxdo:
-    image: ${BINNY_LINUXDO_IMAGE:-binny/source-adapter-linuxdo:browser-v1}
+    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
     profiles: [binny-linuxdo]
     depends_on:
       server:
@@ -459,7 +459,7 @@ services:
     restart: unless-stopped
 
   runtime-linuxdo-two:
-    image: ${BINNY_LINUXDO_IMAGE:-binny/source-adapter-linuxdo:browser-v1}
+    image: ${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}
     profiles: [binny-linuxdo]
     depends_on:
       server:

@@ -32,7 +32,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "test": "node --conditions=source --test",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
-    "image:build": "docker build --platform=linux/amd64 --tag \"${BINNY_LINUXDO_IMAGE:-binny/source-adapter-linuxdo:browser-v1}\" --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/linuxdo/Dockerfile\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
+    "image:build": "docker build --platform=linux/amd64 --tag \"${BINNY_LINUXDO_IMAGE:-binny/linuxdo:local}\" --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/linuxdo/Dockerfile\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\"",
     "test:acceptance": "node --conditions=source scripts/acceptance.ts"
   },
   "dependencies": {

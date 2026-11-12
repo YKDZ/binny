@@ -29,7 +29,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "test": "node --conditions=source --test 'test/**/*.test.ts'",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
-    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/anthropic/Dockerfile\" --tag \"${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/article-anthropic:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/anthropic/Dockerfile\" --tag \"${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/anthropic:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
   },
   "dependencies": {
     "@binny/source-adapter-sdk": "workspace:*",
