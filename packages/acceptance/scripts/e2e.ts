@@ -415,7 +415,13 @@ async function buildPackageImages(
     imageEnvironment[imageVariable] = image;
   const result = await run(
     "pnpm",
-    ["exec", "turbo", "run", ...tasks.map(({ task }) => task)],
+    [
+      "exec",
+      "turbo",
+      "run",
+      "--concurrency=2",
+      ...tasks.map(({ task }) => task),
+    ],
     { cwd: repositoryRoot, env: imageEnvironment },
   );
   assert.equal(
@@ -11746,7 +11752,8 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
+  const runFunctionalJourney =
+    !manualRunsOnly && !capacityPhaseOnly && !rssAdapterOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
   let linuxdoImageUpdate: LinuxdoImageUpdate | undefined;
   try {
@@ -11802,6 +11809,76 @@ async function main(): Promise<void> {
       });
       builtImages.add(linuxdoRuntimeImageName);
     }
+    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-openai#image:build",
+          imageVariable: "BINNY_ARTICLE_OPENAI_IMAGE",
+          image: articleAdapterRuntimeImageNames.openai,
+        },
+        {
+          task: "@binny/source-adapter-anthropic#image:build",
+          imageVariable: "BINNY_ARTICLE_ANTHROPIC_IMAGE",
+          image: articleAdapterRuntimeImageNames.anthropic,
+        },
+        {
+          task: "@binny/source-adapter-google#image:build",
+          imageVariable: "BINNY_ARTICLE_GOOGLE_IMAGE",
+          image: articleAdapterRuntimeImageNames.google,
+        },
+        {
+          task: "@binny/source-adapter-huggingface#image:build",
+          imageVariable: "BINNY_ARTICLE_HUGGINGFACE_IMAGE",
+          image: articleAdapterRuntimeImageNames.huggingface,
+        },
+        {
+          task: "@binny/source-adapter-mistral#image:build",
+          imageVariable: "BINNY_ARTICLE_MISTRAL_IMAGE",
+          image: articleAdapterRuntimeImageNames.mistral,
+        },
+      );
+      for (const imageName of Object.values(articleAdapterRuntimeImageNames))
+        builtImages.add(imageName);
+    }
+    if (qoderAdapterOnly) {
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-qoder#image:build",
+        imageVariable: "BINNY_DOCUMENT_QODER_IMAGE",
+        image: documentAdapterRuntimeImageNames.qoder,
+      });
+      builtImages.add(documentAdapterRuntimeImageNames.qoder);
+    }
+    if (documentAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-deepseek#image:build",
+          imageVariable: "BINNY_DOCUMENT_DEEPSEEK_IMAGE",
+          image: documentAdapterRuntimeImageNames.deepseek,
+        },
+        {
+          task: "@binny/source-adapter-qwen#image:build",
+          imageVariable: "BINNY_DOCUMENT_QWEN_IMAGE",
+          image: documentAdapterRuntimeImageNames.qwen,
+        },
+        {
+          task: "@binny/source-adapter-kimi#image:build",
+          imageVariable: "BINNY_DOCUMENT_KIMI_IMAGE",
+          image: documentAdapterRuntimeImageNames.kimi,
+        },
+        {
+          task: "@binny/source-adapter-minimax#image:build",
+          imageVariable: "BINNY_DOCUMENT_MINIMAX_IMAGE",
+          image: documentAdapterRuntimeImageNames.minimax,
+        },
+        {
+          task: "@binny/source-adapter-qoder#image:build",
+          imageVariable: "BINNY_DOCUMENT_QODER_IMAGE",
+          image: documentAdapterRuntimeImageNames.qoder,
+        },
+      );
+      for (const imageName of Object.values(documentAdapterRuntimeImageNames))
+        builtImages.add(imageName);
+    }
     if (lightweightImageTasks.length > 0)
       await buildPackageImages(lightweightImageTasks);
     if (rssCandidateImageBuilt) {
@@ -11814,22 +11891,6 @@ async function main(): Promise<void> {
       );
       assert.equal(candidateTag.code, 0, candidateTag.stderr);
       builtImages.add(rssCandidateRuntimeImageName);
-    }
-    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
-      await compose(["build", ...articleAdapterRuntimeServices]);
-      for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
-        builtImages.add(imageName);
-      }
-    }
-    if (qoderAdapterOnly) {
-      await compose(["build", qoderAdapterRuntimeService]);
-      builtImages.add(documentAdapterRuntimeImageNames.qoder);
-    }
-    if (documentAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
-      await compose(["build", ...documentAdapterRuntimeServices]);
-      for (const imageName of Object.values(documentAdapterRuntimeImageNames)) {
-        builtImages.add(imageName);
-      }
     }
     if (runFunctionalJourney || rssAdapterOnly) {
       rssImageUpdate = await buildRssImageUpdate(

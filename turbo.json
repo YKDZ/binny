@@ -42,11 +42,6 @@
         "@ykdz/binny#build",
         "@binny/source-adapter-sdk#build",
         "@binny/source-adapter-rss#build",
-        "@binny/source-adapter-deepseek#image:build",
-        "@binny/source-adapter-kimi#image:build",
-        "@binny/source-adapter-minimax#image:build",
-        "@binny/source-adapter-qoder#image:build",
-        "@binny/source-adapter-qwen#image:build",
         "@binny/acceptance#typecheck"
       ],
       "passThroughEnv": [

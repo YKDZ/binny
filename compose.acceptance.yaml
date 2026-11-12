@@ -247,12 +247,6 @@ services:
   runtime-article-openai:
     image: ${BINNY_ARTICLE_OPENAI_IMAGE:-binny/article-openai:local}
     profiles: [binny-articles]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-openai"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -267,12 +261,6 @@ services:
   runtime-article-anthropic:
     image: ${BINNY_ARTICLE_ANTHROPIC_IMAGE:-binny/article-anthropic:local}
     profiles: [binny-articles]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-anthropic"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -287,12 +275,6 @@ services:
   runtime-article-google:
     image: ${BINNY_ARTICLE_GOOGLE_IMAGE:-binny/article-google:local}
     profiles: [binny-articles]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-google"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -307,12 +289,6 @@ services:
   runtime-article-huggingface:
     image: ${BINNY_ARTICLE_HUGGINGFACE_IMAGE:-binny/article-huggingface:local}
     profiles: [binny-articles]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-huggingface"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -329,12 +305,6 @@ services:
   runtime-article-mistral:
     image: ${BINNY_ARTICLE_MISTRAL_IMAGE:-binny/article-mistral:local}
     profiles: [binny-articles]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-mistral"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started
@@ -351,9 +321,6 @@ services:
   runtime-document-deepseek:
     image: ${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/document-deepseek:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/deepseek/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -368,9 +335,6 @@ services:
   runtime-document-qwen:
     image: ${BINNY_DOCUMENT_QWEN_IMAGE:-binny/document-qwen:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/qwen/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -385,9 +349,6 @@ services:
   runtime-document-kimi:
     image: ${BINNY_DOCUMENT_KIMI_IMAGE:-binny/document-kimi:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/kimi/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -402,9 +363,6 @@ services:
   runtime-document-minimax:
     image: ${BINNY_DOCUMENT_MINIMAX_IMAGE:-binny/document-minimax:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/minimax/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -419,9 +377,6 @@ services:
   runtime-document-qoder:
     image: ${BINNY_DOCUMENT_QODER_IMAGE:-binny/document-qoder:local}
     profiles: [binny-documents]
-    build:
-      context: .
-      dockerfile: source-adapters/qoder/Dockerfile
     depends_on:
       server:
         condition: service_started
