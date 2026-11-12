@@ -11571,6 +11571,37 @@ async function main(): Promise<void> {
       });
       builtImages.add(linuxdoRuntimeImageName);
     }
+    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-openai#image:build",
+          imageVariable: "BINNY_ARTICLE_OPENAI_IMAGE",
+          image: articleAdapterRuntimeImageNames.openai,
+        },
+        {
+          task: "@binny/source-adapter-anthropic#image:build",
+          imageVariable: "BINNY_ARTICLE_ANTHROPIC_IMAGE",
+          image: articleAdapterRuntimeImageNames.anthropic,
+        },
+        {
+          task: "@binny/source-adapter-google#image:build",
+          imageVariable: "BINNY_ARTICLE_GOOGLE_IMAGE",
+          image: articleAdapterRuntimeImageNames.google,
+        },
+        {
+          task: "@binny/source-adapter-huggingface#image:build",
+          imageVariable: "BINNY_ARTICLE_HUGGINGFACE_IMAGE",
+          image: articleAdapterRuntimeImageNames.huggingface,
+        },
+        {
+          task: "@binny/source-adapter-mistral#image:build",
+          imageVariable: "BINNY_ARTICLE_MISTRAL_IMAGE",
+          image: articleAdapterRuntimeImageNames.mistral,
+        },
+      );
+      for (const imageName of Object.values(articleAdapterRuntimeImageNames))
+        builtImages.add(imageName);
+    }
     if (lightweightImageTasks.length > 0)
       await buildPackageImages(lightweightImageTasks);
     if (rssCandidateImageBuilt) {
@@ -11583,12 +11614,6 @@ async function main(): Promise<void> {
       );
       assert.equal(candidateTag.code, 0, candidateTag.stderr);
       builtImages.add(rssCandidateRuntimeImageName);
-    }
-    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
-      await compose(["build", ...articleAdapterRuntimeServices]);
-      for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
-        builtImages.add(imageName);
-      }
     }
     if (qoderAdapterOnly) {
       await compose(["build", qoderAdapterRuntimeService]);
