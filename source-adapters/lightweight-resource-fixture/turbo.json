@@ -1,0 +1,71 @@
+{
+  "extends": ["//"],
+  "tags": ["library", "binny:source-adapter"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": [],
+      "outputs": ["dist/**"],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "image:build": {
+      "dependsOn": ["@binny/source-adapter-runtime#image:build:lightweight"],
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/api/src/**",
+        "$TURBO_ROOT$/packages/contracts/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-sdk/src/**",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.lightweight",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/src/**",
+        "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/Dockerfile",
+        "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/package.json",
+        "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/resources/**",
+        "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/src/**",
+        "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/tsconfig.build.json",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
+    "format:check": {
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "dependsOn": ["lint:fix"],
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "lint": {
+      "dependsOn": [],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "inputs": [],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:repair"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "inputs": [],
+      "outputs": [],
+      "tags": ["quality:light"]
+    }
+  }
+}

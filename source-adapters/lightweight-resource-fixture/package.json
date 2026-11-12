@@ -1,0 +1,50 @@
+{
+  "name": "@binny/source-adapter-lightweight-resource-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "运行器镜像解耦验收适配器。",
+  "files": [
+    "dist",
+    "resources"
+  ],
+  "type": "module",
+  "imports": {
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "format:check": "oxfmt --list-different .",
+    "format:write": "oxfmt --write .",
+    "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix . --fix",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
+    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/lightweight-resource-fixture/Dockerfile\" --tag \"${BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE:-binny/lightweight-resource-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+  },
+  "dependencies": {
+    "@binny/source-adapter-sdk": "workspace:*",
+    "@rowanmanning/feed-parser": "2.1.5",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@binny/tooling-config": "workspace:*",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "engines": {
+    "node": "26.13.0"
+  }
+}

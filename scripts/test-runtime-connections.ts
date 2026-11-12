@@ -44,12 +44,14 @@ const repositoryRoot = path.resolve(
 const composeFile = path.join(repositoryRoot, "compose.acceptance.yaml");
 const projectName = "binny-runtime-" + process.pid.toString(10);
 const runtimeImage = projectName + ":lightweight";
+const resourceImage = projectName + ":resource-fixture";
 const imageName = projectName + ":server";
 const jsonHeaders = { "content-type": "application/json" };
 const publishedHost = process.env.BINNY_RUNTIME_PUBLISHED_HOST ?? "172.17.0.1";
 let serverPort = 0;
 let runtimeOnePort = 0;
 let runtimeTwoPort = 0;
+let runtimeResourcePort = 0;
 let composeOverlayDirectory: string | undefined;
 let composeOverlayFile: string | undefined;
 
@@ -57,6 +59,7 @@ function environment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: imageName,
     BINNY_TEST_LIGHTWEIGHT_IMAGE: runtimeImage,
+    BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE: resourceImage,
   };
 }
 
@@ -130,6 +133,9 @@ async function createNetworkOverlay(): Promise<void> {
       "    ports: !override",
       '      - "8080"',
       "  runtime-two:",
+      "    ports: !override",
+      '      - "8080"',
+      "  runtime-resource-fixture:",
       "    ports: !override",
       '      - "8080"',
       "networks:",
@@ -435,35 +441,100 @@ async function containerImage(service: string): Promise<string> {
   ).stdout.trim();
 }
 
+async function dockerImageId(image: string): Promise<string> {
+  const result = await run("docker", [
+    "image",
+    "inspect",
+    "--format",
+    "{{.Id}}",
+    image,
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+async function buildRuntimeImage(task: string): Promise<void> {
+  const result = await run("pnpm", ["exec", "turbo", "run", task], {
+    env: {
+      BINNY_IMAGE_BUILD_CONTEXT: repositoryRoot,
+      ...environment(),
+    },
+  });
+  assert.equal(
+    result.code,
+    0,
+    "Turbo could not build the official lightweight adapter image:\n" +
+      result.stdout +
+      result.stderr,
+  );
+}
+
+async function buildRuntimeImages(): Promise<string> {
+  await buildRuntimeImage(
+    "@binny/source-adapter-runtime#image:build:protocol-fixture",
+  );
+  const baseImageId = await dockerImageId(
+    "binny/source-adapter-runtime:lightweight-v1",
+  );
+  await buildRuntimeImage(
+    "@binny/source-adapter-lightweight-resource-fixture#image:build",
+  );
+  assert.equal(
+    await dockerImageId("binny/source-adapter-runtime:lightweight-v1"),
+    baseImageId,
+    "Building the extra adapter must leave the runtime base image unchanged.",
+  );
+  return baseImageId;
+}
+
 try {
   await createNetworkOverlay();
 
-  await compose(["build", "server", "runtime-one"]);
+  const lightweightBaseImageId = await buildRuntimeImages();
+  await compose(["build", "server"]);
   await compose(["up", "--detach", "--no-build"]);
-  [serverPort, runtimeOnePort, runtimeTwoPort] = await Promise.all([
-    publishedPort("server", 3000),
-    publishedPort("runtime-one", 8080),
-    publishedPort("runtime-two", 8080),
-  ]);
+  [serverPort, runtimeOnePort, runtimeTwoPort, runtimeResourcePort] =
+    await Promise.all([
+      publishedPort("server", 3000),
+      publishedPort("runtime-one", 8080),
+      publishedPort("runtime-two", 8080),
+      publishedPort("runtime-resource-fixture", 8080),
+    ]);
   await waitForApi();
 
-  const [runtimeOneManifest, runtimeTwoManifest] = await Promise.all([
-    waitForManifest(runtimeOnePort),
-    waitForManifest(runtimeTwoPort),
-  ]);
+  const [runtimeOneManifest, runtimeTwoManifest, resourceManifest] =
+    await Promise.all([
+      waitForManifest(runtimeOnePort),
+      waitForManifest(runtimeTwoPort),
+      waitForManifest(runtimeResourcePort),
+    ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
+  assert.equal(resourceManifest.protocolVersion, 7);
   assert.equal(runtimeOneManifest.protocolVersion, 7);
   const sourceAdapter = runtimeOneManifest.sourceAdapter;
   assert.ok(typeof sourceAdapter === "object" && sourceAdapter !== null);
   const sourceAdapterRecord = sourceAdapter as Record<string, unknown>;
+  const resourceSourceAdapter = resourceManifest.sourceAdapter;
+  assert.ok(
+    typeof resourceSourceAdapter === "object" && resourceSourceAdapter !== null,
+  );
+  const resourceSourceAdapterRecord = resourceSourceAdapter as Record<
+    string,
+    unknown
+  >;
 
   await Promise.all([
     waitForBinRegistration("binny-runtime-one", sourceAdapterRecord),
     waitForBinRegistration("binny-runtime-two", sourceAdapterRecord),
+    waitForBinRegistration(
+      "binny-runtime-resource",
+      resourceSourceAdapterRecord,
+    ),
   ]);
   await Promise.all([
     configureBin("binny-runtime-one", "one"),
     configureBin("binny-runtime-two", "two"),
+    configureBin("binny-runtime-resource", "resource-test"),
   ]);
 
   const onlineOne = await waitForCliStatus("binny-runtime-one", "online");
@@ -471,6 +542,99 @@ try {
   assert.notEqual(onlineOne.execution.runtimeId, onlineTwo.execution.runtimeId);
   assert.equal(onlineOne.execution.environment?.kind, "lightweight");
   assert.equal(onlineTwo.execution.environment?.kind, "lightweight");
+  const onlineResource = await waitForCliStatus(
+    "binny-runtime-resource",
+    "online",
+  );
+  assert.equal(onlineResource.execution.environment?.kind, "lightweight");
+  assert.equal(
+    await containerImage("runtime-resource-fixture"),
+    await dockerImageId(resourceImage),
+  );
+  assert.equal(
+    await containerImage("runtime-one"),
+    await containerImage("runtime-two"),
+  );
+
+  const resourceTrigger = cliData<{
+    readonly runId: string;
+    readonly status: string;
+  }>(
+    await cli([
+      "run",
+      "trigger",
+      "binny-runtime-resource",
+      "collect",
+      "--params",
+      "{}",
+    ]),
+    "triggered",
+  );
+  assert.equal(resourceTrigger.status, "queued");
+  const resourceRunDeadline = Date.now() + 30_000;
+  type ResourceRun = {
+    readonly status: string;
+    readonly result?: {
+      readonly output?: unknown;
+      readonly commits: readonly {
+        readonly commitId: string;
+        readonly items: readonly { readonly itemId: string }[];
+      }[];
+    };
+  };
+  let resourceRun: ResourceRun | undefined;
+  while (Date.now() < resourceRunDeadline) {
+    resourceRun = cliData<ResourceRun>(
+      await cli([
+        "run",
+        "get",
+        "binny-runtime-resource",
+        resourceTrigger.runId,
+      ]),
+      "found",
+    );
+    if (resourceRun.status === "completed" || resourceRun.status === "failed")
+      break;
+    await delay(100);
+  }
+  assert.ok(resourceRun !== undefined);
+  assert.equal(resourceRun.status, "completed");
+  assert.deepEqual(resourceRun.result?.output, {
+    feedTitle: "Packaged Test Feed",
+    itemTitle: "Adapter-Owned Resource",
+    bodyText: "Parsed from the adapter-owned resource file.",
+  });
+  const resourceCommit = resourceRun.result?.commits[0];
+  assert.ok(resourceCommit !== undefined);
+  const resourceItemId = resourceCommit.items[0]?.itemId;
+  assert.ok(resourceItemId !== undefined);
+  const archivedResource = cliData<{
+    readonly views: readonly {
+      readonly binId: string;
+      readonly state: {
+        readonly title: string | null;
+        readonly body?: { readonly text?: string };
+      };
+    }[];
+  }>(
+    await cli([
+      "archive",
+      "item",
+      resourceItemId,
+      "--bin",
+      "binny-runtime-resource",
+    ]),
+    "found",
+  );
+  const resourceView = archivedResource.views.find(
+    ({ binId }) => binId === "binny-runtime-resource",
+  );
+  assert.ok(resourceView !== undefined);
+  assert.equal(resourceView.state.title, "Adapter-Owned Resource");
+  assert.equal(
+    resourceView.state.body?.text,
+    "Parsed from the adapter-owned resource file.",
+  );
   const currentBin = cliData<{
     readonly execution: RuntimeStatus;
   }>(await cli(["bin", "get", "binny-runtime-one"]), "found");
@@ -569,7 +733,12 @@ try {
   await waitForCliStatus("binny-runtime-one", "offline", "heartbeat_expired");
   await compose(["start", "runtime-one"]);
   await waitForCliStatus("binny-runtime-one", "online");
-  await compose(["stop", "runtime-one", "runtime-two"]);
+  await compose([
+    "stop",
+    "runtime-one",
+    "runtime-two",
+    "runtime-resource-fixture",
+  ]);
 
   await compose(["up", "--detach", "--force-recreate", "server"]);
   await waitForApi();
@@ -589,9 +758,14 @@ try {
   assert.equal(persistedTwo.identityId, "identity-binny-runtime-two");
   assert.deepEqual(persistedOne.config, { section: "one" });
   assert.deepEqual(persistedTwo.config, { section: "two" });
+  assert.equal(
+    await dockerImageId("binny/source-adapter-runtime:lightweight-v1"),
+    lightweightBaseImageId,
+    "The adapter action must leave the runtime base image unchanged.",
+  );
 
   process.stdout.write(
-    "正式轻量镜像、真实 PostgreSQL、双 bin、能力错误、心跳断开与重连、CLI 状态和核心重建持久性均通过。\n",
+    "Official lightweight images, adapter-owned dependency and resource action, PostgreSQL, dual bins, capability errors, heartbeat reconnection, CLI state, and server restart persistence passed.\n",
   );
 } finally {
   await run("docker", [
@@ -601,6 +775,9 @@ try {
     "--remove-orphans",
   ]).catch(() => undefined);
   await run("docker", ["image", "rm", "--force", runtimeImage]).catch(
+    () => undefined,
+  );
+  await run("docker", ["image", "rm", "--force", resourceImage]).catch(
     () => undefined,
   );
   await run("docker", ["image", "rm", "--force", imageName]).catch(

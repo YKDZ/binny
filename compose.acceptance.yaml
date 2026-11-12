@@ -7,9 +7,11 @@ x-binny-image: &binny-image
 x-binny-runtime-watch: &binny-runtime-watch
   - path: ./source-adapters/rss/src
     action: rebuild
-  - path: ./source-adapters/rss/package.json
+  - path: ./source-adapters/rss/Dockerfile
     action: rebuild
-  - path: ./packages/source-adapter-runtime
+  - path: ./source-adapters/rss/tsconfig.build.json
+    action: rebuild
+  - path: ./source-adapters/rss/package.json
     action: rebuild
   - path: ./packages/source-adapter-sdk/src
     action: rebuild
@@ -17,25 +19,11 @@ x-binny-runtime-watch: &binny-runtime-watch
     action: rebuild
   - path: ./packages/contracts/src
     action: rebuild
-  - path: ./packages/core/src
-    action: rebuild
-  - path: ./packages/db
-    action: rebuild
-  - path: ./packages/server/src
-    action: rebuild
-  - path: ./packages/source-adapter-runtime/package.json
-    action: rebuild
   - path: ./packages/source-adapter-sdk/package.json
     action: rebuild
   - path: ./packages/api/package.json
     action: rebuild
   - path: ./packages/contracts/package.json
-    action: rebuild
-  - path: ./packages/core/package.json
-    action: rebuild
-  - path: ./packages/db/package.json
-    action: rebuild
-  - path: ./packages/server/package.json
     action: rebuild
   - path: ./packages/tooling-config
     action: rebuild
@@ -125,13 +113,6 @@ services:
   runtime-one:
     image: ${BINNY_TEST_LIGHTWEIGHT_IMAGE:-binny/lightweight-fixture:local}
     profiles: [binny-runtime]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/source-adapter.js
-        BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
         condition: service_started
@@ -161,16 +142,25 @@ services:
       - "${BINNY_RUNTIME_TWO_PORT:-14142}:8080"
     restart: unless-stopped
 
+  runtime-resource-fixture:
+    image: ${BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE:-binny/lightweight-resource-fixture:local}
+    profiles: [binny-runtime]
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      BINNY_API_URL: http://server:3000
+      BINNY_RUNTIME_CONTROL_URL: http://runtime-resource-fixture:8080
+      BINNY_BIN_ID: binny-runtime-resource
+      BINNY_RUNTIME_PORT: 8080
+      BINNY_RUNTIME_ENVIRONMENT: lightweight
+    ports:
+      - "${BINNY_RUNTIME_RESOURCE_PORT:-14143}:8080"
+    restart: unless-stopped
+
   runtime-fifteen-one:
     image: ${BINNY_TEST_RUNNER_IMAGE:-binny/runner-fixture:local}
     profiles: [binny-runs]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-source-adapter.js
-        BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
         condition: service_started
@@ -186,13 +176,6 @@ services:
   runtime-fifteen-two:
     image: ${BINNY_TEST_RUNNER_IMAGE:-binny/runner-fixture:local}
     profiles: [binny-runs]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-source-adapter.js
-        BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
         condition: service_started
@@ -208,13 +191,6 @@ services:
   runtime-fifteen-schema-two:
     image: ${BINNY_TEST_RUNNER_SCHEMA_IMAGE:-binny/runner-schema-fixture:local}
     profiles: [binny-runs]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-runtime"
-        BINNY_SOURCE_ADAPTER_ENTRY: fixture-dist/manual-runs-schema-v2-source-adapter.js
-        BINNY_BUILD_FIXTURE: "1"
     depends_on:
       server:
         condition: service_started
@@ -234,10 +210,7 @@ services:
     profiles: [binny-rss]
     build:
       context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-rss"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
+      dockerfile: source-adapters/rss/Dockerfile
     depends_on:
       server:
         condition: service_started
@@ -256,12 +229,6 @@ services:
   runtime-rss-two:
     image: ${BINNY_RSS_IMAGE:-binny/rss:local}
     profiles: [binny-rss]
-    build:
-      context: .
-      dockerfile: packages/source-adapter-runtime/Dockerfile.lightweight
-      args:
-        BINNY_SOURCE_ADAPTER_PACKAGE: "@binny/source-adapter-rss"
-        BINNY_SOURCE_ADAPTER_ENTRY: dist/index.js
     depends_on:
       server:
         condition: service_started

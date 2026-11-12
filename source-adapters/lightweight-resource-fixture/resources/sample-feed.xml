@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Packaged Test Feed</title>
+    <link>https://example.test/feed</link>
+    <description>Feed fixture installed with the adapter image.</description>
+    <item>
+      <guid>packaged-feed-entry</guid>
+      <title>Adapter-Owned Resource</title>
+      <description>Parsed from the adapter-owned resource file.</description>
+      <link>https://example.test/feed/entry</link>
+    </item>
+  </channel>
+</rss>
