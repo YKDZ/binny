@@ -163,6 +163,7 @@ const projectName = `binny-browser-${suffix}`;
 const serverImage = `binny-browser-server-${suffix}:local`;
 const browserImage = `binny-browser-browser-${suffix}:local`;
 const browserBaselineImage = `binny-browser-browser-${suffix}-image-a:local`;
+const browserFixturePackage = "@binny/source-adapter-browser-session-fixture";
 const outerBrowserContainer = `${projectName}-outer-browser`;
 const outerBrowserWsPath = `/binny-browser-${randomUUID()}`;
 const processObserver = `${projectName}-process-observer`;
@@ -173,7 +174,6 @@ let sitePort: number | undefined;
 let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
-let composeProjectDirectory = "";
 let activeBrowserImage = browserImage;
 let playwrightBrowser: PlaywrightBrowser | undefined;
 let composeStarted = false;
@@ -218,15 +218,10 @@ function run(
 }
 
 function composePrefix(profile = "binny-browser"): readonly string[] {
-  const projectDirectory =
-    composeProjectDirectory.length === 0
-      ? []
-      : ["--project-directory", composeProjectDirectory];
   const prefix = [
     "compose",
     "--project-name",
     projectName,
-    ...projectDirectory,
     "--file",
     composeFile,
   ];
@@ -706,23 +701,35 @@ async function buildBrowserImageUpdate(
   await copyImageBuildContext(repositoryRoot, buildContextDirectory);
   await setBuildContextSourceAdapterVersion(
     buildContextDirectory,
-    "packages/source-adapter-runtime/test/fixtures/browser-session-source-adapter.ts",
+    "source-adapters/browser-session-fixture/src/index.ts",
     "binny-browser.browser-session-fixture",
     baselineVersion,
   );
 
   const candidateImageId = await imageId(browserImage);
-  const previousProjectDirectory = composeProjectDirectory;
   const previousBrowserImage = activeBrowserImage;
   let baselineImageId: string;
   try {
-    composeProjectDirectory = buildContextDirectory;
     activeBrowserImage = browserBaselineImage;
-    await compose(["build", "browser-one"]);
+    const build = await run(
+      "pnpm",
+      [
+        "--workspace-root",
+        "exec",
+        "turbo",
+        "run",
+        `${browserFixturePackage}#image:build`,
+      ],
+      { BINNY_IMAGE_BUILD_CONTEXT: buildContextDirectory },
+    );
+    assert.equal(
+      build.code,
+      0,
+      `Browser baseline image build failed:\n${(build.stdout + build.stderr).slice(-12_000)}`,
+    );
     builtImages.add(browserBaselineImage);
     baselineImageId = await imageId(browserBaselineImage);
   } finally {
-    composeProjectDirectory = previousProjectDirectory;
     activeBrowserImage = previousBrowserImage;
   }
   assert.notEqual(
@@ -1508,9 +1515,32 @@ async function verifyPatchrightDeploys(service: string): Promise<void> {
     service,
     "node",
     "-e",
-    'const fs = require("node:fs"); const path = require("node:path"); for (const root of ["/app", "/app/binny-runtime"]) console.log(JSON.parse(fs.readFileSync(path.join(root, "node_modules/patchright-core/package.json"), "utf8")).version);',
+    'const fs = require("node:fs"); const path = require("node:path"); for (const root of ["/app/browser-session-fixture", "/app/binny-runtime"]) console.log(JSON.parse(fs.readFileSync(path.join(root, "node_modules/patchright-core/package.json"), "utf8")).version);',
   ]);
   assert.deepEqual(result.stdout.trim().split(/\s+/u), ["1.64.2", "1.64.2"]);
+}
+
+async function verifyBrowserRuntimePermissions(service: string): Promise<void> {
+  const result = await compose([
+    "exec",
+    "--no-TTY",
+    service,
+    "node",
+    "-e",
+    'const fs = require("node:fs"); const path = require("node:path"); const uid = process.getuid?.(); const profile = process.env.BINNY_BROWSER_PROFILE_DIRECTORY; if (uid === undefined || uid === 0 || profile === undefined) process.exit(2); const probe = path.join(profile, `.binny-profile-write-${process.pid}`); try { fs.writeFileSync(probe, "ok"); } finally { fs.rmSync(probe, { force: true }); } console.log(JSON.stringify({ uid, profile, writable: true }));',
+  ]);
+  const permissions = JSON.parse(result.stdout.trim()) as {
+    readonly uid: number;
+    readonly profile: string;
+    readonly writable: boolean;
+  };
+  assert.ok(permissions.uid > 0, `${service} must run as a non-root user.`);
+  assert.equal(
+    permissions.profile,
+    "/var/lib/binny/browser-profile",
+    `${service} must use the production browser profile path.`,
+  );
+  assert.equal(permissions.writable, true);
 }
 
 async function browserPortBindings(
@@ -1862,6 +1892,20 @@ async function diagnostics(): Promise<string> {
 async function main(): Promise<void> {
   await createComposeOverlay();
   assert.ok(testDirectory !== undefined);
+
+  const imageBuild = await run("pnpm", [
+    "--workspace-root",
+    "exec",
+    "turbo",
+    "run",
+    `${browserFixturePackage}#image:build`,
+  ]);
+  assert.equal(
+    imageBuild.code,
+    0,
+    `Browser fixture image build failed:\n${(imageBuild.stdout + imageBuild.stderr).slice(-12_000)}`,
+  );
+  builtImages.add(browserImage);
   const browserBuildContextDirectory = path.join(
     testDirectory,
     "browser-image-a",
@@ -1871,7 +1915,6 @@ async function main(): Promise<void> {
   assert.equal(config.code, 0);
   composeStarted = true;
   builtImages.add(serverImage);
-  builtImages.add(browserImage);
   await compose([
     "up",
     "--detach",
@@ -1891,6 +1934,7 @@ async function main(): Promise<void> {
   );
   await waitForApi();
   await waitForSource();
+  await verifyBrowserRuntimePermissions("browser-one");
 
   const browserImageUpdate = await buildBrowserImageUpdate(
     await runtimeManifest("browser-two"),
