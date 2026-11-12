@@ -19,4 +19,3 @@ ENV BINNY_SOURCE_ADAPTER_ENTRY=/app/adapter/dist/index.js
 WORKDIR /app
 COPY --from=build --chown=node:node /adapter-deploy /app/adapter
 USER node
-
