@@ -104,6 +104,13 @@ type RssImageUpdate = {
   readonly buildContextDirectory: string;
 };
 
+type LinuxdoImageUpdate = {
+  readonly baselineImageId: string;
+  readonly baselineVersion: string;
+  readonly candidateImageId: string;
+  readonly candidateVersion: string;
+};
+
 type RssAcceptanceResult = {
   readonly binIds: readonly ["binny-rss-one", "binny-rss-two"];
   readonly itemId: string;
@@ -184,6 +191,7 @@ const rssRuntimeImageName = projectName + "-rss:local";
 const rssCandidateRuntimeImageName = projectName + "-rss-candidate:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
+const linuxdoBaselineRuntimeImageName = projectName + "-linuxdo-baseline:local";
 const articleAdapterRuntimeImageNames = {
   openai: projectName + "-article-openai:local",
   anthropic: projectName + "-article-anthropic:local",
@@ -215,6 +223,7 @@ const documentAdapterRuntimeServices = [
 ] as const;
 let activeServerImage = imageName;
 let activeRssRuntimeImage = rssRuntimeImageName;
+let activeLinuxdoRuntimeImage = linuxdoRuntimeImageName;
 let composeOverrideFile = "";
 let composeProjectDirectory = "";
 let composePort = 0;
@@ -384,7 +393,7 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_DOCUMENT_QODER_IMAGE: documentAdapterRuntimeImageNames.qoder,
     BINNY_LINUXDO_BIN_ID: "binny-integration-linuxdo",
     BINNY_LINUXDO_BIN_ID_TWO: "binny-integration-linuxdo-two",
-    BINNY_LINUXDO_IMAGE: linuxdoRuntimeImageName,
+    BINNY_LINUXDO_IMAGE: activeLinuxdoRuntimeImage,
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
@@ -2822,6 +2831,30 @@ async function containerStatus(containerId: string): Promise<string> {
   return result.stdout.trim();
 }
 
+async function containerVolume(
+  service: string,
+  destination: string,
+): Promise<string> {
+  const containerId = await runningContainerId(service);
+  const result = await run(
+    "docker",
+    [
+      "inspect",
+      "--format",
+      `{{range .Mounts}}{{if eq .Destination "${destination}"}}{{.Name}}{{end}}{{end}}`,
+      containerId,
+    ],
+    { env: composeEnvironment() },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const name = result.stdout.trim();
+  assert.ok(
+    name.length > 0,
+    `${service} has no named volume at ${destination}.`,
+  );
+  return name;
+}
+
 async function networkSubnet(network: string): Promise<string> {
   const result = await run("docker", [
     "network",
@@ -3751,16 +3784,18 @@ type RssManualRun = {
   };
 };
 
-async function createRssManifest(): Promise<unknown> {
+async function createSourceAdapterManifest(
+  packageName: string,
+): Promise<unknown> {
   const program = [
     'import { sourceAdapterManifest } from "@binny/source-adapter-sdk";',
-    'import sourceAdapter from "@binny/source-adapter-rss";',
+    `import sourceAdapter from "${packageName}";`,
     "process.stdout.write(JSON.stringify(sourceAdapterManifest(sourceAdapter)));",
   ].join("\n");
   const result = await run("pnpm", [
     "--silent",
     "--filter",
-    "@binny/source-adapter-rss",
+    packageName,
     "exec",
     "node",
     "--conditions=source",
@@ -3825,7 +3860,7 @@ async function createLinuxdoBin(
   const runtimeManifest = await linuxdoRuntimeManifest(service);
   assert.equal(
     registered.sourceAdapterVersion,
-    rssManifestVersion(runtimeManifest),
+    manifestVersion(runtimeManifest),
   );
   const configured = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
@@ -4068,6 +4103,7 @@ async function verifyLinuxdoArchiveJourney(
   sourceControlUrl: string,
   journey: LinuxdoUserJourney,
   rss: RssAcceptanceResult,
+  imageUpdate: LinuxdoImageUpdate,
 ): Promise<void> {
   const binId = "binny-integration-linuxdo";
   const namespace = "linuxdo:linuxdo-e2e-source:8081";
@@ -4628,6 +4664,20 @@ async function verifyLinuxdoArchiveJourney(
     assert.ok(timeline.events.some((event) => event.runId === runId));
   }
 
+  const archiveBeforeImageUpdate = cliData<{
+    readonly itemId: string;
+    readonly revisions: readonly { readonly revisionId: string }[];
+  }>(
+    await cliForLinuxdo(["archive", "item", rootItemId, "--bin", binId]),
+    "found",
+  );
+  await verifyLinuxdoImageUpgrade(
+    baseUrl,
+    imageUpdate,
+    rootItemId,
+    archiveBeforeImageUpdate.revisions.map(({ revisionId }) => revisionId),
+  );
+
   const deletion = cliData<{
     readonly itemId: string;
     readonly deletedItemIds: readonly string[];
@@ -4744,6 +4794,135 @@ async function verifyLinuxdoArchiveJourney(
         deletedItemIds: deletion.deletedItemIds,
         rssItemId: rss.itemId,
         rssBinIds: rss.binIds,
+      }) +
+      "\n",
+  );
+}
+
+async function verifyLinuxdoImageUpgrade(
+  baseUrl: string,
+  imageUpdate: LinuxdoImageUpdate,
+  itemId: string,
+  expectedRevisionIds: readonly string[],
+): Promise<void> {
+  const services = ["runtime-linuxdo", "runtime-linuxdo-two"] as const;
+  const bins = [
+    "binny-integration-linuxdo",
+    "binny-integration-linuxdo-two",
+  ] as const;
+  const previousContainers = new Map<string, string>();
+  const profileVolumes = new Map<string, string>();
+  for (const service of services) {
+    const containerId = await runningContainerId(service);
+    previousContainers.set(service, containerId);
+    assert.equal(await containerImageId(service), imageUpdate.baselineImageId);
+    profileVolumes.set(
+      service,
+      await containerVolume(service, "/var/lib/binny/browser-profile"),
+    );
+  }
+  const baselineRegistrations = await Promise.all(
+    bins.map((binId) => waitForBinRegistration(baseUrl, binId)),
+  );
+  assert.ok(
+    baselineRegistrations.every(
+      ({ sourceAdapterVersion }) =>
+        sourceAdapterVersion === imageUpdate.baselineVersion,
+    ),
+  );
+
+  const readArchivedItem = async () =>
+    cliData<{
+      readonly itemId: string;
+      readonly revisions: readonly { readonly revisionId: string }[];
+    }>(
+      await cli(baseUrl, ["archive", "item", itemId, "--bin", bins[0]]),
+      "found",
+    );
+  const archiveBeforeUpgrade = await readArchivedItem();
+  assert.equal(archiveBeforeUpgrade.itemId, itemId);
+  assert.deepEqual(
+    archiveBeforeUpgrade.revisions.map(({ revisionId }) => revisionId),
+    expectedRevisionIds,
+  );
+
+  await compose(["stop", "--timeout", "30", ...services]);
+  for (const service of services) {
+    const containerId = previousContainers.get(service);
+    assert.ok(containerId !== undefined);
+    assert.equal(await containerStatus(containerId), "exited");
+  }
+
+  activeLinuxdoRuntimeImage = linuxdoRuntimeImageName;
+  await compose([
+    "up",
+    "--detach",
+    "--wait",
+    "--wait-timeout",
+    "90",
+    "--no-deps",
+    "--no-build",
+    "--force-recreate",
+    ...services,
+  ]);
+
+  const updatedContainers = new Map<string, string>();
+  for (const service of services) {
+    const containerId = await runningContainerId(service);
+    updatedContainers.set(service, containerId);
+    assert.notEqual(containerId, previousContainers.get(service));
+    assert.equal(await containerImageId(service), imageUpdate.candidateImageId);
+    assert.equal(
+      await containerVolume(service, "/var/lib/binny/browser-profile"),
+      profileVolumes.get(service),
+    );
+  }
+  await Promise.all(services.map((service) => waitForRuntimeHealth(service)));
+  await Promise.all(bins.map((binId) => waitForRuntime(baseUrl, binId)));
+  const candidateRegistrations = await Promise.all(
+    bins.map((binId) => waitForBinRegistration(baseUrl, binId)),
+  );
+  assert.ok(
+    candidateRegistrations.every(
+      ({ sourceAdapterVersion }) =>
+        sourceAdapterVersion === imageUpdate.candidateVersion,
+    ),
+  );
+
+  const postUpdateCheck = await triggerLinuxdoRun(
+    (args) => cli(baseUrl, args),
+    bins[0],
+    "check",
+    { targets: linuxdoTargets("pinned") },
+  );
+  assert.equal(
+    postUpdateCheck.status,
+    "completed",
+    JSON.stringify(postUpdateCheck),
+  );
+  assert.equal(runOutput(postUpdateCheck)?.availability, "available");
+  const archiveAfterUpgrade = await readArchivedItem();
+  assert.equal(archiveAfterUpgrade.itemId, itemId);
+  assert.deepEqual(
+    archiveAfterUpgrade.revisions.map(({ revisionId }) => revisionId),
+    expectedRevisionIds,
+  );
+
+  process.stdout.write(
+    "Linux.do official image A-to-B upgrade passed: " +
+      JSON.stringify({
+        baselineImage: linuxdoBaselineRuntimeImageName,
+        baselineImageId: imageUpdate.baselineImageId,
+        candidateImage: linuxdoRuntimeImageName,
+        candidateImageId: imageUpdate.candidateImageId,
+        binId: bins[0],
+        oldContainerIds: Object.fromEntries(previousContainers),
+        newContainerIds: Object.fromEntries(updatedContainers),
+        browserProfileVolumes: Object.fromEntries(profileVolumes),
+        postUpdateCheckRunId: postUpdateCheck.runId,
+        archivedItemId: archiveAfterUpgrade.itemId,
+        preservedRevisionIds: expectedRevisionIds,
+        sourceAdapterVersion: imageUpdate.candidateVersion,
       }) +
       "\n",
   );
@@ -4948,7 +5127,7 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   );
 }
 
-function rssManifestVersion(manifest: unknown): string {
+function manifestVersion(manifest: unknown): string {
   assert.ok(typeof manifest === "object" && manifest !== null);
   const version = (manifest as { readonly version?: unknown }).version;
   assert.ok(typeof version === "string" && version.length > 0);
@@ -4963,8 +5142,10 @@ function rssManifestWithVersion(manifest: unknown, version: string): unknown {
 async function buildRssImageUpdate(
   buildContextDirectory: string,
 ): Promise<RssImageUpdate> {
-  const candidateManifest = await createRssManifest();
-  const candidateVersion = rssManifestVersion(candidateManifest);
+  const candidateManifest = await createSourceAdapterManifest(
+    "@binny/source-adapter-rss",
+  );
+  const candidateVersion = manifestVersion(candidateManifest);
   const baselineVersion = candidateVersion + "-image-a";
   const baselineManifest = rssManifestWithVersion(
     candidateManifest,
@@ -5018,6 +5199,53 @@ async function buildRssImageUpdate(
   };
 }
 
+async function buildLinuxdoImageUpdate(
+  buildContextDirectory: string,
+): Promise<LinuxdoImageUpdate> {
+  const candidateVersion = manifestVersion(
+    await createSourceAdapterManifest("@binny/source-adapter-linuxdo"),
+  );
+  const baselineVersion = candidateVersion + "-image-a";
+  await copyImageBuildContext(artifactRoot, buildContextDirectory);
+  await setBuildContextSourceAdapterVersion(
+    buildContextDirectory,
+    "source-adapters/linuxdo/src/source-adapter.ts",
+    "binny.source-adapter-linuxdo",
+    baselineVersion,
+  );
+
+  await buildPackageImages(
+    [
+      {
+        task: "@binny/source-adapter-linuxdo#image:build",
+        imageVariable: "BINNY_LINUXDO_IMAGE",
+        image: linuxdoBaselineRuntimeImageName,
+      },
+    ],
+    buildContextDirectory,
+  );
+  const baselineImageId = await imageId(linuxdoBaselineRuntimeImageName);
+  const candidateImageId = await imageId(linuxdoRuntimeImageName);
+  assert.notEqual(
+    candidateImageId,
+    baselineImageId,
+    "Linux.do A/B must produce different official images from different source manifests.",
+  );
+
+  await setBuildContextSourceAdapterVersion(
+    buildContextDirectory,
+    "source-adapters/linuxdo/src/source-adapter.ts",
+    "binny.source-adapter-linuxdo",
+    candidateVersion,
+  );
+  return {
+    baselineImageId,
+    baselineVersion,
+    candidateImageId,
+    candidateVersion,
+  };
+}
+
 async function createRssBin(
   baseUrl: string,
   binId: string,
@@ -5025,7 +5253,7 @@ async function createRssBin(
   config: unknown,
 ): Promise<void> {
   const registered = await waitForBinRegistration(baseUrl, binId);
-  assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
+  assert.equal(registered.sourceAdapterVersion, manifestVersion(manifest));
   const configJson = JSON.stringify(config);
   assert.ok(configJson !== undefined);
   const updated = cliData<{ readonly id: string }>(
@@ -5049,7 +5277,7 @@ async function updateRssBinSourceAdapter(
   manifest: unknown,
 ): Promise<void> {
   const registered = await waitForBinRegistration(baseUrl, binId);
-  assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
+  assert.equal(registered.sourceAdapterVersion, manifestVersion(manifest));
 }
 
 async function rebuildRssRuntimeWithComposeWatch(
@@ -5956,7 +6184,7 @@ async function configureManualRunBins(
 ): Promise<void> {
   for (const binId of ["binny-runs-one", "binny-runs-two"]) {
     const registered = await waitForBinRegistration(baseUrl, binId);
-    assert.equal(registered.sourceAdapterVersion, rssManifestVersion(manifest));
+    assert.equal(registered.sourceAdapterVersion, manifestVersion(manifest));
     const configured = cliData<{
       readonly id: string;
       readonly config: { readonly section: string };
@@ -6003,7 +6231,9 @@ async function configureExtensionScopeBins(baseUrl: string): Promise<void> {
   assert.equal(configuredSchemaVariant.id, "binny-runs-schema-two");
   await waitForRuntime(baseUrl, "binny-runs-schema-two");
 
-  const rssManifest = await createRssManifest();
+  const rssManifest = await createSourceAdapterManifest(
+    "@binny/source-adapter-rss",
+  );
   await createRssBin(baseUrl, "binny-rss-one", rssManifest, {
     feeds: [{ id: "extension-scope", url: "https://example.test/rss" }],
   });
@@ -10191,7 +10421,7 @@ async function runRssAcceptance(
   );
   assert.equal(
     configuredUpdatedBin.sourceAdapterVersion,
-    rssManifestVersion(activeManifest),
+    manifestVersion(activeManifest),
   );
   process.stdout.write(
     "RSS 正式镜像 A→B 更新与活动运行中断：" +
@@ -10605,7 +10835,7 @@ async function runRssAcceptance(
       }
     | undefined;
   if (!preserveCapacityProject) {
-    const watchVersion = rssManifestVersion(activeManifest) + "-watch";
+    const watchVersion = manifestVersion(activeManifest) + "-watch";
     const watchManifest = rssManifestWithVersion(activeManifest, watchVersion);
     activeManifest = watchManifest;
     const watchedUpdate = await rebuildRssRuntimeWithComposeWatch(
@@ -11518,6 +11748,7 @@ async function main(): Promise<void> {
   let rssControlSource: RssControlSource | undefined;
   const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
+  let linuxdoImageUpdate: LinuxdoImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
       artifactRoot,
@@ -11606,6 +11837,13 @@ async function main(): Promise<void> {
       );
       builtImages.add(rssBaselineRuntimeImageName);
       activeRssRuntimeImage = rssBaselineRuntimeImageName;
+    }
+    if (runFunctionalJourney) {
+      linuxdoImageUpdate = await buildLinuxdoImageUpdate(
+        path.join(overrideDirectory, "linuxdo-build-context"),
+      );
+      builtImages.add(linuxdoBaselineRuntimeImageName);
+      activeLinuxdoRuntimeImage = linuxdoBaselineRuntimeImageName;
     }
     await compose([
       "up",
@@ -11749,7 +11987,7 @@ async function main(): Promise<void> {
       );
       assert.equal(
         registered.sourceAdapterVersion,
-        rssManifestVersion(await createRuntimeFixtureManifest()),
+        manifestVersion(await createRuntimeFixtureManifest()),
       );
       cliData(
         await cli(baseUrl, [
@@ -11871,6 +12109,7 @@ async function main(): Promise<void> {
       );
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
+      assert.ok(linuxdoImageUpdate !== undefined);
       assert.ok(rssControlSource !== undefined);
       if (!rssLinuxdoOnly) {
         assert.ok(installedCliConsumer !== undefined);
@@ -11984,6 +12223,7 @@ async function main(): Promise<void> {
         linuxdoSourceControlUrl,
         linuxdoJourney,
         rssAcceptance,
+        linuxdoImageUpdate,
       );
       if (rssLinuxdoOnly) {
         process.stdout.write(
