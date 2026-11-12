@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   archiveBatchReadResponseSchema,
@@ -119,6 +120,10 @@ const artifactRoot = (() => {
   assert.ok(value !== undefined, "集成验收需要准备好的临时构建制品。");
   return value;
 })();
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../..",
+);
 const composeFile = path.join(artifactRoot, "compose.acceptance.yaml");
 const capacityProfile = process.env.BINNY_E2E_CAPACITY_PROFILE ?? "smoke";
 assert.ok(
@@ -144,6 +149,7 @@ const scheduleOverlapOnly = internalStep === "schedule-overlap";
 const archiveModelOnly = internalStep === "archive-model";
 const archiveSearchOnly = internalStep === "archive-search";
 const rssLinuxdoOnly = internalStep === "rss-linuxdo";
+const rssAdapterOnly = internalStep === "rss-adapter";
 const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const articleAdaptersOnly = internalStep === "article-adapters";
 const documentAdaptersOnly = internalStep === "document-adapters";
@@ -163,6 +169,7 @@ const capacityPhaseOnly =
 const useHeartbeatProxy =
   (!manualRunsOnly || scheduledRunsOnly) &&
   !rssLinuxdoOnly &&
+  !rssAdapterOnly &&
   !capacityPhaseOnly;
 const preserveCapacityProject =
   isFullCapacityRun && (capacityPhase === "seed" || capacityPhase === "verify");
@@ -381,6 +388,34 @@ function composeEnvironment(): Readonly<Record<string, string>> {
     BINNY_RESOURCE_UNREFERENCED_AGE_MS: String(15 * 1000),
     BINNY_RESOURCE_CLEANUP_INTERVAL_MS: String(60 * 60 * 1000),
   };
+}
+
+async function buildPackageImages(
+  tasks: readonly {
+    readonly task: string;
+    readonly imageVariable: string;
+    readonly image: string;
+  }[],
+  buildContextDirectory = artifactRoot,
+): Promise<void> {
+  const imageEnvironment: Record<string, string> = {
+    ...composeEnvironment(),
+    BINNY_IMAGE_BUILD_CONTEXT: buildContextDirectory,
+  };
+  for (const { imageVariable, image } of tasks)
+    imageEnvironment[imageVariable] = image;
+  const result = await run(
+    "pnpm",
+    ["exec", "turbo", "run", ...tasks.map(({ task }) => task)],
+    { cwd: repositoryRoot, env: imageEnvironment },
+  );
+  assert.equal(
+    result.code,
+    0,
+    "Turbo could not build the official adapter images:\n" +
+      result.stdout +
+      result.stderr,
+  );
 }
 
 function apiBaseUrl(): string {
@@ -4943,16 +4978,22 @@ async function buildRssImageUpdate(
     baselineVersion,
   );
 
-  const previousProjectDirectory = composeProjectDirectory;
   const previousRuntimeImage = activeRssRuntimeImage;
   let baselineImageId: string;
   try {
-    composeProjectDirectory = buildContextDirectory;
     activeRssRuntimeImage = rssBaselineRuntimeImageName;
-    await compose(["build", "runtime-rss"]);
+    await buildPackageImages(
+      [
+        {
+          task: "@binny/source-adapter-rss#image:build",
+          imageVariable: "BINNY_RSS_IMAGE",
+          image: rssBaselineRuntimeImageName,
+        },
+      ],
+      buildContextDirectory,
+    );
     baselineImageId = await imageId(rssBaselineRuntimeImageName);
   } finally {
-    composeProjectDirectory = previousProjectDirectory;
     activeRssRuntimeImage = previousRuntimeImage;
   }
 
@@ -11475,7 +11516,8 @@ async function main(): Promise<void> {
   const builtImages = new Set<string>();
   let heartbeatProxy: HeartbeatDelayProxy | undefined;
   let rssControlSource: RssControlSource | undefined;
-  const runFunctionalJourney = !manualRunsOnly && !capacityPhaseOnly;
+  const runFunctionalJourney =
+    !manualRunsOnly && !capacityPhaseOnly && !rssAdapterOnly;
   let rssImageUpdate: RssImageUpdate | undefined;
   try {
     installedCliConsumer = await createIsolatedCliConsumer({
@@ -11484,19 +11526,86 @@ async function main(): Promise<void> {
     await installedCliConsumer.verifyOfflineSchema();
     await compose(["build", "server"]);
     builtImages.add(imageName);
+    const lightweightImageTasks: {
+      readonly task: string;
+      readonly imageVariable: string;
+      readonly image: string;
+    }[] = [];
+    let rssCandidateImageBuilt = false;
     if (
       !capacityPhaseOnly &&
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&
-      !rssLinuxdoOnly
+      !rssLinuxdoOnly &&
+      !rssAdapterOnly
     ) {
-      await compose(["build", "runtime-fifteen-one"]);
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-runtime#image:build:manual-runs-fixture",
+        imageVariable: "BINNY_TEST_RUNNER_IMAGE",
+        image: runtimeImageName,
+      });
       builtImages.add(runtimeImageName);
     }
     if (!capacityPhaseOnly && (!manualRunsOnly || archiveModelJourney)) {
-      await compose(["build", "runtime-rss"]);
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-rss#image:build",
+        imageVariable: "BINNY_RSS_IMAGE",
+        image: activeRssRuntimeImage,
+      });
       builtImages.add(rssRuntimeImageName);
+      rssCandidateImageBuilt = true;
+    }
+    if (archiveModelJourney) {
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-runtime#image:build:schema-fixture",
+        imageVariable: "BINNY_TEST_RUNNER_SCHEMA_IMAGE",
+        image: schemaVariantRuntimeImageName,
+      });
+      builtImages.add(schemaVariantRuntimeImageName);
+    }
+    if (runFunctionalJourney) {
+      lightweightImageTasks.push({
+        task: "@binny/source-adapter-linuxdo#image:build",
+        imageVariable: "BINNY_LINUXDO_IMAGE",
+        image: linuxdoRuntimeImageName,
+      });
+      builtImages.add(linuxdoRuntimeImageName);
+    }
+    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-openai#image:build",
+          imageVariable: "BINNY_ARTICLE_OPENAI_IMAGE",
+          image: articleAdapterRuntimeImageNames.openai,
+        },
+        {
+          task: "@binny/source-adapter-anthropic#image:build",
+          imageVariable: "BINNY_ARTICLE_ANTHROPIC_IMAGE",
+          image: articleAdapterRuntimeImageNames.anthropic,
+        },
+        {
+          task: "@binny/source-adapter-google#image:build",
+          imageVariable: "BINNY_ARTICLE_GOOGLE_IMAGE",
+          image: articleAdapterRuntimeImageNames.google,
+        },
+        {
+          task: "@binny/source-adapter-huggingface#image:build",
+          imageVariable: "BINNY_ARTICLE_HUGGINGFACE_IMAGE",
+          image: articleAdapterRuntimeImageNames.huggingface,
+        },
+        {
+          task: "@binny/source-adapter-mistral#image:build",
+          imageVariable: "BINNY_ARTICLE_MISTRAL_IMAGE",
+          image: articleAdapterRuntimeImageNames.mistral,
+        },
+      );
+      for (const imageName of Object.values(articleAdapterRuntimeImageNames))
+        builtImages.add(imageName);
+    }
+    if (lightweightImageTasks.length > 0)
+      await buildPackageImages(lightweightImageTasks);
+    if (rssCandidateImageBuilt) {
       // Keep the initial candidate referenced by an owned tag so a watch
       // rebuild can move the runtime tag without leaving a dangling image.
       const candidateTag = await run(
@@ -11506,20 +11615,6 @@ async function main(): Promise<void> {
       );
       assert.equal(candidateTag.code, 0, candidateTag.stderr);
       builtImages.add(rssCandidateRuntimeImageName);
-    }
-    if (archiveModelJourney) {
-      await compose(["build", "runtime-fifteen-schema-two"]);
-      builtImages.add(schemaVariantRuntimeImageName);
-    }
-    if (runFunctionalJourney) {
-      await compose(["build", "runtime-linuxdo"]);
-      builtImages.add(linuxdoRuntimeImageName);
-    }
-    if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
-      await compose(["build", ...articleAdapterRuntimeServices]);
-      for (const imageName of Object.values(articleAdapterRuntimeImageNames)) {
-        builtImages.add(imageName);
-      }
     }
     if (qoderAdapterOnly) {
       await compose(["build", qoderAdapterRuntimeService]);
@@ -11531,7 +11626,7 @@ async function main(): Promise<void> {
         builtImages.add(imageName);
       }
     }
-    if (runFunctionalJourney) {
+    if (runFunctionalJourney || rssAdapterOnly) {
       rssImageUpdate = await buildRssImageUpdate(
         path.join(overrideDirectory, "rss-build-context"),
       );
@@ -11594,17 +11689,25 @@ async function main(): Promise<void> {
                     "runtime-rss",
                     "runtime-rss-two",
                   ]
-                : [
-                    "postgres",
-                    "server",
-                    "manual-runs-source",
-                    "rss-e2e-source",
-                    "runtime-fifteen-one",
-                    "runtime-fifteen-two",
-                    "runtime-rss",
-                    "runtime-rss-two",
-                    "heartbeat-proxy",
-                  ];
+                : rssAdapterOnly
+                  ? [
+                      "postgres",
+                      "server",
+                      "rss-e2e-source",
+                      "runtime-rss",
+                      "runtime-rss-two",
+                    ]
+                  : [
+                      "postgres",
+                      "server",
+                      "manual-runs-source",
+                      "rss-e2e-source",
+                      "runtime-fifteen-one",
+                      "runtime-fifteen-two",
+                      "runtime-rss",
+                      "runtime-rss-two",
+                      "heartbeat-proxy",
+                    ];
     if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
@@ -11636,7 +11739,8 @@ async function main(): Promise<void> {
       !articleAdaptersOnly &&
       !documentAdaptersOnly &&
       !qoderAdapterOnly &&
-      !rssLinuxdoOnly
+      !rssLinuxdoOnly &&
+      !rssAdapterOnly
     ) {
       manualRunSourcePort = await publishedPort("manual-runs-source", 8081);
     }
@@ -11655,7 +11759,8 @@ async function main(): Promise<void> {
       articleAdaptersOnly ||
       documentAdaptersOnly ||
       qoderAdapterOnly ||
-      runFunctionalJourney
+      runFunctionalJourney ||
+      rssAdapterOnly
     ) {
       rssControlSource = await createRssControlSource(
         await publishedPort("rss-e2e-source", 8081),
@@ -11783,6 +11888,13 @@ async function main(): Promise<void> {
         waitForRuntime,
         waitForRuntimeHealth,
       });
+    } else if (rssAdapterOnly) {
+      assert.ok(rssImageUpdate !== undefined);
+      assert.ok(rssControlSource !== undefined);
+      await runRssAcceptance(baseUrl, rssControlSource, rssImageUpdate);
+      process.stdout.write(
+        "RSS archive, packaged adapter image upgrade, and CLI readback passed.\n",
+      );
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(rssControlSource !== undefined);
@@ -11907,7 +12019,7 @@ async function main(): Promise<void> {
         await verifyLinuxdoCapacityJourney(baseUrl);
       }
     }
-    if (!manualRunsOnly && !rssLinuxdoOnly) {
+    if (!manualRunsOnly && !rssLinuxdoOnly && !rssAdapterOnly) {
       await runCapacityAcceptance(baseUrl);
     }
   } catch (error) {
