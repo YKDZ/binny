@@ -758,6 +758,10 @@ function createCliContract(identity: CliCommandIdentity) {
         })`;
   const distributionItemCountText = (count: string) =>
     `${count} ${count === "1" ? "item" : "items"}`;
+  const distributionOrderText = (order: "key" | "count") =>
+    order === "count"
+      ? "numeric itemCount desc (group key asc)"
+      : "group key asc";
   const timeWindowSummaryText = (
     timeWindow: NonNullable<
       z.infer<typeof archiveSearchPageSchema>["timeWindow"]
@@ -830,6 +834,7 @@ function createCliContract(identity: CliCommandIdentity) {
         ? []
         : [
             `Distribution by ${page.distribution.by}: ${page.distribution.totalItems} distinct matching ${page.distribution.totalItems === "1" ? "item" : "items"}.`,
+            `Distribution order: ${distributionOrderText(page.distribution.order)}`,
             "Each group counts distinct items; one item can appear in multiple groups.",
             ...page.distribution.groups.map((group) => {
               if (group.kind === "bin") {
@@ -3130,7 +3135,8 @@ function createCliContract(identity: CliCommandIdentity) {
           'Time membership uses stored source precision and zone; timeSummary counts distinct certain and undetermined items, and review="undetermined" with the same snapshot.asOf inspects undetermined views.',
           "Without timeWindow, candidates sort by observedAt descending (itemId ascending breaks ties); with timeWindow, candidates sort by timeWindow.field descending (nulls last, itemId ascending breaks ties).",
           "Distribution groups can use bin, local date period, or a declared extension field. Date groups require a time zone and only count source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason.",
-          "Candidate pages and distribution groups have independent limits and cursors. Reuse snapshot.asOf and the previous top-level cursor or distribution.cursor.",
+          'Distribution groups sort ascending by group key by default (distribution.order="key"), or descending by numeric distinct itemCount with group key ascending breaking ties (distribution.order="count").',
+          "Candidate pages and distribution groups have independent limits and cursors. Reuse snapshot.asOf and the previous top-level cursor or distribution.cursor; distribution cursors are bound to the query, snapshot, and order.",
           "Set includeCandidates to false to return distribution groups only. Each group counts an item once, so group counts may exceed the distinct total. One distribution dimension is available per request.",
         ]),
         examples: [
@@ -3154,6 +3160,12 @@ function createCliContract(identity: CliCommandIdentity) {
           {
             input: {
               query:
+                '{"includeCandidates":false,"distribution":{"by":"bin","order":"count","limit":10}}',
+            },
+          },
+          {
+            input: {
+              query:
                 '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}',
             },
           },
@@ -3171,7 +3183,7 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--query",
             description:
-              "Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.",
+              'Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Distribution groups sort by key ascending ("key", default) or numeric itemCount descending ("count"). Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.',
           },
           queryFile: {
             kind: "valueOption",

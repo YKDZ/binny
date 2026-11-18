@@ -1233,9 +1233,16 @@ const archiveSearchTimeMatchSchema = z.discriminatedUnion("status", [
 
 const archiveSearchCountSchema = z.string().regex(/^(?:0|[1-9]\d*)$/u);
 
+const archiveSearchDistributionOrderSchema = z
+  .enum(["key", "count"])
+  .describe(
+    'Group ordering: "key" sorts ascending by group key (default); "count" sorts descending by numeric itemCount with group key ascending as tie-breaker.',
+  );
+
 const archiveSearchDistributionPageInputFields = {
   limit: z.number().int().min(1).max(100).default(50),
   cursor: postgresTextSchema.min(1).max(4096).optional(),
+  order: archiveSearchDistributionOrderSchema.default("key"),
 };
 
 const archiveSearchBinDistributionRequestSchema = z
@@ -1334,6 +1341,7 @@ const archiveSearchDistributionMissingGroupSchema = z
   })
   .strict();
 const archiveSearchDistributionPageFields = {
+  order: archiveSearchDistributionOrderSchema,
   totalItems: archiveSearchDistributionItemCountSchema,
   hasMore: z.boolean(),
   nextCursor: z.string().min(1).max(4096).optional(),
@@ -1343,7 +1351,9 @@ const archiveSearchDistributionPageFields = {
  * One stable, independently paginated view of the full matching set.
  * `totalItems` is distinct by item. A multi-valued extension item can appear
  * once in each value group; a bin distribution counts it once per matching
- * bin, so group totals can exceed `totalItems`.
+ * bin, so group totals can exceed `totalItems`. Groups sort by `key`
+ * ascending (default) or numeric `itemCount` descending with `key` ascending
+ * as tie-breaker.
  */
 export const archiveSearchDistributionPageSchema =
   withArchiveJsonSchemaProjection(

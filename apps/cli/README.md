@@ -72,7 +72,11 @@ binny archive search --query '{"includeCandidates":false,"distribution":{"by":"b
 BIN_ID="$(jq -r '.data.distribution.groups[0].binId' bins.json)"
 ```
 
-响应包含 `data.snapshot.asOf`、`data.distribution.totalItems` 和当前页的 `groups`。`totalItems` 统计不同条目的数量。每个分组按匹配该 bin 的条目计数；同一条目可能出现在多个 bin 分组中，因此分组计数之和可能大于 `totalItems`。如果 `data.distribution.hasMore` 为 `true`，继续使用 `data.distribution.nextCursor`，并保持筛选条件和快照不变。分布游标与候选游标相互独立，分页大小也相互独立。
+响应包含 `data.snapshot.asOf`、`data.distribution.order`、`data.distribution.totalItems` 和当前页的 `groups`。`totalItems` 统计不同条目的数量。每个分组按匹配该 bin 的条目计数；同一条目可能出现在多个 bin 分组中，因此分组计数之和可能大于 `totalItems`。分布默认按分组键升序排列（`distribution.order: "key"`），也可设为 `"count"` 按去重条目数的数值降序排列完整匹配集（同数按分组键升序打破并列），然后再分页；例如先按 `"count"` 取前 10 个分组，即可找出条目最多的主题或标签。如果 `data.distribution.hasMore` 为 `true`，继续使用 `data.distribution.nextCursor`，并保持筛选条件、排序方式和快照不变。分布游标与候选游标相互独立，分页大小也相互独立。
+
+```sh
+binny archive search --query '{"includeCandidates":false,"distribution":{"by":"bin","order":"count","limit":10}}'
+```
 
 取得 `BIN_ID` 后，读取该 bin 所用适配器声明的字段和值。`SOURCE_ADAPTER_ID` 直接取自这一步的发现结果：
 
@@ -170,7 +174,7 @@ jq \
 binny archive search --query-file ./next-page.json > next-page-results.json
 ```
 
-游标与查询和快照绑定，不与页大小绑定。续读时不要更改筛选条件。分布使用自己的 `distribution.cursor`，不会推进候选分页。
+游标与查询、快照及分布排序绑定，不与页大小绑定。续读时不要更改筛选条件或 `distribution.order`。分布使用自己的 `distribution.cursor`，不会推进候选分页。
 
 `data.results` 中的每个候选是一个不同的 `itemId`。候选的 `matches` 保留命中的 bin 视图及其精确内容版本。同一条目若出现在多个 bin 中，请选择要读取的那条 match。
 

@@ -2568,6 +2568,307 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     reason: "precisionOverlapsBoundary",
   });
 
+  // CLI verification of count-ordered distribution: numeric comparison (10 > 2),
+  // late-key group promoted to #1, in-window replies of older topic counted,
+  // duplicate observations deduplicated, tie-breaking, cross-order rejection,
+  // and readable text output.
+  const cliCountToken = "cli-count-dist-" + randomUUID();
+  const cliCountItems = [
+    {
+      sourceKey: { namespace: "e2e", key: `${cliCountToken}:9999:root` },
+      title: "Older root post for CLI topic 9999",
+      sourcePublishedAt: {
+        precision: "instant",
+        value: "2026-10-20T09:00:00+08:00",
+        timeZone: "Asia/Shanghai",
+      },
+      sourceModifiedAt: null,
+      extensions: {
+        floor: 9999,
+        labels: ["cli-hot-tag"],
+      },
+      body: { text: cliCountToken },
+      capture: {
+        scope: { case: "cli-count-dist" },
+        completeness: "complete",
+        missing: [],
+      },
+    },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      sourceKey: {
+        namespace: "e2e",
+        key: `${cliCountToken}:9999:reply:${index + 1}`,
+      },
+      title: null,
+      sourcePublishedAt: {
+        precision: "instant",
+        value: `2026-10-21T10:${String(index).padStart(2, "0")}:00+08:00`,
+        timeZone: "Asia/Shanghai",
+      },
+      sourceModifiedAt: null,
+      extensions: {
+        floor: 9999,
+        labels: ["cli-hot-tag"],
+      },
+      body: { text: cliCountToken },
+      capture: {
+        scope: { case: "cli-count-dist" },
+        completeness: "complete",
+        missing: [],
+      },
+    })),
+    ...[1001, 1001, 1002, 1002].map((topic, index) => ({
+      sourceKey: {
+        namespace: "e2e",
+        key: `${cliCountToken}:${topic}:${index}`,
+      },
+      title: `CLI topic ${topic} item ${index}`,
+      sourcePublishedAt: {
+        precision: "instant",
+        value: `2026-10-21T11:0${index}:00+08:00`,
+        timeZone: "Asia/Shanghai",
+      },
+      sourceModifiedAt: null,
+      extensions: {
+        floor: topic,
+        labels: [topic === 1001 ? "cli-tie-a" : "cli-tie-b"],
+      },
+      body: { text: cliCountToken },
+      capture: {
+        scope: { case: "cli-count-dist" },
+        completeness: "complete",
+        missing: [],
+      },
+    })),
+  ];
+  const cliCountCommitResponse = await fetch(`${baseUrl}/archives`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "e2e:cli-count-dist:" + randomUUID(),
+      binId,
+      items: cliCountItems,
+    }),
+  });
+  assert.equal(cliCountCommitResponse.status, 201);
+  const cliCountDuplicateResponse = await fetch(`${baseUrl}/archives`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "e2e:cli-count-dist:dup:" + randomUUID(),
+      binId,
+      items: [cliCountItems[1]],
+    }),
+  });
+  assert.equal(cliCountDuplicateResponse.status, 201);
+
+  const cliCountWindow = {
+    field: "sourcePublishedAt",
+    from: "2026-10-21",
+    until: "2026-10-22",
+    timeZone: "Asia/Shanghai",
+  };
+  const cliKeyOrderPage1 = cliData<{
+    readonly distribution?: {
+      readonly order: string;
+      readonly groups: readonly {
+        readonly kind: string;
+        readonly value?: unknown;
+        readonly itemCount: string;
+      }[];
+      readonly hasMore: boolean;
+      readonly nextCursor?: string;
+    };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { in: "body", groups: [[cliCountToken]] },
+        timeWindow: cliCountWindow,
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "floor",
+          limit: 2,
+        },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(cliKeyOrderPage1.distribution?.order, "key");
+  assert.deepEqual(cliKeyOrderPage1.distribution?.groups, [
+    { kind: "extension", value: 1001, itemCount: "2" },
+    { kind: "extension", value: 1002, itemCount: "2" },
+  ]);
+  assert.equal(cliKeyOrderPage1.distribution?.hasMore, true);
+
+  const cliCountOrderPage1 = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly distribution?: {
+      readonly order: string;
+      readonly totalItems: string;
+      readonly groups: readonly {
+        readonly kind: string;
+        readonly value?: unknown;
+        readonly itemCount: string;
+      }[];
+      readonly hasMore: boolean;
+      readonly nextCursor?: string;
+    };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { in: "body", groups: [[cliCountToken]] },
+        timeWindow: cliCountWindow,
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "floor",
+          order: "count",
+          limit: 1,
+        },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(cliCountOrderPage1.distribution?.order, "count");
+  assert.equal(cliCountOrderPage1.distribution?.totalItems, "14");
+  assert.deepEqual(cliCountOrderPage1.distribution?.groups, [
+    { kind: "extension", value: 9999, itemCount: "10" },
+  ]);
+  assert.equal(cliCountOrderPage1.distribution?.hasMore, true);
+  assert.ok(cliCountOrderPage1.distribution?.nextCursor);
+
+  const cliCountOrderPage2 = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly distribution?: {
+      readonly order: string;
+      readonly groups: readonly {
+        readonly kind: string;
+        readonly value?: unknown;
+        readonly itemCount: string;
+      }[];
+      readonly hasMore: boolean;
+    };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { in: "body", groups: [[cliCountToken]] },
+        timeWindow: cliCountWindow,
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "floor",
+          order: "count",
+          limit: 2,
+          cursor: cliCountOrderPage1.distribution.nextCursor,
+        },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(
+    cliCountOrderPage2.snapshot.asOf,
+    cliCountOrderPage1.snapshot.asOf,
+  );
+  assert.deepEqual(cliCountOrderPage2.distribution?.groups, [
+    { kind: "extension", value: 1001, itemCount: "2" },
+    { kind: "extension", value: 1002, itemCount: "2" },
+  ]);
+  assert.equal(cliCountOrderPage2.distribution?.hasMore, false);
+
+  const cliLabelCountText = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify({
+      bins: [binId],
+      text: { in: "body", groups: [[cliCountToken]] },
+      timeWindow: cliCountWindow,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        order: "count",
+        limit: 1,
+      },
+    }),
+    "--output",
+    "text",
+  ]);
+  assert.equal(cliLabelCountText.code, 0, cliLabelCountText.stderr);
+  assert.match(
+    cliLabelCountText.stdout,
+    /Distribution order: numeric itemCount desc \(group key asc\)/u,
+  );
+  assert.match(
+    cliLabelCountText.stdout,
+    /- Extension "cli-hot-tag": 10 items/u,
+  );
+
+  const cliCrossOrderCursorFailure = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        text: { in: "body", groups: [[cliCountToken]] },
+        timeWindow: cliCountWindow,
+        includeCandidates: false,
+        distribution: {
+          by: "extension",
+          sourceAdapterId: "binny-runs.manual-run-fixture",
+          field: "floor",
+          order: "key",
+          limit: 2,
+          cursor: cliCountOrderPage1.distribution.nextCursor,
+        },
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(cliCrossOrderCursorFailure.path, ["distribution", "cursor"]);
+
+  const cliInvalidOrderFailure = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+    readonly diagnostic?: { readonly allowedValues?: readonly string[] };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        bins: [binId],
+        distribution: { by: "bin", order: "popular" },
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(cliInvalidOrderFailure.path, ["distribution", "order"]);
+  assert.deepEqual(cliInvalidOrderFailure.diagnostic, {
+    allowedValues: ["key", "count"],
+  });
+
   for (const invalidQuery of [
     { unsupportedFilter: true },
     { bins: [binId], limit: 0 },

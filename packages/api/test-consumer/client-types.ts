@@ -705,6 +705,7 @@ async function checkPublicArchiveContract(): Promise<void> {
         by: "extension",
         sourceAdapterId: "rss-atom",
         field: "categories",
+        order: "count",
         limit: 10,
       },
     },
@@ -712,8 +713,11 @@ async function checkPublicArchiveContract(): Promise<void> {
   if (distributionSearch.status === 200) {
     const page = await distributionSearch.json();
     void page.candidatesIncluded;
+    void page.distribution?.order;
     void page.distribution?.totalItems;
     if (page.distribution?.by === "extension") {
+      const order: "key" | "count" = page.distribution.order;
+      void order;
       void page.distribution.hasMore;
       const group = page.distribution.groups[0];
       if (group?.kind === "extension") {
@@ -723,6 +727,17 @@ async function checkPublicArchiveContract(): Promise<void> {
       if (group?.kind === "missing") void group.itemCount;
     }
   }
+
+  void client.archives.search.$post({
+    json: {
+      includeCandidates: false,
+      distribution: {
+        by: "bin",
+        // @ts-expect-error Distribution order only allows "key" or "count".
+        order: "popular",
+      },
+    },
+  });
 
   void client.archives.search.$post({
     // @ts-expect-error Extension distributions require an explicit bin scope.

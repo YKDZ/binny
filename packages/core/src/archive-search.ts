@@ -15,7 +15,6 @@ import {
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
   type ArchiveSearchDiagnostic,
-  type ArchiveSearchDistributionRequest,
   type ArchiveSearchOperation,
   type ArchiveSearchRequest,
   type SourceAdapterManifest,
@@ -75,6 +74,7 @@ type SearchDistributionCursor = {
   readonly queryHash: string;
   readonly snapshot: ReturnType<typeof archiveSnapshotSchema.parse>;
   readonly groupKey: string;
+  readonly itemCount?: string;
 };
 type SearchInput = ReturnType<typeof archiveSearchInputSchema.parse>;
 type SearchPageRow = {
@@ -205,6 +205,8 @@ function decodeSearchCursor(cursor: string): SearchCursor | undefined {
   }
 }
 
+const maxPostgresBigint = 9_223_372_036_854_775_807n;
+
 function decodeSearchDistributionCursor(
   cursor: string,
 ): SearchDistributionCursor | undefined {
@@ -226,6 +228,16 @@ function decodeSearchDistributionCursor(
     ) {
       return undefined;
     }
+    const hasItemCount = "itemCount" in value && value.itemCount !== undefined;
+    if (hasItemCount) {
+      if (
+        typeof value.itemCount !== "string" ||
+        !/^(?:0|[1-9]\d*)$/u.test(value.itemCount) ||
+        BigInt(value.itemCount) > maxPostgresBigint
+      ) {
+        return undefined;
+      }
+    }
     const snapshot = archiveSnapshotSchema.safeParse(value.snapshot);
     const groupKey = postgresTextSchema.safeParse(value.groupKey);
     if (!snapshot.success || !groupKey.success) return undefined;
@@ -234,6 +246,9 @@ function decodeSearchDistributionCursor(
       queryHash: value.queryHash,
       snapshot: snapshot.data,
       groupKey: groupKey.data,
+      ...(hasItemCount && typeof value.itemCount === "string"
+        ? { itemCount: value.itemCount }
+        : {}),
     };
   } catch {
     return undefined;
@@ -274,7 +289,7 @@ function queryHash(input: SearchInput): string {
 
 function distributionQueryHash(
   input: SearchInput,
-  distribution: ArchiveSearchDistributionRequest,
+  distribution: NonNullable<SearchInput["distribution"]>,
 ): string {
   const { cursor: _cursor, limit: _limit, ...dimension } = distribution;
   return createHash("sha256")
@@ -349,6 +364,55 @@ function timeZoneSql(timeZone: string): SQL {
   return /^(?:[+-](?:0\d|1[0-3]):[0-5]\d|[+-]14:00)$/u.test(canonical)
     ? sql`${canonical}::interval`
     : sql`${canonical}::text`;
+}
+
+type DistributionOrderColumns = WithSubquery & {
+  readonly group_key: SQLWrapper;
+  readonly item_count_value: SQLWrapper;
+};
+
+type DistributionOrder = NonNullable<SearchInput["distribution"]>["order"];
+
+function distributionAfterCursorSql(
+  distributionBase: DistributionOrderColumns,
+  order: DistributionOrder,
+  cursor: SearchDistributionCursor | undefined,
+): SQL {
+  if (cursor === undefined) return sql`true`;
+  if (order === "count") {
+    if (cursor.itemCount === undefined) {
+      throw new Error("Count-ordered distribution cursor requires itemCount.");
+    }
+    return sql`(
+      ${distributionBase.item_count_value} < (${cursor.itemCount})::bigint
+      OR (
+        ${distributionBase.item_count_value} = (${cursor.itemCount})::bigint
+        AND ${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"
+      )
+    )`;
+  }
+  return sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+}
+
+function distributionSelectedOrder(
+  distributionBase: DistributionOrderColumns,
+  order: DistributionOrder,
+): SQL[] {
+  return order === "count"
+    ? [
+        desc(sql`${distributionBase.item_count_value}`),
+        asc(sql`${distributionBase.group_key} COLLATE "C"`),
+      ]
+    : [asc(sql`${distributionBase.group_key} COLLATE "C"`)];
+}
+
+function distributionAggregateOrderSql(
+  distributionSelected: DistributionOrderColumns,
+  order: DistributionOrder,
+): SQL {
+  return order === "count"
+    ? sql`${distributionSelected.item_count_value} DESC, ${distributionSelected.group_key} COLLATE "C" ASC`
+    : sql`${distributionSelected.group_key} COLLATE "C" ASC`;
 }
 
 function dateDistributionCtes(
@@ -519,6 +583,9 @@ function dateDistributionCtes(
         group_kind: sql`${dateAssigned.group_kind}`.as("group_kind"),
         date_value: sql`${dateAssigned.date_value}`.as("date_value"),
         reason: sql`${dateAssigned.reason}`.as("reason"),
+        item_count_value: sql`count(DISTINCT ${dateAssigned.item_id})`.as(
+          "item_count_value",
+        ),
         item_count: sql`count(DISTINCT ${dateAssigned.item_id})::text`.as(
           "item_count",
         ),
@@ -540,17 +607,24 @@ function dateDistributionCtes(
       })
       .from(selectedViews),
   );
-  const afterCursor =
-    cursor === undefined
-      ? sql`true`
-      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const afterCursor = distributionAfterCursorSql(
+    distributionBase,
+    distribution.order,
+    cursor,
+  );
   const distributionSelected = database.$with("distribution_selected").as(
     database
       .select()
       .from(distributionBase)
       .where(afterCursor)
-      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .orderBy(
+        ...distributionSelectedOrder(distributionBase, distribution.order),
+      )
       .limit(distribution.limit + 1),
+  );
+  const aggregateOrder = distributionAggregateOrderSql(
+    distributionSelected,
+    distribution.order,
   );
   const distributionGroups = database.$with("distribution_groups").as(
     database
@@ -570,7 +644,7 @@ function dateDistributionCtes(
                 'itemCount', ${distributionSelected.item_count},
                 '__distributionKey', ${distributionSelected.group_key}
               )
-            END ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+            END ORDER BY ${aggregateOrder}
           ),
           '[]'::jsonb
         )`.as("groups"),
@@ -637,6 +711,9 @@ function extensionDistributionCtes(
     database
       .select({
         group_value: sql`${extensionValues.group_value}`.as("group_value"),
+        item_count_value: sql`count(DISTINCT ${extensionValues.item_id})`.as(
+          "item_count_value",
+        ),
         item_count: sql`count(DISTINCT ${extensionValues.item_id})::text`.as(
           "item_count",
         ),
@@ -668,6 +745,9 @@ function extensionDistributionCtes(
         ),
       group_kind: sql`'extension'::text`.as("group_kind"),
       group_value: sql`${extensionCounts.group_value}`.as("group_value"),
+      item_count_value: sql`${extensionCounts.item_count_value}`.as(
+        "item_count_value",
+      ),
       item_count: sql`${extensionCounts.item_count}`.as("item_count"),
     })
     .from(extensionCounts);
@@ -676,6 +756,9 @@ function extensionDistributionCtes(
       group_key: sql`'missing:'::text COLLATE "C"`.as("group_key"),
       group_kind: sql`'missing'::text`.as("group_kind"),
       group_value: sql`NULL::jsonb`.as("group_value"),
+      item_count_value: sql`count(DISTINCT ${extensionMissing.item_id})`.as(
+        "item_count_value",
+      ),
       item_count: sql`count(DISTINCT ${extensionMissing.item_id})::text`.as(
         "item_count",
       ),
@@ -694,17 +777,24 @@ function extensionDistributionCtes(
       })
       .from(selectedViews),
   );
-  const afterCursor =
-    cursor === undefined
-      ? sql`true`
-      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const afterCursor = distributionAfterCursorSql(
+    distributionBase,
+    distribution.order,
+    cursor,
+  );
   const distributionSelected = database.$with("distribution_selected").as(
     database
       .select()
       .from(distributionBase)
       .where(afterCursor)
-      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .orderBy(
+        ...distributionSelectedOrder(distributionBase, distribution.order),
+      )
       .limit(distribution.limit + 1),
+  );
+  const aggregateOrder = distributionAggregateOrderSql(
+    distributionSelected,
+    distribution.order,
   );
   const distributionGroups = database.$with("distribution_groups").as(
     database
@@ -723,7 +813,7 @@ function extensionDistributionCtes(
                 'itemCount', ${distributionSelected.item_count},
                 '__distributionKey', ${distributionSelected.group_key}
               )
-            END ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+            END ORDER BY ${aggregateOrder}
           ),
           '[]'::jsonb
         )`.as("groups"),
@@ -771,6 +861,9 @@ function binDistributionCtes(
       .select({
         group_key: sql`${selectedViews.bin_id} COLLATE "C"`.as("group_key"),
         bin_id: sql`${selectedViews.bin_id}`.as("bin_id"),
+        item_count_value: sql`count(DISTINCT ${selectedViews.item_id})`.as(
+          "item_count_value",
+        ),
         item_count: sql`count(DISTINCT ${selectedViews.item_id})::text`.as(
           "item_count",
         ),
@@ -787,17 +880,24 @@ function binDistributionCtes(
       })
       .from(selectedViews),
   );
-  const afterCursor =
-    cursor === undefined
-      ? sql`true`
-      : sql`${distributionBase.group_key} COLLATE "C" > ${cursor.groupKey} COLLATE "C"`;
+  const afterCursor = distributionAfterCursorSql(
+    distributionBase,
+    distribution.order,
+    cursor,
+  );
   const distributionSelected = database.$with("distribution_selected").as(
     database
       .select()
       .from(distributionBase)
       .where(afterCursor)
-      .orderBy(asc(sql`${distributionBase.group_key} COLLATE "C"`))
+      .orderBy(
+        ...distributionSelectedOrder(distributionBase, distribution.order),
+      )
       .limit(distribution.limit + 1),
+  );
+  const aggregateOrder = distributionAggregateOrderSql(
+    distributionSelected,
+    distribution.order,
   );
   const distributionGroups = database.$with("distribution_groups").as(
     database
@@ -809,7 +909,7 @@ function binDistributionCtes(
               'binId', ${distributionSelected.bin_id},
               'itemCount', ${distributionSelected.item_count},
               '__distributionKey', ${distributionSelected.group_key}
-            ) ORDER BY ${distributionSelected.group_key} COLLATE "C" ASC
+            ) ORDER BY ${aggregateOrder}
           ),
           '[]'::jsonb
         )`.as("groups"),
@@ -1621,9 +1721,14 @@ export function createArchiveSearchOperation(
       }
       if (
         requestedDistributionCursor !== undefined &&
-        (distributionCursor === undefined ||
+        (distribution === undefined ||
+          distributionCursor === undefined ||
           distributionHash === undefined ||
           distributionCursor.queryHash !== distributionHash ||
+          (distribution.order === "count" &&
+            distributionCursor.itemCount === undefined) ||
+          (distribution.order === "key" &&
+            distributionCursor.itemCount !== undefined) ||
           (input.asOf !== undefined &&
             distributionCursor.snapshot.asOf !== input.asOf))
       ) {
@@ -1823,16 +1928,28 @@ export function createArchiveSearchOperation(
                 "__distributionKey"
               ]
             : undefined;
+        const lastDistributionItemCount =
+          typeof lastDistributionGroup === "object" &&
+          lastDistributionGroup !== null &&
+          !Array.isArray(lastDistributionGroup)
+            ? (lastDistributionGroup as Record<string, unknown>)["itemCount"]
+            : undefined;
         if (
           distributionHasMore &&
           distributionHash !== undefined &&
-          typeof lastDistributionGroupKey === "string"
+          typeof lastDistributionGroupKey === "string" &&
+          (distribution.order !== "count" ||
+            typeof lastDistributionItemCount === "string")
         ) {
           nextDistributionCursor = encodeSearchDistributionCursor({
             version: 1,
             queryHash: distributionHash,
             snapshot: resolvedSnapshot,
             groupKey: lastDistributionGroupKey,
+            ...(distribution.order === "count" &&
+            typeof lastDistributionItemCount === "string"
+              ? { itemCount: lastDistributionItemCount }
+              : {}),
           });
         }
         const publicDistributionGroups = selectedDistributionGroups.map(
@@ -1867,6 +1984,7 @@ export function createArchiveSearchOperation(
                         field: distribution.field,
                       }
                     : { by: distribution.by }),
+                order: distribution.order,
                 totalItems: row.distributionTotalItems ?? "0",
                 groups: publicDistributionGroups,
                 hasMore: distributionHasMore,
