@@ -253,6 +253,7 @@ void describe("native command examples", () => {
     const text = await run(textExample.argv, fetch);
     assert.equal(text.exitCode, 0, text.stderr);
     assert.match(text.stdout, /Snapshot: 0/u);
+    assert.match(text.stdout, /Candidate order: observedAt desc/u);
     assert.match(text.stdout, /No archived items matched\./u);
     assert.doesNotMatch(text.stdout, /"kind"\s*:/u);
     assert.equal(requests, 2);

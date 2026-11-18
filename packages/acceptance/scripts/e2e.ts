@@ -965,6 +965,24 @@ async function verifyNativeCommandExamples(baseUrl: string): Promise<void> {
     "the time window example should match archived views",
   );
 
+  const offsetTimeWindowExample = summary.examples.find(({ shell }) =>
+    shell.includes("+08:00"),
+  );
+  assert.ok(
+    offsetTimeWindowExample,
+    "archive search should publish an offset instant timeWindow example",
+  );
+  const offsetTimeWindow = cliData<{
+    readonly timeSummary: {
+      readonly certainItems: string;
+      readonly undeterminedItems: string;
+    };
+  }>(await cli(baseUrl, [...offsetTimeWindowExample.argv]), "found");
+  assert.ok(
+    Number(offsetTimeWindow.timeSummary.certainItems) > 0,
+    "the offset instant time window example should match archived views",
+  );
+
   const fileExample = summary.examples.find(({ shell }) =>
     shell.includes("--query-file"),
   );
@@ -2202,6 +2220,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   ]);
   assert.equal(readable.code, 0, readable.stderr);
   assert.match(readable.stdout, /Snapshot:/u);
+  assert.match(
+    readable.stdout,
+    /Candidate order: observedAt desc \(itemId asc\)/u,
+  );
   assert.match(readable.stdout, /Matches on this page: 1/u);
   assert.match(
     readable.stdout,
@@ -2218,6 +2240,14 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     "text",
   ]);
   assert.equal(timeWindowReadable.code, 0, timeWindowReadable.stderr);
+  assert.match(
+    timeWindowReadable.stdout,
+    /Time window: observedAt \[2000-01-01, 2100-01-01\) \(UTC\); inclusive from, exclusive until; review=certain/u,
+  );
+  assert.match(
+    timeWindowReadable.stdout,
+    /Candidate order: observedAt desc \(nulls last, itemId asc\)/u,
+  );
   assert.match(timeWindowReadable.stdout, /Certain items: [1-9]\d*/u);
   assert.match(timeWindowReadable.stdout, /Undetermined items: 0/u);
   assert.match(timeWindowReadable.stdout, /Time review: certain/u);
@@ -2333,6 +2363,210 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     /- Undetermined \(precisionOverlapsBoundary\): 1 item/u,
   );
   assert.match(dateDistributionReadable.stdout, /End of distribution\./u);
+
+  // CLI verification of Beijing 06:00-12:00 [from, until) window, day-precision
+  // undetermined review in the same snapshot, and readable boundary/sort hints.
+  const cliOffsetToken = "cli-offset-window-" + randomUUID();
+  const cliOffsetCommitResponse = await fetch(`${baseUrl}/archives`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "e2e:cli-offset-window:" + randomUUID(),
+      binId,
+      items: [
+        {
+          sourceKey: { namespace: "e2e", key: cliOffsetToken + ":at-from" },
+          title: "CLI offset window at-from",
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-08T06:00:00+08:00",
+            timeZone: "Asia/Shanghai",
+          },
+          sourceModifiedAt: null,
+          extensions: {},
+          body: { text: cliOffsetToken },
+          capture: {
+            scope: { case: "cli-offset-window" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: "e2e", key: cliOffsetToken + ":inside" },
+          title: "CLI offset window inside",
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-08T10:30:00+08:00",
+            timeZone: "Asia/Shanghai",
+          },
+          sourceModifiedAt: null,
+          extensions: {},
+          body: { text: cliOffsetToken },
+          capture: {
+            scope: { case: "cli-offset-window" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: "e2e", key: cliOffsetToken + ":at-until" },
+          title: "CLI offset window at-until",
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-08T12:00:00+08:00",
+            timeZone: "Asia/Shanghai",
+          },
+          sourceModifiedAt: null,
+          extensions: {},
+          body: { text: cliOffsetToken },
+          capture: {
+            scope: { case: "cli-offset-window" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: "e2e", key: cliOffsetToken + ":day-known" },
+          title: "CLI offset window day-known",
+          sourcePublishedAt: {
+            precision: "day",
+            value: "2026-11-08",
+            timeZone: "Asia/Shanghai",
+          },
+          sourceModifiedAt: null,
+          extensions: {},
+          body: { text: cliOffsetToken },
+          capture: {
+            scope: { case: "cli-offset-window" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    }),
+  });
+  assert.equal(cliOffsetCommitResponse.status, 201);
+  const cliOffsetCommit = (await cliOffsetCommitResponse.json()) as {
+    readonly items: readonly {
+      readonly itemId: string;
+      readonly sourceKey: { readonly key: string };
+    }[];
+  };
+  const cliOffsetId = (suffix: string) => {
+    const found = cliOffsetCommit.items.find(
+      ({ sourceKey }) => sourceKey.key === `${cliOffsetToken}:${suffix}`,
+    )?.itemId;
+    assert.ok(found);
+    return found;
+  };
+  const cliOffsetQuery = {
+    bins: [binId],
+    text: { in: "body", groups: [[cliOffsetToken]] },
+    timeWindow: {
+      field: "sourcePublishedAt",
+      from: "2026-11-08T06:00:00+08:00",
+      until: "2026-11-08T12:00:00+08:00",
+    },
+  };
+  const cliOffsetCertain = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly candidateOrder?: {
+      readonly field: string;
+      readonly direction: string;
+    };
+    readonly timeWindow?: {
+      readonly field: string;
+      readonly from: string;
+      readonly until: string;
+      readonly review: string;
+    };
+    readonly timeSummary: {
+      readonly certainItems: string;
+      readonly undeterminedItems: string;
+    };
+    readonly results: readonly { readonly itemId: string }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(cliOffsetQuery),
+    ]),
+    "found",
+  );
+  assert.deepEqual(cliOffsetCertain.candidateOrder, {
+    field: "sourcePublishedAt",
+    direction: "desc",
+  });
+  assert.deepEqual(cliOffsetCertain.timeWindow, {
+    field: "sourcePublishedAt",
+    from: "2026-11-08T06:00:00+08:00",
+    until: "2026-11-08T12:00:00+08:00",
+    review: "certain",
+  });
+  assert.deepEqual(cliOffsetCertain.timeSummary, {
+    certainItems: "2",
+    undeterminedItems: "1",
+  });
+  assert.deepEqual(
+    cliOffsetCertain.results.map(({ itemId }) => itemId),
+    [cliOffsetId("inside"), cliOffsetId("at-from")],
+  );
+
+  const cliOffsetText = await cli(baseUrl, [
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(cliOffsetQuery),
+    "--output",
+    "text",
+  ]);
+  assert.equal(cliOffsetText.code, 0, cliOffsetText.stderr);
+  assert.match(
+    cliOffsetText.stdout,
+    /Time window: sourcePublishedAt \[2026-11-08T06:00:00\+08:00, 2026-11-08T12:00:00\+08:00\); inclusive from, exclusive until; review=certain/u,
+  );
+  assert.match(
+    cliOffsetText.stdout,
+    /Candidate order: sourcePublishedAt desc \(nulls last, itemId asc\)/u,
+  );
+
+  const cliOffsetUndetermined = cliData<{
+    readonly snapshot: { readonly asOf: string };
+    readonly results: readonly {
+      readonly itemId: string;
+      readonly matches: readonly {
+        readonly timeMatch?: {
+          readonly status: string;
+          readonly reason?: string;
+        };
+      }[];
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...cliOffsetQuery,
+        asOf: cliOffsetCertain.snapshot.asOf,
+        timeWindow: { ...cliOffsetQuery.timeWindow, review: "undetermined" },
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(
+    cliOffsetUndetermined.snapshot.asOf,
+    cliOffsetCertain.snapshot.asOf,
+  );
+  assert.deepEqual(
+    cliOffsetUndetermined.results.map(({ itemId }) => itemId),
+    [cliOffsetId("day-known")],
+  );
+  assert.deepEqual(cliOffsetUndetermined.results[0]?.matches[0]?.timeMatch, {
+    status: "undetermined",
+    reason: "precisionOverlapsBoundary",
+  });
 
   for (const invalidQuery of [
     { unsupportedFilter: true },

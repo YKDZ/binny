@@ -99,7 +99,12 @@ binny service query-contract --operation batch-read --part response
 
 ## 组合扩展筛选、时间窗口与文件输入
 
-下面的请求使用已声明的 `section` 字段、字面标题关键词组和本地日期时间窗口。示例假定所选适配器声明了 `section` 并允许 `model-news`；请将字段、值、关键词、日期及时区替换为服务实际声明和需要的范围。`from` 日期包含在窗口内，`until` 日期不包含在窗口内；两者都是 `timeZone` 中的本地午夜。
+下面的请求使用已声明的 `section` 字段、字面标题关键词组和本地日期时间窗口。示例假定所选适配器声明了 `section` 并允许 `model-news`；请将字段、值、关键词、日期及时区替换为服务实际声明和需要的范围。`timeWindow` 支持两种左闭右开 `[from, until)` 写法（均包含 `from`、排除 `until`）：
+
+1. **本地日期 + `timeZone`**：`from` 与 `until` 为 `YYYY-MM-DD`，按必填 `timeZone` 的本地午夜解释。
+2. **带明确偏移的精确时刻**：`from` 与 `until` 为带 `Z` 或 `±HH:MM` 偏移的 ISO 8601 时刻（例如 `2026-11-08T06:00:00+08:00` 至 `2026-11-08T12:00:00+08:00`），不能再传 `timeZone`。
+
+未传 `timeWindow` 时，候选按 `observedAt` 倒序排列（`itemId` 升序打破并列）；传入 `timeWindow` 时，候选按所选 `timeWindow.field` 倒序排列（空值排在最后，`itemId` 升序打破并列）。
 
 用上一步取得的 bin 和适配器写出一份可复用的搜索文件，并先执行一次扩展筛选：
 
@@ -134,11 +139,14 @@ jq \
   }' search.json > window-search.json
 
 binny archive search --query-file ./window-search.json > first-page.json
+
+# 也可以按带明确偏移的起止时刻筛选（左闭右开，不传 timeZone）
+binny archive search --query '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08T06:00:00+08:00","until":"2026-11-08T12:00:00+08:00"}}'
 ```
 
 文本匹配不区分大小写，并按字面内容匹配。一个组内的值采用 OR，多个组之间采用 AND；其他筛选条件也以 AND 组合。只能使用所选适配器实际声明的字段和操作。
 
-默认情况下，时间窗口只返回来源时间确定落在窗口内的视图。`timeSummary` 会分别报告确定和无法判定的条目数量。若要检查时间、精度或时区不足以判断的视图，可在 `timeWindow` 中加入 `"review":"undetermined"` 重做搜索；这些视图不计入确定命中。
+默认情况下，时间窗口只返回来源时间确定落在窗口内的视图。`timeSummary` 会分别报告确定和无法判定的条目数量。若要检查时间、精度或时区不足以判断的视图，可在保持相同 `asOf` 快照的前提下在 `timeWindow` 中加入 `"review":"undetermined"` 重做搜索；这些视图不计入确定命中。
 
 同一请求也可以通过内联 JSON 或标准输入提交：
 

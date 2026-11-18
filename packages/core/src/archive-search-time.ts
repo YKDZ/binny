@@ -128,8 +128,25 @@ export function localDateBoundarySql(date: string, timeZone: string): SQL {
   return sql`(${date}::date::timestamp AT TIME ZONE ${zoneSql})`;
 }
 
+/** Resolve the half-open [start, end) timestamptz bounds for a search time window. */
+export function timeWindowBoundsSql(window: ArchiveSearchTimeWindow): {
+  readonly start: SQL;
+  readonly end: SQL;
+} {
+  if ("timeZone" in window) {
+    return {
+      start: localDateBoundarySql(window.from, window.timeZone),
+      end: localDateBoundarySql(window.until, window.timeZone),
+    };
+  }
+  return {
+    start: sql`(${window.from})::timestamptz`,
+    end: sql`(${window.until})::timestamptz`,
+  };
+}
+
 /**
- * Classify one source time against a half-open local calendar window. Coarse
+ * Classify one source time against a half-open `[from, until)` window. Coarse
  * source values match only when their whole represented period is contained.
  */
 export function sourceTimeWindowDecisionSql(
@@ -142,8 +159,7 @@ export function sourceTimeWindowDecisionSql(
   readonly sortValue: SQL;
 } {
   const bounds = sourceTimeBoundsSql(sourceTime, aliases);
-  const windowStart = localDateBoundarySql(window.from, window.timeZone);
-  const windowEnd = localDateBoundarySql(window.until, window.timeZone);
+  const { start: windowStart, end: windowEnd } = timeWindowBoundsSql(window);
   const status = sql`CASE
     WHEN ${bounds.value} IS NULL THEN 'undetermined'
     WHEN ${bounds.precision} = 'instant'

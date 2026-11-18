@@ -631,7 +631,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/search",
       description:
-        "Search items by source and case-insensitive literal term groups at a fixed archive cut, with stable paginated source views. Callers may wait for complete results; disconnecting cancels active query execution.",
+        'Search items by source and case-insensitive literal term groups at a fixed archive cut, with stable paginated source views. Optional half-open [from, until) time windows accept either local calendar dates in a required timeZone or explicit-offset instants without timeZone, order candidates by the selected window field descending (nulls last) instead of observedAt descending, count certain and undetermined items separately in timeSummary, and support review="undetermined" at the same snapshot.asOf. Callers may wait for complete results; disconnecting cancels active query execution.',
       requestSchema: archiveApiSchemas.searchInput,
       responseSchema: archiveApiSchemas.searchPage,
     },

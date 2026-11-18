@@ -763,6 +763,8 @@ async function checkPublicArchiveContract(): Promise<void> {
   });
   if (timeWindowSearch.status === 200) {
     const page = await timeWindowSearch.json();
+    void page.candidateOrder?.field;
+    void page.timeWindow?.from;
     void page.timeSummary?.certainItems;
     void page.timeSummary?.undeterminedItems;
     const result = page.results[0];
@@ -777,6 +779,30 @@ async function checkPublicArchiveContract(): Promise<void> {
   ) {
     void (await timeWindowSearch.json()).error.path;
   }
+
+  void client.archives.search.$post({
+    json: {
+      bins: ["rss-main"],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T12:00:00+08:00",
+      },
+    },
+  });
+
+  void client.archives.search.$post({
+    json: {
+      bins: ["rss-main"],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T12:00:00+08:00",
+        // @ts-expect-error Time window review only accepts "certain" or "undetermined".
+        review: "outside",
+      },
+    },
+  });
 
   const relationOnly = await client.archives.$post({
     json: {

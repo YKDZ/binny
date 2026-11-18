@@ -1076,49 +1076,141 @@ export const archiveSearchTextSchema = withArchiveJsonSchemaProjection(
 );
 export type ArchiveSearchText = z.infer<typeof archiveSearchTextSchema>;
 
+const archiveSearchTimeFieldSchema = z.enum([
+  "sourcePublishedAt",
+  "sourceModifiedAt",
+  "observedAt",
+]);
+const archiveSearchTimeReviewSchema = z.enum(["certain", "undetermined"]);
+
+function parseInstantEpochMicroseconds(value: string): bigint | undefined {
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(
+      value,
+    );
+  if (match === null) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const fraction = match[7] ?? "";
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const baseSeconds = BigInt(Math.trunc(date.getTime() / 1000));
+  const offsetMinutes =
+    match[8] === "Z"
+      ? 0
+      : (match[9] === "+" ? 1 : -1) *
+        (Number(match[10]) * 60 + Number(match[11]));
+  const utcSeconds = baseSeconds - BigInt(offsetMinutes * 60);
+  // Align fractional seconds to PostgreSQL timestamptz microsecond rounding
+  // so sub-microsecond inputs do not collapse to an empty window in SQL.
+  const paddedFraction = fraction.padEnd(6, "0");
+  let microseconds = BigInt(paddedFraction.slice(0, 6));
+  const remainder = paddedFraction.slice(6);
+  if (remainder.length > 0) {
+    const firstExtraDigit = remainder[0]!;
+    const hasNonZeroTail = /[1-9]/u.test(remainder.slice(1));
+    if (
+      firstExtraDigit > "5" ||
+      (firstExtraDigit === "5" &&
+        (hasNonZeroTail || (microseconds & 1n) === 1n))
+    ) {
+      microseconds += 1n;
+    }
+  }
+  return utcSeconds * 1_000_000n + microseconds;
+}
+
+const archiveSearchCalendarTimeWindowSchema = z
+  .object({
+    field: archiveSearchTimeFieldSchema.describe(
+      "The source or archive time fact used for this window.",
+    ),
+    from: z.iso
+      .date()
+      .describe(
+        "Inclusive local calendar date, interpreted at local midnight in timeZone.",
+      ),
+    until: z.iso
+      .date()
+      .describe(
+        "Exclusive local calendar date, interpreted at local midnight in timeZone.",
+      ),
+    timeZone: archiveTimeZoneSchema.describe(
+      "Required caller time zone used to interpret both local date bounds.",
+    ),
+    review: archiveSearchTimeReviewSchema
+      .default("certain")
+      .describe(
+        "Enumerate confirmed matching views or views whose time evidence is insufficient.",
+      ),
+  })
+  .strict()
+  .superRefine((window, context) => {
+    if (window.from >= window.until) {
+      context.addIssue({
+        code: "custom",
+        path: ["until"],
+        message: "The exclusive until date must be later than from.",
+      });
+    }
+  });
+
+const archiveSearchInstantTimeWindowSchema = z
+  .object({
+    field: archiveSearchTimeFieldSchema.describe(
+      "The source or archive time fact used for this window.",
+    ),
+    from: z.iso
+      .datetime({ offset: true })
+      .describe("Inclusive start instant with an explicit Z or ±HH:MM offset."),
+    until: z.iso
+      .datetime({ offset: true })
+      .describe(
+        "Exclusive end instant with an explicit Z or ±HH:MM offset, later than from at microsecond precision.",
+      ),
+    review: archiveSearchTimeReviewSchema
+      .default("certain")
+      .describe(
+        "Enumerate confirmed matching views or views whose time evidence is insufficient.",
+      ),
+  })
+  .strict()
+  .superRefine((window, context) => {
+    const fromUs = parseInstantEpochMicroseconds(window.from);
+    const untilUs = parseInstantEpochMicroseconds(window.until);
+    if (fromUs !== undefined && untilUs !== undefined && fromUs >= untilUs) {
+      context.addIssue({
+        code: "custom",
+        path: ["until"],
+        message:
+          "The exclusive until instant must be later than from at microsecond precision.",
+      });
+    }
+  });
+
 /**
- * Filter by a local calendar window. `from` is inclusive and `until` is
- * exclusive; both boundaries are local midnights in `timeZone`, so calendar
- * days retain their actual length across daylight-saving changes. Review
- * selects confirmed matches or views whose precision/time-zone evidence is
- * insufficient to decide membership.
+ * Filter by a half-open `[from, until)` time window using either local calendar
+ * dates in a required `timeZone` (interpreted at local midnight so calendar
+ * days retain their actual length across daylight-saving changes) or exact
+ * instants with explicit `Z` or `±HH:MM` offsets. Review selects confirmed
+ * matches or views whose precision/time-zone evidence is insufficient to decide
+ * membership.
  */
 export const archiveSearchTimeWindowSchema = withArchiveJsonSchemaProjection(
   z
-    .object({
-      field: z
-        .enum(["sourcePublishedAt", "sourceModifiedAt", "observedAt"])
-        .describe("The source or archive time fact used for this window."),
-      from: z.iso
-        .date()
-        .describe(
-          "Inclusive local calendar date, interpreted at local midnight.",
-        ),
-      until: z.iso
-        .date()
-        .describe(
-          "Exclusive local calendar date, interpreted at local midnight.",
-        ),
-      timeZone: archiveTimeZoneSchema.describe(
-        "Required caller time zone used to interpret both local date bounds.",
-      ),
-      review: z
-        .enum(["certain", "undetermined"])
-        .default("certain")
-        .describe(
-          "Enumerate confirmed matching views or views whose time evidence is insufficient.",
-        ),
-    })
-    .strict()
-    .superRefine((window, context) => {
-      if (window.from >= window.until) {
-        context.addIssue({
-          code: "custom",
-          path: ["until"],
-          message: "The exclusive until date must be later than from.",
-        });
-      }
-    }),
+    .union([
+      archiveSearchCalendarTimeWindowSchema,
+      archiveSearchInstantTimeWindowSchema,
+    ])
+    .describe(
+      "Half-open [from, until) window using either local calendar dates with timeZone or explicit-offset instants without timeZone.",
+    ),
 );
 export type ArchiveSearchTimeWindow = z.infer<
   typeof archiveSearchTimeWindowSchema
@@ -1429,6 +1521,52 @@ export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
     }),
 );
 
+function timeWindowBranchSchema(timeWindow: Record<string, unknown>) {
+  const fromLooksInstant =
+    typeof timeWindow.from === "string" && /[Tt]/u.test(timeWindow.from);
+  const untilLooksInstant =
+    typeof timeWindow.until === "string" && /[Tt]/u.test(timeWindow.until);
+  const hasTimeZone = Object.hasOwn(timeWindow, "timeZone");
+  return (fromLooksInstant && untilLooksInstant) ||
+    ((fromLooksInstant || untilLooksInstant) && !hasTimeZone)
+    ? archiveSearchInstantTimeWindowSchema
+    : archiveSearchCalendarTimeWindowSchema;
+}
+
+function resolveTimeWindowIssue(input: unknown): z.core.$ZodIssue | undefined {
+  if (!isPlainJsonObject(input) || !isPlainJsonObject(input.timeWindow)) {
+    return undefined;
+  }
+  const checked = timeWindowBranchSchema(input.timeWindow).safeParse(
+    input.timeWindow,
+  );
+  if (checked.success) return undefined;
+  const normalized = checked.error.issues.map((issue) => {
+    if (
+      issue.code === "unrecognized_keys" &&
+      issue.path.length === 0 &&
+      issue.keys.includes("timeZone")
+    ) {
+      return {
+        ...issue,
+        path: ["timeWindow", "timeZone"] as PropertyKey[],
+        message: "Offset instant time windows cannot specify timeZone.",
+      };
+    }
+    return {
+      ...issue,
+      path: ["timeWindow", ...issue.path] as PropertyKey[],
+    };
+  });
+  return normalized.reduce<z.core.$ZodIssue | undefined>(
+    (selected, candidate) =>
+      selected === undefined || candidate.path.length > selected.path.length
+        ? candidate
+        : selected,
+    undefined,
+  );
+}
+
 function nestedArchiveSearchIssues(
   issues: readonly z.core.$ZodIssue[],
   prefix: readonly PropertyKey[] = [],
@@ -1450,47 +1588,55 @@ export function archiveSearchInputIssue(
   const unionIssue = issues.find(
     (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
   );
-  if (unionIssue?.code !== "invalid_union") return issues[0];
+  let selectedIssue: z.core.$ZodIssue | undefined;
+  if (unionIssue?.code !== "invalid_union") {
+    selectedIssue = issues[0];
+  } else {
+    const hasExtensionScope =
+      typeof input === "object" &&
+      input !== null &&
+      Object.hasOwn(input, "extensions");
+    const branchIndex = hasExtensionScope ? 0 : 1;
+    let branchIssues = unionIssue.errors[branchIndex];
+    if (branchIssues === undefined) return issues[0];
 
-  const hasExtensionScope =
-    typeof input === "object" &&
-    input !== null &&
-    Object.hasOwn(input, "extensions");
-  const branchIndex = hasExtensionScope ? 0 : 1;
-  let branchIssues = unionIssue.errors[branchIndex];
-  if (branchIssues === undefined) return issues[0];
-
-  const distribution =
-    typeof input === "object" &&
-    input !== null &&
-    "distribution" in input &&
-    typeof input.distribution === "object" &&
-    input.distribution !== null
-      ? input.distribution
-      : undefined;
-  if (
-    !hasExtensionScope &&
-    distribution !== undefined &&
-    "by" in distribution &&
-    distribution.by === "extension"
-  ) {
-    const distributionUnion = branchIssues.find(
-      (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
-    );
-    if (distributionUnion?.code === "invalid_union") {
-      branchIssues = distributionUnion.errors[1];
+    const distribution =
+      typeof input === "object" &&
+      input !== null &&
+      "distribution" in input &&
+      typeof input.distribution === "object" &&
+      input.distribution !== null
+        ? input.distribution
+        : undefined;
+    if (
+      !hasExtensionScope &&
+      distribution !== undefined &&
+      "by" in distribution &&
+      distribution.by === "extension"
+    ) {
+      const distributionUnion = branchIssues.find(
+        (issue) => issue.code === "invalid_union" && issue.errors.length === 2,
+      );
+      if (distributionUnion?.code === "invalid_union") {
+        branchIssues = distributionUnion.errors[1];
+      }
     }
-  }
-  if (branchIssues === undefined) return issues[0];
+    if (branchIssues === undefined) return issues[0];
 
-  const candidates = nestedArchiveSearchIssues(branchIssues.flat());
-  return candidates.reduce<z.core.$ZodIssue | undefined>(
-    (selected, candidate) =>
-      selected === undefined || candidate.path.length > selected.path.length
-        ? candidate
-        : selected,
-    undefined,
-  );
+    const candidates = nestedArchiveSearchIssues(branchIssues.flat());
+    selectedIssue = candidates.reduce<z.core.$ZodIssue | undefined>(
+      (selected, candidate) =>
+        selected === undefined || candidate.path.length > selected.path.length
+          ? candidate
+          : selected,
+      undefined,
+    );
+  }
+
+  if (selectedIssue?.path[0] === "timeWindow") {
+    return resolveTimeWindowIssue(input) ?? selectedIssue;
+  }
+  return selectedIssue;
 }
 
 /** Optional correction evidence attached to an archive search failure. */
@@ -1639,6 +1785,21 @@ export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
     .object({
       snapshot: archiveSnapshotSchema,
       candidatesIncluded: z.boolean(),
+      candidateOrder: z
+        .object({
+          field: archiveSearchTimeFieldSchema,
+          direction: z.literal("desc"),
+        })
+        .strict()
+        .optional()
+        .describe(
+          "Effective candidate item sort key: observedAt descending without a timeWindow, or timeWindow.field descending (nulls last, itemId ascending tie-breaker) with a timeWindow.",
+        ),
+      timeWindow: archiveSearchTimeWindowSchema
+        .optional()
+        .describe(
+          "Applied half-open [from, until) time window when time filtering was requested.",
+        ),
       results: z.array(archiveSearchResultSchema),
       timeSummary: z
         .object({

@@ -4597,6 +4597,323 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
     assert.equal(error.code, "invalid_input");
     assert.deepEqual(error.path, ["timeWindow", "timeZone"]);
   }
+
+  // Offset instant [from, until) window (Beijing 06:00 to 12:00) alongside
+  // microsecond boundaries, day-precision undetermined review, and sort checks.
+  const offsetToken = "beijing-offset-window-" + runId;
+  const offsetCommitted = await submitArchive(client, {
+    requestId: "e2e:offset-window:" + runId,
+    binId: "binny-runs-one",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":before" },
+        title: "Offset window before",
+        sourcePublishedAt: instant("2026-11-08T05:59:59.999999+08:00"),
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":at-from" },
+        title: "Offset window at-from",
+        sourcePublishedAt: instant("2026-11-08T06:00:00+08:00"),
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":inside-utc" },
+        title: "Offset window inside-utc",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-11-08T01:30:00Z",
+        },
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":at-until" },
+        title: "Offset window at-until",
+        sourcePublishedAt: instant("2026-11-08T12:00:00+08:00"),
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":day-known" },
+        title: "Offset window day-known",
+        sourcePublishedAt: {
+          precision: "day",
+          value: "2026-11-08",
+          timeZone: "Asia/Shanghai",
+        },
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":day-no-zone" },
+        title: "Offset window day-no-zone",
+        sourcePublishedAt: { precision: "day", value: "2026-11-08" },
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: { namespace: "e2e", key: offsetToken + ":missing" },
+        title: "Offset window missing",
+        sourcePublishedAt: null,
+        sourceModifiedAt: null,
+        extensions: {},
+        body: { text: offsetToken },
+        capture: {
+          scope: { case: "offset-window" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+  const offsetIds = new Map(
+    offsetCommitted.items.map(({ sourceKey, itemId }) => [
+      sourceKey.key,
+      itemId,
+    ]),
+  );
+  const offsetItemId = (key: string): string => {
+    const found = offsetIds.get(offsetToken + ":" + key);
+    assert.ok(found);
+    return found;
+  };
+
+  const offsetWindowResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[offsetToken]] },
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T12:00:00+08:00",
+      },
+    },
+  });
+  assert.equal(offsetWindowResponse.status, 200);
+  if (offsetWindowResponse.status !== 200) {
+    throw new Error("Offset instant time-window search failed.");
+  }
+  const offsetWindowPage = await offsetWindowResponse.json();
+  assert.deepEqual(offsetWindowPage.candidateOrder, {
+    field: "sourcePublishedAt",
+    direction: "desc",
+  });
+  assert.deepEqual(offsetWindowPage.timeWindow, {
+    field: "sourcePublishedAt",
+    from: "2026-11-08T06:00:00+08:00",
+    until: "2026-11-08T12:00:00+08:00",
+    review: "certain",
+  });
+  assert.deepEqual(offsetWindowPage.timeSummary, {
+    certainItems: "2",
+    undeterminedItems: "3",
+  });
+  assert.deepEqual(
+    offsetWindowPage.results.map(({ itemId }) => itemId),
+    [offsetItemId("inside-utc"), offsetItemId("at-from")],
+  );
+
+  const crossOffsetResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[offsetToken]] },
+      asOf: offsetWindowPage.snapshot.asOf,
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T04:00:00Z",
+      },
+    },
+  });
+  assert.equal(crossOffsetResponse.status, 200);
+  if (crossOffsetResponse.status !== 200) {
+    throw new Error("Cross-offset time-window search failed.");
+  }
+  const crossOffsetPage = await crossOffsetResponse.json();
+  assert.deepEqual(
+    crossOffsetPage.results.map(({ itemId }) => itemId),
+    [offsetItemId("inside-utc"), offsetItemId("at-from")],
+  );
+
+  const offsetUndeterminedResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[offsetToken]] },
+      asOf: offsetWindowPage.snapshot.asOf,
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T12:00:00+08:00",
+        review: "undetermined",
+      },
+    },
+  });
+  assert.equal(offsetUndeterminedResponse.status, 200);
+  if (offsetUndeterminedResponse.status !== 200) {
+    throw new Error("Offset undetermined review search failed.");
+  }
+  const offsetUndetermined = await offsetUndeterminedResponse.json();
+  assert.equal(
+    offsetUndetermined.snapshot.asOf,
+    offsetWindowPage.snapshot.asOf,
+  );
+  assert.deepEqual(offsetUndetermined.timeSummary, {
+    certainItems: "2",
+    undeterminedItems: "3",
+  });
+  assert.deepEqual(
+    offsetUndetermined.results.map(({ itemId }) => itemId).toSorted(),
+    [
+      offsetItemId("day-known"),
+      offsetItemId("day-no-zone"),
+      offsetItemId("missing"),
+    ].toSorted(),
+  );
+  const offsetDayKnownMatch = offsetUndetermined.results.find(
+    ({ itemId }) => itemId === offsetItemId("day-known"),
+  )?.matches[0]?.timeMatch;
+  assert.deepEqual(offsetDayKnownMatch, {
+    status: "undetermined",
+    reason: "precisionOverlapsBoundary",
+  });
+
+  const fullDayOffsetResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[offsetToken]] },
+      asOf: offsetWindowPage.snapshot.asOf,
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: "2026-11-08T00:00:00+08:00",
+        until: "2026-11-09T00:00:00+08:00",
+      },
+    },
+  });
+  assert.equal(fullDayOffsetResponse.status, 200);
+  if (fullDayOffsetResponse.status !== 200) {
+    throw new Error("Full-day offset time-window search failed.");
+  }
+  const fullDayOffset = await fullDayOffsetResponse.json();
+  assert.deepEqual(fullDayOffset.timeSummary, {
+    certainItems: "5",
+    undeterminedItems: "2",
+  });
+  assert.ok(
+    fullDayOffset.results.some(
+      ({ itemId }) => itemId === offsetItemId("day-known"),
+    ),
+  );
+
+  const noWindowOffsetResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one"],
+      text: { in: "body", groups: [[offsetToken]] },
+    },
+  });
+  assert.equal(noWindowOffsetResponse.status, 200);
+  if (noWindowOffsetResponse.status !== 200) {
+    throw new Error("Unwindowed search failed.");
+  }
+  const noWindowOffsetPage = await noWindowOffsetResponse.json();
+  assert.deepEqual(noWindowOffsetPage.candidateOrder, {
+    field: "observedAt",
+    direction: "desc",
+  });
+  assert.equal(noWindowOffsetPage.timeWindow, undefined);
+
+  const invalidOffsetCases = [
+    {
+      timeWindow: {
+        field: "sourcePublishedAt" as const,
+        from: "2026-11-08T06:00:00",
+        until: "2026-11-08T12:00:00+08:00",
+      },
+      expectedPath: ["timeWindow", "from"],
+    },
+    {
+      timeWindow: {
+        field: "sourcePublishedAt" as const,
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-08T12:00:00+08:00",
+        timeZone: "Asia/Shanghai",
+      },
+      expectedPath: ["timeWindow", "timeZone"],
+    },
+    {
+      timeWindow: {
+        field: "sourcePublishedAt" as const,
+        from: "2026-11-08T06:00:00+08:00",
+        until: "2026-11-07T22:00:00Z",
+      },
+      expectedPath: ["timeWindow", "until"],
+    },
+    {
+      timeWindow: {
+        field: "sourcePublishedAt" as const,
+        from: "2026-11-08T06:00:00.0000001+08:00",
+        until: "2026-11-08T06:00:00.0000004+08:00",
+      },
+      expectedPath: ["timeWindow", "until"],
+    },
+  ];
+  for (const invalidCase of invalidOffsetCases) {
+    const response = await fetch(baseUrl + "/archives/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bins: ["binny-runs-one"],
+        timeWindow: invalidCase.timeWindow,
+      }),
+    });
+    assert.equal(response.status, 400);
+    const failure = (await response.json()) as {
+      readonly error: {
+        readonly code: string;
+        readonly path?: readonly (string | number)[];
+      };
+    };
+    assert.equal(failure.error.code, "invalid_input");
+    assert.deepEqual(failure.error.path, invalidCase.expectedPath);
+  }
 }
 
 async function verifyHardDeleteEntryPoint(
