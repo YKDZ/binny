@@ -156,9 +156,148 @@ void describe("bin discovery", () => {
     );
     assert.equal(textResult.exitCode, 0, textResult.output);
     assert.match(textResult.output, /Bin: rss-main/u);
-    assert.match(textResult.output, /Runtime: offline/u);
+    assert.match(
+      textResult.output,
+      /Runtime connection: offline \(runtime_not_connected\)/u,
+    );
+    assert.match(textResult.output, /Browser: unknown \(runtime offline\)/u);
     assert.match(textResult.output, /Source state: unknown/u);
     assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
+  });
+
+  void it("renders separate runtime connection and browser work states for online browser, lightweight, and incompatible bins", async () => {
+    const binsById: Record<string, unknown> = {
+      linuxdo: {
+        id: "linuxdo",
+        sourceAdapterId: "linuxdo",
+        identityId: "account-linuxdo",
+        config: { baseUrl: "https://linux.do" },
+        browserIdleTimeoutSeconds: 0,
+        status: "active",
+        execution: {
+          status: "online",
+          runtimeId: "runtime-linuxdo-1",
+          lastHeartbeatAt: "2026-11-02T00:00:00.000Z",
+          environment: {
+            kind: "browser",
+            browser: {
+              available: true,
+              profileReuseAfterRestart: true,
+              power: { status: "stopped" },
+            },
+          },
+        },
+        sourceStateSnapshot: {
+          freshness: "current",
+          updatedAt: "2026-11-02T00:00:00.000Z",
+        },
+        createdAt: "2026-11-01T00:00:00.000Z",
+        updatedAt: "2026-11-02T00:00:00.000Z",
+      },
+      "rss-lightweight": {
+        id: "rss-lightweight",
+        sourceAdapterId: "rss",
+        identityId: "account-rss",
+        config: { feedUrl: "https://example.test/feed.xml" },
+        browserIdleTimeoutSeconds: null,
+        status: "active",
+        execution: {
+          status: "online",
+          runtimeId: "runtime-rss-1",
+          lastHeartbeatAt: "2026-11-02T00:00:00.000Z",
+          environment: {
+            kind: "lightweight",
+            browser: {
+              available: false,
+              profileReuseAfterRestart: false,
+              power: { status: "unavailable" },
+            },
+          },
+        },
+        sourceStateSnapshot: { freshness: "unknown" },
+        createdAt: "2026-11-01T00:00:00.000Z",
+        updatedAt: "2026-11-02T00:00:00.000Z",
+      },
+      "broken-browser": {
+        id: "broken-browser",
+        sourceAdapterId: "linuxdo",
+        identityId: "account-broken",
+        config: {},
+        browserIdleTimeoutSeconds: 60,
+        status: "active",
+        execution: {
+          status: "incompatible",
+          runtimeId: "runtime-broken-1",
+          lastHeartbeatAt: "2026-11-02T00:00:00.000Z",
+          error: { code: "runtime_configuration_incompatible" },
+        },
+        sourceStateSnapshot: { freshness: "unknown" },
+        createdAt: "2026-11-01T00:00:00.000Z",
+        updatedAt: "2026-11-02T00:00:00.000Z",
+      },
+    };
+
+    const customFetch: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(new Request(input, init).url);
+      if (url.pathname === "/meta") return Response.json(metadata);
+      const match = /^\/bins\/([^/]+)$/u.exec(url.pathname);
+      const bin = match?.[1] === undefined ? undefined : binsById[match[1]];
+      return bin === undefined
+        ? new Response("Not found", { status: 404 })
+        : Response.json(bin);
+    };
+
+    const browserStructured = await run(["bin", "get", "linuxdo"], customFetch);
+    assert.equal(browserStructured.exitCode, 0, browserStructured.output);
+    const wire = JSON.parse(browserStructured.output) as {
+      readonly data: {
+        readonly execution: {
+          readonly status: string;
+          readonly environment?: {
+            readonly kind: string;
+            readonly browser: { readonly power: { readonly status: string } };
+          };
+        };
+      };
+    };
+    assert.equal(wire.data.execution.status, "online");
+    assert.equal(
+      wire.data.execution.environment?.browser.power.status,
+      "stopped",
+    );
+
+    const browserText = await run(
+      ["bin", "get", "linuxdo", "--output", "text"],
+      customFetch,
+    );
+    assert.equal(browserText.exitCode, 0, browserText.output);
+    assert.match(browserText.output, /^Runtime connection: online$/mu);
+    assert.match(browserText.output, /^Browser: stopped$/mu);
+
+    const lightweightText = await run(
+      ["bin", "get", "rss-lightweight", "--output", "text"],
+      customFetch,
+    );
+    assert.equal(lightweightText.exitCode, 0, lightweightText.output);
+    assert.match(lightweightText.output, /^Runtime connection: online$/mu);
+    assert.match(
+      lightweightText.output,
+      /^Browser: unavailable \(lightweight runtime\)$/mu,
+    );
+
+    const incompatibleText = await run(
+      ["bin", "get", "broken-browser", "--output", "text"],
+      customFetch,
+    );
+    assert.equal(incompatibleText.exitCode, 0, incompatibleText.output);
+    assert.match(
+      incompatibleText.output,
+      /^Runtime connection: incompatible \(runtime_configuration_incompatible\)$/mu,
+    );
+    assert.match(
+      incompatibleText.output,
+      /^Browser: unknown \(runtime incompatible\)$/mu,
+    );
   });
 
   void it("renders list output as readable text without changing structured shape", async () => {

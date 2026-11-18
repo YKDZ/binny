@@ -445,6 +445,29 @@ void describe("native offline CLI contract discovery", () => {
     assert.match(archiveHelp.stdout, /extension-fields <bin-id>/u);
     assert.match(archiveHelp.stdout, /explicit bin/u);
     assert.match(archiveHelp.stdout, /hasAny/u);
+
+    const binGetHelp = await run(["bin", "get", "--help"]);
+    assert.equal(binGetHelp.exitCode, 0);
+    assert.match(binGetHelp.stdout, /runtime connection/iu);
+    assert.match(binGetHelp.stdout, /browser work status/iu);
+    assert.match(binGetHelp.stdout, /stopped browser is normal/iu);
+    assert.match(binGetHelp.stdout, /coverage/iu);
+
+    const runListHelp = await run(["run", "list", "--help"]);
+    assert.equal(runListHelp.exitCode, 0);
+    assert.match(runListHelp.stdout, /triggerType/u);
+    assert.match(runListHelp.stdout, /stopReasonCode/u);
+    assert.match(runListHelp.stdout, /cancelled runs/iu);
+    assert.match(runListHelp.stdout, /coverage/iu);
+
+    const runListSuccess = await run([
+      "run",
+      "list",
+      "--schema=success:structured",
+    ]);
+    assert.equal(runListSuccess.exitCode, 0, runListSuccess.stderr);
+    assert.match(runListSuccess.stdout, /triggerType/u);
+    assert.match(runListSuccess.stdout, /stopReasonCode/u);
   });
 
   void it("publishes one native example source for machine argv and help", async () => {

@@ -1019,12 +1019,34 @@ function createCliContract(identity: CliCommandIdentity) {
               `${id}\t${sourceAdapterId}\t${status}\t${execution.status}`,
           ),
         ]);
+  const runtimeConnectionLabel = (
+    execution: z.infer<typeof cliBinDetailsSchema>["execution"],
+  ): string => {
+    if (execution.status === "online") return "online";
+    if (execution.status === "offline") return `offline (${execution.reason})`;
+    return `incompatible (${execution.error.code})`;
+  };
+  const browserWorkStateLabel = (
+    execution: z.infer<typeof cliBinDetailsSchema>["execution"],
+  ): string => {
+    if (execution.status !== "online") {
+      return `unknown (runtime ${execution.status})`;
+    }
+    if (execution.environment.kind === "lightweight") {
+      return "unavailable (lightweight runtime)";
+    }
+    const { power } = execution.environment.browser;
+    return power.error === undefined
+      ? power.status
+      : `${power.status} (${power.error.code}: ${power.error.message})`;
+  };
   const binDetailsText = (bin: z.infer<typeof cliBinDetailsSchema>) =>
     text.lines([
       `Bin: ${bin.id}`,
       `Source adapter: ${bin.sourceAdapterId}`,
       `Status: ${bin.status}`,
-      `Runtime: ${bin.execution.status}`,
+      `Runtime connection: ${runtimeConnectionLabel(bin.execution)}`,
+      `Browser: ${browserWorkStateLabel(bin.execution)}`,
       `Source state: ${bin.sourceStateSnapshot.freshness}${
         "updatedAt" in bin.sourceStateSnapshot
           ? ` (updated ${bin.sourceStateSnapshot.updatedAt})`
@@ -1974,7 +1996,7 @@ function createCliContract(identity: CliCommandIdentity) {
       "Runs",
       ...page.runs.map(
         (run) =>
-          `${run.createdAt}  ${run.binId}  ${run.action}  ${run.status}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
+          `${run.createdAt}  ${run.binId}  ${run.action}  ${run.triggerType}  ${run.status}  ${run.stopReasonCode ?? "-"}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
       ),
       ...(page.nextCursor === undefined
         ? []
@@ -3179,7 +3201,9 @@ function createCliContract(identity: CliCommandIdentity) {
         name: "get",
         description: "Read a bin's saved configuration and concise status.",
         helpSupplement: text.lines([
-          "The response includes configuration values and runtime status. Read the full configuration schema with bin config-schema <bin-id>.",
+          "The response includes configuration values, runtime connection status, and browser work status. Read the full configuration schema with bin config-schema <bin-id>.",
+          "An online runtime connection with a stopped browser is normal: browser runtimes start and stop their browser on demand.",
+          "A completed run or current snapshot freshness does not imply complete historical coverage.",
         ]),
         fields: { id: { kind: "positional", description: "bin 标识" } },
         input: binIdInputSchema,
@@ -3323,6 +3347,8 @@ function createCliContract(identity: CliCommandIdentity) {
           "List action runs across all bins with optional action, status, and creation-time filters.",
         helpSupplement: text.lines([
           "The lower creation-time bound is inclusive; the upper bound is exclusive. Continue with the same filters and page size.",
+          "Each row includes triggerType and, for terminal runs, stopReasonCode so callers can inspect action failure rates or streaks without calling run get per row. Callers decide how cancelled runs affect streaks.",
+          "A completed run does not imply complete collection scope coverage.",
         ]),
         examples: [
           { input: { status: "failed", limit: "10" } },
