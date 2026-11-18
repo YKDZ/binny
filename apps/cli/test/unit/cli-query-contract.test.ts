@@ -893,7 +893,11 @@ void describe("查询服务发现", () => {
     );
 
     assert.equal(result.exitCode, 1);
-    assert.match(result.output, /HTTP API 协议/u);
+    assert.match(result.output, /HTTP API protocol 99/u);
+    assert.match(
+      result.output,
+      new RegExp(`supports protocol ${String(publicApiProtocolVersion)}`, "u"),
+    );
     assert.equal(
       service.requests.some(({ path }) => path === "/archives/search"),
       false,
@@ -905,7 +909,11 @@ void describe("查询服务发现", () => {
     const result = await run(["bin", "actions", "rss-main"], service.fetch);
 
     assert.equal(result.exitCode, 1);
-    assert.match(result.output, /HTTP API 协议/u);
+    assert.match(result.output, /HTTP API protocol 1/u);
+    assert.match(
+      result.output,
+      new RegExp(`supports protocol ${String(publicApiProtocolVersion)}`, "u"),
+    );
     assert.deepEqual(
       service.requests.map(({ method, path }) => [method, path]),
       [["GET", "/meta"]],
@@ -917,7 +925,7 @@ void describe("查询服务发现", () => {
     const listed = await run(["bin", "list"], listService.fetch);
 
     assert.equal(listed.exitCode, 1);
-    assert.match(listed.output, /HTTP API 协议/u);
+    assert.match(listed.output, /HTTP API protocol 99/u);
     assert.deepEqual(
       listService.requests.map(({ method, path }) => [method, path]),
       [["GET", "/meta"]],
@@ -932,7 +940,7 @@ void describe("查询服务发现", () => {
     );
 
     assert.equal(updated.exitCode, 1);
-    assert.match(updated.output, /HTTP API 协议/u);
+    assert.match(updated.output, /HTTP API protocol 99/u);
     assert.deepEqual(
       updateService.requests.map(({ method, path }) => [method, path]),
       [["GET", "/meta"]],
@@ -1110,7 +1118,14 @@ void describe("查询服务发现", () => {
     );
 
     assert.equal(result.exitCode, 1);
-    assert.match(result.output, /归档查询契约版本/u);
+    assert.match(result.output, /archive query contract version 99/iu);
+    assert.match(
+      result.output,
+      new RegExp(
+        `supports version ${String(archiveQueryContractVersion)}`,
+        "u",
+      ),
+    );
     assert.equal(
       service.requests.some(({ path }) => path === "/archives/search"),
       false,
