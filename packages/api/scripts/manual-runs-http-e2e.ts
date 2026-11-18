@@ -1830,6 +1830,8 @@ async function verifyGlobalOperationLists(): Promise<void> {
       assert.equal(Object.hasOwn(run, "params"), false);
       assert.equal(Object.hasOwn(run, "report"), false);
       assert.equal(Object.hasOwn(run, "result"), false);
+      assert.ok(run.triggerType === "manual" || run.triggerType === "schedule");
+      assert.equal(run.stopReasonCode, "completed");
       assert.equal(runIds.has(run.runId), false);
       runIds.add(run.runId);
       binIds.add(run.binId);
@@ -2041,6 +2043,88 @@ async function verifyGlobalOperationLists(): Promise<void> {
   }
 }
 
+async function verifyRunListDiagnosticsSummary(): Promise<void> {
+  const runs: {
+    readonly runId: string;
+    readonly binId: string;
+    readonly action: string;
+    readonly triggerType: "manual" | "schedule";
+    readonly status: string;
+    readonly stopReasonCode?: string | undefined;
+  }[] = [];
+  let cursor: string | undefined;
+  do {
+    const response = await client.runs.$get({
+      query: {
+        limit: "100",
+        ...(cursor === undefined ? {} : { cursor }),
+      },
+    });
+    assert.equal(response.status, 200);
+    if (response.status !== 200) return;
+    const page = await response.json();
+    for (const run of page.runs) {
+      runs.push(run);
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "schedule" &&
+        run.action === "collect" &&
+        run.status === "completed" &&
+        run.stopReasonCode === "completed",
+    ),
+  );
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "manual" &&
+        run.action === "check" &&
+        run.status === "completed" &&
+        run.stopReasonCode === "completed",
+    ),
+  );
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "manual" &&
+        run.action === "check" &&
+        run.status === "failed" &&
+        run.stopReasonCode === "source_check_failed",
+    ),
+  );
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "manual" &&
+        run.action === "collect" &&
+        run.status === "failed" &&
+        run.stopReasonCode === "source_requires_human",
+    ),
+  );
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "manual" &&
+        run.action === "collect" &&
+        run.status === "cancelled" &&
+        run.stopReasonCode === "cancelled",
+    ),
+  );
+  assert.ok(
+    runs.some(
+      (run) =>
+        run.triggerType === "manual" &&
+        run.action === "collect" &&
+        run.status === "cancelled" &&
+        run.stopReasonCode === "cancelled_before_execution",
+    ),
+  );
+}
+
 async function main(): Promise<void> {
   const [stage] = process.argv.slice(2);
   if (stage === "verify-after-restart") {
@@ -2073,6 +2157,7 @@ async function main(): Promise<void> {
   await verifySchedulesCrud(sourceRuntimeUrl);
   await verifyGlobalOperationLists();
   await verifyScheduledReferenceTime(sourceRuntimeUrl, sourceControlUrl);
+  await verifyRunListDiagnosticsSummary();
   const typedArchiveItemId = await verifyTypedArchiveVersionHistory();
   process.stdout.write(
     "Manual-run HTTP acceptance for queues, diagnostics, action outputs, global operation lists, archive constraints, and failures passed.\n",

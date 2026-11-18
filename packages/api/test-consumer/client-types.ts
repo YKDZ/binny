@@ -156,6 +156,21 @@ async function checkPublicManualRunContract(): Promise<void> {
     void status;
     const output: unknown = run.result?.output;
     void output;
+    const failureStage: string | undefined = run.result?.error?.stage;
+    const failureTarget: string | undefined = run.result?.error?.target;
+    const failureAbortCause:
+      | "user_cancelled"
+      | "source_request_timeout"
+      | "action_budget_exhausted"
+      | "unknown"
+      | undefined = run.result?.error?.abortCause;
+    void failureStage;
+    void failureTarget;
+    void failureAbortCause;
+    // @ts-expect-error abortCause only allows the declared enum values.
+    const invalidAbortCause: "network_reset" | undefined =
+      run.result?.error?.abortCause;
+    void invalidAbortCause;
     // @ts-expect-error 动态动作输出不能在通用运行类型中假定具体结构。
     void run.result?.output.availability;
     // @ts-expect-error 触发成功响应不包含错误封装。
@@ -322,6 +337,8 @@ async function checkPublicScheduleContract(): Promise<void> {
   if (listedRuns.status === 200) {
     const run = (await listedRuns.json()).runs[0];
     void run?.binId;
+    void (run?.triggerType satisfies "manual" | "schedule" | undefined);
+    void (run?.stopReasonCode satisfies string | undefined);
     // @ts-expect-error summary rows omit saved parameters.
     void run?.params;
   } else if (listedRuns.status === 400) {

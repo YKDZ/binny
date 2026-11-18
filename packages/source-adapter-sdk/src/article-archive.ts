@@ -6,9 +6,14 @@ import type {
   ArchiveResourceMetadata,
   ArchiveResourceReference,
   JsonObject,
+  ManualRunAbortCause,
   SourceTime,
 } from "@binny/contracts";
 
+import {
+  classifyAbortCause,
+  isActionCancelledReason,
+} from "./abort-diagnostics.ts";
 import {
   validateMediaResponse,
   type CleanContentMediaCandidate,
@@ -19,17 +24,33 @@ import {
   type SourceAdapterArchiveSubmission,
   type SourceAdapterContext,
 } from "./index.ts";
+import { isSourceAccessBudgetExceededError } from "./source-access-budget.ts";
 
 const defaultMaximumMediaBytes = 32 * 1024 * 1024;
 const defaultMediaFetchTimeoutMs = 20_000;
 
 export class MediaFetchError extends Error {
   readonly statusCode: number | undefined;
+  readonly stage: string;
+  readonly target: string | undefined;
+  readonly abortCause: ManualRunAbortCause | undefined;
 
-  constructor(message: string, statusCode?: number, cause?: unknown) {
+  constructor(
+    message: string,
+    statusCode?: number,
+    cause?: unknown,
+    diagnostics?: {
+      readonly stage?: string | undefined;
+      readonly target?: string | undefined;
+      readonly abortCause?: ManualRunAbortCause | undefined;
+    },
+  ) {
     super(message, { cause });
     this.name = "MediaFetchError";
     this.statusCode = statusCode;
+    this.stage = diagnostics?.stage ?? "downloading-media";
+    this.target = diagnostics?.target;
+    this.abortCause = diagnostics?.abortCause;
   }
 }
 
@@ -48,10 +69,8 @@ export async function fetchValidatedMedia(
 ): Promise<{ readonly body: Blob; readonly mediaType: string }> {
   const timeoutMs = options.timeoutMs ?? defaultMediaFetchTimeoutMs;
   const maximumBytes = options.maximumBytes ?? defaultMaximumMediaBytes;
-  const requestSignal = AbortSignal.any([
-    signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const requestSignal = AbortSignal.any([signal, timeoutSignal]);
 
   let response: Response;
   try {
@@ -65,18 +84,41 @@ export async function fetchValidatedMedia(
       signal: requestSignal,
     });
   } catch (error) {
-    throw new MediaFetchError("媒体请求未能完成。", undefined, error);
+    const abortCause = classifyAbortCause({ error, signal, timeoutSignal });
+    if (
+      abortCause === "user_cancelled" ||
+      abortCause === "action_budget_exhausted"
+    ) {
+      throw signal.reason ?? error;
+    }
+    const message =
+      abortCause === "source_request_timeout"
+        ? `Media request timed out after ${String(timeoutMs)}ms.`
+        : abortCause === "unknown"
+          ? "Media request was aborted for an unknown reason."
+          : "Media request failed.";
+    throw new MediaFetchError(message, undefined, error, {
+      target: candidate.url,
+      ...(abortCause === undefined ? {} : { abortCause }),
+    });
   }
 
   if (response.status !== 200) {
     await response.body?.cancel();
     throw new MediaFetchError(
-      `媒体源返回 HTTP ${response.status}。`,
+      `Media source returned HTTP ${response.status}.`,
       response.status,
+      undefined,
+      { target: candidate.url },
     );
   }
   if (response.body === null) {
-    throw new MediaFetchError("媒体响应没有字节内容。", response.status);
+    throw new MediaFetchError(
+      "Media response has no byte content.",
+      response.status,
+      undefined,
+      { target: candidate.url },
+    );
   }
 
   const contentLength = Number(response.headers.get("content-length"));
@@ -85,6 +127,8 @@ export async function fetchValidatedMedia(
     throw new MediaFetchError(
       `媒体超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未将其加入归档。`,
       413,
+      undefined,
+      { target: candidate.url },
     );
   }
 
@@ -93,7 +137,28 @@ export async function fetchValidatedMedia(
   let size = 0;
   try {
     while (true) {
-      const chunk = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        const abortCause = classifyAbortCause({ error, signal, timeoutSignal });
+        if (
+          abortCause === "user_cancelled" ||
+          abortCause === "action_budget_exhausted"
+        ) {
+          throw signal.reason ?? error;
+        }
+        const message =
+          abortCause === "source_request_timeout"
+            ? `Media stream timed out after ${String(timeoutMs)}ms.`
+            : abortCause === "unknown"
+              ? "Media stream was aborted for an unknown reason."
+              : "Media stream failed.";
+        throw new MediaFetchError(message, undefined, error, {
+          target: candidate.url,
+          ...(abortCause === undefined ? {} : { abortCause }),
+        });
+      }
       if (chunk.done) break;
       size += chunk.value.byteLength;
       if (size > maximumBytes) {
@@ -101,6 +166,8 @@ export async function fetchValidatedMedia(
         throw new MediaFetchError(
           `媒体超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未将其加入归档。`,
           413,
+          undefined,
+          { target: candidate.url },
         );
       }
       chunks.push(chunk.value);
@@ -201,7 +268,13 @@ export async function uploadCleanedMedia(
       }
       uploaded.set(candidate.url, result.resource);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (
+        isActionCancelledReason(context.signal.reason) ||
+        isSourceAccessBudgetExceededError(context.signal.reason)
+      ) {
+        throw context.signal.reason;
+      }
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       const reason =
         error instanceof MediaFetchError
           ? `媒体「${candidate.url}」：${error.message}`

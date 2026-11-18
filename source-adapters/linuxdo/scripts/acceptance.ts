@@ -1768,6 +1768,85 @@ async function verifyRunReportAfterWorkerInterruption(): Promise<void> {
   }
 }
 
+async function verifyCollectionRequestTimeoutDiagnostics(): Promise<void> {
+  await updateFixtureState({
+    topicResponsePause: { topicId: 2401, milliseconds: 32_000 },
+  });
+  try {
+    const queued = cliData<ManualRun>(
+      await cli([
+        "run",
+        "trigger",
+        "binny-discovery-topic",
+        "collect",
+        "--params",
+        JSON.stringify({
+          topicId: 2401,
+          date: "2026-10-28",
+          timeZone: "UTC",
+        }),
+      ]),
+      "triggered",
+    );
+    const failed = await waitForManualRun(queued.runId);
+    assert.equal(failed.status, "failed", JSON.stringify(failed));
+    assert.equal(
+      failed.result?.error?.code,
+      "linuxdo_source_unreachable",
+      JSON.stringify(failed),
+    );
+    assert.equal(
+      failed.result?.error?.stage,
+      "reading-topic",
+      JSON.stringify(failed),
+    );
+    assert.equal(
+      failed.result?.error?.target,
+      "http://linuxdo-e2e-source:8081/t/2401.json",
+      JSON.stringify(failed),
+    );
+    assert.equal(
+      failed.result?.error?.abortCause,
+      "source_request_timeout",
+      JSON.stringify(failed),
+    );
+    assert.equal(failed.report?.phase, "failed", JSON.stringify(failed.report));
+    assert.equal(
+      failed.report?.stage,
+      "reading-topic",
+      JSON.stringify(failed.report),
+    );
+    assert.equal(
+      failed.report?.target,
+      "http://linuxdo-e2e-source:8081/t/2401.json",
+      JSON.stringify(failed.report),
+    );
+    assert.equal(
+      failed.report?.abortCause,
+      "source_request_timeout",
+      JSON.stringify(failed.report),
+    );
+
+    const detailText = await cli([
+      "run",
+      "get",
+      "binny-discovery-topic",
+      queued.runId,
+      "--output",
+      "text",
+    ]);
+    assert.equal(detailText.code, 0, detailText.stderr);
+    assert.match(detailText.stdout, /^Stage: reading-topic$/mu);
+    assert.match(
+      detailText.stdout,
+      /^Target: http:\/\/linuxdo-e2e-source:8081\/t\/2401\.json$/mu,
+    );
+    assert.match(detailText.stdout, /^Abort cause: source_request_timeout$/mu);
+  } finally {
+    await updateFixtureState({ topicResponsePause: null });
+  }
+}
+
 type PublicSourceStateSnapshot =
   | { readonly freshness: "unknown" }
   | {
@@ -1865,7 +1944,7 @@ async function verifySourceStateFreshness(
   assert.equal(recovered.execution.status, "online");
   assert.equal(recovered.sourceStateSnapshot.freshness, "current");
   assert.ok(
-    Date.parse(recovered.sourceStateSnapshot.updatedAt!) >=
+    Date.parse(recovered.sourceStateSnapshot.updatedAt) >=
       Date.parse(originalUpdatedAt),
   );
 }
@@ -2789,6 +2868,36 @@ async function verifyChallengeCancellation(): Promise<void> {
     const stopped = await waitForManualRun(queued.runId);
     assert.equal(stopped.status, "cancelled", JSON.stringify(stopped));
     assert.equal(stopped.report?.phase, "cancelled", JSON.stringify(stopped));
+    assert.equal(
+      stopped.report?.abortCause,
+      "user_cancelled",
+      JSON.stringify(stopped.report),
+    );
+    assert.equal(
+      typeof stopped.report?.stage,
+      "string",
+      JSON.stringify(stopped.report),
+    );
+    assert.equal(
+      typeof stopped.report?.target,
+      "string",
+      JSON.stringify(stopped.report),
+    );
+    const cancelledText = await cli([
+      "run",
+      "get",
+      "binny-discovery-topic",
+      queued.runId,
+      "--output",
+      "text",
+    ]);
+    assert.equal(cancelledText.code, 0, cancelledText.stderr);
+    assert.match(cancelledText.stdout, /^Stage: .+/mu);
+    assert.match(
+      cancelledText.stdout,
+      /^Target: http:\/\/linuxdo-e2e-source:8081\//mu,
+    );
+    assert.match(cancelledText.stdout, /^Abort cause: user_cancelled$/mu);
     assert.equal(stopped.result?.output, undefined);
     assert.ok(
       Date.now() - started < 10_000,
@@ -4827,6 +4936,21 @@ async function verifySyncCancellationAndRuntimeExit(
     );
     assert.equal(cancelledDiscovery.status, "cancelled");
     assert.equal(syncReport(cancelledDiscovery).phase, "cancelled");
+    assert.equal(
+      cancelledDiscovery.report?.abortCause,
+      "user_cancelled",
+      JSON.stringify(cancelledDiscovery.report),
+    );
+    assert.equal(
+      cancelledDiscovery.report?.stage,
+      "initializing-page-origin",
+      JSON.stringify(cancelledDiscovery.report),
+    );
+    assert.equal(
+      cancelledDiscovery.report?.target,
+      "http://linuxdo-e2e-source:8081/",
+      JSON.stringify(cancelledDiscovery.report),
+    );
     const cancelledDiscoveryReport = JSON.stringify(cancelledDiscovery.report);
     const discoveryEvents = (await sourceState()).events;
     assert.equal(
@@ -4967,6 +5091,25 @@ async function verifySyncCancellationAndRuntimeExit(
     const cancelled = await waitForManualRun(activeCancellation.runId);
     assert.equal(cancelled.status, "cancelled", JSON.stringify(cancelled));
     assert.equal(syncReport(cancelled).phase, "cancelled");
+    assert.equal(
+      cancelled.report?.abortCause,
+      "user_cancelled",
+      JSON.stringify(cancelled.report),
+    );
+    assert.equal(
+      cancelled.report?.stage,
+      "scanning-post-feed",
+      JSON.stringify(cancelled.report),
+    );
+    assert.equal(
+      typeof cancelled.report?.target,
+      "string",
+      JSON.stringify(cancelled.report),
+    );
+    assert.match(
+      cancelled.report?.target as string,
+      /^http:\/\/linuxdo-e2e-source:8081\/posts\.json/u,
+    );
     assert.equal(
       syncReport(cancelled).scopes.find(
         ({ scope }) => scope.kind === "category" && scope.id === 42,
@@ -5499,6 +5642,21 @@ async function verifyBoundedSync(): Promise<string> {
     );
     assert.equal(syncReport(requestLimit).phase, "budget-exhausted");
     assert.equal(syncReport(requestLimit).budget.stopReason, "request-limit");
+    assert.equal(
+      requestLimit.report?.abortCause,
+      "action_budget_exhausted",
+      JSON.stringify(requestLimit.report),
+    );
+    const budgetText = await cli([
+      "run",
+      "get",
+      "binny-discovery-topic",
+      requestLimit.runId,
+      "--output",
+      "text",
+    ]);
+    assert.equal(budgetText.code, 0, budgetText.stderr);
+    assert.match(budgetText.stdout, /^Abort cause: action_budget_exhausted$/mu);
     assert.equal(syncOutput(requestLimit).outcome, "partial");
     const requestLimitUpperBound = syncReport(requestLimit).upperBound;
     lastConfirmedPosition = syncOutput(requestLimit).scopes.find(
@@ -7221,6 +7379,10 @@ async function main(): Promise<void> {
     await verifyRunReportAfterWorkerInterruption();
     process.stdout.write(
       "运行中报告、错误运行器拒绝、worker 异常退出保留和终结历史保护通过。\n",
+    );
+    await verifyCollectionRequestTimeoutDiagnostics();
+    process.stdout.write(
+      "采集单次来源请求超时、阶段、目标与 Abort cause 诊断通过。\n",
     );
     await verifyDailyCollection();
     process.stdout.write(

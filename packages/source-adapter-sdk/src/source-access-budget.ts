@@ -35,6 +35,20 @@ export class SourceAccessBudgetExceededError extends Error {
   }
 }
 
+/** Identifies SourceAccessBudgetExceededError across module or worker boundaries. */
+export function isSourceAccessBudgetExceededError(
+  error: unknown,
+): error is SourceAccessBudgetExceededError {
+  return (
+    error instanceof SourceAccessBudgetExceededError ||
+    (typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      error.name === "SourceAccessBudgetExceededError" &&
+      "reason" in error)
+  );
+}
+
 export type SourceAccessBudgetSnapshot = {
   readonly maxRequests: number;
   readonly maxElapsedMs: number;

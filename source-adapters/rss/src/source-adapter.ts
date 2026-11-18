@@ -14,6 +14,7 @@ import {
   upsertIncrementalScopeEntry,
   type ArchiveResourceMetadata,
   type IncrementalEntryRecord,
+  type ManualRunAbortCause,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import * as z from "zod";
@@ -489,7 +490,13 @@ function feedItemsWithIdentity(
 function feedReadFailure(
   feedId: string,
   error: unknown,
-): { readonly message: string; readonly unavailable: boolean } {
+): {
+  readonly message: string;
+  readonly unavailable: boolean;
+  readonly stage?: string;
+  readonly target?: string;
+  readonly abortCause?: ManualRunAbortCause;
+} {
   if (!(error instanceof FeedRequestError)) {
     return {
       message: `RSS/Atom feed「${feedId}」读取失败。`,
@@ -506,6 +513,9 @@ function feedReadFailure(
   return {
     message: `RSS/Atom feed「${feedId}」检查失败：${error.message}`,
     unavailable,
+    ...(error.stage === undefined ? {} : { stage: error.stage }),
+    ...(error.target === undefined ? {} : { target: error.target }),
+    ...(error.abortCause === undefined ? {} : { abortCause: error.abortCause }),
   };
 }
 
@@ -610,6 +620,9 @@ function failureFromProblems(
     readonly message: string;
     readonly path?: readonly (string | number)[];
     readonly suggestion?: string;
+    readonly stage?: string;
+    readonly target?: string;
+    readonly abortCause?: ManualRunAbortCause;
   }[],
   completedScopes: readonly string[],
 ) {
@@ -635,6 +648,11 @@ function failureFromProblems(
         first?.suggestion ??
         "检查问题 feed 与媒体来源后重新触发 collect；已归档的相同条目会按稳定信源键处理。",
       requiresHuman: false,
+      ...(first?.stage === undefined ? {} : { stage: first.stage }),
+      ...(first?.target === undefined ? {} : { target: first.target }),
+      ...(first?.abortCause === undefined
+        ? {}
+        : { abortCause: first.abortCause }),
     },
     completedScopes,
   );
@@ -650,6 +668,9 @@ async function collectFeeds(
     message: string;
     path?: readonly (string | number)[];
     suggestion?: string;
+    stage?: string;
+    target?: string;
+    abortCause?: ManualRunAbortCause;
   }[] = selected.missing.map((feedId) => ({
     feedId,
     message: `本次参数选择了未配置的 feed「${feedId}」。`,
@@ -679,11 +700,17 @@ async function collectFeeds(
     try {
       response = await requestFeed(feed.url, validators, context.signal);
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       const failure = feedReadFailure(feed.id, error);
       problems.push({
         feedId: feed.id,
         message: failure.message,
         path: ["feeds", feed.id],
+        ...(failure.stage === undefined ? {} : { stage: failure.stage }),
+        ...(failure.target === undefined ? {} : { target: failure.target }),
+        ...(failure.abortCause === undefined
+          ? {}
+          : { abortCause: failure.abortCause }),
       });
       continue;
     }
@@ -824,6 +851,9 @@ async function syncFeeds(
     message: string;
     path?: readonly (string | number)[];
     suggestion?: string;
+    stage?: string;
+    target?: string;
+    abortCause?: ManualRunAbortCause;
   }[] = selected.missing.map((feedId) => ({
     feedId,
     message: `本次参数选择了未配置的 feed「${feedId}」。`,
@@ -850,11 +880,17 @@ async function syncFeeds(
       try {
         response = await requestFeed(feed.url, {}, context.signal);
       } catch (error) {
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         const failure = feedReadFailure(feed.id, error);
         problems.push({
           feedId: feed.id,
           message: failure.message,
           path: ["feeds", feed.id],
+          ...(failure.stage === undefined ? {} : { stage: failure.stage }),
+          ...(failure.target === undefined ? {} : { target: failure.target }),
+          ...(failure.abortCause === undefined
+            ? {}
+            : { abortCause: failure.abortCause }),
         });
         continue;
       }
@@ -948,11 +984,17 @@ async function syncFeeds(
     try {
       response = await requestFeed(feed.url, validators, context.signal);
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       const failure = feedReadFailure(feed.id, error);
       problems.push({
         feedId: feed.id,
         message: failure.message,
         path: ["feeds", feed.id],
+        ...(failure.stage === undefined ? {} : { stage: failure.stage }),
+        ...(failure.target === undefined ? {} : { target: failure.target }),
+        ...(failure.abortCause === undefined
+          ? {}
+          : { abortCause: failure.abortCause }),
       });
       continue;
     }

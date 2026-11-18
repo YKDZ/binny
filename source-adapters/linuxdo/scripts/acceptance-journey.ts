@@ -57,6 +57,9 @@ export type LinuxdoManualRun = {
       readonly path?: readonly (string | number)[];
       readonly impact?: string;
       readonly message?: string;
+      readonly stage?: string;
+      readonly target?: string;
+      readonly abortCause?: string;
     };
     readonly completedScopes?: readonly string[];
     readonly commits?: readonly {
@@ -322,6 +325,7 @@ export async function openLinuxdoViewer(
         0,
         2_000,
       )} 原因=${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
   await page.waitForFunction(

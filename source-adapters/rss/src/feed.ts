@@ -1,11 +1,13 @@
 import { Buffer } from "node:buffer";
 
 import {
+  classifyAbortCause,
   cleanContent,
   validateMediaResponse,
   type ArchiveItemSubmissionInput,
   type CleanContentMediaCandidate,
   type CleanContentResult,
+  type ManualRunAbortCause,
 } from "@binny/source-adapter-sdk";
 import { parseFeed } from "@rowanmanning/feed-parser";
 import { z } from "zod";
@@ -67,11 +69,26 @@ export type FeedRequestResult =
 
 export class FeedRequestError extends Error {
   readonly statusCode: number | undefined;
+  readonly stage: string | undefined;
+  readonly target: string | undefined;
+  readonly abortCause: ManualRunAbortCause | undefined;
 
-  constructor(message: string, statusCode?: number, cause?: unknown) {
+  constructor(
+    message: string,
+    statusCode?: number,
+    cause?: unknown,
+    diagnostics?: {
+      readonly stage?: string | undefined;
+      readonly target?: string | undefined;
+      readonly abortCause?: ManualRunAbortCause | undefined;
+    },
+  ) {
     super(message, { cause });
     this.name = "FeedRequestError";
     this.statusCode = statusCode;
+    this.stage = diagnostics?.stage;
+    this.target = diagnostics?.target;
+    this.abortCause = diagnostics?.abortCause;
   }
 }
 
@@ -309,14 +326,62 @@ function responseValidators(response: Response): FeedValidators {
   };
 }
 
-function requestSignal(signal: AbortSignal): AbortSignal {
-  return AbortSignal.any([signal, AbortSignal.timeout(fetchTimeoutMs)]);
+function createRequestSignal(signal: AbortSignal): {
+  readonly timeoutSignal: AbortSignal;
+  readonly signal: AbortSignal;
+} {
+  const timeoutSignal = AbortSignal.timeout(fetchTimeoutMs);
+  return {
+    timeoutSignal,
+    signal: AbortSignal.any([signal, timeoutSignal]),
+  };
+}
+
+function throwClassifiedFeedError(
+  error: unknown,
+  input: {
+    readonly signal: AbortSignal;
+    readonly timeoutSignal: AbortSignal;
+    readonly stage: string;
+    readonly target: string;
+    readonly timeoutMessage: string;
+    readonly abortedMessage: string;
+    readonly fallbackMessage: string;
+  },
+): never {
+  const abortCause = classifyAbortCause({
+    error,
+    signal: input.signal,
+    timeoutSignal: input.timeoutSignal,
+  });
+  if (
+    abortCause === "user_cancelled" ||
+    abortCause === "action_budget_exhausted"
+  ) {
+    throw input.signal.reason ?? error;
+  }
+  const message =
+    abortCause === "source_request_timeout"
+      ? input.timeoutMessage
+      : abortCause === "unknown"
+        ? input.abortedMessage
+        : input.fallbackMessage;
+  throw new FeedRequestError(message, undefined, error, {
+    stage: input.stage,
+    target: input.target,
+    ...(abortCause === undefined ? {} : { abortCause }),
+  });
 }
 
 async function readLimitedText(
   response: Response,
   maximumBytes = maximumFeedBytes,
   contentName = "RSS/Atom feed",
+  abortContext?: {
+    readonly url: string;
+    readonly signal: AbortSignal;
+    readonly timeoutSignal: AbortSignal;
+  },
 ): Promise<string> {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
@@ -324,18 +389,49 @@ async function readLimitedText(
     throw new FeedRequestError(
       `${contentName}超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未读取其正文。`,
       413,
+      undefined,
+      abortContext === undefined
+        ? undefined
+        : { stage: "fetching-feed", target: abortContext.url },
     );
   }
 
   if (response.body === null) {
-    throw new FeedRequestError("RSS/Atom feed 响应没有正文。", response.status);
+    throw new FeedRequestError(
+      "RSS/Atom feed 响应没有正文。",
+      response.status,
+      undefined,
+      abortContext === undefined
+        ? undefined
+        : { stage: "fetching-feed", target: abortContext.url },
+    );
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     while (true) {
-      const chunk = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        if (abortContext !== undefined) {
+          throwClassifiedFeedError(error, {
+            signal: abortContext.signal,
+            timeoutSignal: abortContext.timeoutSignal,
+            stage: "fetching-feed",
+            target: abortContext.url,
+            timeoutMessage: `Feed response timed out after ${String(fetchTimeoutMs)}ms.`,
+            abortedMessage: "Feed response was aborted for an unknown reason.",
+            fallbackMessage: "RSS/Atom feed 请求未能完成。",
+          });
+        }
+        throw new FeedRequestError(
+          "RSS/Atom feed 请求未能完成。",
+          undefined,
+          error,
+        );
+      }
       if (chunk.done) break;
       size += chunk.value.byteLength;
       if (size > maximumBytes) {
@@ -343,6 +439,10 @@ async function readLimitedText(
         throw new FeedRequestError(
           `${contentName}超过 ${Math.floor(maximumBytes / 1024 / 1024)} MiB，未读取其正文。`,
           413,
+          undefined,
+          abortContext === undefined
+            ? undefined
+            : { stage: "fetching-feed", target: abortContext.url },
         );
       }
       chunks.push(chunk.value);
@@ -361,6 +461,9 @@ async function readLimitedText(
       `${contentName}正文不是可识别的文本编码。`,
       response.status,
       error,
+      abortContext === undefined
+        ? undefined
+        : { stage: "fetching-feed", target: abortContext.url },
     );
   }
 }
@@ -381,19 +484,24 @@ export async function requestFeed(
     headers.set("if-modified-since", validators.lastModified);
   }
 
+  const request = createRequestSignal(signal);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "GET",
       headers,
-      signal: requestSignal(signal),
+      signal: request.signal,
     });
   } catch (error) {
-    throw new FeedRequestError(
-      "RSS/Atom feed 请求未能完成。",
-      undefined,
-      error,
-    );
+    throwClassifiedFeedError(error, {
+      signal,
+      timeoutSignal: request.timeoutSignal,
+      stage: "fetching-feed",
+      target: url,
+      timeoutMessage: `Feed request timed out after ${String(fetchTimeoutMs)}ms.`,
+      abortedMessage: "Feed request was aborted for an unknown reason.",
+      fallbackMessage: "RSS/Atom feed 请求未能完成。",
+    });
   }
 
   const responseHeaders = responseValidators(response);
@@ -405,10 +513,21 @@ export async function requestFeed(
     throw new FeedRequestError(
       `RSS/Atom feed 返回 HTTP ${response.status}。`,
       response.status,
+      undefined,
+      { stage: "fetching-feed", target: url },
     );
   }
 
-  const source = await readLimitedText(response);
+  const source = await readLimitedText(
+    response,
+    maximumFeedBytes,
+    "RSS/Atom feed",
+    {
+      url,
+      signal,
+      timeoutSignal: request.timeoutSignal,
+    },
+  );
   try {
     return {
       status: "ok",
@@ -421,6 +540,7 @@ export async function requestFeed(
       "响应不是可解析的 RSS/Atom feed。",
       response.status,
       error,
+      { stage: "fetching-feed", target: url },
     );
   }
 }
@@ -444,31 +564,52 @@ export async function fetchMedia(
         ? maybeSignal
         : new AbortController().signal;
 
+  const request = createRequestSignal(signal);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "GET",
       headers: { accept: "*/*", "user-agent": "Binny RSS sourceAdapter/1.0" },
-      signal: requestSignal(signal),
+      signal: request.signal,
     });
   } catch (error) {
-    throw new FeedRequestError("媒体请求未能完成。", undefined, error);
+    throwClassifiedFeedError(error, {
+      signal,
+      timeoutSignal: request.timeoutSignal,
+      stage: "downloading-media",
+      target: url,
+      timeoutMessage: `Media request timed out after ${String(fetchTimeoutMs)}ms.`,
+      abortedMessage: "Media request was aborted for an unknown reason.",
+      fallbackMessage: "媒体请求未能完成。",
+    });
   }
   if (response.status !== 200) {
     await response.body?.cancel();
     throw new FeedRequestError(
       `媒体源返回 HTTP ${response.status}。`,
       response.status,
+      undefined,
+      { stage: "downloading-media", target: url },
     );
   }
   if (response.body === null) {
-    throw new FeedRequestError("媒体响应没有字节内容。", response.status);
+    throw new FeedRequestError(
+      "媒体响应没有字节内容。",
+      response.status,
+      undefined,
+      { stage: "downloading-media", target: url },
+    );
   }
 
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maximumMediaBytes) {
     await response.body.cancel();
-    throw new FeedRequestError("媒体超过 32 MiB，未将其加入归档。", 413);
+    throw new FeedRequestError(
+      "媒体超过 32 MiB，未将其加入归档。",
+      413,
+      undefined,
+      { stage: "downloading-media", target: url },
+    );
   }
 
   const reader = response.body.getReader();
@@ -476,12 +617,30 @@ export async function fetchMedia(
   let size = 0;
   try {
     while (true) {
-      const chunk = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (error) {
+        throwClassifiedFeedError(error, {
+          signal,
+          timeoutSignal: request.timeoutSignal,
+          stage: "downloading-media",
+          target: url,
+          timeoutMessage: `Media stream timed out after ${String(fetchTimeoutMs)}ms.`,
+          abortedMessage: "Media stream was aborted for an unknown reason.",
+          fallbackMessage: "媒体请求未能完成。",
+        });
+      }
       if (chunk.done) break;
       size += chunk.value.byteLength;
       if (size > maximumMediaBytes) {
         await reader.cancel();
-        throw new FeedRequestError("媒体超过 32 MiB，未将其加入归档。", 413);
+        throw new FeedRequestError(
+          "媒体超过 32 MiB，未将其加入归档。",
+          413,
+          undefined,
+          { stage: "downloading-media", target: url },
+        );
       }
       chunks.push(chunk.value);
     }
