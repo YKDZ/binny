@@ -411,8 +411,8 @@ function sourceTimeZoneOffsetAt(
         .map(({ type, value }) => [type, Number(value)]),
     );
     const localTime = new Date(0);
-    localTime.setUTCFullYear(values.year!, values.month! - 1, values.day!);
-    localTime.setUTCHours(values.hour!, values.minute!, values.second!, 0);
+    localTime.setUTCFullYear(values.year!, values.month! - 1, values.day);
+    localTime.setUTCHours(values.hour!, values.minute, values.second, 0);
     return Math.round((localTime.getTime() - epochMs) / 60_000);
   } catch {
     return undefined;
@@ -1030,7 +1030,6 @@ export const archiveErrorSchema = z
           "resource_not_found",
           "resource_storage_unavailable",
           "commit_not_found",
-          "query_budget_exceeded",
           "request_cancelled",
           "payload_too_large",
           "relation_not_found",
@@ -1439,7 +1438,7 @@ function nestedArchiveSearchIssues(
     if (issue.code === "invalid_union" && issue.errors.length > 0) {
       return nestedArchiveSearchIssues(issue.errors.flat(), path);
     }
-    return [{ ...issue, path } as z.core.$ZodIssue];
+    return [{ ...issue, path }];
   });
 }
 
@@ -1729,13 +1728,10 @@ export type ArchiveOperation<T> =
 
 /**
  * Server-only execution metadata passed between the HTTP adapter and archive
- * store. One monotonic deadline covers processing and preparing the complete
- * response after the request has been parsed; it does not bound client network
- * transfer time.
+ * store. Search and batch-read operations wait until the complete response is
+ * prepared unless cancelled through `signal`.
  */
 export type ArchiveOperationContext = {
-  /** Monotonic deadline set once by the server; never accepted in a serialized request. */
-  readonly deadline?: number;
   /** Aborted when the HTTP client disconnects before the response is complete. */
   readonly signal?: AbortSignal;
 };
@@ -1777,9 +1773,8 @@ export type ArchiveOperations = {
     secondRevisionId: string,
   ): Promise<ArchiveOperation<ArchiveRevisionDiff>>;
   /**
-   * Search an immutable snapshot. Candidates and any requested distribution
-   * share the request deadline through complete HTTP response preparation;
-   * the server does not guarantee client network transfer time.
+   * Search an immutable snapshot. Callers may wait for complete results; an
+   * aborted request stops active database work via `context.signal`.
    */
   searchArchive(
     input: ArchiveSearchRequest,
@@ -1791,9 +1786,9 @@ export type ArchiveOperations = {
    * absent, and mismatched references return per-item unreadable results.
    * Readable revisions include the complete stored body and report resource
    * availability independently. A request accepts at most 50 references and
-   * rejects as a whole if its complete response exceeds 16 MiB or its shared
-   * server request budget expires. The deadline includes HTTP response
-   * preparation but does not bound client network transfer time.
+   * rejects as a whole if its complete response exceeds 16 MiB. Callers may
+   * wait for complete results; an aborted request stops active work via
+   * `context.signal`.
    */
   readArchiveBatch(
     input: ArchiveBatchReadRequest,

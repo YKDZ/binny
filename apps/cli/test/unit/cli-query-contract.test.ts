@@ -223,7 +223,7 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v3: \/meta\/query/u);
+    assert.match(result.output, /Archive query v4: \/meta\/query/u);
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 

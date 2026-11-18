@@ -23,7 +23,7 @@ import { withArchiveWriteLock } from "./archive-lock.ts";
 import type { ArchiveTransaction } from "./archive-lock.ts";
 import {
   assertArchiveQueryActive,
-  executeArchiveQueryWithinDeadline,
+  executeCancellableArchiveQuery,
 } from "./archive-query-budget.ts";
 
 type ResourceRow = typeof archiveResources.$inferSelect;
@@ -63,7 +63,6 @@ export type ArchiveResourceStorage = {
   readonly inspectAvailability: (
     resourceIds: readonly string[],
     executeQuery: CancellableQueryExecutor,
-    deadline: number,
     signal?: AbortSignal,
   ) => Promise<ReadonlyMap<string, boolean>>;
   readonly collectUnreferencedResources: (
@@ -650,7 +649,6 @@ export function createArchiveResourceStorage(
   async function inspectAvailability(
     resourceIds: readonly string[],
     executeQuery: CancellableQueryExecutor,
-    deadline: number,
     signal?: AbortSignal,
   ): Promise<ReadonlyMap<string, boolean>> {
     // PostgreSQL returns UUID text in lowercase even when the immutable state preserves source casing.
@@ -659,7 +657,7 @@ export function createArchiveResourceStorage(
     ];
     if (uniqueResourceIds.length === 0) return new Map();
 
-    assertArchiveQueryActive(deadline, signal);
+    assertArchiveQueryActive(signal);
     const requestJson = JSON.stringify(uniqueResourceIds);
     const requested = database.$with("requested_resources").as(
       database
@@ -671,7 +669,7 @@ export function createArchiveResourceStorage(
         ),
     );
     const rows =
-      await executeArchiveQueryWithinDeadline<ResourceAvailabilityQueryRow>(
+      await executeCancellableArchiveQuery<ResourceAvailabilityQueryRow>(
         executeQuery,
         database
           .with(requested)
@@ -694,7 +692,6 @@ export function createArchiveResourceStorage(
               eq(archiveResources.status, "ready"),
             ),
           ),
-        deadline,
         signal,
       );
     const rowsById = new Map<string, ResourceAvailabilityRow>();
@@ -710,7 +707,7 @@ export function createArchiveResourceStorage(
 
     const availability = new Map<string, boolean>();
     for (const resourceId of uniqueResourceIds) {
-      assertArchiveQueryActive(deadline, signal);
+      assertArchiveQueryActive(signal);
       const row = rowsById.get(resourceId);
       availability.set(
         resourceId,
@@ -718,7 +715,7 @@ export function createArchiveResourceStorage(
           ? false
           : await resourceFileIsAvailable(directory, row),
       );
-      assertArchiveQueryActive(deadline, signal);
+      assertArchiveQueryActive(signal);
     }
     return availability;
   }

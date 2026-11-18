@@ -27,7 +27,6 @@ import {
   archiveRevisions,
   archiveWriteClock,
   binConfigurations,
-  databaseErrorCode,
   type CancellableQueryExecutor,
   type Database,
 } from "@binny/db";
@@ -50,10 +49,8 @@ import { unionAll } from "drizzle-orm/pg-core";
 import { canonicalJson } from "./archive-common.ts";
 import {
   ArchiveRequestCancelled,
-  ArchiveQueryBudgetExceeded,
   assertArchiveQueryActive,
-  createArchiveQueryDeadline,
-  executeArchiveQueryWithinDeadline,
+  executeCancellableArchiveQuery,
 } from "./archive-query-budget.ts";
 import {
   canonicalizeArchiveTimeZone,
@@ -256,17 +253,6 @@ function invalidInput(
       message,
       path: [...path],
       ...(diagnostic === undefined ? {} : { diagnostic }),
-    },
-  };
-}
-
-function budgetFailure(budgetMs: number): ArchiveSearchOperation<never> {
-  return {
-    ok: false,
-    status: 422,
-    error: {
-      code: "query_budget_exceeded",
-      message: `Search exceeded the server request budget of ${budgetMs} ms; no partial results were returned.`,
     },
   };
 }
@@ -1566,15 +1552,11 @@ function decodeSearchResults(value: unknown): unknown[] {
   return decoded;
 }
 
-/** Build the fixed archive search operation with one server-side request budget. */
+/** Build the archive search operation with cancellable query execution. */
 export function createArchiveSearchOperation(
   database: Database,
   executeQuery: CancellableQueryExecutor,
-  budgetMs: number,
 ): Pick<ArchiveOperations, "searchArchive"> {
-  if (!Number.isSafeInteger(budgetMs) || budgetMs < 1) {
-    throw new RangeError("Search request budget must be a positive integer.");
-  }
   return {
     async searchArchive(
       request: ArchiveSearchRequest,
@@ -1582,10 +1564,8 @@ export function createArchiveSearchOperation(
     ): Promise<
       ArchiveSearchOperation<ReturnType<typeof archiveSearchPageSchema.parse>>
     > {
-      const deadline =
-        context?.deadline ?? createArchiveQueryDeadline(budgetMs);
       const signal = context?.signal;
-      assertArchiveQueryActive(deadline, signal);
+      assertArchiveQueryActive(signal);
       const checked = archiveSearchInputSchema.safeParse(request);
       if (!checked.success) {
         const issue = archiveSearchInputIssue(request, checked.error.issues);
@@ -1679,15 +1659,13 @@ export function createArchiveSearchOperation(
           timeZoneFields.add(input.distribution.field);
         }
         if (timeZoneFields.size > 0) {
-          const [zoneRow] =
-            await executeArchiveQueryWithinDeadline<SearchZoneRow>(
-              executeQuery,
-              timeZoneDiscoveryQuery(database, input, snapshot, [
-                ...timeZoneFields,
-              ]),
-              deadline,
-              signal,
-            );
+          const [zoneRow] = await executeCancellableArchiveQuery<SearchZoneRow>(
+            executeQuery,
+            timeZoneDiscoveryQuery(database, input, snapshot, [
+              ...timeZoneFields,
+            ]),
+            signal,
+          );
           if (zoneRow === undefined) {
             throw new Error("Search time-zone query returned no snapshot row.");
           }
@@ -1708,7 +1686,7 @@ export function createArchiveSearchOperation(
           );
           aliases = archiveTimeZoneAliases(timeZones);
         }
-        const [row] = await executeArchiveQueryWithinDeadline<SearchPageRow>(
+        const [row] = await executeCancellableArchiveQuery<SearchPageRow>(
           executeQuery,
           pageQuery(
             database,
@@ -1718,7 +1696,6 @@ export function createArchiveSearchOperation(
             distributionCursor,
             aliases,
           ),
-          deadline,
           signal,
         );
         if (row === undefined) {
@@ -1813,7 +1790,7 @@ export function createArchiveSearchOperation(
           distribution !== undefined &&
           rawDistributionGroups.length > distribution.limit;
         const selectedDistributionGroups = distributionHasMore
-          ? rawDistributionGroups.slice(0, distribution!.limit)
+          ? rawDistributionGroups.slice(0, distribution.limit)
           : rawDistributionGroups;
         let nextDistributionCursor: string | undefined;
         const lastDistributionGroup = selectedDistributionGroups.at(-1);
@@ -1883,7 +1860,7 @@ export function createArchiveSearchOperation(
             ? {}
             : { distribution: completedDistribution }),
         });
-        assertArchiveQueryActive(deadline, signal);
+        assertArchiveQueryActive(signal);
         return { ok: true, value: completedPage };
       } catch (error) {
         if (
@@ -1891,12 +1868,6 @@ export function createArchiveSearchOperation(
           error instanceof ArchiveRequestCancelled
         ) {
           throw new ArchiveRequestCancelled();
-        }
-        if (
-          error instanceof ArchiveQueryBudgetExceeded ||
-          databaseErrorCode(error) === "57014"
-        ) {
-          return budgetFailure(budgetMs);
         }
         throw error;
       }
