@@ -758,13 +758,34 @@ function createCliContract(identity: CliCommandIdentity) {
         })`;
   const distributionItemCountText = (count: string) =>
     `${count} ${count === "1" ? "item" : "items"}`;
+  const timeWindowSummaryText = (
+    timeWindow: NonNullable<
+      z.infer<typeof archiveSearchPageSchema>["timeWindow"]
+    >,
+  ) =>
+    `Time window: ${timeWindow.field} [${timeWindow.from}, ${timeWindow.until})${
+      "timeZone" in timeWindow ? ` (${timeWindow.timeZone})` : ""
+    }; inclusive from, exclusive until; review=${timeWindow.review}`;
+  const candidateOrderText = (
+    page: z.infer<typeof archiveSearchPageSchema>,
+  ) => {
+    const field =
+      page.candidateOrder?.field ?? page.timeWindow?.field ?? "observedAt";
+    return field === "observedAt" && page.timeWindow === undefined
+      ? "Candidate order: observedAt desc (itemId asc)"
+      : `Candidate order: ${field} desc (nulls last, itemId asc)`;
+  };
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
   ) =>
     text.lines([
       `Snapshot: ${page.snapshot.asOf}`,
+      ...(page.timeWindow === undefined
+        ? []
+        : [timeWindowSummaryText(page.timeWindow)]),
       ...(page.candidatesIncluded
         ? [
+            candidateOrderText(page),
             `Matches on this page: ${page.results.length}`,
             ...(page.results.length === 0
               ? ["No archived items matched."]
@@ -3105,7 +3126,9 @@ function createCliContract(identity: CliCommandIdentity) {
           "File and stdin examples expect a request prepared as described in the README; native examples do not carry file contents or stdin bytes.",
           "Text matching is case-insensitive and literal. Values in one group use OR; multiple groups use AND.",
           "Extension filters require an explicit bin and the sourceAdapterId declared by bin extension-fields <bin-id>. String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. All filters combine with AND; missing and null extension values do not match.",
-          'A timeWindow uses inclusive from and exclusive until local dates in its required timeZone; set review to "undetermined" to inspect views whose stored time or zone cannot decide membership.',
+          "A timeWindow uses a half-open [from, until) range (inclusive from, exclusive until) in either form: local calendar dates (YYYY-MM-DD) interpreted at local midnight in a required timeZone, or exact instants with an explicit Z or ±HH:MM offset without timeZone.",
+          'Time membership uses stored source precision and zone; timeSummary counts distinct certain and undetermined items, and review="undetermined" with the same snapshot.asOf inspects undetermined views.',
+          "Without timeWindow, candidates sort by observedAt descending (itemId ascending breaks ties); with timeWindow, candidates sort by timeWindow.field descending (nulls last, itemId ascending breaks ties).",
           "Distribution groups can use bin, local date period, or a declared extension field. Date groups require a time zone and only count source-time intervals wholly contained in one local period; other source times appear in an undetermined group with their reason.",
           "Candidate pages and distribution groups have independent limits and cursors. Reuse snapshot.asOf and the previous top-level cursor or distribution.cursor.",
           "Set includeCandidates to false to return distribution groups only. Each group counts an item once, so group counts may exceed the distinct total. One distribution dimension is available per request.",
@@ -3134,6 +3157,12 @@ function createCliContract(identity: CliCommandIdentity) {
                 '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08","until":"2026-11-09","timeZone":"Asia/Shanghai"}}',
             },
           },
+          {
+            input: {
+              query:
+                '{"timeWindow":{"field":"sourcePublishedAt","from":"2026-11-08T06:00:00+08:00","until":"2026-11-08T12:00:00+08:00"}}',
+            },
+          },
           { input: { queryFile: "./search.json" } },
           { input: { queryStdin: true } },
         ],
@@ -3142,7 +3171,7 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--query",
             description:
-              "Fixed search request JSON. Time window dates and date distributions use local calendar boundaries in their required time zone. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.",
+              "Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.",
           },
           queryFile: {
             kind: "valueOption",

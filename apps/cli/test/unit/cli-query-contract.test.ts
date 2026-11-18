@@ -1131,4 +1131,116 @@ void describe("查询服务发现", () => {
       false,
     );
   });
+
+  void it("renders active timeWindow bounds and candidate sort order in readable output", async () => {
+    const offsetWindow = {
+      field: "sourcePublishedAt",
+      from: "2026-11-08T06:00:00+08:00",
+      until: "2026-11-08T12:00:00+08:00",
+      review: "certain",
+    } as const;
+    const service = fakeService({
+      searchResponse: {
+        snapshot: { asOf: "15", mode: "current" },
+        candidatesIncluded: true,
+        candidateOrder: { field: "sourcePublishedAt", direction: "desc" },
+        timeWindow: offsetWindow,
+        timeSummary: { certainItems: "1", undeterminedItems: "2" },
+        hasMore: false,
+        results: [],
+      },
+    });
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ timeWindow: offsetWindow }),
+        "--output",
+        "text",
+      ],
+      service.fetch,
+    );
+
+    assert.equal(text.exitCode, 0, text.output);
+    assert.match(
+      text.output,
+      /Time window: sourcePublishedAt \[2026-11-08T06:00:00\+08:00, 2026-11-08T12:00:00\+08:00\); inclusive from, exclusive until; review=certain/u,
+    );
+    assert.match(
+      text.output,
+      /Candidate order: sourcePublishedAt desc \(nulls last, itemId asc\)/u,
+    );
+  });
+
+  void it("reports branch-accurate local validation diagnostics for invalid offset time windows", async () => {
+    const service = fakeService({});
+    const missingOffset = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          timeWindow: {
+            field: "sourcePublishedAt",
+            from: "2026-11-08T06:00:00",
+            until: "2026-11-08T12:00:00+08:00",
+          },
+        }),
+      ],
+      service.fetch,
+    );
+    assert.equal(missingOffset.exitCode, 1);
+    assert.deepEqual(failureData(missingOffset.output).path, [
+      "timeWindow",
+      "from",
+    ]);
+
+    const extraZone = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          timeWindow: {
+            field: "sourcePublishedAt",
+            from: "2026-11-08T06:00:00+08:00",
+            until: "2026-11-08T12:00:00+08:00",
+            timeZone: "Asia/Shanghai",
+          },
+        }),
+      ],
+      service.fetch,
+    );
+    assert.equal(extraZone.exitCode, 1);
+    assert.deepEqual(failureData(extraZone.output).path, [
+      "timeWindow",
+      "timeZone",
+    ]);
+
+    const badReview = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          timeWindow: {
+            field: "sourcePublishedAt",
+            from: "2026-11-08T06:00:00+08:00",
+            until: "2026-11-08T12:00:00+08:00",
+            review: "outside",
+          },
+        }),
+      ],
+      service.fetch,
+    );
+    assert.equal(badReview.exitCode, 1);
+    assert.deepEqual(failureData(badReview.output), {
+      code: "invalid_input",
+      message: 'Invalid option: expected one of "certain"|"undetermined"',
+      path: ["timeWindow", "review"],
+      diagnostic: { allowedValues: ["certain", "undetermined"] },
+    });
+    assert.deepEqual(service.requests, []);
+  });
 });

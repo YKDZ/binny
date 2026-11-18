@@ -55,10 +55,10 @@ import {
 import {
   canonicalizeArchiveTimeZone,
   archiveTimeZoneAliases,
-  localDateBoundarySql,
   sourceTimeBoundsSql,
   sourceTimeFieldSql,
   sourceTimeWindowDecisionSql,
+  timeWindowBoundsSql,
   type ArchiveTimeZoneAliases,
 } from "./archive-search-time.ts";
 
@@ -1150,17 +1150,27 @@ function pageQuery(
   );
   const latestStateData = sql`${latest.state_data}`;
 
+  const observedWindowBounds =
+    input.timeWindow?.field === "observedAt"
+      ? timeWindowBoundsSql(input.timeWindow)
+      : undefined;
   const decision =
     input.timeWindow === undefined
       ? undefined
-      : input.timeWindow.field === "observedAt"
+      : observedWindowBounds !== undefined
         ? {
-            status: sql`CASE WHEN ${latest.observed_at} >= ${localDateBoundarySql(input.timeWindow.from, input.timeWindow.timeZone)} AND ${latest.observed_at} < ${localDateBoundarySql(input.timeWindow.until, input.timeWindow.timeZone)} THEN 'certain' ELSE 'outside' END`,
+            status: sql`CASE WHEN ${latest.observed_at} >= ${observedWindowBounds.start} AND ${latest.observed_at} < ${observedWindowBounds.end} THEN 'certain' ELSE 'outside' END`,
             reason: sql`NULL::text`,
             sortValue: sql`${latest.observed_at}`,
           }
         : sourceTimeWindowDecisionSql(
-            sourceTimeFieldSql(latestStateData, input.timeWindow.field),
+            sourceTimeFieldSql(
+              latestStateData,
+              input.timeWindow.field as Extract<
+                typeof input.timeWindow.field,
+                "sourcePublishedAt" | "sourceModifiedAt"
+              >,
+            ),
             input.timeWindow,
             aliases,
           );
@@ -1758,6 +1768,17 @@ export function createArchiveSearchOperation(
         const page = archiveSearchPageSchema.parse({
           snapshot: resolvedSnapshot,
           candidatesIncluded: input.includeCandidates,
+          ...(input.includeCandidates
+            ? {
+                candidateOrder: {
+                  field: input.timeWindow?.field ?? "observedAt",
+                  direction: "desc" as const,
+                },
+              }
+            : {}),
+          ...(input.timeWindow === undefined
+            ? {}
+            : { timeWindow: input.timeWindow }),
           results: pageRows,
           ...(input.timeWindow === undefined
             ? {}
