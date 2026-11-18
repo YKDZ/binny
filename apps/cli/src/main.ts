@@ -84,6 +84,12 @@ import { isNodeBrokenPipe } from "@ykdz/cli-contract/node";
 import * as z from "zod";
 
 import type { CliCommandIdentity } from "./cli-command-identity.ts";
+import {
+  fetchMetadataDocument,
+  metadataFailureReasonSchema,
+  type MetadataRetryOptions,
+  type ServiceCompatibilityFailure,
+} from "./metadata-http.ts";
 
 export type CliRuntime = {
   readonly argv: readonly string[];
@@ -91,13 +97,18 @@ export type CliRuntime = {
   readonly identity: CliCommandIdentity;
   readonly apiUrl?: string;
   readonly fetch?: typeof globalThis.fetch;
+  readonly metadataRetry?: MetadataRetryOptions;
   readonly readStdin?: () => Promise<string>;
 };
 
 type CliDependencies = {
-  readonly createClient: () => ReturnType<typeof createApiClient>;
+  readonly createClient: (
+    fetchOverride?: typeof globalThis.fetch,
+  ) => ReturnType<typeof createApiClient>;
   readonly apiUrl: string;
   readonly getServiceMetadata: () => Promise<ServiceMetadataDocument>;
+  readonly fetchImplementation?: typeof globalThis.fetch;
+  readonly metadataRetry?: MetadataRetryOptions;
   readonly readStdin?: () => Promise<string>;
 };
 
@@ -396,20 +407,13 @@ const errorOutputSchema = z.union([
         "service_capability_unavailable",
       ]),
       message: z.string(),
+      reason: metadataFailureReasonSchema.optional(),
+      httpStatus: z.int().min(100).max(599).optional(),
+      attempts: z.int().positive().optional(),
     })
     .strict(),
 ]);
 type CliApiError = z.infer<typeof errorOutputSchema>;
-
-type ServiceCompatibilityFailure = {
-  readonly code:
-    | "service_metadata_unavailable"
-    | "service_query_contract_unavailable"
-    | "incompatible_http_api_protocol"
-    | "incompatible_archive_query_contract"
-    | "service_capability_unavailable";
-  readonly message: string;
-};
 
 function httpApiProtocolFailure(
   httpApiVersion: number,
@@ -418,11 +422,11 @@ function httpApiProtocolFailure(
   return {
     code: "incompatible_http_api_protocol",
     message:
-      "服务使用 HTTP API 协议 " +
+      "Service uses HTTP API protocol " +
       String(httpApiVersion) +
-      "；当前 CLI 支持协议 " +
+      "; this CLI supports protocol " +
       String(publicApiProtocolVersion) +
-      "。",
+      ".",
   };
 }
 
@@ -454,17 +458,24 @@ async function queryCompatibilityFailure(
     return {
       code: "incompatible_archive_query_contract",
       message:
-        "服务的归档查询契约版本或入口与当前 CLI 不兼容。服务版本为 " +
+        "Service archive query contract version " +
         String(result.metadata.contracts.archiveQuery.version) +
-        "，当前 CLI 支持版本 " +
+        " (path " +
+        result.metadata.contracts.archiveQuery.path +
+        ") is incompatible with this CLI (supports version " +
         String(archiveQueryContractVersion) +
-        "。",
+        ", path " +
+        archiveQueryContractPath +
+        ").",
     };
   }
   if (!result.metadata.capabilities.includes(capability)) {
     return {
       code: "service_capability_unavailable",
-      message: "服务未公开当前查询所需的能力：" + capability + "。",
+      message:
+        "The service does not advertise the required capability: " +
+        capability +
+        ".",
     };
   }
   return undefined;
@@ -595,75 +606,41 @@ async function readServiceQueryContract(
     };
   }
 
-  let response: Response;
-  try {
-    response = await dependencies.createClient().meta.query.$get();
-  } catch {
-    return {
-      ok: false,
-      error: {
-        code: "service_query_contract_unavailable",
-        message:
-          "Cannot read the service archive query contract from " +
-          archiveQueryContractPath +
-          "; no local declarations were used.",
-      },
-    };
+  const fetched = await fetchMetadataDocument({
+    ...(dependencies.fetchImplementation === undefined
+      ? {}
+      : { fetchImplementation: dependencies.fetchImplementation }),
+    requestWithFetch: (attemptFetch) =>
+      dependencies.createClient(attemptFetch).meta.query.$get(),
+    spec: {
+      failureCode: "service_query_contract_unavailable",
+      targetLabel: "service archive query contract",
+      endpointPath: archiveQueryContractPath,
+      schema: serviceQueryContractDocumentSchema,
+      trailingHint: "no local declarations were used",
+    },
+    ...(dependencies.metadataRetry === undefined
+      ? {}
+      : { retry: dependencies.metadataRetry }),
+  });
+  if (!fetched.ok) {
+    return { ok: false, error: fetched.error };
   }
-  if (response.status !== 200) {
-    return {
-      ok: false,
-      error: {
-        code: "service_query_contract_unavailable",
-        message:
-          "The service did not return its archive query contract from " +
-          archiveQueryContractPath +
-          " (HTTP " +
-          String(response.status) +
-          "); no local declarations were used.",
-      },
-    };
-  }
-
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    return {
-      ok: false,
-      error: {
-        code: "service_query_contract_unavailable",
-        message:
-          "The service returned an invalid archive query contract; no local declarations were used.",
-      },
-    };
-  }
-  const checked = serviceQueryContractDocumentSchema.safeParse(value);
-  if (!checked.success) {
-    return {
-      ok: false,
-      error: {
-        code: "service_query_contract_unavailable",
-        message:
-          "The service returned an invalid archive query contract; no local declarations were used.",
-      },
-    };
-  }
-  if (checked.data.version !== metadata.contracts.archiveQuery.version) {
+  if (fetched.document.version !== metadata.contracts.archiveQuery.version) {
     return {
       ok: false,
       error: {
         code: "incompatible_archive_query_contract",
         message:
           "The service archive query contract reports version " +
-          String(checked.data.version) +
+          String(fetched.document.version) +
           " but service metadata advertises version " +
           String(metadata.contracts.archiveQuery.version) +
           ".",
       },
     };
   }
-  return { ok: true, metadata, document: checked.data };
+  return { ok: true, metadata, document: fetched.document };
 }
 
 function selectedServiceQueryOperations(
@@ -1256,6 +1233,15 @@ function createCliContract(identity: CliCommandIdentity) {
     const diagnostic = "diagnostic" in error ? error.diagnostic : undefined;
     return text.lines([
       "Request failed: " + error.message,
+      ...("reason" in error && error.reason !== undefined
+        ? [`Reason: ${error.reason}`]
+        : []),
+      ...("httpStatus" in error && error.httpStatus !== undefined
+        ? [`HTTP status: ${String(error.httpStatus)}`]
+        : []),
+      ...("attempts" in error && error.attempts !== undefined
+        ? [`Attempts: ${String(error.attempts)}`]
+        : []),
       ...("path" in error && error.path !== undefined
         ? [`Path: ${errorPathText(error.path)}`]
         : []),
@@ -3807,48 +3793,36 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
     const invocation = parseCliInvocation(contract, runtime.argv.slice(2));
     const apiUrl =
       parsedApiUrl(invocation) ?? runtime.apiUrl ?? "http://localhost:3000";
-    const createClient = () =>
-      createApiClient(
+    const createClient = (fetchOverride?: typeof globalThis.fetch) => {
+      const effectiveFetch = fetchOverride ?? runtime.fetch;
+      return createApiClient(
         apiUrl,
-        runtime.fetch === undefined ? {} : { fetch: runtime.fetch },
+        effectiveFetch === undefined ? {} : { fetch: effectiveFetch },
       );
+    };
     let serviceMetadataRequest: Promise<ServiceMetadataDocument> | undefined;
     const getServiceMetadata = (): Promise<ServiceMetadataDocument> => {
       serviceMetadataRequest ??= (async () => {
-        try {
-          const response = await createClient().meta.$get();
-          if (response.status !== 200) {
-            return {
-              ok: false,
-              error: {
-                code: "service_metadata_unavailable",
-                message: "服务未提供公开元信息。",
-              },
-            };
-          }
-          const metadata = serviceMetadataSchema.safeParse(
-            await response.json(),
-          );
-          if (!metadata.success) {
-            return {
-              ok: false,
-              error: {
-                code: "service_metadata_unavailable",
-                message: "服务公开的元信息格式无效。",
-              },
-            };
-          }
-          return { ok: true, metadata: metadata.data };
-        } catch {
-          return {
-            ok: false,
-            error: {
-              code: "service_metadata_unavailable",
-              message:
-                "Cannot read service metadata; check that --url or BINNY_API_URL points to a running service.",
-            },
-          };
-        }
+        const fetched = await fetchMetadataDocument({
+          ...(runtime.fetch === undefined
+            ? {}
+            : { fetchImplementation: runtime.fetch }),
+          requestWithFetch: (attemptFetch) =>
+            createClient(attemptFetch).meta.$get(),
+          spec: {
+            failureCode: "service_metadata_unavailable",
+            targetLabel: "service metadata",
+            endpointPath: "/meta",
+            schema: serviceMetadataSchema,
+            trailingHint:
+              "check that --url or BINNY_API_URL points to a running service",
+          },
+          ...(runtime.metadataRetry === undefined
+            ? {}
+            : { retry: runtime.metadataRetry }),
+        });
+        if (!fetched.ok) return { ok: false, error: fetched.error };
+        return { ok: true, metadata: fetched.document };
       })();
       return serviceMetadataRequest;
     };
@@ -3858,6 +3832,12 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
         apiUrl,
         createClient,
         getServiceMetadata,
+        ...(runtime.fetch === undefined
+          ? {}
+          : { fetchImplementation: runtime.fetch }),
+        ...(runtime.metadataRetry === undefined
+          ? {}
+          : { metadataRetry: runtime.metadataRetry }),
         ...(runtime.readStdin === undefined
           ? {}
           : { readStdin: runtime.readStdin }),

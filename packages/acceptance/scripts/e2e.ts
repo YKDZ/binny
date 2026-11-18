@@ -156,9 +156,8 @@ const archiveModelJourney = archiveModelOnly || archiveSearchOnly;
 const articleAdaptersOnly = internalStep === "article-adapters";
 const documentAdaptersOnly = internalStep === "document-adapters";
 const qoderAdapterOnly = internalStep === "qoder-adapter";
-// This value sets expectations for timeout cases; ordinary journeys leave the
-// server variable unset and exercise the server's own default.
-const expectedArchiveSearchBudgetMs = archiveModelJourney ? 1_500 : 10_000;
+const archiveLockHoldMs = 10_500;
+const archiveCancellationTimeoutMs = 3_000;
 const manualRunsOnly =
   scheduleOnly ||
   archiveModelJourney ||
@@ -2337,7 +2336,6 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
 
   for (const invalidQuery of [
     { unsupportedFilter: true },
-    { budgetMs: 1 },
     { bins: [binId], limit: 0 },
   ]) {
     const failure = cliFailure<{ readonly code: string }>(
@@ -2368,7 +2366,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   assert.equal(mismatchedCursor.code, "invalid_input");
 }
 
-async function verifyArchiveSearchPoolWaitBudget(
+async function verifyArchiveSearchPoolWaitCompletion(
   baseUrl: string,
   itemId: string,
 ): Promise<void> {
@@ -2396,42 +2394,29 @@ async function verifyArchiveSearchPoolWaitBudget(
     assert.equal(blockedReads.length, blockedReadConnectionCount);
 
     const startedAt = performance.now();
-    const response = await fetch(`${baseUrl}/archives/search`, {
+    const responsePromise = fetch(`${baseUrl}/archives/search`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
-      signal: AbortSignal.timeout(6_000),
+      signal: AbortSignal.timeout(30_000),
     });
+    await wait(archiveLockHoldMs);
+    await lock.release();
+    const response = await responsePromise;
     const elapsedMs = performance.now() - startedAt;
-    assert.equal(response.status, 422);
-    const failure = (await response.json()) as {
-      readonly error: { readonly code: string; readonly message: string };
-    };
-    assert.equal(failure.error.code, "query_budget_exceeded");
-    assert.match(
-      failure.error.message,
-      new RegExp(
-        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
-        "u",
-      ),
-    );
+    assert.equal(response.status, 200, await response.clone().text());
+    const page = archiveSearchPageSchema.parse(await response.json());
+    assert.equal(page.candidatesIncluded, true);
+    assert.equal(page.results.length, 1);
     assert.ok(
-      elapsedMs < expectedArchiveSearchBudgetMs * 2,
-      `Search waited ${String(elapsedMs)} ms for the occupied database pool.`,
+      elapsedMs >= 10_000,
+      `Search resolved before the 10-second lock hold (${String(elapsedMs)} ms).`,
     );
   } finally {
     await lock.release();
     const responses = await Promise.all(itemReads);
     assert.ok(responses.every(({ status }) => status === 200));
   }
-
-  const recoveredSearch = await fetch(`${baseUrl}/archives/search`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bins: ["binny-runs-one"], limit: 1 }),
-    signal: AbortSignal.timeout(5_000),
-  });
-  assert.equal(recoveredSearch.status, 200);
 }
 
 async function verifyArchiveSearchRequestCancellation(
@@ -2462,8 +2447,7 @@ async function verifyArchiveSearchRequestCancellation(
       assert.equal(outcome.error.name, "AbortError");
     }
 
-    const cancellationDeadline =
-      Date.now() + Math.floor(expectedArchiveSearchBudgetMs / 2);
+    const cancellationDeadline = Date.now() + archiveCancellationTimeoutMs;
     let waiterStillBlocked = true;
     while (Date.now() < cancellationDeadline) {
       waiterStillBlocked = (await readManualRunLockWaiters()).some(
@@ -2476,11 +2460,11 @@ async function verifyArchiveSearchRequestCancellation(
     assert.equal(
       waiterStillBlocked,
       false,
-      "An aborted archive search kept waiting on PostgreSQL until its request budget expired.",
+      "An aborted archive search kept waiting on PostgreSQL after client disconnect.",
     );
     assert.ok(
-      performance.now() - abortedAt < expectedArchiveSearchBudgetMs / 2,
-      "The database query stopped only after the ordinary search deadline.",
+      performance.now() - abortedAt < archiveCancellationTimeoutMs,
+      "The database query did not stop promptly after client disconnect.",
     );
   } finally {
     await lock.release();
@@ -2495,11 +2479,10 @@ async function verifyArchiveSearchRequestCancellation(
   assert.equal(recovered.status, 200);
 }
 
-async function verifyArchiveSearchSharedRequestBudget(
+async function verifyArchiveSearchWaitCompletion(
   baseUrl: string,
 ): Promise<void> {
-  const timeZoneLock = await holdArchiveTableReadLock("archive_revision");
-  const pageLock = await holdArchiveTableReadLock("bin_configurations");
+  const lock = await holdArchiveTableReadLock("archive_commit");
   const requestBody = {
     bins: ["binny-runs-one", "binny-runs-two"],
     extensions: {
@@ -2524,72 +2507,33 @@ async function verifyArchiveSearchSharedRequestBudget(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(expectedArchiveSearchBudgetMs * 3),
+      signal: AbortSignal.timeout(30_000),
     });
-    await waitForManualRunLockWaiterBlockedBy(timeZoneLock.backendPid);
-    const firstPhaseReleaseAt =
-      startedAt + Math.floor(expectedArchiveSearchBudgetMs / 2);
-    while (performance.now() < firstPhaseReleaseAt) {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-    }
-    await timeZoneLock.release();
-    await waitForManualRunLockWaiterBlockedBy(pageLock.backendPid);
+    await waitForManualRunLockWaiterBlockedBy(lock.backendPid);
+    await wait(archiveLockHoldMs);
+    await lock.release();
 
     const response = await responsePromise;
     const elapsedMs = performance.now() - startedAt;
-    assert.equal(response.status, 422);
-    const failure = (await response.json()) as {
-      readonly error: { readonly code: string; readonly message: string };
-    };
-    assert.deepEqual(Object.keys(failure).sort(), ["error"]);
-    assert.equal(failure.error.code, "query_budget_exceeded");
-    assert.match(failure.error.message, /no partial results were returned/u);
-    assert.match(
-      failure.error.message,
-      new RegExp(
-        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
-        "u",
-      ),
-    );
+    assert.equal(response.status, 200, await response.clone().text());
+    const page = archiveSearchPageSchema.parse(await response.json());
+    assert.equal(page.candidatesIncluded, true);
+    assert.ok(page.results.length > 0);
+    assert.equal(page.distribution?.by, "date");
     assert.ok(
-      elapsedMs < expectedArchiveSearchBudgetMs * 1.25,
-      `Search reset its request budget between time-zone and result queries (${String(elapsedMs)} ms).`,
+      elapsedMs >= 10_000,
+      `Search resolved before the 10-second lock hold (${String(elapsedMs)} ms).`,
     );
   } finally {
-    await Promise.all([timeZoneLock.release(), pageLock.release()]);
+    await lock.release();
   }
-
-  const recovered = await fetch(baseUrl + "/archives/search", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(5_000),
-  });
-  assert.equal(recovered.status, 200, await recovered.clone().text());
-  const recoveredPage = archiveSearchPageSchema.parse(await recovered.json());
-  assert.equal(recoveredPage.candidatesIncluded, true);
-  assert.equal(recoveredPage.distribution?.by, "date");
 }
 
-async function verifyArchiveBatchReadBudget(
+async function verifyArchiveBatchReadWaitCompletion(
   baseUrl: string,
   reference: ArchiveBatchReadReference,
 ): Promise<void> {
-  const lock = startManagedProcess("docker", postgresExecArgs([]));
-  lock.write(
-    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_resource IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD';\n",
-  );
-  await lock.waitForMarker("BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD");
-  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
-  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
-  let released = false;
-  const release = async () => {
-    if (released) return;
-    released = true;
-    lock.write("COMMIT;\n\\q\n");
-    const result = await lock.waitForClose();
-    assert.equal(result.code, 0, result.stderr);
-  };
+  const lock = await holdArchiveTableReadLock("archive_revision");
 
   try {
     const startedAt = performance.now();
@@ -2597,42 +2541,31 @@ async function verifyArchiveBatchReadBudget(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ references: [reference] }),
-      signal: AbortSignal.timeout(expectedArchiveSearchBudgetMs * 3),
+      signal: AbortSignal.timeout(30_000),
     });
-    await waitForManualRunLockWaiterBlockedBy(backendPid);
+    await waitForManualRunLockWaiterBlockedBy(lock.backendPid);
+    await wait(archiveLockHoldMs);
+    await lock.release();
+
     const response = await responsePromise;
     const elapsedMs = performance.now() - startedAt;
-    assert.equal(response.status, 422);
-    const failure = (await response.json()) as {
-      readonly error: { readonly code: string; readonly message: string };
-    };
-    assert.equal(failure.error.code, "query_budget_exceeded");
-    assert.match(
-      failure.error.message,
-      new RegExp(
-        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
-        "u",
-      ),
-    );
-    assert.match(failure.error.message, /no partial results were returned/u);
+    assert.equal(response.status, 200, await response.clone().text());
+    const batch = archiveBatchReadResponseSchema.parse(await response.json());
+    assert.equal(batch.results.length, 1);
+    const result = batch.results[0];
+    assert.ok(result?.status === "readable");
+    assert.equal(result.revision.revisionId, reference.revisionId);
+    assert.ok((result.revision.state.body?.text ?? "").length > 0);
     assert.ok(
-      elapsedMs < expectedArchiveSearchBudgetMs * 2,
-      `Batch read waited ${String(elapsedMs)} ms for resource storage metadata.`,
+      elapsedMs >= 10_000,
+      `Batch read resolved before the 10-second lock hold (${String(elapsedMs)} ms).`,
     );
   } finally {
-    await release();
+    await lock.release();
   }
-
-  const recovered = await fetch(baseUrl + "/archives/batch-read", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ references: [reference] }),
-    signal: AbortSignal.timeout(5_000),
-  });
-  assert.equal(recovered.status, 200, await recovered.clone().text());
 }
 
-async function verifyArchiveBatchReadBudgetCli(
+async function verifyArchiveBatchReadWaitCompletionCli(
   baseUrl: string,
   reference: ArchiveBatchReadReference,
 ): Promise<void> {
@@ -2646,59 +2579,34 @@ async function verifyArchiveBatchReadBudgetCli(
       JSON.stringify([reference]),
     ]);
     await waitForManualRunLockWaiterBlockedBy(lock.backendPid);
+    await wait(archiveLockHoldMs);
+    await lock.release();
+
     const result = await resultPromise;
     const elapsedMs = performance.now() - startedAt;
-    const failure = cliFailure<{
-      readonly code: string;
-      readonly message: string;
-    }>(result, "query_budget_exceeded");
-    assert.match(
-      failure.message,
-      new RegExp(
-        `request budget of ${String(expectedArchiveSearchBudgetMs)} ms`,
-        "u",
-      ),
-    );
-    assert.match(failure.message, /no partial results were returned/u);
+    const data = cliData<{
+      readonly results: readonly {
+        readonly status: string;
+        readonly revision?: { readonly revisionId: string };
+      }[];
+    }>(result, "read");
+    assert.equal(data.results.length, 1);
+    assert.equal(data.results[0]?.status, "readable");
+    assert.equal(data.results[0]?.revision?.revisionId, reference.revisionId);
     assert.ok(
-      elapsedMs < expectedArchiveSearchBudgetMs * 1.5,
-      `The installed CLI waited ${String(elapsedMs)} ms for resource metadata.`,
+      elapsedMs >= 10_000,
+      `CLI batch read resolved before the 10-second lock hold (${String(elapsedMs)} ms).`,
     );
   } finally {
     await lock.release();
   }
-
-  const recovered = cliData<{ readonly results: readonly unknown[] }>(
-    await cli(baseUrl, [
-      "archive",
-      "batch-read",
-      "--references",
-      JSON.stringify([reference]),
-    ]),
-    "read",
-  );
-  assert.equal(recovered.results.length, 1);
 }
 
 async function verifyArchiveBatchReadRequestCancellation(
   baseUrl: string,
   reference: ArchiveBatchReadReference,
 ): Promise<void> {
-  const lock = startManagedProcess("docker", postgresExecArgs([]));
-  lock.write(
-    "BEGIN;\nSELECT pg_backend_pid();\nLOCK TABLE archive_resource IN ACCESS EXCLUSIVE MODE;\nSELECT 'BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD';\n",
-  );
-  await lock.waitForMarker("BINNY_ARCHIVE_RESOURCE_READ_LOCK_HELD");
-  const backendPid = Number(lock.stdout().trim().split("\n")[0]);
-  assert.ok(Number.isInteger(backendPid) && backendPid > 0);
-  let released = false;
-  const release = async () => {
-    if (released) return;
-    released = true;
-    lock.write("COMMIT;\n\\q\n");
-    const result = await lock.waitForClose();
-    assert.equal(result.code, 0, result.stderr);
-  };
+  const lock = await holdArchiveTableReadLock("archive_resource");
 
   try {
     const controller = new AbortController();
@@ -2711,7 +2619,9 @@ async function verifyArchiveBatchReadRequestCancellation(
       (response) => ({ kind: "response" as const, response }),
       (error: unknown) => ({ kind: "error" as const, error }),
     );
-    const waiterPid = await waitForManualRunLockWaiterBlockedBy(backendPid);
+    const waiterPid = await waitForManualRunLockWaiterBlockedBy(
+      lock.backendPid,
+    );
     const abortedAt = performance.now();
     controller.abort();
     const outcome = await request;
@@ -2721,13 +2631,12 @@ async function verifyArchiveBatchReadRequestCancellation(
       assert.equal(outcome.error.name, "AbortError");
     }
 
-    const cancellationDeadline =
-      Date.now() + Math.floor(expectedArchiveSearchBudgetMs / 2);
+    const cancellationDeadline = Date.now() + archiveCancellationTimeoutMs;
     let waiterStillBlocked = true;
     while (Date.now() < cancellationDeadline) {
       waiterStillBlocked = (await readManualRunLockWaiters()).some(
         ({ pid, blockers }) =>
-          pid === waiterPid && blockers.includes(backendPid),
+          pid === waiterPid && blockers.includes(lock.backendPid),
       );
       if (!waiterStillBlocked) break;
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
@@ -2735,14 +2644,14 @@ async function verifyArchiveBatchReadRequestCancellation(
     assert.equal(
       waiterStillBlocked,
       false,
-      "An aborted archive batch read kept waiting on PostgreSQL until its request budget expired.",
+      "An aborted archive batch read kept waiting on PostgreSQL after client disconnect.",
     );
     assert.ok(
-      performance.now() - abortedAt < expectedArchiveSearchBudgetMs / 2,
-      "The archive batch read stopped only after the ordinary request deadline.",
+      performance.now() - abortedAt < archiveCancellationTimeoutMs,
+      "The archive batch read did not stop promptly after client disconnect.",
     );
   } finally {
-    await release();
+    await lock.release();
   }
 
   const recovered = await fetch(baseUrl + "/archives/batch-read", {
@@ -3081,6 +2990,7 @@ async function holdTableShareLock(table: string): Promise<HeldTableLock> {
 
 async function holdArchiveTableReadLock(
   table:
+    | "archive_commit"
     | "archive_item"
     | "archive_revision"
     | "archive_resource"
@@ -11550,23 +11460,6 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
   const serverId = (await compose(["ps", "-q", "server"])).stdout.trim();
   const postgresId = (await compose(["ps", "-q", "postgres"])).stdout.trim();
   assert.ok(serverId && postgresId);
-  const serverEnvironmentResult = await run("docker", [
-    "inspect",
-    "--format",
-    "{{range .Config.Env}}{{println .}}{{end}}",
-    serverId,
-  ]);
-  assert.equal(serverEnvironmentResult.code, 0, serverEnvironmentResult.stderr);
-  const archiveSearchBudgetEnvironment = serverEnvironmentResult.stdout
-    .split("\n")
-    .find((value) => value.startsWith("BINNY_ARCHIVE_SEARCH_BUDGET_MS="));
-  if (isFullCapacityRun) {
-    assert.equal(
-      archiveSearchBudgetEnvironment,
-      undefined,
-      "Full capacity queries must use the server's configured default budget.",
-    );
-  }
   const limits = await Promise.all([
     inspectContainerLimit("server"),
     inspectContainerLimit("postgres"),
@@ -11723,8 +11616,6 @@ async function runCapacityAcceptance(baseUrl: string): Promise<void> {
           serverImageId,
           serverBuildImageId,
           postgresImageId,
-          archiveSearchBudgetEnvironment:
-            archiveSearchBudgetEnvironment ?? null,
           node: process.version,
           host,
           networkSubnets,
@@ -11778,12 +11669,6 @@ async function main(): Promise<void> {
       "  server:",
       '    cpus: "1.0"',
       '    mem_limit: "2g"',
-      ...(archiveModelJourney
-        ? [
-            "    environment:",
-            `      BINNY_ARCHIVE_SEARCH_BUDGET_MS: "${String(expectedArchiveSearchBudgetMs)}"`,
-          ]
-        : []),
       "    ports: !override",
       '      - "3000"',
       "    networks: !override",
@@ -12205,8 +12090,11 @@ async function main(): Promise<void> {
       assert.ok(itemId);
       await archiveHttpStep("fixed-search", baseUrl);
       const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
-      await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
-      await verifyArchiveBatchReadBudgetCli(
+      await verifyArchiveBatchReadWaitCompletion(
+        baseUrl,
+        batchReadFixture.reference,
+      );
+      await verifyArchiveBatchReadWaitCompletionCli(
         baseUrl,
         batchReadFixture.reference,
       );
@@ -12219,7 +12107,7 @@ async function main(): Promise<void> {
       await archiveBatchReadCliStep(baseUrl, batchReadFixture);
       await archiveSearchCliStep(baseUrl);
       await verifyArchiveSearchRequestCancellation(baseUrl);
-      await verifyArchiveSearchSharedRequestBudget(baseUrl);
+      await verifyArchiveSearchWaitCompletion(baseUrl);
       if (archiveSearchOnly) {
         process.stdout.write("Fixed search HTTP and CLI acceptance passed.\n");
       } else {
@@ -12227,7 +12115,7 @@ async function main(): Promise<void> {
         const archiveStateReference = JSON.parse(archiveState) as {
           readonly itemId: string;
         };
-        await verifyArchiveSearchPoolWaitBudget(
+        await verifyArchiveSearchPoolWaitCompletion(
           baseUrl,
           archiveStateReference.itemId,
         );
@@ -12341,8 +12229,11 @@ async function main(): Promise<void> {
         });
         await archiveHttpStep("fixed-search", baseUrl);
         const batchReadFixture = await archiveBatchReadHttpStep(baseUrl);
-        await verifyArchiveBatchReadBudget(baseUrl, batchReadFixture.reference);
-        await verifyArchiveBatchReadBudgetCli(
+        await verifyArchiveBatchReadWaitCompletion(
+          baseUrl,
+          batchReadFixture.reference,
+        );
+        await verifyArchiveBatchReadWaitCompletionCli(
           baseUrl,
           batchReadFixture.reference,
         );
@@ -12356,7 +12247,7 @@ async function main(): Promise<void> {
         const archive = await archiveHttpStep("submit", baseUrl);
         await archiveSearchCliStep(baseUrl);
         await verifyArchiveSearchRequestCancellation(baseUrl);
-        await verifyArchiveSearchSharedRequestBudget(baseUrl);
+        await verifyArchiveSearchWaitCompletion(baseUrl);
         const sdkResource = await sdkResourceStep(baseUrl);
         baseUrl = await verifyResourceStorageInterruptions(baseUrl, archive);
         baseUrl = await verifyRestartAndRemoval(baseUrl, archive, sdkResource);

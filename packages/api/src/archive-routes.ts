@@ -27,22 +27,13 @@ import {
 } from "@binny/contracts";
 // 文本归档 HTTP 子路由；公开客户端类型直接由这些正式路由推导。
 import { zValidator } from "@hono/zod-validator";
-import { Hono, type Context, type TypedResponse } from "hono";
+import { Hono } from "hono";
 import * as z from "zod";
 
 import { validationFailure } from "./validation.ts";
 
 export type { ArchiveOperations } from "@binny/contracts";
 
-const defaultArchiveRequestBudgetMs = 10_000;
-
-type ArchiveRequestBudgetFailure = {
-  readonly error: {
-    readonly code: "query_budget_exceeded";
-    readonly message: string;
-    readonly path: (string | number)[] | undefined;
-  };
-};
 type ArchiveRequestCancelledFailure = {
   readonly error: {
     readonly code: "request_cancelled";
@@ -50,18 +41,6 @@ type ArchiveRequestCancelledFailure = {
     readonly path: (string | number)[] | undefined;
   };
 };
-
-function archiveRequestBudgetFailure(
-  budgetMs: number,
-): ArchiveRequestBudgetFailure {
-  return {
-    error: {
-      code: "query_budget_exceeded" as const,
-      message: `Archive request exceeded the configured server request budget of ${String(budgetMs)} ms before its complete response was prepared; no partial results were returned.`,
-      path: undefined,
-    },
-  };
-}
 
 function archiveRequestCancelledFailure(): ArchiveRequestCancelledFailure {
   return {
@@ -74,39 +53,7 @@ function archiveRequestCancelledFailure(): ArchiveRequestCancelledFailure {
   };
 }
 
-function respondWithinArchiveRequestBudget<ResponseType extends Response>(
-  c: Context,
-  createResponse: () => ResponseType,
-  deadline: number,
-  signal: AbortSignal,
-  budgetMs: number,
-):
-  | ResponseType
-  | (Response & TypedResponse<ArchiveRequestBudgetFailure, 422, "json">)
-  | (Response & TypedResponse<ArchiveRequestCancelledFailure, 422, "json">) {
-  if (signal.aborted) return c.json(archiveRequestCancelledFailure(), 422);
-  if (performance.now() >= deadline) {
-    return c.json(archiveRequestBudgetFailure(budgetMs), 422);
-  }
-  const response = createResponse();
-  if (signal.aborted) return c.json(archiveRequestCancelledFailure(), 422);
-  if (performance.now() >= deadline) {
-    return c.json(archiveRequestBudgetFailure(budgetMs), 422);
-  }
-  return response;
-}
-
-function makeArchiveRoutes(
-  operations: ArchiveOperations,
-  archiveRequestBudgetMs: number,
-) {
-  if (
-    !Number.isSafeInteger(archiveRequestBudgetMs) ||
-    archiveRequestBudgetMs < 1
-  ) {
-    throw new RangeError("Archive request budget must be a positive integer.");
-  }
-
+function makeArchiveRoutes(operations: ArchiveOperations) {
   return new Hono()
     .post("/resources", async (c) => {
       const contentType = c.req.header("content-type") ?? "";
@@ -292,39 +239,25 @@ function makeArchiveRoutes(
       }),
       async (c) => {
         const signal = c.req.raw.signal;
-        const deadline = performance.now() + archiveRequestBudgetMs;
         try {
+          if (signal.aborted) {
+            return c.json(archiveRequestCancelledFailure(), 422);
+          }
           const result = await operations.searchArchive(c.req.valid("json"), {
-            deadline,
             signal,
           });
+          if (signal.aborted) {
+            return c.json(archiveRequestCancelledFailure(), 422);
+          }
           if (!result.ok) {
             switch (result.status) {
               case 400:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 400),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 400);
               case 422:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 422),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 422);
             }
           }
-          return respondWithinArchiveRequestBudget(
-            c,
-            () => c.json(result.value, 200),
-            deadline,
-            signal,
-            archiveRequestBudgetMs,
-          );
+          return c.json(result.value, 200);
         } catch (error) {
           if (signal.aborted)
             return c.json(archiveRequestCancelledFailure(), 422);
@@ -346,55 +279,30 @@ function makeArchiveRoutes(
       }),
       async (c) => {
         const signal = c.req.raw.signal;
-        const deadline = performance.now() + archiveRequestBudgetMs;
         try {
+          if (signal.aborted) {
+            return c.json(archiveRequestCancelledFailure(), 422);
+          }
           const result = await operations.readArchiveBatch(
             c.req.valid("json"),
-            { deadline, signal },
+            { signal },
           );
+          if (signal.aborted) {
+            return c.json(archiveRequestCancelledFailure(), 422);
+          }
           if (!result.ok) {
             switch (result.status) {
               case 400:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 400),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 400);
               case 413:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 413),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 413);
               case 422:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 422),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 422);
               case 503:
-                return respondWithinArchiveRequestBudget(
-                  c,
-                  () => c.json({ error: result.error }, 503),
-                  deadline,
-                  signal,
-                  archiveRequestBudgetMs,
-                );
+                return c.json({ error: result.error }, 503);
             }
           }
-          return respondWithinArchiveRequestBudget(
-            c,
-            () => c.json(result.value, 200),
-            deadline,
-            signal,
-            archiveRequestBudgetMs,
-          );
+          return c.json(result.value, 200);
         } catch (error) {
           if (signal.aborted)
             return c.json(archiveRequestCancelledFailure(), 422);
@@ -723,7 +631,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/search",
       description:
-        "Search items by source and case-insensitive literal term groups at a fixed archive cut, with stable paginated source views.",
+        "Search items by source and case-insensitive literal term groups at a fixed archive cut, with stable paginated source views. Callers may wait for complete results; disconnecting cancels active query execution.",
       requestSchema: archiveApiSchemas.searchInput,
       responseSchema: archiveApiSchemas.searchPage,
     },
@@ -731,7 +639,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/batch-read",
       description:
-        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; complete responses are limited to 16 MiB.",
+        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; complete responses are limited to 16 MiB and callers may wait for completion or disconnect to cancel.",
       requestSchema: archiveApiSchemas.batchReadInput,
       responseSchema: archiveApiSchemas.batchReadResponse,
     },
@@ -739,15 +647,11 @@ export const archiveQueryContract = {
 } as const;
 
 /**
- * Create archive routes with one server-side preparation deadline per search or
- * batch-read request; the deadline is not a client network transfer timeout.
+ * Create archive routes with client-disconnect cancellation for search and
+ * batch-read requests.
  */
 export function createArchiveRoutes(
   operations: ArchiveOperations,
-  options: { readonly requestBudgetMs?: number } = {},
 ): ArchiveRoutes {
-  return makeArchiveRoutes(
-    operations,
-    options.requestBudgetMs ?? defaultArchiveRequestBudgetMs,
-  );
+  return makeArchiveRoutes(operations);
 }

@@ -398,8 +398,6 @@ export type ArchiveStoreOptions = {
   readonly executeCancellableSearchQuery: CancellableQueryExecutor;
   readonly unreferencedResourceAgeMs?: number;
   readonly resourceCleanupIntervalMs?: number;
-  /** One server-side preparation budget shared by archive search and batch read. */
-  readonly archiveSearchBudgetMs?: number;
 };
 
 export type ArchiveStore = ArchiveOperations & {
@@ -421,13 +419,11 @@ export function createArchiveStore(
   const searchOperations = createArchiveSearchOperation(
     database,
     options.executeCancellableSearchQuery,
-    options.archiveSearchBudgetMs ?? 10_000,
   );
   const batchReadOperations = createArchiveBatchReadOperation(
     database,
     resourceStorage,
     options.executeCancellableSearchQuery,
-    options.archiveSearchBudgetMs ?? 10_000,
   );
   return {
     initializeResourceStorage: () => resourceStorage.initialize(),

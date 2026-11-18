@@ -443,7 +443,7 @@ async function checkPublicArchiveContract(): Promise<void> {
           archiveSeq: "12",
         },
       ],
-      // @ts-expect-error Request budgets are configured by the service.
+      // @ts-expect-error Unrecognized request fields are rejected by the strict batch-read contract.
       budgetMs: 1,
     },
   });
