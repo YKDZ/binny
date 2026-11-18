@@ -9,7 +9,11 @@ import {
   manualRunStatusSchema,
   type ManualRunApiError,
 } from "./manual-run.ts";
-import { withPostgresJsonSchemaProjection } from "./postgres-text.ts";
+import {
+  postgresTextSchema,
+  registerPostgresJsonSchemaProjection,
+  withPostgresJsonSchemaProjection,
+} from "./postgres-text.ts";
 
 const timestampSchema = z.iso.datetime({ offset: true });
 
@@ -44,16 +48,55 @@ export const manualRunListQuerySchema = withPostgresJsonSchemaProjection(
     }),
 );
 
+export const manualRunTriggerTypeSchema = z.enum(["manual", "schedule"]);
+
+const manualRunListSummaryFieldsSchema = manualRunSchema
+  .pick({
+    runId: true,
+    binId: true,
+    action: true,
+    status: true,
+    createdAt: true,
+    startedAt: true,
+    finishedAt: true,
+  })
+  .extend({
+    triggerType: manualRunTriggerTypeSchema,
+    stopReasonCode: postgresTextSchema.min(1).optional(),
+  })
+  .strict();
+
+const manualRunListSummaryCheckedSchema =
+  manualRunListSummaryFieldsSchema.superRefine((summary, context) => {
+    const terminal =
+      summary.status === "completed" ||
+      summary.status === "failed" ||
+      summary.status === "cancelled";
+    if (terminal && summary.stopReasonCode === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["stopReasonCode"],
+        message: "Terminal runs must include a stopReasonCode.",
+      });
+    } else if (!terminal && summary.stopReasonCode !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["stopReasonCode"],
+        message: "Non-terminal runs must not include a stopReasonCode.",
+      });
+    }
+  });
+
+registerPostgresJsonSchemaProjection(
+  manualRunListSummaryFieldsSchema,
+  manualRunListSummaryCheckedSchema,
+  manualRunListSummaryFieldsSchema,
+);
+
 /** List projection; parameters, reports, and results remain on run detail. */
-export const manualRunListSummarySchema = manualRunSchema.pick({
-  runId: true,
-  binId: true,
-  action: true,
-  status: true,
-  createdAt: true,
-  startedAt: true,
-  finishedAt: true,
-});
+export const manualRunListSummarySchema = withPostgresJsonSchemaProjection(
+  manualRunListSummaryCheckedSchema,
+);
 
 export const manualRunListPageSchema = withPostgresJsonSchemaProjection(
   z

@@ -322,6 +322,8 @@ async function checkPublicScheduleContract(): Promise<void> {
   if (listedRuns.status === 200) {
     const run = (await listedRuns.json()).runs[0];
     void run?.binId;
+    void (run?.triggerType satisfies "manual" | "schedule" | undefined);
+    void (run?.stopReasonCode satisfies string | undefined);
     // @ts-expect-error summary rows omit saved parameters.
     void run?.params;
   } else if (listedRuns.status === 400) {

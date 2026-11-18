@@ -5599,6 +5599,8 @@ async function releaseSource(
   gateKey: string,
   disposition:
     | "material"
+    | "manual"
+    | "execution-error"
     | "slow"
     | "available"
     | "unavailable"
@@ -7227,7 +7229,12 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
   ];
   const runs = new Map<
     string,
-    { readonly runId: string; readonly binId: string }
+    {
+      readonly runId: string;
+      readonly binId: string;
+      readonly triggerType: string;
+      readonly stopReasonCode?: string;
+    }
   >();
   let cursor: string | undefined;
   do {
@@ -7235,6 +7242,8 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
       readonly runs: readonly {
         readonly runId: string;
         readonly binId: string;
+        readonly triggerType: string;
+        readonly stopReasonCode?: string;
       }[];
       readonly nextCursor?: string;
     }>(
@@ -7250,6 +7259,8 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
       assert.equal(Object.hasOwn(run, "params"), false);
       assert.equal(Object.hasOwn(run, "report"), false);
       assert.equal(Object.hasOwn(run, "result"), false);
+      assert.ok(run.triggerType === "manual" || run.triggerType === "schedule");
+      assert.equal(run.stopReasonCode, "completed");
       assert.equal(runs.has(run.runId), false);
       runs.set(run.runId, run);
     }
@@ -8090,6 +8101,127 @@ async function scheduledRunsStep(
       "删除运行计划后，已完成运行仍可通过运行列表发现。",
     );
   }
+
+  const failedCollectGateKey = "schedule-list-failed-collect-" + randomUUID();
+  const failedCollectRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: failedCollectGateKey,
+        sourceKey: failedCollectGateKey,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    failedCollectGateKey,
+    failedCollectRun.runId,
+    binId,
+  );
+  await releaseSource(sourceControlUrl, failedCollectGateKey, "manual");
+  await waitForCliManualRunState(baseUrl, binId, failedCollectRun.runId, [
+    "failed",
+  ]);
+
+  const cancelledCollectGateKey =
+    "schedule-list-cancelled-collect-" + randomUUID();
+  const cancelledCollectRun = cliData<{ readonly runId: string }>(
+    await cli(baseUrl, [
+      "run",
+      "trigger",
+      binId,
+      "collect",
+      "--params",
+      JSON.stringify({
+        sourceUrl,
+        gateKey: cancelledCollectGateKey,
+        sourceKey: cancelledCollectGateKey,
+      }),
+    ]),
+    "triggered",
+  );
+  await waitForSourceArrival(
+    sourceControlUrl,
+    cancelledCollectGateKey,
+    cancelledCollectRun.runId,
+    binId,
+  );
+  cliData(
+    await cli(baseUrl, ["run", "cancel", binId, cancelledCollectRun.runId]),
+    "cancellation",
+  );
+  await releaseSource(sourceControlUrl, cancelledCollectGateKey, "material");
+  await waitForCliManualRunState(baseUrl, binId, cancelledCollectRun.runId, [
+    "cancelled",
+  ]);
+
+  const listSummaryPage = cliData<{
+    readonly runs: readonly {
+      readonly runId: string;
+      readonly action: string;
+      readonly triggerType: string;
+      readonly status: string;
+      readonly stopReasonCode?: string;
+    }[];
+  }>(await cli(baseUrl, ["run", "list", "--limit", "100"]), "listed");
+  const scheduledCollectSummary = listSummaryPage.runs.find(
+    ({ runId }) => runId === collectAfterFirstTrigger.lastRunId,
+  );
+  const scheduledCheckSummary = listSummaryPage.runs.find(
+    ({ runId }) => runId === checkAfterFirstTrigger.lastRunId,
+  );
+  const manualCollectSummary = listSummaryPage.runs.find(
+    ({ runId }) => runId === manualRun.runId,
+  );
+  const failedCollectSummary = listSummaryPage.runs.find(
+    ({ runId }) => runId === failedCollectRun.runId,
+  );
+  const cancelledCollectSummary = listSummaryPage.runs.find(
+    ({ runId }) => runId === cancelledCollectRun.runId,
+  );
+  assert.equal(scheduledCollectSummary?.triggerType, "schedule");
+  assert.equal(scheduledCollectSummary?.action, "collect");
+  assert.equal(scheduledCollectSummary?.stopReasonCode, "completed");
+  assert.equal(scheduledCheckSummary?.triggerType, "schedule");
+  assert.equal(scheduledCheckSummary?.action, "check");
+  assert.equal(scheduledCheckSummary?.stopReasonCode, "completed");
+  assert.equal(manualCollectSummary?.triggerType, "manual");
+  assert.equal(manualCollectSummary?.action, "collect");
+  assert.equal(manualCollectSummary?.stopReasonCode, "completed");
+  assert.equal(failedCollectSummary?.triggerType, "manual");
+  assert.equal(failedCollectSummary?.status, "failed");
+  assert.equal(failedCollectSummary?.stopReasonCode, "source_requires_human");
+  assert.equal(cancelledCollectSummary?.triggerType, "manual");
+  assert.equal(cancelledCollectSummary?.status, "cancelled");
+  assert.equal(cancelledCollectSummary?.stopReasonCode, "cancelled");
+
+  const listTextSummary = await cli(baseUrl, [
+    "run",
+    "list",
+    "--limit",
+    "100",
+    "--output",
+    "text",
+  ]);
+  assert.equal(listTextSummary.code, 0, listTextSummary.stderr);
+  assert.match(
+    listTextSummary.stdout,
+    /check\s+schedule\s+completed\s+completed/u,
+  );
+  assert.match(
+    listTextSummary.stdout,
+    /collect\s+manual\s+failed\s+source_requires_human/u,
+  );
+  assert.match(
+    listTextSummary.stdout,
+    /collect\s+manual\s+cancelled\s+cancelled/u,
+  );
 
   const inspectServer = async (containerId: string) => {
     const result = await run(

@@ -2215,6 +2215,16 @@ async function main(): Promise<void> {
   assert.equal(initialResult.result?.output?.problems[0]?.requiresHuman, true);
 
   await waitForBrowserPower("binny-browser-one", "ready");
+  const readyBinText = await cli([
+    "bin",
+    "get",
+    "binny-browser-one",
+    "--output",
+    "text",
+  ]);
+  assert.equal(readyBinText.code, 0, readyBinText.stderr);
+  assert.match(readyBinText.stdout, /^Runtime connection: online$/mu);
+  assert.match(readyBinText.stdout, /^Browser: ready$/mu);
   const awakeMemory = await browserContainerMemoryBytes("browser-one");
   const initialBrowserProcess = await browserMainProcess("browser-one");
   await holdIdleProbeAtDeadline("binny-browser-one", 4);
@@ -2230,6 +2240,16 @@ async function main(): Promise<void> {
   await updateBin("binny-browser-one", 4);
   const stoppedBin = await waitForBrowserPower("binny-browser-one", "stopped");
   assert.equal(stoppedBin.execution.status, "online");
+  const stoppedBinText = await cli([
+    "bin",
+    "get",
+    "binny-browser-one",
+    "--output",
+    "text",
+  ]);
+  assert.equal(stoppedBinText.code, 0, stoppedBinText.stderr);
+  assert.match(stoppedBinText.stdout, /^Runtime connection: online$/mu);
+  assert.match(stoppedBinText.stdout, /^Browser: stopped$/mu);
   await waitForBrowserProcessesStopped("browser-one");
   const stoppedMemory = await browserContainerMemoryBytes("browser-one");
   assert.ok(

@@ -101,19 +101,55 @@ function serializeFailure(value: ManualRunFailure): ManualRunFailure {
   return manualRunFailureSchema.parse(value);
 }
 
+/** Derives the stop reason code for terminal runs using the same rules as `run get`. */
+export function deriveManualRunStopReasonCode(input: {
+  readonly status: ManualRun["status"];
+  readonly startedAt: Date | null;
+  readonly failure: unknown;
+}): string | undefined {
+  if (
+    input.status !== "completed" &&
+    input.status !== "failed" &&
+    input.status !== "cancelled"
+  ) {
+    return undefined;
+  }
+  if (input.status === "cancelled") {
+    return input.startedAt === null
+      ? "cancelled_before_execution"
+      : "cancelled";
+  }
+  const failureValue =
+    input.failure === null ? null : manualRunFailureSchema.parse(input.failure);
+  if (failureValue !== null) return failureValue.code;
+  return input.status === "failed" ? "failed" : "completed";
+}
+
 function statusReason(
   status: ManualRun["status"],
   failureValue: ManualRunFailure | null,
   startedAt: Date | null,
 ) {
+  const code = deriveManualRunStopReasonCode({
+    status,
+    startedAt,
+    failure: failureValue,
+  });
+  if (code === undefined) {
+    throw new Error("Non-terminal runs do not have a stop reason.");
+  }
   if (status === "cancelled") {
-    return startedAt === null
-      ? { code: "cancelled_before_execution", message: "运行在开始前已取消。" }
-      : { code: "cancelled", message: "执行进程已停止，运行取消完成。" };
+    return {
+      code,
+      message:
+        startedAt === null
+          ? "运行在开始前已取消。"
+          : "执行进程已停止，运行取消完成。",
+    };
   }
   return failureValue === null
-    ? { code: "completed", message: "动作已完成。" }
-    : { code: failureValue.code, message: failureValue.message };
+    ? { code, message: "动作已完成。" }
+    : { code, message: failureValue.message };
 }
 
 async function readCommitLocators(
