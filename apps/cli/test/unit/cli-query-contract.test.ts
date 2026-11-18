@@ -346,6 +346,43 @@ void describe("查询服务发现", () => {
     assert.match(text.output, /Allowed values: "bin", "date"/u);
   });
 
+  void it("returns structured allowed values for a local distribution order failure", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ distribution: { by: "bin", order: "popular" } }),
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "invalid_input",
+      message: 'Invalid option: expected one of "key"|"count"',
+      path: ["distribution", "order"],
+      diagnostic: { allowedValues: ["key", "count"] },
+    });
+    assert.deepEqual(service.requests, []);
+
+    const text = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ distribution: { by: "bin", order: "popular" } }),
+        "--output",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(text.exitCode, 1, text.output);
+    assert.match(text.output, /Path: distribution\.order/u);
+    assert.match(text.output, /Allowed values: "key", "count"/u);
+  });
+
   void it("uses extension-scoped distribution candidates when extension filters are present", async () => {
     const service = fakeService({});
     const result = await run(

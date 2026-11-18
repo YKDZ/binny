@@ -257,5 +257,46 @@ void describe("native command examples", () => {
     assert.match(text.stdout, /No archived items matched\./u);
     assert.doesNotMatch(text.stdout, /"kind"\s*:/u);
     assert.equal(requests, 2);
+
+    const distributionFetch: typeof globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/meta") return Response.json(metadata);
+      if (url.pathname === "/archives/search")
+        return Response.json({
+          snapshot: { asOf: "5", mode: "current" },
+          candidatesIncluded: false,
+          results: [],
+          hasMore: false,
+          distribution: {
+            by: "bin",
+            order: "count",
+            totalItems: "10",
+            groups: [
+              { kind: "bin", binId: "b-top", itemCount: "10" },
+              { kind: "bin", binId: "b-low", itemCount: "2" },
+            ],
+            hasMore: false,
+          },
+        });
+      return new Response("Not found", { status: 404 });
+    };
+    const distributionText = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        '{"includeCandidates":false,"distribution":{"by":"bin","order":"count","limit":10}}',
+        "--output",
+        "text",
+      ],
+      distributionFetch,
+    );
+    assert.equal(distributionText.exitCode, 0, distributionText.stderr);
+    assert.match(
+      distributionText.stdout,
+      /Distribution order: numeric itemCount desc \(group key asc\)/u,
+    );
+    assert.match(distributionText.stdout, /- Bin b-top: 10 items/u);
   });
 });

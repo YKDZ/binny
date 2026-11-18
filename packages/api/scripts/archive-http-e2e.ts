@@ -4916,6 +4916,554 @@ async function verifyTimeWindowSearch(baseUrl: string): Promise<void> {
   }
 }
 
+async function verifyCountOrderedDistribution(baseUrl: string): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const runId = randomUUID();
+  const token = "count-dist-" + runId;
+  const instant = (iso: string) => ({
+    precision: "instant" as const,
+    value: iso,
+  });
+
+  // Submit an older root post (floor 9999) before the target day window, plus
+  // 10 in-window replies so numeric count ordering (10 > 2) puts 9999 first
+  // even though lexicographical key order puts it last after 1001..1003.
+  const topicItems: Parameters<typeof submitArchive>[1]["items"][number][] = [
+    {
+      sourceKey: { namespace: "e2e", key: token + ":topic-9999-root" },
+      title: "Older root post for topic 9999",
+      sourcePublishedAt: instant("2026-10-01T08:00:00+08:00"),
+      sourceModifiedAt: null,
+      extensions: {
+        floor: 9999,
+        labels: ["zeta-tag"],
+      },
+      body: { text: token },
+      capture: {
+        scope: { case: "count-distribution" },
+        completeness: "complete",
+        missing: [],
+      },
+    },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      sourceKey: {
+        namespace: "e2e",
+        key: `${token}:topic-9999-reply-${index + 1}`,
+      },
+      title: null,
+      sourcePublishedAt: instant(
+        `2026-10-15T10:${String(index).padStart(2, "0")}:00+08:00`,
+      ),
+      sourceModifiedAt: null,
+      extensions: {
+        floor: 9999,
+        labels: ["zeta-tag"],
+      },
+      body: { text: token },
+      capture: {
+        scope: { case: "count-distribution" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    ...[1001, 1001, 1002, 1002].map((topic, index) => ({
+      sourceKey: {
+        namespace: "e2e",
+        key: `${token}:topic-${topic}-${index}`,
+      },
+      title: `Topic ${topic} post ${index}`,
+      sourcePublishedAt: instant(`2026-10-15T11:0${index}:00+08:00`),
+      sourceModifiedAt: null,
+      extensions: {
+        floor: topic,
+        labels: [topic === 1001 ? "alpha-tag" : "beta-tag"],
+      },
+      body: { text: token },
+      capture: {
+        scope: { case: "count-distribution" },
+        completeness: "complete" as const,
+        missing: [],
+      },
+    })),
+    {
+      sourceKey: { namespace: "e2e", key: `${token}:topic-1003-0` },
+      title: "Topic 1003 post",
+      sourcePublishedAt: instant("2026-10-15T11:10:00+08:00"),
+      sourceModifiedAt: null,
+      extensions: {
+        floor: 1003,
+        labels: ["gamma-tag"],
+      },
+      body: { text: token },
+      capture: {
+        scope: { case: "count-distribution" },
+        completeness: "complete",
+        missing: [],
+      },
+    },
+  ];
+
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:primary:" + runId,
+    binId: "binny-runs-one",
+    items: topicItems,
+  });
+
+  // Duplicate observations of an already archived reply (same bin and second bin)
+  // must not inflate distinct item counts.
+  const duplicateReply = topicItems[1]!;
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:reobserve-one:" + runId,
+    binId: "binny-runs-one",
+    items: [duplicateReply],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:reobserve-two:" + runId,
+    binId: "binny-runs-two",
+    items: [duplicateReply],
+  });
+
+  // Separate bin-count fixture where binny-runs-two (10) outnumbers binny-runs-one (2),
+  // verifying bin count ordering does not match lexicographical binId order.
+  const binOrderToken = "count-bin-order-" + runId;
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:bin-one:" + runId,
+    binId: "binny-runs-one",
+    items: [0, 1].map((index) => ({
+      sourceKey: { namespace: "e2e", key: `${binOrderToken}:one:${index}` },
+      title: `Bin one item ${index}`,
+      sourcePublishedAt: instant("2026-10-15T12:00:00+08:00"),
+      sourceModifiedAt: null,
+      extensions: {},
+      body: { text: binOrderToken },
+      capture: {
+        scope: { case: "count-bin-order" },
+        completeness: "complete",
+        missing: [],
+      },
+    })),
+  });
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:bin-two:" + runId,
+    binId: "binny-runs-two",
+    items: Array.from({ length: 10 }, (_, index) => ({
+      sourceKey: { namespace: "e2e", key: `${binOrderToken}:two:${index}` },
+      title: `Bin two item ${index}`,
+      sourcePublishedAt: instant("2026-10-15T12:00:00+08:00"),
+      sourceModifiedAt: null,
+      extensions: {},
+      body: { text: binOrderToken },
+      capture: {
+        scope: { case: "count-bin-order" },
+        completeness: "complete",
+        missing: [],
+      },
+    })),
+  });
+
+  const windowBaseQuery = {
+    bins: ["binny-runs-one", "binny-runs-two"],
+    text: { in: "body" as const, groups: [[token]] },
+    timeWindow: {
+      field: "sourcePublishedAt" as const,
+      from: "2026-10-15",
+      until: "2026-10-16",
+      timeZone: "Asia/Shanghai",
+    },
+  };
+
+  // Key order puts topic 9999 on page 2 after 1001 and 1002.
+  const keyPage1Response = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        limit: 2,
+      },
+    },
+  });
+  assert.equal(keyPage1Response.status, 200);
+  if (keyPage1Response.status !== 200) {
+    throw new Error("Key-ordered topic distribution page 1 failed.");
+  }
+  const keyPage1 = await keyPage1Response.json();
+  assert.equal(keyPage1.distribution?.order, "key");
+  assert.deepEqual(keyPage1.distribution?.groups, [
+    { kind: "extension", value: 1001, itemCount: "2" },
+    { kind: "extension", value: 1002, itemCount: "2" },
+  ]);
+  assert.equal(keyPage1.distribution?.hasMore, true);
+  assert.ok(keyPage1.distribution?.nextCursor);
+
+  const keyPage2Response = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        limit: 2,
+        cursor: keyPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(keyPage2Response.status, 200);
+  if (keyPage2Response.status !== 200) {
+    throw new Error("Key-ordered topic distribution page 2 failed.");
+  }
+  const keyPage2 = await keyPage2Response.json();
+  assert.deepEqual(keyPage2.distribution?.groups, [
+    { kind: "extension", value: 1003, itemCount: "1" },
+    { kind: "extension", value: 9999, itemCount: "10" },
+  ]);
+
+  // Count order puts topic 9999 (10 replies, root outside window, duplicates ignored)
+  // first even with limit=1 and numeric 10 > 2.
+  const countPage1Response = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        order: "count",
+        limit: 1,
+      },
+    },
+  });
+  assert.equal(countPage1Response.status, 200);
+  if (countPage1Response.status !== 200) {
+    throw new Error("Count-ordered topic distribution page 1 failed.");
+  }
+  const countPage1 = await countPage1Response.json();
+  assert.equal(countPage1.distribution?.order, "count");
+  assert.equal(countPage1.distribution?.totalItems, "15");
+  assert.deepEqual(countPage1.distribution?.groups, [
+    { kind: "extension", value: 9999, itemCount: "10" },
+  ]);
+  assert.equal(countPage1.distribution?.hasMore, true);
+  assert.ok(countPage1.distribution?.nextCursor);
+
+  // Advance archive clock after page 1; continuation must remain pinned to snapshot.asOf.
+  await submitArchive(client, {
+    requestId: "e2e:count-dist:after-snapshot:" + runId,
+    binId: "binny-runs-one",
+    items: [
+      {
+        sourceKey: { namespace: "e2e", key: `${token}:after-snapshot` },
+        title: "After snapshot reply",
+        sourcePublishedAt: instant("2026-10-15T11:30:00+08:00"),
+        sourceModifiedAt: null,
+        extensions: { floor: 1003, labels: ["gamma-tag"] },
+        body: { text: token },
+        capture: {
+          scope: { case: "count-distribution" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+  });
+
+  // Cross-order cursor reuse must be rejected with 400 invalid_input at ["distribution", "cursor"].
+  const crossCountToKeyResponse = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        order: "key",
+        limit: 2,
+        cursor: countPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(crossCountToKeyResponse.status, 400);
+  if (crossCountToKeyResponse.status === 400) {
+    const error = (await crossCountToKeyResponse.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["distribution", "cursor"]);
+  }
+
+  const crossKeyToCountResponse = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        order: "count",
+        limit: 2,
+        cursor: keyPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(crossKeyToCountResponse.status, 400);
+  if (crossKeyToCountResponse.status === 400) {
+    const error = (await crossKeyToCountResponse.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["distribution", "cursor"]);
+  }
+
+  // Page through remaining count-ordered groups at limit=2 then limit=1 to verify
+  // tie-breaking (1001 before 1002) and zero omissions/duplicates on the same snapshot.
+  const countPage2Response = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        order: "count",
+        limit: 2,
+        cursor: countPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(countPage2Response.status, 200);
+  if (countPage2Response.status !== 200) {
+    throw new Error("Count-ordered topic distribution page 2 failed.");
+  }
+  const countPage2 = await countPage2Response.json();
+  assert.equal(countPage2.snapshot.asOf, countPage1.snapshot.asOf);
+  assert.equal(countPage2.distribution?.totalItems, "15");
+  assert.deepEqual(countPage2.distribution?.groups, [
+    { kind: "extension", value: 1001, itemCount: "2" },
+    { kind: "extension", value: 1002, itemCount: "2" },
+  ]);
+  assert.equal(countPage2.distribution?.hasMore, true);
+  assert.ok(countPage2.distribution?.nextCursor);
+
+  const countPage3Response = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "floor",
+        order: "count",
+        limit: 2,
+        cursor: countPage2.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(countPage3Response.status, 200);
+  if (countPage3Response.status !== 200) {
+    throw new Error("Count-ordered topic distribution page 3 failed.");
+  }
+  const countPage3 = await countPage3Response.json();
+  assert.equal(countPage3.snapshot.asOf, countPage1.snapshot.asOf);
+  assert.equal(countPage3.distribution?.totalItems, "15");
+  assert.deepEqual(countPage3.distribution?.groups, [
+    { kind: "extension", value: 1003, itemCount: "1" },
+  ]);
+  assert.equal(countPage3.distribution?.hasMore, false);
+  assert.equal(countPage3.distribution?.nextCursor, undefined);
+
+  // Verify tag array distribution (labels) with count ordering and independent candidate cursor.
+  const labelWithCandidatesResponse = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      asOf: countPage1.snapshot.asOf,
+      includeCandidates: true,
+      limit: 2,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        order: "count",
+        limit: 2,
+      },
+    },
+  });
+  assert.equal(labelWithCandidatesResponse.status, 200);
+  if (labelWithCandidatesResponse.status !== 200) {
+    throw new Error("Count-ordered label distribution page 1 failed.");
+  }
+  const labelWithCandidates = await labelWithCandidatesResponse.json();
+  assert.equal(labelWithCandidates.results.length, 2);
+  assert.equal(labelWithCandidates.hasMore, true);
+  assert.ok(labelWithCandidates.nextCursor);
+  assert.equal(labelWithCandidates.distribution?.order, "count");
+  assert.deepEqual(labelWithCandidates.distribution?.groups, [
+    { kind: "extension", value: "zeta-tag", itemCount: "10" },
+    { kind: "extension", value: "alpha-tag", itemCount: "2" },
+  ]);
+  assert.equal(labelWithCandidates.distribution?.hasMore, true);
+  assert.ok(labelWithCandidates.distribution?.nextCursor);
+
+  // Advance distribution cursor while resetting candidates (no candidate cursor).
+  const advanceDistOnlyResponse = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: true,
+      limit: 2,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        order: "count",
+        limit: 2,
+        cursor: labelWithCandidates.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(advanceDistOnlyResponse.status, 200);
+  if (advanceDistOnlyResponse.status !== 200) {
+    throw new Error("Independent distribution continuation failed.");
+  }
+  const advanceDistOnly = await advanceDistOnlyResponse.json();
+  assert.equal(advanceDistOnly.snapshot.asOf, countPage1.snapshot.asOf);
+  assert.deepEqual(
+    advanceDistOnly.results.map(({ itemId }) => itemId),
+    labelWithCandidates.results.map(({ itemId }) => itemId),
+  );
+  assert.deepEqual(advanceDistOnly.distribution?.groups, [
+    { kind: "extension", value: "beta-tag", itemCount: "2" },
+    { kind: "extension", value: "gamma-tag", itemCount: "1" },
+  ]);
+  assert.equal(advanceDistOnly.distribution?.hasMore, false);
+
+  // Advance candidate cursor while starting distribution at page 1.
+  const advanceCandOnlyResponse = await client.archives.search.$post({
+    json: {
+      ...windowBaseQuery,
+      includeCandidates: true,
+      limit: 2,
+      cursor: labelWithCandidates.nextCursor,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: "binny-runs.manual-run-fixture",
+        field: "labels",
+        order: "count",
+        limit: 2,
+      },
+    },
+  });
+  assert.equal(advanceCandOnlyResponse.status, 200);
+  if (advanceCandOnlyResponse.status !== 200) {
+    throw new Error("Independent candidate continuation failed.");
+  }
+  const advanceCandOnly = await advanceCandOnlyResponse.json();
+  assert.equal(advanceCandOnly.snapshot.asOf, countPage1.snapshot.asOf);
+  assert.equal(
+    advanceCandOnly.results.some(({ itemId }) =>
+      labelWithCandidates.results.some((first) => first.itemId === itemId),
+    ),
+    false,
+  );
+  assert.deepEqual(advanceCandOnly.distribution?.groups, [
+    { kind: "extension", value: "zeta-tag", itemCount: "10" },
+    { kind: "extension", value: "alpha-tag", itemCount: "2" },
+  ]);
+
+  // Verify count ordering for date and bin distributions as well.
+  const dateCountPage1Response = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "body", groups: [[token]] },
+      asOf: countPage1.snapshot.asOf,
+      includeCandidates: false,
+      distribution: {
+        by: "date",
+        field: "sourcePublishedAt",
+        period: "day",
+        timeZone: "Asia/Shanghai",
+        order: "count",
+        limit: 1,
+      },
+    },
+  });
+  assert.equal(dateCountPage1Response.status, 200);
+  if (dateCountPage1Response.status !== 200) {
+    throw new Error("Count-ordered date distribution page 1 failed.");
+  }
+  const dateCountPage1 = await dateCountPage1Response.json();
+  assert.deepEqual(dateCountPage1.distribution?.groups, [
+    { kind: "date", value: "2026-10-15", itemCount: "15" },
+  ]);
+  assert.ok(dateCountPage1.distribution?.nextCursor);
+
+  const dateCountPage2Response = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "body", groups: [[token]] },
+      includeCandidates: false,
+      distribution: {
+        by: "date",
+        field: "sourcePublishedAt",
+        period: "day",
+        timeZone: "Asia/Shanghai",
+        order: "count",
+        limit: 1,
+        cursor: dateCountPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(dateCountPage2Response.status, 200);
+  if (dateCountPage2Response.status !== 200) {
+    throw new Error("Count-ordered date distribution page 2 failed.");
+  }
+  const dateCountPage2 = await dateCountPage2Response.json();
+  assert.deepEqual(dateCountPage2.distribution?.groups, [
+    { kind: "date", value: "2026-10-01", itemCount: "1" },
+  ]);
+
+  const binCountPage1Response = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "body", groups: [[binOrderToken]] },
+      includeCandidates: false,
+      distribution: {
+        by: "bin",
+        order: "count",
+        limit: 1,
+      },
+    },
+  });
+  assert.equal(binCountPage1Response.status, 200);
+  if (binCountPage1Response.status !== 200) {
+    throw new Error("Count-ordered bin distribution page 1 failed.");
+  }
+  const binCountPage1 = await binCountPage1Response.json();
+  assert.deepEqual(binCountPage1.distribution?.groups, [
+    { kind: "bin", binId: "binny-runs-two", itemCount: "10" },
+  ]);
+  assert.ok(binCountPage1.distribution?.nextCursor);
+
+  const binCountPage2Response = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "body", groups: [[binOrderToken]] },
+      includeCandidates: false,
+      distribution: {
+        by: "bin",
+        order: "count",
+        limit: 1,
+        cursor: binCountPage1.distribution.nextCursor,
+      },
+    },
+  });
+  assert.equal(binCountPage2Response.status, 200);
+  if (binCountPage2Response.status !== 200) {
+    throw new Error("Count-ordered bin distribution page 2 failed.");
+  }
+  const binCountPage2 = await binCountPage2Response.json();
+  assert.deepEqual(binCountPage2.distribution?.groups, [
+    { kind: "bin", binId: "binny-runs-one", itemCount: "2" },
+  ]);
+}
+
 async function verifyHardDeleteEntryPoint(
   client: ArchiveClient,
   baseUrl: string,
@@ -6275,6 +6823,7 @@ async function main(): Promise<void> {
   if (stage === "fixed-search") {
     await verifyFixedSearch(baseUrl);
     await verifyTimeWindowSearch(baseUrl);
+    await verifyCountOrderedDistribution(baseUrl);
     process.stdout.write(
       "Fixed archive search and pagination acceptance passed.\n",
     );
