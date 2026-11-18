@@ -76,11 +76,7 @@ export type ApiOperations = {
   readonly humanSessions: HumanSessionOperations;
 };
 
-function makeApp(
-  operations: ApiOperations,
-  productVersion: string,
-  archiveRequestBudgetMs: number,
-) {
+function makeApp(operations: ApiOperations, productVersion: string) {
   const serviceMetadata = serviceMetadataSchema.parse({
     product: { name: "Binny", version: productVersion },
     protocols: { httpApi: publicApiProtocolVersion },
@@ -829,12 +825,7 @@ function makeApp(
         return c.json(result.value, 200);
       },
     )
-    .route(
-      "/",
-      createArchiveRoutes(operations.archives, {
-        requestBudgetMs: archiveRequestBudgetMs,
-      }),
-    );
+    .route("/", createArchiveRoutes(operations.archives));
 }
 
 export type ApiRoutes = ReturnType<typeof makeApp>;
@@ -860,13 +851,7 @@ export function createApiRoutes(
   operations: ApiOperations,
   options: {
     readonly productVersion?: string;
-    /** Shared server-side preparation budget for archive search and batch reads. */
-    readonly archiveRequestBudgetMs?: number;
   } = {},
 ): ApiRoutes {
-  return makeApp(
-    operations,
-    options.productVersion ?? "unpublished",
-    options.archiveRequestBudgetMs ?? 10_000,
-  );
+  return makeApp(operations, options.productVersion ?? "unpublished");
 }

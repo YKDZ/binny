@@ -4,13 +4,14 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 5 adds optional search diagnostic evidence to archive error responses;
- * strict consumers of the earlier error shape must not be assumed compatible.
+ * Version 6 removes the fixed server archive query execution budget and its
+ * `query_budget_exceeded` error code while preserving client disconnect
+ * cancellation (`request_cancelled`) and composable search/run diagnostic updates.
  */
-export const publicApiProtocolVersion = 5;
+export const publicApiProtocolVersion = 6;
 
-/** Fixed archive search and batch-read contract version. */
-export const archiveQueryContractVersion = 3;
+/** Archive search and batch-read contract version. */
+export const archiveQueryContractVersion = 4;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {

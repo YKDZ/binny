@@ -337,6 +337,8 @@ async function checkPublicScheduleContract(): Promise<void> {
   if (listedRuns.status === 200) {
     const run = (await listedRuns.json()).runs[0];
     void run?.binId;
+    void (run?.triggerType satisfies "manual" | "schedule" | undefined);
+    void (run?.stopReasonCode satisfies string | undefined);
     // @ts-expect-error summary rows omit saved parameters.
     void run?.params;
   } else if (listedRuns.status === 400) {
@@ -456,7 +458,7 @@ async function checkPublicArchiveContract(): Promise<void> {
           archiveSeq: "12",
         },
       ],
-      // @ts-expect-error Request budgets are configured by the service.
+      // @ts-expect-error Unrecognized request fields are rejected by the strict batch-read contract.
       budgetMs: 1,
     },
   });

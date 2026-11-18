@@ -11,6 +11,8 @@ import {
 import { manualRuns, type Database } from "@binny/db";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 
+import { deriveManualRunStopReasonCode } from "./manual-run.ts";
+
 function invalidCursor(): ManualRunListOperation<never> {
   return {
     ok: false,
@@ -151,9 +153,11 @@ export function createManualRunListStore(
           runId: manualRuns.runId,
           binId: manualRuns.binId,
           action: manualRuns.action,
+          triggerType: manualRuns.triggerType,
           status: manualRuns.status,
           startedAt: manualRuns.startedAt,
           finishedAt: manualRuns.finishedAt,
+          failure: manualRuns.failure,
           // 保留 PostgreSQL 微秒精度，避免游标边界退化为 JavaScript 毫秒。
           createdAt: sql<string>`to_char(${manualRuns.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
         })
@@ -168,12 +172,19 @@ export function createManualRunListStore(
 
       const hasMore = rows.length > limit;
       const pageRows = rows.slice(0, limit);
-      const runs = pageRows.map((row) =>
-        manualRunListSummarySchema.parse({
+      const runs = pageRows.map((row) => {
+        const stopReasonCode = deriveManualRunStopReasonCode({
+          status: row.status,
+          startedAt: row.startedAt,
+          failure: row.failure,
+        });
+        return manualRunListSummarySchema.parse({
           runId: row.runId,
           binId: row.binId,
           action: row.action,
+          triggerType: row.triggerType,
           status: row.status,
+          ...(stopReasonCode === undefined ? {} : { stopReasonCode }),
           createdAt: row.createdAt,
           ...(row.startedAt === null
             ? {}
@@ -181,8 +192,8 @@ export function createManualRunListStore(
           ...(row.finishedAt === null
             ? {}
             : { finishedAt: row.finishedAt.toISOString() }),
-        }),
-      );
+        });
+      });
       const lastRow = pageRows.at(-1);
       const nextCursor =
         hasMore && lastRow !== undefined
