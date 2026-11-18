@@ -432,7 +432,7 @@ void describe("service query contract discovery", () => {
 
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(result.stdout, /Service: Binny 1\.2\.3/u);
-    assert.match(result.stdout, /Query contract: v3 at \/meta\/query/u);
+    assert.match(result.stdout, /Query contract: v4 at \/meta\/query/u);
     assert.match(
       result.stdout,
       /Operation: search \(POST \/archives\/search\)/u,

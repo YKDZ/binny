@@ -28,6 +28,7 @@ type CapacityShape = {
   readonly itemCount: number;
   readonly cascadeCount: number;
   readonly multiBinItemCount: number;
+  readonly linuxdoTrafficPostCount: number;
   readonly mediaFileCount: number;
   readonly mediaBytesEach: number;
   readonly sharedBytes: number;
@@ -100,9 +101,18 @@ type CapacityReport = {
 
 const binId = "binny-runs-one";
 const secondBinId = "binny-runs-two";
+const linuxdoBinId = "binny-integration-linuxdo";
 const sourceAdapterId = "binny-runs.manual-run-fixture";
+const linuxdoSourceAdapterId = "binny.source-adapter-linuxdo";
 const sourceBins = [binId, secondBinId] as const;
 const sourceNamespace = "capacity26";
+const wideNamespace = "capacity26-wide";
+const linuxdoTrafficNamespace = "capacity26-linuxdo";
+const linuxdoTrafficDate = "2026-02-15";
+const linuxdoTrafficUntilDate = "2026-02-16";
+const linuxdoTrafficTimeZone = "Asia/Shanghai";
+const wideUltraItemCount = 4;
+const linuxdoOutOfWindowCount = 2;
 const capacityLabel = "capacity26";
 const sectionGroupCount = 100;
 const multiBinOrdinals = [0, 1, 2] as const;
@@ -116,6 +126,7 @@ function shapeFor(profile: CapacityProfile): CapacityShape {
         itemCount: 100_000,
         cascadeCount: 10_000,
         multiBinItemCount: multiBinOrdinals.length,
+        linuxdoTrafficPostCount: 2_000,
         mediaFileCount: 1_000,
         mediaBytesEach: 100_000_000,
         sharedBytes: sharedPayload.byteLength,
@@ -124,10 +135,48 @@ function shapeFor(profile: CapacityProfile): CapacityShape {
         itemCount: 250,
         cascadeCount: 10,
         multiBinItemCount: multiBinOrdinals.length,
+        linuxdoTrafficPostCount: 40,
         mediaFileCount: 4,
         mediaBytesEach: 1_048_576,
         sharedBytes: sharedPayload.byteLength,
       };
+}
+
+function linuxdoTrafficTagsFor(ordinal: number): string[] {
+  const tags = ["linuxdo-daily", ordinal % 2 === 0 ? "ai" : "dev"];
+  if (ordinal % 4 === 0) tags.push("featured");
+  if (ordinal % 5 === 0) tags.push("weekly");
+  return tags;
+}
+
+function expectedLinuxdoTrafficTagGroups(postCount: number) {
+  return [
+    {
+      kind: "extension" as const,
+      value: "ai",
+      itemCount: String(Math.ceil(postCount / 2)),
+    },
+    {
+      kind: "extension" as const,
+      value: "dev",
+      itemCount: String(Math.floor(postCount / 2)),
+    },
+    {
+      kind: "extension" as const,
+      value: "featured",
+      itemCount: String(Math.ceil(postCount / 4)),
+    },
+    {
+      kind: "extension" as const,
+      value: "linuxdo-daily",
+      itemCount: String(postCount),
+    },
+    {
+      kind: "extension" as const,
+      value: "weekly",
+      itemCount: String(Math.ceil(postCount / 5)),
+    },
+  ];
 }
 
 function sourceKeyFor(ordinal: number) {
@@ -397,6 +446,288 @@ async function seedCapacity(
   }
 
   const shared = await uploadSharedPayload(client);
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":wide-ultra:title",
+    binId,
+    observedAt: "2025-02-01T10:00:00Z",
+    items: [
+      {
+        sourceKey: { namespace: wideNamespace, key: "ultra-title-only" },
+        title: "Ultra title match fixture",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-02-14T08:00:00.000Z",
+          timeZone: "UTC",
+        },
+        sourceModifiedAt: null,
+        extensions: {
+          category: "post",
+          section: "wide-ultra",
+          floor: 1,
+          labels: ["wide-ultra"],
+          featured: false,
+        },
+        body: {
+          text: "Neutral archive body without search token.",
+          searchText: "Neutral archive body without search token.",
+        },
+        capture: {
+          scope: { benchmark: "archive-capacity-wide-ultra" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [],
+  });
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":wide-ultra:body",
+    binId: secondBinId,
+    observedAt: "2025-02-01T11:00:00Z",
+    items: [
+      {
+        sourceKey: { namespace: wideNamespace, key: "ultra-body-only" },
+        title: "Neutral fixture heading",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-02-14T09:00:00.000Z",
+          timeZone: "UTC",
+        },
+        sourceModifiedAt: null,
+        extensions: {
+          category: "comment",
+          section: "wide-ultra",
+          floor: 2,
+          labels: ["wide-ultra"],
+          featured: false,
+        },
+        body: {
+          text: "Body mentions Ultra capacity query across bins.",
+          searchText: "Body mentions Ultra capacity query across bins.",
+        },
+        capture: {
+          scope: { benchmark: "archive-capacity-wide-ultra" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [],
+  });
+  const sharedUltraItem: ArchiveSubmissionInput["items"][number] = {
+    sourceKey: { namespace: wideNamespace, key: "ultra-shared" },
+    title: "Shared Ultra cross-bin item",
+    sourcePublishedAt: {
+      precision: "instant",
+      value: "2026-02-14T10:00:00.000Z",
+      timeZone: "UTC",
+    },
+    sourceModifiedAt: null,
+    extensions: {
+      category: "post",
+      section: "wide-ultra",
+      floor: 3,
+      labels: ["wide-ultra"],
+      featured: false,
+    },
+    body: {
+      text: "Shared Ultra item archived across two bins.",
+      searchText: "Shared Ultra item archived across two bins.",
+    },
+    capture: {
+      scope: { benchmark: "archive-capacity-wide-ultra" },
+      completeness: "complete",
+      missing: [],
+    },
+  };
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":wide-ultra:shared:one",
+    binId,
+    observedAt: "2025-02-01T12:00:00Z",
+    items: [sharedUltraItem],
+    relations: [],
+  });
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":wide-ultra:shared:two",
+    binId: secondBinId,
+    observedAt: "2025-02-01T12:05:00Z",
+    items: [sharedUltraItem],
+    relations: [],
+  });
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":wide-ultra:linuxdo",
+    binId: linuxdoBinId,
+    observedAt: "2025-02-01T13:00:00Z",
+    items: [
+      {
+        sourceKey: { namespace: wideNamespace, key: "ultra-linuxdo" },
+        title: "Linux.do Ultra wide search sample",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-02-14T11:00:00.000Z",
+          timeZone: linuxdoTrafficTimeZone,
+        },
+        sourceModifiedAt: null,
+        extensions: {
+          topicId: 900001,
+          postNumber: 1,
+          categoryId: 42,
+          tags: ["wide-ultra"],
+          authorUsername: "capacity-ultra",
+          authorName: "Capacity Ultra",
+          media: [],
+          topic: {
+            slug: "linuxdo-ultra-sample",
+            createdAt: "2026-02-14T11:00:00.000Z",
+          },
+        },
+        body: {
+          text: "Linux.do post discussing Ultra archive search.",
+          searchText: "Linux.do post discussing Ultra archive search.",
+        },
+        capture: {
+          scope: { benchmark: "archive-capacity-wide-ultra" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [],
+  });
+
+  await submitArchive(client, {
+    requestId: "capacity26:" + profile + ":linuxdo-traffic:out-of-window",
+    binId: linuxdoBinId,
+    observedAt: "2025-02-01T14:00:00Z",
+    items: [
+      {
+        sourceKey: {
+          namespace: linuxdoTrafficNamespace,
+          key: "traffic-out-0",
+        },
+        title: "Linux.do post before high-traffic day",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-02-14T15:59:59.000Z",
+          timeZone: linuxdoTrafficTimeZone,
+        },
+        sourceModifiedAt: null,
+        extensions: {
+          topicId: 900002,
+          postNumber: 1,
+          categoryId: 42,
+          tags: ["linuxdo-daily", "out-of-window"],
+          authorUsername: "capacity-linuxdo",
+          authorName: "Capacity Linux.do",
+          media: [],
+          topic: {
+            slug: "linuxdo-traffic-before",
+            createdAt: "2026-02-14T15:59:59.000Z",
+          },
+        },
+        body: {
+          text: "Out-of-window post before Shanghai midnight.",
+          searchText: "Out-of-window post before Shanghai midnight.",
+        },
+        capture: {
+          scope: { benchmark: "archive-capacity-linuxdo-traffic" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+      {
+        sourceKey: {
+          namespace: linuxdoTrafficNamespace,
+          key: "traffic-out-1",
+        },
+        title: "Linux.do post at exclusive upper boundary",
+        sourcePublishedAt: {
+          precision: "instant",
+          value: "2026-02-15T16:00:00.000Z",
+          timeZone: linuxdoTrafficTimeZone,
+        },
+        sourceModifiedAt: null,
+        extensions: {
+          topicId: 900003,
+          postNumber: 1,
+          categoryId: 42,
+          tags: ["linuxdo-daily", "out-of-window"],
+          authorUsername: "capacity-linuxdo",
+          authorName: "Capacity Linux.do",
+          media: [],
+          topic: {
+            slug: "linuxdo-traffic-after",
+            createdAt: "2026-02-15T16:00:00.000Z",
+          },
+        },
+        body: {
+          text: "Out-of-window post at exclusive next-day boundary.",
+          searchText: "Out-of-window post at exclusive next-day boundary.",
+        },
+        capture: {
+          scope: { benchmark: "archive-capacity-linuxdo-traffic" },
+          completeness: "complete",
+          missing: [],
+        },
+      },
+    ],
+    relations: [],
+  });
+  for (let offset = 0; offset < shape.linuxdoTrafficPostCount; offset += 100) {
+    const end = Math.min(shape.linuxdoTrafficPostCount, offset + 100);
+    const items: ArchiveSubmissionInput["items"] = Array.from(
+      { length: end - offset },
+      (_, index) => {
+        const ordinal = offset + index;
+        const publishedIso = new Date(
+          Date.UTC(2026, 1, 14, 16, 0, 0) + ordinal * 30_000,
+        ).toISOString();
+        return {
+          sourceKey: {
+            namespace: linuxdoTrafficNamespace,
+            key: "traffic-post-" + String(ordinal).padStart(6, "0"),
+          },
+          title: "Linux.do high-traffic post " + String(ordinal),
+          sourcePublishedAt: {
+            precision: "instant",
+            value: publishedIso,
+            timeZone: linuxdoTrafficTimeZone,
+          },
+          sourceModifiedAt: null,
+          extensions: {
+            topicId: 910_000 + Math.floor(ordinal / 10),
+            postNumber: (ordinal % 10) + 1,
+            categoryId: 42,
+            tags: linuxdoTrafficTagsFor(ordinal),
+            authorUsername: "capacity-linuxdo",
+            authorName: "Capacity Linux.do",
+            media: [],
+            topic: {
+              slug: "linuxdo-traffic-" + String(Math.floor(ordinal / 10)),
+              createdAt: publishedIso,
+            },
+          },
+          body: {
+            text: "Linux.do daily sample post " + String(ordinal),
+            searchText: "Linux.do daily sample post " + String(ordinal),
+          },
+          capture: {
+            scope: { benchmark: "archive-capacity-linuxdo-traffic" },
+            completeness: "complete",
+            missing: [],
+          },
+        };
+      },
+    );
+    const commit = await submitArchive(client, {
+      requestId: "capacity26:" + profile + ":linuxdo-traffic:" + String(offset),
+      binId: linuxdoBinId,
+      observedAt: "2025-02-01T15:00:00Z",
+      items,
+      relations: [],
+    });
+    assert.equal(commit.items.length, items.length);
+  }
   const media: CapacityResource[] = [];
   const retainedOwnerItemIds: string[] = [];
   const mediaOwnerFirst = 10;
@@ -1039,6 +1370,81 @@ async function runSearchMatrix(
     bodyCodePointLength,
   });
 
+  const wideUltraRead = await measureSearch(
+    client,
+    "all-bins literal search Ultra",
+    "all bins, literal text group Ultra, first page limit 10",
+    {
+      text: { groups: [["Ultra"]] },
+      limit: 10,
+    },
+  );
+  assertCapacityResults(wideUltraRead.page, wideUltraItemCount);
+  assert.equal(wideUltraRead.page.hasMore, false);
+  assert.deepEqual(
+    wideUltraRead.page.results.map(({ sourceKey }) => sourceKey),
+    [
+      { namespace: wideNamespace, key: "ultra-linuxdo" },
+      { namespace: wideNamespace, key: "ultra-shared" },
+      { namespace: wideNamespace, key: "ultra-body-only" },
+      { namespace: wideNamespace, key: "ultra-title-only" },
+    ],
+  );
+  const sharedUltraResult = wideUltraRead.page.results.find(
+    ({ sourceKey }) => sourceKey.key === "ultra-shared",
+  );
+  assert.ok(sharedUltraResult !== undefined);
+  assert.deepEqual(
+    sharedUltraResult.matches.map(({ binId: matchedBin }) => matchedBin).sort(),
+    [...sourceBins].sort(),
+  );
+  measurements.push(wideUltraRead.measurement);
+
+  const linuxdoTagsRead = await measureSearch(
+    client,
+    "linuxdo high-traffic day tags distribution",
+    `bin ${linuxdoBinId}, sourcePublishedAt ${linuxdoTrafficDate}..${linuxdoTrafficUntilDate} ${linuxdoTrafficTimeZone}, multi-value tags distribution`,
+    {
+      bins: [linuxdoBinId],
+      timeWindow: {
+        field: "sourcePublishedAt",
+        from: linuxdoTrafficDate,
+        until: linuxdoTrafficUntilDate,
+        timeZone: linuxdoTrafficTimeZone,
+      },
+      includeCandidates: false,
+      distribution: {
+        by: "extension",
+        sourceAdapterId: linuxdoSourceAdapterId,
+        field: "tags",
+        limit: 100,
+      },
+    },
+  );
+  assert.equal(linuxdoTagsRead.page.candidatesIncluded, false);
+  assert.deepEqual(linuxdoTagsRead.page.results, []);
+  assert.equal(
+    linuxdoTagsRead.page.timeSummary?.certainItems,
+    String(shape.linuxdoTrafficPostCount),
+  );
+  assert.equal(linuxdoTagsRead.page.timeSummary?.undeterminedItems, "0");
+  if (linuxdoTagsRead.page.distribution?.by !== "extension") {
+    throw new Error("Expected a Linux.do tags extension distribution page.");
+  }
+  assert.equal(
+    linuxdoTagsRead.page.distribution.totalItems,
+    String(shape.linuxdoTrafficPostCount),
+  );
+  assert.equal(linuxdoTagsRead.page.distribution.hasMore, false);
+  assert.deepEqual(
+    linuxdoTagsRead.page.distribution.groups,
+    expectedLinuxdoTrafficTagGroups(shape.linuxdoTrafficPostCount),
+  );
+  measurements.push({
+    ...linuxdoTagsRead.measurement,
+    groupCount: linuxdoTagsRead.page.distribution.groups.length,
+  });
+
   return measurements;
 }
 
@@ -1246,6 +1652,7 @@ export async function runArchiveCapacityE2E(
   const client = createApiClient(baseUrl);
   await ensureCapacityBin(client, phase, binId);
   await ensureCapacityBin(client, phase, secondBinId);
+  await ensureCapacityBin(client, phase, linuxdoBinId);
   const measurements: QueryMeasurement[] = [];
   let manifest: CapacityManifest;
   let itemIds: ReadonlyMap<number, string> | undefined;
@@ -1298,16 +1705,24 @@ export async function runArchiveCapacityE2E(
     (total, resource) => total + resource.size,
     0,
   );
+  const linuxdoTrafficTotalSeededItems =
+    shape.linuxdoTrafficPostCount + linuxdoOutOfWindowCount;
+  const seededItemCount =
+    shape.itemCount + wideUltraItemCount + linuxdoTrafficTotalSeededItems;
   const deletedItemCount =
     deletionResult.deletedCascadeItems + deletionResult.deletedSharedOwnerItems;
-  const retainedItemCount = shape.itemCount - deletedItemCount;
-  const submittedRevisionCount = shape.itemCount * 2 + shape.mediaFileCount * 2;
+  const retainedItemCount = seededItemCount - deletedItemCount;
+  const submittedRevisionCount =
+    shape.itemCount * 2 +
+    shape.mediaFileCount * 2 +
+    wideUltraItemCount +
+    linuxdoTrafficTotalSeededItems;
   const retainedRevisionCount =
     submittedRevisionCount -
     deletionResult.deletedCascadeItems * 2 -
     deletionResult.deletedSharedOwnerItems * 3;
   const submittedObservationCount =
-    submittedRevisionCount + shape.multiBinItemCount;
+    submittedRevisionCount + shape.multiBinItemCount + 1;
   const retainedObservationCount =
     submittedObservationCount -
     deletionResult.deletedCascadeItems * 2 -
@@ -1319,8 +1734,8 @@ export async function runArchiveCapacityE2E(
   return {
     profile,
     phase,
-    seededItemCount: shape.itemCount,
-    multiBinItemCount: shape.multiBinItemCount,
+    seededItemCount,
+    multiBinItemCount: shape.multiBinItemCount + 1,
     retainedItemCount,
     submittedRevisionCount,
     retainedRevisionCount,
@@ -1328,7 +1743,7 @@ export async function runArchiveCapacityE2E(
     retainedObservationCount,
     submittedRelationCount,
     retainedRelationCount,
-    seededRelationDensity: submittedRelationCount / shape.itemCount,
+    seededRelationDensity: submittedRelationCount / seededItemCount,
     retainedRelationDensity: retainedRelationCount / retainedItemCount,
     ...(manifest.cascadeDeletionMilliseconds === undefined
       ? {}

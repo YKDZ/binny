@@ -15,7 +15,6 @@ import {
   archiveItems,
   archiveObservations,
   archiveRevisions,
-  databaseErrorCode,
   type CancellableQueryExecutor,
   type Database,
 } from "@binny/db";
@@ -24,10 +23,8 @@ import { and, asc, eq, exists, sql } from "drizzle-orm";
 import { archiveJsonStringifyByteLength } from "./archive-json-size.ts";
 import {
   ArchiveRequestCancelled,
-  ArchiveQueryBudgetExceeded,
   assertArchiveQueryActive,
-  createArchiveQueryDeadline,
-  executeArchiveQueryWithinDeadline,
+  executeCancellableArchiveQuery,
 } from "./archive-query-budget.ts";
 import type { ArchiveResourceStorage } from "./archive-resource-storage.ts";
 
@@ -80,17 +77,6 @@ function payloadTooLarge(): ArchiveBatchReadOperation<never> {
   };
 }
 
-function budgetFailure(budgetMs: number): ArchiveBatchReadOperation<never> {
-  return {
-    ok: false,
-    status: 422,
-    error: {
-      code: "query_budget_exceeded",
-      message: `Batch read exceeded the server request budget of ${String(budgetMs)} ms; no partial results were returned.`,
-    },
-  };
-}
-
 function invalidInput(
   message: string,
   path: readonly (string | number)[],
@@ -103,19 +89,14 @@ function invalidInput(
 }
 
 /**
- * Read selected immutable item views through bounded, cancellable queries with
- * one shared deadline covering resource checks and complete result assembly.
+ * Read selected immutable item views through cancellable queries covering
+ * resource availability checks and complete result assembly.
  */
 export function createArchiveBatchReadOperation(
   database: Database,
   resourceStorage: ArchiveResourceStorage,
   executeQuery: CancellableQueryExecutor,
-  budgetMs: number,
 ): Pick<ArchiveOperations, "readArchiveBatch"> {
-  if (!Number.isSafeInteger(budgetMs) || budgetMs < 1) {
-    throw new RangeError("Archive request budget must be a positive integer.");
-  }
-
   return {
     async readArchiveBatch(
       request: ArchiveBatchReadRequest,
@@ -125,10 +106,8 @@ export function createArchiveBatchReadOperation(
         ReturnType<typeof archiveBatchReadResponseSchema.parse>
       >
     > {
-      const deadline =
-        context?.deadline ?? createArchiveQueryDeadline(budgetMs);
       const signal = context?.signal;
-      assertArchiveQueryActive(deadline, signal);
+      assertArchiveQueryActive(signal);
       const checked = archiveBatchReadInputSchema.safeParse(request);
       if (!checked.success) {
         const issue = checked.error.issues[0];
@@ -171,7 +150,7 @@ export function createArchiveBatchReadOperation(
               )`,
             ),
         );
-        const rows = await executeArchiveQueryWithinDeadline<BatchReadRow>(
+        const rows = await executeCancellableArchiveQuery<BatchReadRow>(
           executeQuery,
           // Resolve references without copying revision bodies into every result row.
           database
@@ -247,7 +226,6 @@ export function createArchiveBatchReadOperation(
               ),
             )
             .orderBy(asc(requested.reference_index)),
-          deadline,
           signal,
         );
         if (rows.length !== checked.data.references.length) {
@@ -257,7 +235,7 @@ export function createArchiveBatchReadOperation(
         const resultsByIndex = new Map<number, ArchiveBatchReadItemResult>();
         const readableGroups = new Map<string, ReadableReferenceGroup>();
         for (const row of rows) {
-          assertArchiveQueryActive(deadline, signal);
+          assertArchiveQueryActive(signal);
           const reference = checked.data.references[row.referenceIndex];
           if (reference === undefined) {
             throw new Error("Batch read returned an unknown reference index.");
@@ -310,7 +288,7 @@ export function createArchiveBatchReadOperation(
 
         const revisionsById = new Map<string, ReadableRevision>();
         const resourceIds: string[] = [];
-        const assertActive = () => assertArchiveQueryActive(deadline, signal);
+        const assertActive = () => assertArchiveQueryActive(signal);
         const emptyResponseBytes = archiveJsonStringifyByteLength(
           { results: [] },
           archiveBatchReadMaxResponseBytes,
@@ -390,7 +368,7 @@ export function createArchiveBatchReadOperation(
             );
           }
           const revisionRows =
-            await executeArchiveQueryWithinDeadline<ArchiveRevisionStateRow>(
+            await executeCancellableArchiveQuery<ArchiveRevisionStateRow>(
               executeQuery,
               database
                 .select({
@@ -404,13 +382,12 @@ export function createArchiveBatchReadOperation(
                     eq(archiveRevisions.stateHash, row.stateHash),
                   ),
                 ),
-              deadline,
               signal,
             );
           const revisionRow = revisionRows[0];
           if (revisionRow === undefined) {
             const currentItemRows =
-              await executeArchiveQueryWithinDeadline<CurrentItemStatusRow>(
+              await executeCancellableArchiveQuery<CurrentItemStatusRow>(
                 executeQuery,
                 database
                   .select({
@@ -431,7 +408,6 @@ export function createArchiveBatchReadOperation(
                     archiveItemDeletions,
                     sql`${archiveItemDeletions.itemId} = requested.item_id`,
                   ),
-                deadline,
                 signal,
               );
             const currentItem = currentItemRows[0];
@@ -503,7 +479,6 @@ export function createArchiveBatchReadOperation(
         const resourceAvailability = await resourceStorage.inspectAvailability(
           resourceIds,
           executeQuery,
-          deadline,
           signal,
         );
         for (const [revisionId, readableRevision] of revisionsById) {
@@ -603,12 +578,6 @@ export function createArchiveBatchReadOperation(
       } catch (error) {
         if (signal?.aborted || error instanceof ArchiveRequestCancelled) {
           throw new ArchiveRequestCancelled();
-        }
-        if (
-          error instanceof ArchiveQueryBudgetExceeded ||
-          databaseErrorCode(error) === "57014"
-        ) {
-          return budgetFailure(budgetMs);
         }
         throw error;
       }

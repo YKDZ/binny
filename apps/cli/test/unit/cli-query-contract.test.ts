@@ -223,7 +223,7 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v3: \/meta\/query/u);
+    assert.match(result.output, /Archive query v4: \/meta\/query/u);
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
@@ -982,7 +982,7 @@ void describe("查询服务发现", () => {
       listedWire.data.actions.collect?.description,
       "读取 feed 中的新内容。",
     );
-    assert.equal("params" in listedWire.data.actions.collect!, false);
+    assert.equal("params" in listedWire.data.actions.collect, false);
 
     const listedText = await run(
       ["bin", "actions", "rss-main", "--output", "text"],
