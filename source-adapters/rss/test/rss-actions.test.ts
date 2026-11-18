@@ -4,7 +4,11 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
 
-import { isSourceAdapterActionError } from "@binny/source-adapter-sdk";
+import {
+  createActionCancelledReason,
+  isActionCancelledReason,
+  isSourceAdapterActionError,
+} from "@binny/source-adapter-sdk";
 import type {
   ArchiveCommit,
   ArchiveResourceMetadata,
@@ -887,5 +891,102 @@ void test("RSS/Atom clean content, full-text selection, attachments, and increme
         error === undefined ? resolve() : reject(error),
       );
     });
+  }
+});
+
+void test("RSS adapter preserves stage, target, and abortCause for timeout, unknown abort, and cancellation", async () => {
+  const feedUrl = "https://example.test/feed.xml";
+  const originalFetch = globalThis.fetch;
+  const baseContext = {
+    binId: "bin-rss-diag",
+    identityId: "id-rss",
+    runId: randomUUID(),
+    referenceTime: "2026-10-28T00:00:00.000Z",
+    sourceAdapterVersion: sourceAdapter.version,
+    config: { feeds: [{ id: "main", url: feedUrl }] },
+    persistentState: {
+      load: async () => undefined,
+      save: async () => undefined,
+    },
+    archive: {
+      submit: async () => {
+        throw new Error("should not submit");
+      },
+    },
+    resources: {
+      upload: async () => {
+        throw new Error("should not upload");
+      },
+      resolve: async () => ({
+        resources: [],
+        items: [],
+        mediaByUrl: {},
+      }),
+    },
+  };
+
+  try {
+    globalThis.fetch = async () => {
+      throw new DOMException("signal timed out", "TimeoutError");
+    };
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(
+          {
+            ...baseContext,
+            signal: new AbortController().signal,
+          },
+          {},
+        ),
+      (error: unknown) => {
+        assert.equal(isSourceAdapterActionError(error), true);
+        if (!isSourceAdapterActionError(error)) return false;
+        assert.equal(error.failure.stage, "fetching-feed");
+        assert.equal(error.failure.target, feedUrl);
+        assert.equal(error.failure.abortCause, "source_request_timeout");
+        return true;
+      },
+    );
+
+    globalThis.fetch = async () => {
+      throw new DOMException("signal is aborted without reason", "AbortError");
+    };
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(
+          {
+            ...baseContext,
+            signal: new AbortController().signal,
+          },
+          {},
+        ),
+      (error: unknown) => {
+        assert.equal(isSourceAdapterActionError(error), true);
+        if (!isSourceAdapterActionError(error)) return false;
+        assert.equal(error.failure.stage, "fetching-feed");
+        assert.equal(error.failure.target, feedUrl);
+        assert.equal(error.failure.abortCause, "unknown");
+        return true;
+      },
+    );
+
+    const cancelController = new AbortController();
+    globalThis.fetch = async () => {
+      cancelController.abort(createActionCancelledReason());
+      throw new DOMException("aborted", "AbortError");
+    };
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(
+          {
+            ...baseContext,
+            signal: cancelController.signal,
+          },
+          {},
+        ),
+      (error: unknown) => isActionCancelledReason(error),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

@@ -2,17 +2,24 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   archiveResourceManifest,
+  classifyAbortCause,
   cleanContent,
   createSourceAccessBudget,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  isActionCancelledReason,
+  isSourceAccessBudgetExceededError,
   isSourceAdapterActionError,
+  readFailureDiagnosticContext,
   sourceAccessConfigSchema,
   sourceAdapterActionError,
+  SourceRequestError,
   validateMediaResponse,
   type ArchiveResourceMetadata,
   type CleanContentMediaCandidate,
+  type FailureDiagnosticContext,
   type JsonObject,
+  type ManualRunAbortCause,
   type SourceAccessBudgetClient,
   type SourceAccessKind,
   type SourceAccessRequest,
@@ -690,9 +697,19 @@ const sourceAccessReportSchema = z
       ),
   })
   .describe("解释本次主动访问和浏览器自动请求观测的统计。");
+const manualRunAbortCauseSchema = z.enum([
+  "user_cancelled",
+  "source_request_timeout",
+  "action_budget_exhausted",
+  "unknown",
+]);
+
 const checkReportSchema = z.strictObject({
   phase: z.enum(["preparing", "checking", "completed", "failed", "cancelled"]),
   intent: checkParamsSchema.describe("来源访问前记录的检查主题或目标。"),
+  stage: z.string().min(1).optional(),
+  target: z.string().min(1).optional(),
+  abortCause: manualRunAbortCauseSchema.optional(),
   sourceAccess: sourceAccessReportSchema,
 });
 const listCategoriesReportSchema = z.strictObject({
@@ -706,6 +723,9 @@ const listCategoriesReportSchema = z.strictObject({
   intent: z
     .literal("list-categories")
     .describe("来源访问前记录的板块发现意图。"),
+  stage: z.string().min(1).optional(),
+  target: z.string().min(1).optional(),
+  abortCause: manualRunAbortCauseSchema.optional(),
   sourceAccess: sourceAccessReportSchema,
 });
 const collectionIncompleteScopeSchema = z.strictObject({
@@ -792,6 +812,9 @@ const collectReportSchema = z.strictObject({
   discovery: z
     .enum(["not-started", "in-progress", "complete", "partial", "failed"])
     .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
+  stage: z.string().min(1).optional(),
+  target: z.string().min(1).optional(),
+  abortCause: manualRunAbortCauseSchema.optional(),
   sourceAccess: sourceAccessReportSchema,
   scopes: z
     .array(
@@ -872,6 +895,9 @@ const syncReportSchema = z
     ]),
     challengeRecovery: challengeRecoverySchema,
     budget: syncBudgetReportSchema,
+    stage: z.string().min(1).optional(),
+    target: z.string().min(1).optional(),
+    abortCause: manualRunAbortCauseSchema.optional(),
     sourceAccess: sourceAccessReportSchema,
     scopes: z.array(syncScopeReportSchema).readonly(),
     observedPosts: z.int().nonnegative(),
@@ -913,6 +939,11 @@ type SyncReport = z.output<typeof syncReportSchema>;
 type CollectionIncompleteScope = z.infer<
   typeof collectionIncompleteScopeSchema
 >;
+type DiagnosticStep = {
+  readonly stage: string;
+  readonly target?: string | undefined;
+};
+
 type JsonResponse =
   | { readonly kind: "json"; readonly status: number; readonly value: unknown }
   | {
@@ -929,6 +960,9 @@ type JsonResponse =
       readonly kind: "networkError";
       readonly status: 0;
       readonly message: string;
+      readonly stage?: string;
+      readonly target?: string;
+      readonly abortCause?: ManualRunAbortCause;
     };
 type TopicAccess =
   | {
@@ -942,6 +976,7 @@ type TopicAccess =
       readonly kind: "unavailable";
       readonly availability: "unavailable" | "unknown";
       readonly problem: DiscourseProblem;
+      readonly diagnostic?: FailureDiagnosticContext;
     };
 type SessionAccess =
   | { readonly kind: "available" }
@@ -949,6 +984,7 @@ type SessionAccess =
       readonly kind: "unavailable";
       readonly availability: "unavailable" | "unknown";
       readonly problem: DiscourseProblem;
+      readonly diagnostic?: FailureDiagnosticContext;
     };
 type SharedBrowser = {
   readonly page: Page;
@@ -983,21 +1019,39 @@ const postBatchSize = 100;
 const pageRecovery = new WeakMap<Page, ChallengeRecovery>();
 const pageSourceAccess = new WeakMap<Page, PageSourceAccess>();
 
+const defaultRequestTimeoutMs = 30_000;
+
+function configuredRequestTimeoutMs(): number {
+  const raw = process.env.BINNY_LINUXDO_REQUEST_TIMEOUT_MS;
+  if (raw === undefined) return defaultRequestTimeoutMs;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0
+    ? parsed
+    : defaultRequestTimeoutMs;
+}
+
 export function bindPageSourceAccessForTest(
   page: Page,
   origin = "https://linux.do",
+  options?: {
+    readonly client?: NonNullable<SourceAdapterContext["sourceAccess"]>;
+    readonly signal?: AbortSignal;
+    readonly onStep?: (step: DiagnosticStep) => void;
+  },
 ): void {
   pageSourceAccess.set(page, {
-    client: {
-      withAdmission: async (_request: unknown, op: () => Promise<unknown>) =>
-        await op(),
-      observeResponse: async () => ({
-        observedAtEpochMs: Date.now(),
-        outcome: "cooled" as const,
-      }),
-      snapshot: () => emptySourceAccessReport(),
-    } as unknown as NonNullable<SourceAdapterContext["sourceAccess"]>,
-    signal: new AbortController().signal,
+    client:
+      options?.client ??
+      ({
+        withAdmission: async (_request: unknown, op: () => Promise<unknown>) =>
+          await op(),
+        observeResponse: async () => ({
+          observedAtEpochMs: Date.now(),
+          outcome: "cooled" as const,
+        }),
+        snapshot: () => emptySourceAccessReport(),
+      } as unknown as NonNullable<SourceAdapterContext["sourceAccess"]>),
+    signal: options?.signal ?? new AbortController().signal,
     siteOrigin: origin,
     events: {
       total: 0,
@@ -1009,6 +1063,7 @@ export function bindPageSourceAccessForTest(
     },
     rateLimitResponses: [],
     publish: () => Promise.resolve(),
+    onStep: options?.onStep,
   });
 }
 
@@ -1033,7 +1088,22 @@ type PageSourceAccess = {
   readonly events: PageRequestEvents;
   readonly rateLimitResponses: SourceAccessReport["rateLimitResponses"];
   readonly publish: ((report: SourceAccessReport) => Promise<void>) | undefined;
+  readonly onStep?: ((step: DiagnosticStep) => void) | undefined;
+  currentStep?: DiagnosticStep | undefined;
 };
+
+function setPageStep(page: Page, stage: string, target?: string): void {
+  const state = pageSourceAccess.get(page);
+  if (state === undefined) return;
+  const next: DiagnosticStep =
+    target === undefined ? { stage } : { stage, target };
+  state.currentStep = next;
+  state.onStep?.(next);
+}
+
+function readPageStep(page: Page): DiagnosticStep | undefined {
+  return pageSourceAccess.get(page)?.currentStep;
+}
 
 function sourceBudgetRemainingMs(
   client: NonNullable<SourceAdapterContext["sourceAccess"]>,
@@ -1047,16 +1117,16 @@ function sourceBudgetRemainingMs(
 function activeRequestTimeoutMs(
   client: NonNullable<SourceAdapterContext["sourceAccess"]>,
   signal: AbortSignal,
-  maximumMs: number,
+  maximumMs = configuredRequestTimeoutMs(),
 ): number {
   signal.throwIfAborted();
   const remaining = sourceBudgetRemainingMs(client);
-  if (remaining === undefined) return maximumMs;
-  if (remaining <= 0) {
+  if (remaining !== undefined && remaining <= 0) {
     signal.throwIfAborted();
-    throw new DOMException("来源访问预算已耗尽。", "TimeoutError");
+    throw new SourceAccessBudgetExceededError("elapsed-time-limit");
   }
-  return Math.min(maximumMs, remaining);
+  // Keep per-request timeout separate from action budget; budget exhaustion fires via signal.
+  return maximumMs;
 }
 
 function emptySourceAccessReport(): SourceAccessReport {
@@ -1201,6 +1271,7 @@ async function withSharedBrowser<T>(
   >,
   callback: (browser: SharedBrowser) => Promise<T>,
   publishSourceAccess?: (report: SourceAccessReport) => Promise<void>,
+  onStep?: (step: DiagnosticStep) => void,
 ): Promise<
   T & {
     readonly challengeRecovery: ChallengeRecoverySummary;
@@ -1241,6 +1312,7 @@ async function withSharedBrowser<T>(
       },
       rateLimitResponses: [],
       publish: publishSourceAccess,
+      onStep,
     };
     pageSourceAccess.set(page, accessState);
     page.on("request", (request) => {
@@ -1317,18 +1389,28 @@ async function readJson(
   url: URL,
   signal: AbortSignal,
   valid: (value: unknown) => boolean,
+  stage = "reading-json",
 ): Promise<JsonResponse> {
   signal.throwIfAborted();
   let response: PageFetchResponse;
   try {
     await ensurePageOrigin(page, url, signal);
+    setPageStep(page, stage, url.href);
     response = await fetchInPage(page, url, "application/json", "text", valid);
   } catch (error) {
-    if (signal.aborted) throw signal.reason;
+    if (signal.aborted) throw signal.reason ?? error;
+    const diagnostic = readFailureDiagnosticContext(error);
+    const abortCause =
+      diagnostic.abortCause ?? classifyAbortCause({ error, signal });
+    const resolvedStage = diagnostic.stage ?? stage;
+    const resolvedTarget = diagnostic.target ?? url.href;
     return {
       kind: "networkError",
       status: 0,
-      message: error instanceof Error ? error.message : "请求没有完成。",
+      message: error instanceof Error ? error.message : "Request failed.",
+      stage: resolvedStage,
+      target: resolvedTarget,
+      ...(abortCause === undefined ? {} : { abortCause }),
     };
   }
 
@@ -1378,16 +1460,43 @@ async function ensurePageOrigin(
   if (currentOrigin === url.origin) return;
   signal.throwIfAborted();
   const home = new URL("/", url);
-  await withSourceAdmission(page, source, home, async () => {
-    const state = pageSourceAccess.get(page);
-    if (state === undefined) throw new Error("页面没有绑定来源准入状态。");
-    return await page.goto(home.href, {
-      waitUntil: "domcontentloaded",
-      timeout: activeRequestTimeoutMs(state.client, signal, 30_000),
+  setPageStep(page, "initializing-page-origin", home.href);
+  const timeoutMs = configuredRequestTimeoutMs();
+  try {
+    await withSourceAdmission(page, source, home, async () => {
+      const state = pageSourceAccess.get(page);
+      if (state === undefined) throw new Error("页面没有绑定来源准入状态。");
+      return await page.goto(home.href, {
+        waitUntil: "domcontentloaded",
+        timeout: activeRequestTimeoutMs(state.client, signal, timeoutMs),
+      });
     });
-  });
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    const abortCause = classifyAbortCause({ error, signal });
+    const message =
+      abortCause === "source_request_timeout"
+        ? `Initializing page origin ${home.href} timed out after ${String(timeoutMs)}ms.`
+        : abortCause === "unknown"
+          ? `Initializing page origin ${home.href} was aborted for an unknown reason: ${error instanceof Error ? error.message : String(error)}`
+          : error instanceof Error
+            ? error.message
+            : "Failed to initialize page origin.";
+    throw new SourceRequestError(message, {
+      stage: "initializing-page-origin",
+      target: home.href,
+      ...(abortCause === undefined ? {} : { abortCause }),
+      cause: error,
+    });
+  }
   if (new URL(page.url()).origin !== url.origin) {
-    throw new Error("站点首页跳转到了不同的 origin，无法安全复用浏览器会话。");
+    throw new SourceRequestError(
+      "站点首页跳转到了不同的 origin，无法安全复用浏览器会话。",
+      {
+        stage: "initializing-page-origin",
+        target: home.href,
+      },
+    );
   }
 }
 
@@ -1402,9 +1511,14 @@ async function fetchInPage(
 ): Promise<PageFetchResponse> {
   const accessState = pageSourceAccess.get(page);
   if (accessState === undefined) throw new Error("页面没有绑定来源准入状态。");
+  const requestTimeoutMs = configuredRequestTimeoutMs();
   const initialDeadline =
     performance.now() +
-    activeRequestTimeoutMs(accessState.client, accessState.signal, 30_000);
+    activeRequestTimeoutMs(
+      accessState.client,
+      accessState.signal,
+      requestTimeoutMs,
+    );
   let response: PageFetchResponse;
   while (true) {
     const remaining = () => {
@@ -1412,30 +1526,32 @@ async function fetchInPage(
       const budgetRemaining = sourceBudgetRemainingMs(accessState.client);
       if (budgetRemaining !== undefined && budgetRemaining <= 0) {
         accessState.signal.throwIfAborted();
-        return 0;
+        throw new SourceAccessBudgetExceededError("elapsed-time-limit");
       }
-      return Math.max(
-        0,
-        Math.ceil(
-          Math.min(
-            initialDeadline - performance.now(),
-            budgetRemaining ?? Number.POSITIVE_INFINITY,
-          ),
-        ),
-      );
+      return Math.max(0, Math.ceil(initialDeadline - performance.now()));
     };
-    if (remaining() <= 0) throw new Error("页面读取时间已耗尽。");
+    const remainingMs = remaining();
+    if (remainingMs <= 0) {
+      throw new SourceRequestError(
+        `Source request to ${url.href} timed out after ${String(requestTimeoutMs)}ms.`,
+        {
+          target: url.href,
+          abortCause: "source_request_timeout",
+        },
+      );
+    }
     try {
       response = await fetchInPageOnce(
         page,
         url,
         accept,
         body,
-        remaining(),
+        remainingMs,
         source,
       );
       break;
     } catch (error) {
+      if (accessState.signal.aborted) throw accessState.signal.reason ?? error;
       if (
         page.isClosed() ||
         !(error instanceof Error) ||
@@ -1498,12 +1614,19 @@ function responseProblemMessage(
     : message;
 }
 
+type BrowserEvaluateFetchResult =
+  | ({ readonly kind: "ok" } & PageFetchResponse)
+  | { readonly kind: "timeout"; readonly timeoutMs: number }
+  | { readonly kind: "aborted"; readonly message: string }
+  | { readonly kind: "error"; readonly message: string }
+  | PageFetchResponse;
+
 async function fetchInPageOnce(
   page: Page,
   url: URL,
   accept: string,
   body: "text" | "base64",
-  timeoutMs = 30_000,
+  timeoutMs = configuredRequestTimeoutMs(),
   source: SourceAccessKind = "site",
 ): Promise<PageFetchResponse> {
   return await withSourceAdmission(page, source, url, async () => {
@@ -1515,60 +1638,136 @@ async function fetchInPageOnce(
       accessState.signal,
       timeoutMs,
     );
-    return await page.evaluate(
-      async ({ href, acceptHeader, bodyType, expiresAt }) => {
-        const controller = new AbortController();
-        const remaining =
-          expiresAt - (performance.timeOrigin + performance.now());
-        if (remaining <= 0)
-          throw new DOMException("请求期限已到。", "TimeoutError");
-        const timeout = window.setTimeout(() => controller.abort(), remaining);
-        try {
-          const response = await fetch(href, {
-            cache: "no-store",
-            credentials: "include",
-            headers: { accept: acceptHeader },
-            signal: controller.signal,
-          });
-          let responseBody: string;
-          if (bodyType === "text") {
-            responseBody = await response.text();
-          } else {
-            const bytes = new Uint8Array(await response.arrayBuffer());
-            let binary = "";
-            const chunkSize = 0x8000;
-            for (
-              let offset = 0;
-              offset < bytes.byteLength;
-              offset += chunkSize
-            ) {
-              binary += String.fromCharCode(
-                ...bytes.subarray(offset, offset + chunkSize),
-              );
-            }
-            responseBody = btoa(binary);
+    let evaluateResult: BrowserEvaluateFetchResult;
+    try {
+      evaluateResult = await page.evaluate(
+        async ({
+          href,
+          acceptHeader,
+          bodyType,
+          expiresAt,
+          timeoutDurationMs,
+        }) => {
+          const controller = new AbortController();
+          const remaining =
+            expiresAt - (performance.timeOrigin + performance.now());
+          if (remaining <= 0) {
+            return { kind: "timeout" as const, timeoutMs: timeoutDurationMs };
           }
-          const retryAfter = response.headers.get("retry-after");
-          return {
-            mitigated: response.headers.get("cf-mitigated") ?? "",
-            status: response.status,
-            contentType: response.headers.get("content-type") ?? "",
-            ...(retryAfter === null ? {} : { retryAfter }),
-            body: responseBody,
-          };
-        } finally {
-          window.clearTimeout(timeout);
-        }
-      },
-      {
-        href: url.href,
-        acceptHeader: accept,
-        bodyType: body,
-        // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
-        expiresAt:
-          performance.timeOrigin + performance.now() + boundedTimeoutMs,
-      },
-    );
+          let timedOut = false;
+          const timeout = window.setTimeout(() => {
+            timedOut = true;
+            controller.abort("source_request_timeout");
+          }, remaining);
+          try {
+            const response = await fetch(href, {
+              cache: "no-store",
+              credentials: "include",
+              headers: { accept: acceptHeader },
+              signal: controller.signal,
+            });
+            let responseBody: string;
+            if (bodyType === "text") {
+              responseBody = await response.text();
+            } else {
+              const bytes = new Uint8Array(await response.arrayBuffer());
+              let binary = "";
+              const chunkSize = 0x8000;
+              for (
+                let offset = 0;
+                offset < bytes.byteLength;
+                offset += chunkSize
+              ) {
+                binary += String.fromCharCode(
+                  ...bytes.subarray(offset, offset + chunkSize),
+                );
+              }
+              responseBody = btoa(binary);
+            }
+            const retryAfter = response.headers.get("retry-after");
+            return {
+              kind: "ok" as const,
+              mitigated: response.headers.get("cf-mitigated") ?? "",
+              status: response.status,
+              contentType: response.headers.get("content-type") ?? "",
+              ...(retryAfter === null ? {} : { retryAfter }),
+              body: responseBody,
+            };
+          } catch (error) {
+            if (
+              timedOut ||
+              controller.signal.reason === "source_request_timeout"
+            ) {
+              return { kind: "timeout" as const, timeoutMs: timeoutDurationMs };
+            }
+            if (
+              typeof error === "object" &&
+              error !== null &&
+              "name" in error &&
+              error.name === "AbortError"
+            ) {
+              return {
+                kind: "aborted" as const,
+                message:
+                  error instanceof Error && error.message.length > 0
+                    ? error.message
+                    : "Request aborted",
+              };
+            }
+            return {
+              kind: "error" as const,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          } finally {
+            window.clearTimeout(timeout);
+          }
+        },
+        {
+          href: url.href,
+          acceptHeader: accept,
+          bodyType: body,
+          // 请求期限与日期解释解耦，验收的日期偏移不能改变浏览器剩余预算。
+          expiresAt:
+            performance.timeOrigin + performance.now() + boundedTimeoutMs,
+          timeoutDurationMs: boundedTimeoutMs,
+        },
+      );
+    } catch (error) {
+      if (accessState.signal.aborted) {
+        throw accessState.signal.reason ?? error;
+      }
+      throw error;
+    }
+
+    if (accessState.signal.aborted) {
+      throw accessState.signal.reason;
+    }
+    if ("kind" in evaluateResult) {
+      if (evaluateResult.kind === "timeout") {
+        throw new SourceRequestError(
+          `Source request to ${url.href} timed out after ${String(evaluateResult.timeoutMs)}ms.`,
+          {
+            target: url.href,
+            abortCause: "source_request_timeout",
+          },
+        );
+      }
+      if (evaluateResult.kind === "aborted") {
+        throw new SourceRequestError(
+          `Source request to ${url.href} was aborted for an unknown reason: ${evaluateResult.message}`,
+          {
+            target: url.href,
+            abortCause: "unknown",
+          },
+        );
+      }
+      if (evaluateResult.kind === "error") {
+        throw new Error(evaluateResult.message);
+      }
+      const { kind: _kind, ...pageResponse } = evaluateResult;
+      return pageResponse;
+    }
+    return evaluateResult;
   });
 }
 
@@ -1598,14 +1797,23 @@ function accessProblem(
   return { kind: "unavailable", availability, problem };
 }
 
-function networkProblem(topicId: number, message: string): TopicAccess {
-  return accessProblem(topicId, "unknown", {
-    code: "linuxdo_source_unreachable",
-    message: `无法读取 Linux.do 主题：${message}`,
-    impact: "本次检查无法确认所选主题是否可用，未读取或归档主题内容。",
-    suggestion: "检查站点地址、网络连接后重新运行 check。",
-    requiresHuman: false,
-  });
+function networkProblem(
+  topicId: number,
+  message: string,
+  diagnostic?: FailureDiagnosticContext,
+): TopicAccess {
+  return {
+    kind: "unavailable",
+    availability: "unknown",
+    problem: {
+      code: "linuxdo_source_unreachable",
+      message: `无法读取 Linux.do 主题：${message}`,
+      impact: "本次检查无法确认所选主题是否可用，未读取或归档主题内容。",
+      suggestion: "检查站点地址、网络连接后重新运行 check。",
+      requiresHuman: false,
+    },
+    ...(diagnostic === undefined ? {} : { diagnostic }),
+  };
 }
 
 async function readTopicAccess(
@@ -1616,7 +1824,14 @@ async function readTopicAccess(
 ): Promise<TopicAccess> {
   const session = await readSessionAccess(page, site, signal);
   if (session.kind === "unavailable") {
-    return accessProblem(topicId, session.availability, session.problem);
+    return {
+      kind: "unavailable",
+      availability: session.availability,
+      problem: session.problem,
+      ...(session.diagnostic === undefined
+        ? {}
+        : { diagnostic: session.diagnostic }),
+    };
   }
   return await readTopic(page, site, topicId, signal);
 }
@@ -1632,6 +1847,7 @@ async function readSessionAccess(
     sessionUrl,
     signal,
     (value) => discourseSessionSchema.safeParse(value).success,
+    "checking-session",
   );
   if (session.kind === "networkError") {
     return {
@@ -1643,6 +1859,13 @@ async function readSessionAccess(
         impact: "本次检查无法确认所选目标是否可用，未读取或归档主题内容。",
         suggestion: "检查站点地址、网络连接后重新运行 check。",
         requiresHuman: false,
+      },
+      diagnostic: {
+        stage: session.stage ?? "checking-session",
+        target: session.target ?? sessionUrl.href,
+        ...(session.abortCause === undefined
+          ? {}
+          : { abortCause: session.abortCause }),
       },
     };
   }
@@ -1657,6 +1880,10 @@ async function readSessionAccess(
         suggestion:
           "使用 human open 在持久浏览器中登录后重新触发 check 或 collect。",
         requiresHuman: true,
+      },
+      diagnostic: {
+        stage: "checking-session",
+        target: sessionUrl.href,
       },
     };
   }
@@ -1678,6 +1905,10 @@ async function readSessionAccess(
           "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新触发动作。",
         requiresHuman: challenge,
       },
+      diagnostic: {
+        stage: "checking-session",
+        target: sessionUrl.href,
+      },
     };
   }
   if (session.status !== 200) {
@@ -1690,6 +1921,10 @@ async function readSessionAccess(
         impact: "本次检查或采集没有确认登录状态。",
         suggestion: "检查站点响应后重新运行 check。",
         requiresHuman: false,
+      },
+      diagnostic: {
+        stage: "checking-session",
+        target: sessionUrl.href,
       },
     };
   }
@@ -1706,6 +1941,10 @@ async function readSessionAccess(
           "使用 human open 查看站点响应，并在登录状态有效后重新触发动作。",
         requiresHuman: true,
       },
+      diagnostic: {
+        stage: "checking-session",
+        target: sessionUrl.href,
+      },
     };
   }
 
@@ -1719,12 +1958,24 @@ async function readTopic(
   signal: AbortSignal,
 ): Promise<TopicAccess> {
   const topicUrl = new URL(`/t/${String(topicId)}.json`, site.origin);
-  const topicResponse = await readJson(page, topicUrl, signal, (value) => {
-    const parsed = discourseTopicSchema.safeParse(value);
-    return parsed.success && parsed.data.id === topicId;
-  });
+  const topicResponse = await readJson(
+    page,
+    topicUrl,
+    signal,
+    (value) => {
+      const parsed = discourseTopicSchema.safeParse(value);
+      return parsed.success && parsed.data.id === topicId;
+    },
+    "reading-topic",
+  );
   if (topicResponse.kind === "networkError") {
-    return networkProblem(topicId, topicResponse.message);
+    return networkProblem(topicId, topicResponse.message, {
+      stage: topicResponse.stage ?? "reading-topic",
+      target: topicResponse.target ?? topicUrl.href,
+      ...(topicResponse.abortCause === undefined
+        ? {}
+        : { abortCause: topicResponse.abortCause }),
+    });
   }
   // JSON 403 表示主题权限；HTML 403 可能是站点挑战，须交给人工处理。
   if (
@@ -1787,20 +2038,28 @@ async function readTopic(
   };
 }
 
-function failureFromProblem(problem: DiscourseProblem) {
+function failureFromProblem(
+  problem: DiscourseProblem,
+  diagnostic?: FailureDiagnosticContext,
+) {
   return sourceAdapterActionError({
     code: problem.code,
     message: problem.message,
     impact: problem.impact,
     suggestion: problem.suggestion,
     requiresHuman: problem.requiresHuman,
+    ...(diagnostic?.stage === undefined ? {} : { stage: diagnostic.stage }),
+    ...(diagnostic?.target === undefined ? {} : { target: diagnostic.target }),
+    ...(diagnostic?.abortCause === undefined
+      ? {}
+      : { abortCause: diagnostic.abortCause }),
   });
 }
 
 function failureFromAccess(
   access: Extract<TopicAccess, { kind: "unavailable" }>,
 ) {
-  return failureFromProblem(access.problem);
+  return failureFromProblem(access.problem, access.diagnostic);
 }
 
 function targetScope(target: ConfiguredTarget): string {
@@ -1923,6 +2182,7 @@ async function readTopicListPage(
     url,
     signal,
     (value) => topicListResponseSchema.safeParse(value).success,
+    "reading-topic-list",
   );
   if (response.kind === "networkError") {
     throw sourceAdapterActionError({
@@ -1931,6 +2191,11 @@ async function readTopicListPage(
       impact: "本次没有确认该目标的列表范围。",
       suggestion: "检查站点地址、网络连接后重新运行 check 或 collect。",
       requiresHuman: false,
+      stage: response.stage ?? "reading-topic-list",
+      target: response.target ?? url.href,
+      ...(response.abortCause === undefined
+        ? {}
+        : { abortCause: response.abortCause }),
     });
   }
   if (
@@ -1943,6 +2208,8 @@ async function readTopicListPage(
       impact: "本次没有处理该目标的主题。",
       suggestion: "确认分类路径、目标可见性与账号权限后重新运行。",
       requiresHuman: false,
+      stage: "reading-topic-list",
+      target: url.href,
     });
   }
   if (response.kind !== "json") {
@@ -1959,6 +2226,8 @@ async function readTopicListPage(
       suggestion:
         "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
       requiresHuman: challenge,
+      stage: "reading-topic-list",
+      target: url.href,
     });
   }
   if (response.status !== 200) {
@@ -1968,6 +2237,8 @@ async function readTopicListPage(
       impact: "本次没有确认该目标的列表范围。",
       suggestion: "检查站点响应后重新运行 check 或 collect。",
       requiresHuman: false,
+      stage: "reading-topic-list",
+      target: url.href,
     });
   }
   const parsed = topicListResponseSchema.safeParse(response.value);
@@ -1978,6 +2249,8 @@ async function readTopicListPage(
       impact: "本次没有确认该目标的完整列表范围。",
       suggestion: "检查站点列表响应后重新运行 check 或 collect。",
       requiresHuman: false,
+      stage: "reading-topic-list",
+      target: url.href,
     });
   }
   return parsed.data.topic_list;
@@ -2032,11 +2305,49 @@ function listCheckDiagnostic(
   };
 }
 
+function stepReportFields(
+  step: DiagnosticStep | undefined,
+): Partial<DiagnosticStep> {
+  if (step === undefined) return {};
+  return {
+    stage: step.stage,
+    ...(step.target === undefined ? {} : { target: step.target }),
+  };
+}
+
+function resolveActionAbortFields(
+  error: unknown,
+  signal: AbortSignal,
+  fallbackStep?: DiagnosticStep,
+): {
+  readonly stage?: string | undefined;
+  readonly target?: string | undefined;
+  readonly abortCause?: ManualRunAbortCause | undefined;
+} {
+  const fromAction = isSourceAdapterActionError(error)
+    ? {
+        stage: error.failure.stage,
+        target: error.failure.target,
+        abortCause: error.failure.abortCause,
+      }
+    : readFailureDiagnosticContext(error);
+  const stage = fromAction.stage ?? fallbackStep?.stage;
+  const target = fromAction.target ?? fallbackStep?.target;
+  const abortCause =
+    fromAction.abortCause ?? classifyAbortCause({ error, signal });
+  return {
+    ...(stage === undefined ? {} : { stage }),
+    ...(target === undefined ? {} : { target }),
+    ...(abortCause === undefined ? {} : { abortCause }),
+  };
+}
+
 async function checkTopic(
   context: LinuxdoContext<typeof checkReportSchema>,
   params: CheckParams,
 ) {
   const site = siteFromConfig(context.config);
+  let lastStep: DiagnosticStep | undefined;
   let report = checkReportSchema.parse({
     phase: "preparing",
     intent: params,
@@ -2050,7 +2361,14 @@ async function checkTopic(
   try {
     await publishReport({ ...report, phase: "checking" });
     const onAccess = (sourceAccess: SourceAccessReport) =>
-      publishReport({ ...report, sourceAccess });
+      publishReport({
+        ...report,
+        ...stepReportFields(lastStep),
+        sourceAccess,
+      });
+    const onStep = (step: DiagnosticStep) => {
+      lastStep = step;
+    };
     let browserOutput: Awaited<ReturnType<typeof checkOneTopic>>;
     if (params.topicId !== undefined) {
       browserOutput = await checkOneTopic(
@@ -2058,6 +2376,7 @@ async function checkTopic(
         site,
         params.topicId,
         onAccess,
+        onStep,
       );
     } else {
       const targets = params.targets ?? [];
@@ -2126,14 +2445,21 @@ async function checkTopic(
           return targetCheckResult(scopes, availability, problems);
         },
         onAccess,
+        onStep,
       );
     }
     const { sourceAccess, ...output } = browserOutput;
     await publishReport({ ...report, phase: "completed", sourceAccess });
     return output;
   } catch (error) {
+    const abortFields = resolveActionAbortFields(
+      error,
+      context.signal,
+      lastStep,
+    );
     await publishReport({
       ...report,
+      ...abortFields,
       phase: context.signal.aborted ? "cancelled" : "failed",
     }).catch(() => undefined);
     throw error;
@@ -2144,6 +2470,7 @@ function categoryListFailure(
   code: string,
   message: string,
   requiresHuman = false,
+  diagnostic?: FailureDiagnosticContext,
 ) {
   return sourceAdapterActionError({
     code,
@@ -2153,6 +2480,11 @@ function categoryListFailure(
       ? "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新发现板块。"
       : "检查当前账号的站点响应与板块访问权限后，重新运行 list-categories。",
     requiresHuman,
+    ...(diagnostic?.stage === undefined ? {} : { stage: diagnostic.stage }),
+    ...(diagnostic?.target === undefined ? {} : { target: diagnostic.target }),
+    ...(diagnostic?.abortCause === undefined
+      ? {}
+      : { abortCause: diagnostic.abortCause }),
   });
 }
 
@@ -2267,6 +2599,7 @@ async function listCategories(
   context: LinuxdoContext<typeof listCategoriesReportSchema>,
 ) {
   const site = siteFromConfig(context.config);
+  let lastStep: DiagnosticStep | undefined;
   let report = listCategoriesReportSchema.parse({
     phase: "preparing",
     intent: "list-categories",
@@ -2295,23 +2628,55 @@ async function listCategories(
               ? "使用 human open 在持久浏览器中登录或完成人工挑战，再重新运行 list-categories。"
               : "检查站点地址与当前会话后，重新运行 list-categories。",
             requiresHuman: session.problem.requiresHuman,
+            ...(session.diagnostic?.stage === undefined
+              ? {}
+              : { stage: session.diagnostic.stage }),
+            ...(session.diagnostic?.target === undefined
+              ? {}
+              : { target: session.diagnostic.target }),
+            ...(session.diagnostic?.abortCause === undefined
+              ? {}
+              : { abortCause: session.diagnostic.abortCause }),
           });
         }
         return {
           categories: await readVisibleCategories(page, site, context.signal),
         };
       },
-      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+      (sourceAccess) =>
+        publishReport({
+          ...report,
+          ...stepReportFields(lastStep),
+          sourceAccess,
+        }),
+      (step) => {
+        lastStep = step;
+      },
     );
     const { sourceAccess, ...output } = browserOutput;
     await publishReport({ ...report, phase: "completed", sourceAccess });
     return output;
   } catch (error) {
+    const abortFields = resolveActionAbortFields(
+      error,
+      context.signal,
+      lastStep,
+    );
     await publishReport({
       ...report,
+      ...abortFields,
       phase: context.signal.aborted ? "cancelled" : "failed",
     }).catch(() => undefined);
-    throw error;
+    if (isSourceAdapterActionError(error)) {
+      throw sourceAdapterActionError(
+        {
+          ...error.failure,
+          ...abortFields,
+        },
+        error.completedScopes,
+      );
+    }
+    throw failureWithProgress(error, context, [], lastStep);
   }
 }
 
@@ -2327,11 +2692,20 @@ async function readVisibleCategories(
     categoriesUrl,
     signal,
     (value) => discourseCategoryListSchema.safeParse(value).success,
+    "discovering-categories",
   );
   if (response.kind === "networkError") {
     throw categoryListFailure(
       "linuxdo_source_unreachable",
       `无法读取 Linux.do 板块列表：${response.message}`,
+      false,
+      {
+        stage: response.stage ?? "discovering-categories",
+        target: response.target ?? categoriesUrl.href,
+        ...(response.abortCause === undefined
+          ? {}
+          : { abortCause: response.abortCause }),
+      },
     );
   }
   if (response.kind !== "json") {
@@ -2854,6 +3228,7 @@ async function checkOneTopic(
   site: ReturnType<typeof siteFromConfig>,
   topicId: number,
   publishSourceAccess: (report: SourceAccessReport) => Promise<void>,
+  onStep?: (step: DiagnosticStep) => void,
 ) {
   return await withSharedBrowser(
     context,
@@ -2877,6 +3252,7 @@ async function checkOneTopic(
       return checkResult(topicScope(topicId), "available", problems);
     },
     publishSourceAccess,
+    onStep,
   );
 }
 
@@ -2983,20 +3359,27 @@ async function readTopicPosts(
     for (const postId of unresolved) {
       postsUrl.searchParams.append("post_ids[]", String(postId));
     }
-    const response = await readJson(page, postsUrl, signal, (value) => {
-      const parsed = topicPostsResponseSchema.safeParse(value);
-      if (!parsed.success) return false;
-      const ids = new Set<number>();
-      for (const value of parsed.data.post_stream.posts) {
-        const post = discoursePostSchema.safeParse(value);
-        if (
-          post.success &&
-          (post.data.topic_id === undefined || post.data.topic_id === topic.id)
-        )
-          ids.add(post.data.id);
-      }
-      return unresolved.every((id) => ids.has(id));
-    });
+    const response = await readJson(
+      page,
+      postsUrl,
+      signal,
+      (value) => {
+        const parsed = topicPostsResponseSchema.safeParse(value);
+        if (!parsed.success) return false;
+        const ids = new Set<number>();
+        for (const value of parsed.data.post_stream.posts) {
+          const post = discoursePostSchema.safeParse(value);
+          if (
+            post.success &&
+            (post.data.topic_id === undefined ||
+              post.data.topic_id === topic.id)
+          )
+            ids.add(post.data.id);
+        }
+        return unresolved.every((id) => ids.has(id));
+      },
+      "reading-topic-posts",
+    );
     if (response.kind !== "json" && requiresPageReview(response)) {
       return {
         posts: [...postsById.values()].toSorted(
@@ -3082,21 +3465,27 @@ async function readSelectedTopicPosts(
     for (const postId of batch) {
       postsUrl.searchParams.append("post_ids[]", String(postId));
     }
-    const response = await readJson(page, postsUrl, signal, (value) => {
-      const parsed = topicPostsResponseSchema.safeParse(value);
-      if (!parsed.success) return false;
-      const ids = new Set<number>();
-      for (const value of parsed.data.post_stream.posts) {
-        const post = discoursePostSchema.safeParse(value);
-        if (
-          post.success &&
-          (post.data.topic_id === undefined || post.data.topic_id === topicId)
-        ) {
-          ids.add(post.data.id);
+    const response = await readJson(
+      page,
+      postsUrl,
+      signal,
+      (value) => {
+        const parsed = topicPostsResponseSchema.safeParse(value);
+        if (!parsed.success) return false;
+        const ids = new Set<number>();
+        for (const value of parsed.data.post_stream.posts) {
+          const post = discoursePostSchema.safeParse(value);
+          if (
+            post.success &&
+            (post.data.topic_id === undefined || post.data.topic_id === topicId)
+          ) {
+            ids.add(post.data.id);
+          }
         }
-      }
-      return batch.every((id) => ids.has(id));
-    });
+        return batch.every((id) => ids.has(id));
+      },
+      "reading-topic-posts",
+    );
     if (response.kind !== "json" || response.status !== 200) continue;
     const envelope = topicPostsResponseSchema.safeParse(response.value);
     if (!envelope.success) continue;
@@ -3147,15 +3536,21 @@ async function readPostFeedPage(
 > {
   const feedUrl = new URL("/posts.json", siteOrigin);
   if (before !== undefined) feedUrl.searchParams.set("before", String(before));
-  const response = await readJson(page, feedUrl, signal, (value) => {
-    const feed = discoursePostFeedSchema.safeParse(value);
-    return (
-      feed.success &&
-      feed.data.latest_posts.every(
-        (post) => discoursePostSchema.safeParse(post).success,
-      )
-    );
-  });
+  const response = await readJson(
+    page,
+    feedUrl,
+    signal,
+    (value) => {
+      const feed = discoursePostFeedSchema.safeParse(value);
+      return (
+        feed.success &&
+        feed.data.latest_posts.every(
+          (post) => discoursePostSchema.safeParse(post).success,
+        )
+      );
+    },
+    "scanning-post-feed",
+  );
   if (response.kind === "networkError") {
     return {
       kind: "error",
@@ -3466,6 +3861,7 @@ async function downloadMedia(
   try {
     if (mediaUrl.origin === siteOrigin.origin) {
       await ensurePageOrigin(page, mediaUrl, context.signal, "media");
+      setPageStep(page, "downloading-media", mediaUrl.href);
       const response = await fetchInPage(
         page,
         mediaUrl,
@@ -3497,6 +3893,7 @@ async function downloadMedia(
       mediaType = response.contentType;
       body = Buffer.from(response.body, "base64");
     } else {
+      setPageStep(page, "downloading-media", mediaUrl.href);
       const response = await withSourceAdmission(
         page,
         "media",
@@ -3509,7 +3906,7 @@ async function downloadMedia(
             timeout: activeRequestTimeoutMs(
               accessState.client,
               accessState.signal,
-              30_000,
+              configuredRequestTimeoutMs(),
             ),
           });
         },
@@ -3519,7 +3916,7 @@ async function downloadMedia(
       body = await response.body();
     }
   } catch (error) {
-    if (context.signal.aborted) throw context.signal.reason;
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     return {
       ok: false,
       reason: error instanceof Error ? error.message : "媒体请求没有完成。",
@@ -4516,27 +4913,13 @@ async function collectListTarget(
         error.completedScopes,
       );
     }
-    if (context.signal.aborted) {
-      throw sourceAdapterActionError(
-        {
-          code: "source_adapter_action_cancelled",
-          message: "Linux.do 采集已取消。",
-          impact: `采集范围 ${scope} 未穷尽，已保存此前提交的资料。`,
-          suggestion: "确认取消原因后，使用相同固定日期创建新的采集运行。",
-          requiresHuman: false,
-        },
-        completedScopes,
-      );
-    }
+    const wrapped = failureWithProgress(error, context, completedScopes, page);
     throw sourceAdapterActionError(
       {
-        code: "linuxdo_collection_failed",
-        message: "Linux.do 采集未能完成。",
+        ...wrapped.failure,
         impact: `采集范围 ${scope} 未穷尽，已保存此前提交的资料。`,
-        suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
-        requiresHuman: false,
       },
-      completedScopes,
+      wrapped.completedScopes,
     );
   }
 }
@@ -4545,19 +4928,43 @@ function failureWithProgress(
   error: unknown,
   context: Pick<SourceAdapterContext, "signal">,
   completedScopes: readonly string[],
+  pageOrStep?: Page | DiagnosticStep,
 ) {
+  const fallbackStep =
+    pageOrStep === undefined
+      ? undefined
+      : "stage" in pageOrStep
+        ? pageOrStep
+        : readPageStep(pageOrStep);
   if (isSourceAdapterActionError(error)) {
     const errorScopes = Array.isArray(error.completedScopes)
       ? error.completedScopes.filter(
           (scope): scope is string => typeof scope === "string",
         )
       : [];
-    return sourceAdapterActionError(error.failure, [
-      ...completedScopes,
-      ...errorScopes,
-    ]);
+    const stage = error.failure.stage ?? fallbackStep?.stage;
+    const target = error.failure.target ?? fallbackStep?.target;
+    return sourceAdapterActionError(
+      {
+        ...error.failure,
+        ...(stage === undefined ? {} : { stage }),
+        ...(target === undefined ? {} : { target }),
+      },
+      [...completedScopes, ...errorScopes],
+    );
   }
-  if (context.signal.aborted) {
+  const fields = resolveActionAbortFields(error, context.signal, fallbackStep);
+  const diagnosticFields = {
+    ...(fields.stage === undefined ? {} : { stage: fields.stage }),
+    ...(fields.target === undefined ? {} : { target: fields.target }),
+    ...(fields.abortCause === undefined
+      ? {}
+      : { abortCause: fields.abortCause }),
+  };
+  if (
+    fields.abortCause === "user_cancelled" ||
+    (context.signal.aborted && isActionCancelledReason(context.signal.reason))
+  ) {
     return sourceAdapterActionError(
       {
         code: "source_adapter_action_cancelled",
@@ -4565,6 +4972,56 @@ function failureWithProgress(
         impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
         suggestion: "确认取消原因后，可重新运行尚未完成的发现范围。",
         requiresHuman: false,
+        ...diagnosticFields,
+        abortCause: "user_cancelled",
+      },
+      completedScopes,
+    );
+  }
+  if (fields.abortCause === "action_budget_exhausted") {
+    return sourceAdapterActionError(
+      {
+        code: "source_access_budget_exhausted",
+        message:
+          error instanceof Error && error.message.length > 0
+            ? error.message
+            : "Linux.do source access budget exhausted.",
+        impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
+        suggestion: "Increase run budget or retry the remaining scopes.",
+        requiresHuman: false,
+        ...diagnosticFields,
+      },
+      completedScopes,
+    );
+  }
+  if (fields.abortCause === "source_request_timeout") {
+    return sourceAdapterActionError(
+      {
+        code: "linuxdo_source_unreachable",
+        message:
+          error instanceof Error && error.message.length > 0
+            ? error.message
+            : "Linux.do source request timed out.",
+        impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
+        suggestion: "Check site availability and retry.",
+        requiresHuman: false,
+        ...diagnosticFields,
+      },
+      completedScopes,
+    );
+  }
+  if (fields.abortCause === "unknown") {
+    return sourceAdapterActionError(
+      {
+        code: "linuxdo_collection_failed",
+        message:
+          error instanceof Error && error.message.length > 0
+            ? error.message
+            : "Linux.do source request was aborted for an unknown reason.",
+        impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
+        suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
+        requiresHuman: false,
+        ...diagnosticFields,
       },
       completedScopes,
     );
@@ -4576,6 +5033,7 @@ function failureWithProgress(
       impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
       suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
       requiresHuman: false,
+      ...diagnosticFields,
     },
     completedScopes,
   );
@@ -4774,6 +5232,7 @@ async function collectTopic(
   const site = siteFromConfig(context.config);
   const completedScopes: string[] = [];
   const incompleteScopes: CollectionIncompleteScope[] = [];
+  let lastStep: DiagnosticStep | undefined;
   let report: CollectionReport = collectReportSchema.parse({
     phase: "preparing",
     referenceTime: context.referenceTime,
@@ -4839,7 +5298,7 @@ async function collectTopic(
       async ({ page, request }) => {
         const session = await readSessionAccess(page, site, context.signal);
         if (session.kind === "unavailable") {
-          throw failureFromProblem(session.problem);
+          throw failureFromProblem(session.problem, session.diagnostic);
         }
         if (rangeParams !== undefined) {
           const rangeOutput = await collectPostCreatedRange(
@@ -4860,8 +5319,14 @@ async function collectTopic(
           };
         }
         if (params.topicId !== undefined) {
+          lastStep = {
+            stage: "reading-topic",
+            target: new URL(`/t/${String(params.topicId)}.json`, site.origin)
+              .href,
+          };
           await publishReport({
             ...report,
+            ...stepReportFields(lastStep),
             phase: "collecting",
             discovery: "complete",
             scopes: [
@@ -4949,8 +5414,27 @@ async function collectTopic(
         for (const [index, target] of targets.entries()) {
           context.signal.throwIfAborted();
           const scope = targetScope(target);
+          lastStep =
+            target.kind === "topic"
+              ? {
+                  stage: "reading-topic",
+                  target: new URL(
+                    `/t/${String(target.topicId)}.json`,
+                    site.origin,
+                  ).href,
+                }
+              : {
+                  stage: "reading-topic-list",
+                  target: targetListUrl(
+                    site,
+                    target,
+                    params.maxTopics,
+                    dateWindow,
+                  ).href,
+                };
           await publishReport({
             ...report,
+            ...stepReportFields(lastStep),
             scopes: report.scopes.map((current) =>
               current.scope === scope
                 ? { ...current, status: "in-progress" }
@@ -5097,14 +5581,28 @@ async function collectTopic(
         await publishReport({ ...report, phase: "completed" });
         return output();
       },
-      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+      (sourceAccess) =>
+        publishReport({
+          ...report,
+          ...stepReportFields(lastStep),
+          sourceAccess,
+        }),
+      (step) => {
+        lastStep = step;
+      },
     );
     const { sourceAccess, ...result } = browserOutput;
     await publishReport({ ...report, phase: "completed", sourceAccess });
     return result;
   } catch (error) {
+    const abortFields = resolveActionAbortFields(
+      error,
+      context.signal,
+      lastStep,
+    );
     await publishReport({
       ...report,
+      ...abortFields,
       phase: context.signal.aborted ? "cancelled" : "failed",
       discovery:
         report.discovery === "in-progress" ? "failed" : report.discovery,
@@ -5114,7 +5612,7 @@ async function collectTopic(
           : scope,
       ),
     }).catch(() => undefined);
-    throw failureWithProgress(error, context, completedScopes);
+    throw failureWithProgress(error, context, completedScopes, lastStep);
   }
 }
 
@@ -5160,6 +5658,7 @@ async function sync(
   let topicsExamined = 0;
   let state: SyncPersistentState | undefined;
   let activePlan: SyncScopePlan | undefined;
+  let lastStep: DiagnosticStep | undefined;
   let report = syncReportSchema.parse({
     phase: "preparing",
     upperBound,
@@ -5282,7 +5781,7 @@ async function sync(
       async ({ page, request }) => {
         const session = await readSessionAccess(page, site, budget.signal);
         if (session.kind === "unavailable")
-          throw failureFromProblem(session.problem);
+          throw failureFromProblem(session.problem, session.diagnostic);
 
         const needsCategories =
           params.targets === undefined ||
@@ -5454,7 +5953,15 @@ async function sync(
 
         return { challengeRecovery: { rounds: 0, elapsedMs: 0, successes: 0 } };
       },
-      (sourceAccess) => publishReport({ ...report, sourceAccess }),
+      (sourceAccess) =>
+        publishReport({
+          ...report,
+          ...stepReportFields(lastStep),
+          sourceAccess,
+        }),
+      (step) => {
+        lastStep = step;
+      },
     );
 
     const challengeRecovery = browserOutput.challengeRecovery;
@@ -5473,20 +5980,28 @@ async function sync(
     });
     return output(challengeRecovery);
   } catch (error) {
-    const budgetStop = error instanceof SourceAccessBudgetExceededError;
-    const cancelled = context.signal.aborted;
+    const budgetStop =
+      isSourceAccessBudgetExceededError(error) ||
+      isSourceAccessBudgetExceededError(budget.signal.reason);
+    const cancelled =
+      isActionCancelledReason(context.signal.reason) || context.signal.aborted;
+    const budgetErrorReason = isSourceAccessBudgetExceededError(error)
+      ? error.reason
+      : isSourceAccessBudgetExceededError(budget.signal.reason)
+        ? budget.signal.reason.reason
+        : "elapsed-time-limit";
     if (activePlan !== undefined) {
       const name = syncScopeName(syncScopeReference(activePlan.target));
       reportScopes.set(name, syncPlanReport(activePlan, "unknown", true));
       addIncomplete(
         name,
         budgetStop
-          ? `budget_${error.reason.replaceAll("-", "_")}`
+          ? `budget_${budgetErrorReason.replaceAll("-", "_")}`
           : cancelled
             ? "sync_cancelled"
             : "sync_scope_unknown",
         budgetStop
-          ? `本轮达到 ${error.reason} 上限；该已分配范围没有确认完成。`
+          ? `本轮达到 ${budgetErrorReason} 上限；该已分配范围没有确认完成。`
           : cancelled
             ? "本轮在处理该范围时取消；接续位置已分配，覆盖结果未知。"
             : error instanceof Error
@@ -5499,23 +6014,36 @@ async function sync(
       await persistIntent("budget-exhausted").catch(() => undefined);
       await publishReport({
         ...report,
+        ...stepReportFields(lastStep),
+        abortCause: "action_budget_exhausted",
         phase: "budget-exhausted",
         discovery: plans.length === 0 ? "failed" : "partial",
       }).catch(() => undefined);
       return output();
     }
 
+    const abortFields = resolveActionAbortFields(
+      error,
+      budget.signal,
+      lastStep,
+    );
     const failurePhase = cancelled ? "cancelled" : "failed";
     await persistIntent(failurePhase).catch(() => undefined);
     await publishReport({
       ...report,
+      ...abortFields,
       phase: failurePhase,
       discovery:
         report.discovery === "not-started" || report.discovery === "in-progress"
           ? "failed"
           : "partial",
     }).catch(() => undefined);
-    throw failureWithProgress(error, context, completedScopes);
+    throw failureWithProgress(
+      error,
+      { signal: budget.signal },
+      completedScopes,
+      lastStep,
+    );
   } finally {
     budget.close();
   }
@@ -5582,10 +6110,17 @@ export const sourceAdapter = defineSourceAdapter({
 });
 
 export {
-  scanPostCreatedRange,
-  computeSyncScopeCandidateLowerBound,
-  syncScopePlans,
   assignSyncPosition,
+  computeSyncScopeCandidateLowerBound,
+  failureFromAccess,
+  failureWithProgress,
+  fetchInPageOnce,
+  readSessionAccess,
+  readTopic,
+  readTopicListPage,
+  readVisibleCategories,
+  scanPostCreatedRange,
+  syncScopePlans,
   type PostRangeReadCache,
   type PostRangeScan,
   type DiscoursePost,

@@ -13,7 +13,9 @@ import type {
   SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import {
+  isActionCancelledReason,
   isSourceAdapterActionError,
+  readFailureDiagnosticContext,
   sourceAdapterManifest,
 } from "@binny/source-adapter-sdk";
 
@@ -622,7 +624,7 @@ qoder init</code></pre>
       assert.equal(detailRequests.length, 1);
       assert.equal(submissions.length, 1);
 
-      const submission = submissions[0]!;
+      const submission = submissions[0];
       const item = submission.items[0]!;
 
       // Verify stable sourceKey, region, language, and metadata
@@ -1143,10 +1145,7 @@ Fast 档位现已面向 Qoder 桌面端全部用户上线。
       assert.equal(item.sourcePublishedAt, null);
       assert.equal(item.sourceModifiedAt, null);
       assert.ok(typeof item.extensions.effectiveDate === "string");
-      assert.match(
-        item.extensions.effectiveDate as string,
-        /2026 年 11 月 5 日/u,
-      );
+      assert.match(item.extensions.effectiveDate, /2026 年 11 月 5 日/u);
       assert.equal(item.extensions.region, "cn");
       assert.equal(item.extensions.language, "zh-CN");
       assert.equal(item.extensions.section, "事件");
@@ -1982,7 +1981,7 @@ Mobile 更新说明
           signal: new AbortController().signal,
           persistentState: {
             async load() {
-              return storedState as Record<string, unknown> | undefined;
+              return storedState;
             },
             async save(state) {
               storedState = state as IncrementalSyncState;
@@ -2353,6 +2352,116 @@ ${updatesMd}
       assert.equal(collectedItem.extensions.latestVersion, "0.5.3");
     } finally {
       server.close();
+    }
+  });
+
+  void test("preserves stage, target, and abortCause for index timeout and unknown AbortError", async () => {
+    const indexUrl = "https://example.test/llms.txt";
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => {
+        throw new DOMException("signal timed out", "TimeoutError");
+      };
+      await assert.rejects(
+        () =>
+          sourceAdapter.actions.sync.execute(
+            {
+              binId: "bin-qoder-diag",
+              identityId: "id-qoder",
+              runId: randomUUID(),
+              referenceTime: new Date().toISOString(),
+              sourceAdapterVersion: sourceAdapter.version,
+              config: {
+                blogListUrl: "https://example.test/blog",
+                cnDocsIndexUrl: indexUrl,
+                intChangelogIndexUrl: "https://example.test/changelog",
+              },
+              signal: new AbortController().signal,
+              persistentState: {
+                load: async () => undefined,
+                save: async () => undefined,
+              },
+              archive: {
+                submit: async () => {
+                  throw new Error("should not submit");
+                },
+              },
+              resources: {
+                upload: async () => {
+                  throw new Error("should not upload");
+                },
+                resolve: async () => ({
+                  resources: [],
+                  items: [],
+                  mediaByUrl: {},
+                }),
+              },
+            },
+            { scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID] },
+          ),
+        (error: unknown) => {
+          const context = readFailureDiagnosticContext(error);
+          assert.equal(context.stage, "fetching-index");
+          assert.equal(context.target, indexUrl);
+          assert.equal(context.abortCause, "source_request_timeout");
+          return true;
+        },
+      );
+
+      globalThis.fetch = async () => {
+        throw new DOMException(
+          "signal is aborted without reason",
+          "AbortError",
+        );
+      };
+      await assert.rejects(
+        () =>
+          sourceAdapter.actions.sync.execute(
+            {
+              binId: "bin-qoder-diag",
+              identityId: "id-qoder",
+              runId: randomUUID(),
+              referenceTime: new Date().toISOString(),
+              sourceAdapterVersion: sourceAdapter.version,
+              config: {
+                blogListUrl: "https://example.test/blog",
+                cnDocsIndexUrl: indexUrl,
+                intChangelogIndexUrl: "https://example.test/changelog",
+              },
+              signal: new AbortController().signal,
+              persistentState: {
+                load: async () => undefined,
+                save: async () => undefined,
+              },
+              archive: {
+                submit: async () => {
+                  throw new Error("should not submit");
+                },
+              },
+              resources: {
+                upload: async () => {
+                  throw new Error("should not upload");
+                },
+                resolve: async () => ({
+                  resources: [],
+                  items: [],
+                  mediaByUrl: {},
+                }),
+              },
+            },
+            { scopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID] },
+          ),
+        (error: unknown) => {
+          const context = readFailureDiagnosticContext(error);
+          assert.equal(context.stage, "fetching-index");
+          assert.equal(context.target, indexUrl);
+          assert.equal(context.abortCause, "unknown");
+          assert.equal(isActionCancelledReason(error), false);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

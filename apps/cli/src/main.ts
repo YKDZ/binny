@@ -894,8 +894,21 @@ function createCliContract(identity: CliCommandIdentity) {
       .split("\n")
       .map((line) => `  ${line}`),
   ];
-  const runDetailText = (run: ManualRun) =>
-    text.lines([
+  const nonEmptyReportString = (
+    report: ManualRun["report"],
+    key: string,
+  ): string | undefined => {
+    if (report === undefined) return undefined;
+    const value = report[key];
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  };
+  const runDetailText = (run: ManualRun) => {
+    const error = run.result?.error;
+    const stage = error?.stage ?? nonEmptyReportString(run.report, "stage");
+    const target = error?.target ?? nonEmptyReportString(run.report, "target");
+    const abortCause =
+      error?.abortCause ?? nonEmptyReportString(run.report, "abortCause");
+    return text.lines([
       "Run",
       `ID: ${run.runId}`,
       `Bin: ${run.binId}`,
@@ -924,9 +937,13 @@ function createCliContract(identity: CliCommandIdentity) {
       ...(run.stopConfirmedAt === undefined
         ? []
         : [`Stop confirmed at: ${run.stopConfirmedAt}`]),
+      ...(stage === undefined ? [] : [`Stage: ${stage}`]),
+      ...(target === undefined ? [] : [`Target: ${target}`]),
+      ...(abortCause === undefined ? [] : [`Abort cause: ${abortCause}`]),
       ...(run.report === undefined ? [] : jsonSection("Report", run.report)),
       ...(run.result === undefined ? [] : jsonSection("Result", run.result)),
     ]);
+  };
   const scheduleDetailText = (schedule: Schedule) =>
     text.lines([
       "Schedule",
@@ -3385,6 +3402,10 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "run",
         name: "get",
         description: "Read one run's status and result.",
+        helpSupplement: text.lines([
+          "When available, run get surfaces the failing or cancelled stage, target, and abortCause in result.error or report.",
+          "abortCause distinguishes user_cancelled, source_request_timeout, and action_budget_exhausted only when direct evidence exists; underlying aborts without such evidence remain unknown.",
+        ]),
         fields: {
           binId: { kind: "positional", description: "Bin ID" },
           runId: { kind: "positional", description: "Run ID" },

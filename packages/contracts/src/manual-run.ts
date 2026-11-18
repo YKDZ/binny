@@ -57,6 +57,13 @@ export const manualRunTriggerInputSchema = withPostgresJsonSchemaProjection(
     .strict(),
 );
 
+export const manualRunAbortCauseSchema = z.enum([
+  "user_cancelled",
+  "source_request_timeout",
+  "action_budget_exhausted",
+  "unknown",
+]);
+
 export const manualRunFailureSchema = z
   .object({
     code: postgresTextSchema.min(1).max(128),
@@ -65,6 +72,9 @@ export const manualRunFailureSchema = z
     path: failurePathSchema.optional(),
     suggestion: postgresTextSchema.min(1).optional(),
     requiresHuman: z.boolean(),
+    stage: postgresTextSchema.min(1).optional(),
+    target: postgresTextSchema.min(1).optional(),
+    abortCause: manualRunAbortCauseSchema.optional(),
   })
   .strict();
 
@@ -217,6 +227,7 @@ export const manualRunErrorSchema = withPostgresJsonSchemaProjection(
 );
 
 export type ManualRunTriggerInput = z.infer<typeof manualRunTriggerInputSchema>;
+export type ManualRunAbortCause = z.infer<typeof manualRunAbortCauseSchema>;
 export type ManualRunFailure = z.infer<typeof manualRunFailureSchema>;
 export type ManualRunCompletion = z.infer<typeof manualRunCompletionSchema>;
 export type ManualRun = z.infer<typeof manualRunSchema>;

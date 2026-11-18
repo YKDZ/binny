@@ -270,7 +270,7 @@ async function executeSync(
         initializedScopes.push(...res.initializedScopes);
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -282,7 +282,7 @@ async function executeSync(
         initializedScopes.push(...res.initializedScopes);
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -294,7 +294,7 @@ async function executeSync(
         initializedScopes.push(...res.initializedScopes);
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -306,7 +306,7 @@ async function executeSync(
         initializedScopes.push(...res.initializedScopes);
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -334,7 +334,7 @@ async function executeCollect(
       const res = await collectInternationalBlog(context, params);
       completedScopes.push(...res.completedScopes);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -343,7 +343,7 @@ async function executeCollect(
       const res = await collectCnAnnouncementsEvents(context, params);
       completedScopes.push(...res.completedScopes);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -352,7 +352,7 @@ async function executeCollect(
       const res = await collectCnChangelogs(context, params);
       completedScopes.push(...res.completedScopes);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
@@ -361,7 +361,7 @@ async function executeCollect(
       const res = await collectInternationalChangelogs(context, params);
       completedScopes.push(...res.completedScopes);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       actionErrors.push(error);
     }
   }
