@@ -1,0 +1,207 @@
+import type { ManualRunAbortCause } from "@binny/contracts";
+
+import { isSourceAccessBudgetExceededError } from "./source-access-budget.ts";
+
+const actionCancelledSymbol = Symbol.for("binny.sourceAdapter.actionCancelled");
+const actionCancelledCode = "binny_run_cancelled";
+
+/** Explicit cancellation reason attached by runtime worker when SIGTERM stops a run. */
+export class ActionCancelledError extends Error {
+  readonly [actionCancelledSymbol] = true;
+  readonly code = actionCancelledCode;
+
+  constructor(message = "Action cancelled by user.") {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+
+/** Creates an explicit user-cancellation reason for AbortController.abort(). */
+export function createActionCancelledReason(
+  message = "Action cancelled by user.",
+): ActionCancelledError {
+  return new ActionCancelledError(message);
+}
+
+/** Checks whether a value carries explicit user-cancellation evidence. */
+export function isActionCancelledReason(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (actionCancelledSymbol in value ||
+      ("code" in value && value.code === actionCancelledCode))
+  );
+}
+
+/** Checks whether an error represents a timeout (DOMException TimeoutError or Playwright TimeoutError). */
+export function isTimeoutLikeError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("name" in error && error.name === "TimeoutError") return true;
+  return false;
+}
+
+/** Checks whether an error represents an abort without assuming its cause. */
+export function isAbortLikeError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("name" in error && error.name === "AbortError") return true;
+  if ("code" in error && error.code === "ERR_ABORTED") return true;
+  if (error instanceof Error) {
+    return /\bERR_ABORTED\b|signal is aborted|This operation was aborted/iu.test(
+      error.message,
+    );
+  }
+  return false;
+}
+
+function collectCauseChain(root: unknown): readonly unknown[] {
+  const items: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = root;
+  while (
+    current !== undefined &&
+    current !== null &&
+    typeof current === "object" &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    items.push(current);
+    current = "cause" in current ? current.cause : undefined;
+  }
+  return items;
+}
+
+export type ClassifyAbortCauseInput = {
+  readonly error?: unknown;
+  readonly signal?: AbortSignal | undefined;
+  readonly timeoutSignal?: AbortSignal | undefined;
+  readonly requestTimedOut?: boolean | undefined;
+  readonly userCancelled?: boolean | undefined;
+  readonly budgetExceeded?: boolean | undefined;
+};
+
+/**
+ * Classifies an abort/timeout/budget failure strictly from concrete runtime evidence.
+ * Returns undefined for ordinary non-abort errors (e.g. connection refused or HTTP errors).
+ */
+export function classifyAbortCause(
+  input: ClassifyAbortCauseInput,
+): ManualRunAbortCause | undefined {
+  const errorChain = collectCauseChain(input.error);
+  const signalReasonChain =
+    input.signal?.aborted === true
+      ? collectCauseChain(input.signal.reason)
+      : [];
+
+  if (
+    input.userCancelled === true ||
+    signalReasonChain.some(isActionCancelledReason) ||
+    errorChain.some(isActionCancelledReason)
+  ) {
+    return "user_cancelled";
+  }
+
+  if (
+    input.budgetExceeded === true ||
+    signalReasonChain.some(isSourceAccessBudgetExceededError) ||
+    errorChain.some(isSourceAccessBudgetExceededError)
+  ) {
+    return "action_budget_exhausted";
+  }
+
+  if (
+    input.requestTimedOut === true ||
+    input.timeoutSignal?.aborted === true ||
+    errorChain.some(isTimeoutLikeError)
+  ) {
+    return "source_request_timeout";
+  }
+
+  if (
+    errorChain.some(isAbortLikeError) ||
+    signalReasonChain.some(isAbortLikeError)
+  ) {
+    return "unknown";
+  }
+
+  return undefined;
+}
+
+export type FailureDiagnosticContext = {
+  readonly stage?: string | undefined;
+  readonly target?: string | undefined;
+  readonly abortCause?: ManualRunAbortCause | undefined;
+};
+
+/** Error carrying structured failure stage, target, and abortCause for adapter/runtime reporting. */
+export class SourceRequestError extends Error {
+  readonly stage: string | undefined;
+  readonly target: string | undefined;
+  readonly abortCause: ManualRunAbortCause | undefined;
+  readonly statusCode: number | undefined;
+
+  constructor(
+    message: string,
+    context: FailureDiagnosticContext & {
+      readonly statusCode?: number | undefined;
+      readonly cause?: unknown;
+    } = {},
+  ) {
+    super(
+      message,
+      context.cause === undefined ? undefined : { cause: context.cause },
+    );
+    this.name = "SourceRequestError";
+    this.stage = context.stage;
+    this.target = context.target;
+    this.abortCause = context.abortCause;
+    this.statusCode = context.statusCode;
+  }
+}
+
+const validAbortCauses = new Set<ManualRunAbortCause>([
+  "user_cancelled",
+  "source_request_timeout",
+  "action_budget_exhausted",
+  "unknown",
+]);
+
+/** Extracts non-empty diagnostic fields (stage, target, abortCause) from an error or its cause chain. */
+export function readFailureDiagnosticContext(
+  error: unknown,
+): FailureDiagnosticContext {
+  let stage: string | undefined;
+  let target: string | undefined;
+  let abortCause: ManualRunAbortCause | undefined;
+
+  for (const item of collectCauseChain(error)) {
+    if (typeof item !== "object" || item === null) continue;
+    const record = item as Record<string, unknown>;
+    if (
+      stage === undefined &&
+      typeof record.stage === "string" &&
+      record.stage.length > 0
+    ) {
+      stage = record.stage;
+    }
+    if (
+      target === undefined &&
+      typeof record.target === "string" &&
+      record.target.length > 0
+    ) {
+      target = record.target;
+    }
+    if (
+      abortCause === undefined &&
+      typeof record.abortCause === "string" &&
+      validAbortCauses.has(record.abortCause as ManualRunAbortCause)
+    ) {
+      abortCause = record.abortCause as ManualRunAbortCause;
+    }
+  }
+
+  return {
+    ...(stage === undefined ? {} : { stage }),
+    ...(target === undefined ? {} : { target }),
+    ...(abortCause === undefined ? {} : { abortCause }),
+  };
+}

@@ -19,6 +19,21 @@ import { z } from "zod";
 import type { SourceAccessClient } from "./source-access.ts";
 
 export {
+  ActionCancelledError,
+  classifyAbortCause,
+  createActionCancelledReason,
+  isAbortLikeError,
+  isActionCancelledReason,
+  isTimeoutLikeError,
+  readFailureDiagnosticContext,
+  SourceRequestError,
+} from "./abort-diagnostics.ts";
+export type {
+  ClassifyAbortCauseInput,
+  FailureDiagnosticContext,
+} from "./abort-diagnostics.ts";
+
+export {
   cleanContent,
   isAcceptableMediaResponse,
   validateMediaResponse,
@@ -74,6 +89,7 @@ export { sourceTimeFrom } from "./source-time.ts";
 
 export {
   createSourceAccessBudget,
+  isSourceAccessBudgetExceededError,
   SourceAccessBudgetExceededError,
 } from "./source-access-budget.ts";
 export type {
@@ -117,6 +133,7 @@ export {
 
 export type {
   JsonObject,
+  ManualRunAbortCause,
   ManualRunFailure,
   SourceAdapterManifest,
   JsonSchema,
@@ -492,7 +509,7 @@ export function createSourceAdapterContext<
               binId: context.binId,
               runId: context.runId,
               sourceAdapterVersion: context.sourceAdapterVersion,
-            } as ArchiveSubmissionInput,
+            },
           },
           { init: { signal: context.signal } },
         );

@@ -11,8 +11,11 @@ import {
   type ManualRunExecution,
 } from "@binny/contracts";
 import {
+  classifyAbortCause,
+  createActionCancelledReason,
   createSourceAdapterContext,
   parseSourceAdapterInput,
+  readFailureDiagnosticContext,
   sourceAdapterManifest,
   isSourceAdapterActionError,
   createSourceAccessClient,
@@ -319,11 +322,24 @@ process.on("message", (value: unknown) => {
 
 process.once("SIGTERM", () => {
   cancelled = true;
-  actionAbort?.abort();
+  actionAbort?.abort(createActionCancelledReason());
 });
 
-function failureFrom(error: unknown) {
-  if (isSourceAdapterActionError(error)) return error.failure;
+function sanitizeFailureText(value: string, fallback: string): string {
+  const cleaned = value.replaceAll("\u0000", "").trim();
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+function failureFrom(error: unknown, signal?: AbortSignal) {
+  if (isSourceAdapterActionError(error)) {
+    if (cancelled && error.failure.abortCause === undefined) {
+      return {
+        ...error.failure,
+        abortCause: "user_cancelled" as const,
+      };
+    }
+    return error.failure;
+  }
   if (error instanceof SourceAccessStateUnavailableError) {
     return {
       code: error.code,
@@ -332,11 +348,68 @@ function failureFrom(error: unknown) {
       requiresHuman: false,
     } as const;
   }
+  const diagnostic = readFailureDiagnosticContext(error);
+  const abortCause =
+    diagnostic.abortCause ??
+    classifyAbortCause({ error, signal, userCancelled: cancelled });
+  const rawMessage = error instanceof Error ? error.message : "";
+  const diagnosticFields = {
+    ...(diagnostic.stage === undefined ? {} : { stage: diagnostic.stage }),
+    ...(diagnostic.target === undefined ? {} : { target: diagnostic.target }),
+    ...(abortCause === undefined ? {} : { abortCause }),
+  };
+
+  if (abortCause === "user_cancelled") {
+    return {
+      code: "source_adapter_action_cancelled",
+      message: "Source adapter action was cancelled.",
+      impact: "This run did not complete.",
+      requiresHuman: false,
+      ...diagnosticFields,
+    } as const;
+  }
+  if (abortCause === "action_budget_exhausted") {
+    return {
+      code: "source_access_budget_exhausted",
+      message: sanitizeFailureText(
+        rawMessage,
+        "Source access budget exhausted.",
+      ),
+      impact: "This run did not complete.",
+      requiresHuman: false,
+      ...diagnosticFields,
+    } as const;
+  }
+  if (abortCause === "source_request_timeout") {
+    return {
+      code: "source_request_timeout",
+      message: sanitizeFailureText(rawMessage, "Source request timed out."),
+      impact: "This run did not complete.",
+      requiresHuman: false,
+      ...diagnosticFields,
+    } as const;
+  }
+  if (abortCause === "unknown") {
+    return {
+      code: "source_adapter_execution_failed",
+      message: sanitizeFailureText(
+        rawMessage,
+        "Source request was aborted for an unknown reason.",
+      ),
+      impact: "This run did not complete.",
+      requiresHuman: false,
+      ...diagnosticFields,
+    } as const;
+  }
   return {
     code: "source_adapter_execution_failed",
-    message: "信源适配器动作执行失败。",
-    impact: "本次运行未能完成。",
+    message: sanitizeFailureText(
+      rawMessage,
+      "Source adapter action execution failed.",
+    ),
+    impact: "This run did not complete.",
     requiresHuman: false,
+    ...diagnosticFields,
   } as const;
 }
 
@@ -414,7 +487,7 @@ async function executeRun(
   }
 
   actionAbort = new AbortController();
-  if (cancelled) actionAbort.abort();
+  if (cancelled) actionAbort.abort(createActionCancelledReason());
   try {
     const accessDeclarations = sourceAccessConfigFromAdapterConfig(
       configured.data,
@@ -561,7 +634,7 @@ async function executeRun(
     return {
       status: "failed",
       completedScopes,
-      error: failureFrom(error),
+      error: failureFrom(error, actionAbort.signal),
     };
   }
 }

@@ -15,6 +15,7 @@ import {
   type IncrementalOngoingDocumentRecord,
 } from "@binny/source-adapter-sdk";
 
+import { fetchQoderDocument } from "./fetch.ts";
 import { cleanQoderMdx, extractQoderDocumentTitle } from "./mdx-cleaner.ts";
 import type {
   QoderCheckOutput,
@@ -194,56 +195,20 @@ export function extractEffectiveDate(text: string): string | undefined {
   return undefined;
 }
 
-/** Checks whether a response text is an HTML SPA shell or error page instead of markdown. */
-export function isHtmlSpaOrError(text: string): boolean {
-  if (/<(!doctype\s+html|html|head)[\s>]/iu.test(text)) {
-    if (/<div\s+id=["'](root|app|__next)["']\s*>\s*<\/div>/iu.test(text)) {
-      return true;
-    }
-    if (
-      /<title[^>]*>.*?(404|not\s+found|error|forbidden|页面不存在|错误).*?<\/title>/iu.test(
-        text,
-      )
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Fetches a text document with timeout and abort signal handling. */
+/** Fetches a text document with timeout, stage, target, and abort signal handling. */
 async function fetchText(
   url: string,
   signal: AbortSignal,
+  stage: string,
   timeoutMs = 20_000,
 ): Promise<string> {
-  const requestSignal = AbortSignal.any([
+  return await fetchQoderDocument({
+    url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      accept: "text/markdown, text/plain, */*",
-      "user-agent": "Binny SourceAdapter/1.0",
-    },
-    signal: requestSignal,
+    stage,
+    timeoutMs,
+    rejectHtmlSpaOrError: true,
   });
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`Fetch failed: ${url} returned HTTP ${response.status}`);
-  }
-
-  const text = await response.text();
-  if (isHtmlSpaOrError(text)) {
-    throw new Error(
-      `Fetch failed: ${url} returned an HTML SPA shell or error page instead of markdown`,
-    );
-  }
-
-  return text;
 }
 
 function failureFromProblems(
@@ -282,7 +247,12 @@ export async function checkCnAnnouncementsEvents(
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
 
   try {
-    const text = await fetchText(indexUrl, context.signal, 10_000);
+    const text = await fetchText(
+      indexUrl,
+      context.signal,
+      "fetching-index",
+      10_000,
+    );
     const docs = discoverCnAnnouncementDocs(text, indexUrl);
 
     if (docs.length === 0 && !text.includes("#")) {
@@ -337,7 +307,7 @@ export async function syncCnAnnouncementsEvents(
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
   const state = await loadIncrementalSyncState(context);
 
-  const indexText = await fetchText(indexUrl, context.signal);
+  const indexText = await fetchText(indexUrl, context.signal, "fetching-index");
   const activeDocs = discoverCnAnnouncementDocs(indexText, indexUrl);
   const activeKeys = new Set(activeDocs.map((doc) => doc.docKey));
 
@@ -360,7 +330,11 @@ export async function syncCnAnnouncementsEvents(
     for (const doc of activeDocs) {
       if (context.signal.aborted) throw context.signal.reason;
       try {
-        const rawMd = await fetchText(doc.fetchUrl, context.signal);
+        const rawMd = await fetchText(
+          doc.fetchUrl,
+          context.signal,
+          "fetching-document",
+        );
         const { cleanResult } = cleanQoderMdx(rawMd, {
           baseUrl: doc.canonicalUrl,
         });
@@ -408,7 +382,11 @@ export async function syncCnAnnouncementsEvents(
   for (const doc of activeDocs) {
     if (context.signal.aborted) throw context.signal.reason;
     try {
-      const rawMd = await fetchText(doc.fetchUrl, context.signal);
+      const rawMd = await fetchText(
+        doc.fetchUrl,
+        context.signal,
+        "fetching-document",
+      );
       const { cleanResult } = cleanQoderMdx(rawMd, {
         baseUrl: doc.canonicalUrl,
       });
@@ -522,7 +500,11 @@ export async function collectCnAnnouncementsEvents(
       }
     }
   } else {
-    const indexText = await fetchText(indexUrl, context.signal);
+    const indexText = await fetchText(
+      indexUrl,
+      context.signal,
+      "fetching-index",
+    );
     const discovered = discoverCnAnnouncementDocs(indexText, indexUrl);
     targetDocs =
       params.maxItems !== undefined && params.maxItems > 0
@@ -536,7 +518,11 @@ export async function collectCnAnnouncementsEvents(
   for (const doc of targetDocs) {
     if (context.signal.aborted) throw context.signal.reason;
     try {
-      const rawMd = await fetchText(doc.fetchUrl, context.signal);
+      const rawMd = await fetchText(
+        doc.fetchUrl,
+        context.signal,
+        "fetching-document",
+      );
       const { cleanResult } = cleanQoderMdx(rawMd, {
         baseUrl: doc.canonicalUrl,
       });

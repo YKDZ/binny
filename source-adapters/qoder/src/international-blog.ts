@@ -20,6 +20,7 @@ import {
 } from "@binny/source-adapter-sdk";
 import * as parse5 from "parse5";
 
+import { fetchQoderDocument } from "./fetch.ts";
 import type {
   QoderCheckOutput,
   QoderCollectOutput,
@@ -102,7 +103,7 @@ function findFirstElement(
 ): Element | undefined {
   if (isElement(root) && predicate(root)) return root;
   if ("childNodes" in root) {
-    for (const child of (root as ParentNode).childNodes) {
+    for (const child of root.childNodes) {
       const found = findFirstElement(child, predicate);
       if (found) return found;
     }
@@ -290,7 +291,7 @@ export function discoverInternationalBlogArticles(
   function buildParents(node: Node | ChildNode) {
     if (isElement(node) || "childNodes" in node) {
       const parentEl = isElement(node) ? node : undefined;
-      for (const child of (node as ParentNode).childNodes) {
+      for (const child of node.childNodes) {
         if (parentEl) parentMap.set(child, parentEl);
         buildParents(child);
       }
@@ -451,7 +452,7 @@ function locateArticleContainer(doc: Node): Element | undefined {
     function buildParents(node: Node | ChildNode) {
       if (isElement(node) || "childNodes" in node) {
         const parentEl = isElement(node) ? node : undefined;
-        for (const child of (node as ParentNode).childNodes) {
+        for (const child of node.childNodes) {
           if (parentEl) parentMap.set(child, parentEl);
           buildParents(child);
         }
@@ -570,7 +571,7 @@ export function extractInternationalBlogArticle(
     function buildParents(node: Node | ChildNode) {
       if (isElement(node) || "childNodes" in node) {
         const parentElement = isElement(node) ? node : undefined;
-        for (const child of (node as ParentNode).childNodes) {
+        for (const child of node.childNodes) {
           if (parentElement) parentMap.set(child, parentElement);
           buildParents(child);
         }
@@ -689,30 +690,19 @@ export function extractInternationalBlogArticle(
   };
 }
 
-/** Fetches HTML content with abort signal and user agent. */
-async function fetchHtml(url: string, signal: AbortSignal): Promise<string> {
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: {
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "user-agent": "Binny SourceAdapter/1.0 (+https://github.com/binny)",
-      },
-      signal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Failed to fetch ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
-  }
-
-  return await response.text();
+/** Fetches HTML content with timeout, stage, target, and abort signal handling. */
+async function fetchHtml(
+  url: string,
+  signal: AbortSignal,
+  stage: string,
+): Promise<string> {
+  return await fetchQoderDocument({
+    url,
+    signal,
+    stage,
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    userAgent: "Binny SourceAdapter/1.0 (+https://github.com/binny)",
+  });
 }
 
 function failureFromProblems(
@@ -747,7 +737,7 @@ export async function checkInternationalBlog(
 
   let listHtml: string;
   try {
-    listHtml = await fetchHtml(blogListUrl, context.signal);
+    listHtml = await fetchHtml(blogListUrl, context.signal, "fetching-index");
   } catch (error) {
     return {
       availability: "unavailable",
@@ -786,7 +776,11 @@ export async function checkInternationalBlog(
 
   const sampleCard = discovered[0]!;
   try {
-    const detailHtml = await fetchHtml(sampleCard.url, context.signal);
+    const detailHtml = await fetchHtml(
+      sampleCard.url,
+      context.signal,
+      "fetching-document",
+    );
     const extracted = extractInternationalBlogArticle(
       detailHtml,
       sampleCard.url,
@@ -829,7 +823,11 @@ export async function syncInternationalBlog(
   const blogListUrl =
     context.config.blogListUrl ?? DEFAULT_INTERNATIONAL_BLOG_URL;
   const state = await loadIncrementalSyncState(context);
-  const listHtml = await fetchHtml(blogListUrl, context.signal);
+  const listHtml = await fetchHtml(
+    blogListUrl,
+    context.signal,
+    "fetching-index",
+  );
   const discovered = discoverInternationalBlogArticles(listHtml, blogListUrl);
 
   const isInitialized = isIncrementalScopeInitialized(
@@ -886,7 +884,11 @@ export async function syncInternationalBlog(
     }
 
     try {
-      const detailHtml = await fetchHtml(card.url, context.signal);
+      const detailHtml = await fetchHtml(
+        card.url,
+        context.signal,
+        "fetching-document",
+      );
       const extracted = extractInternationalBlogArticle(
         detailHtml,
         card.url,
@@ -991,7 +993,11 @@ export async function collectInternationalBlog(
       }
     }
   } else {
-    const listHtml = await fetchHtml(blogListUrl, context.signal);
+    const listHtml = await fetchHtml(
+      blogListUrl,
+      context.signal,
+      "fetching-index",
+    );
     const discovered = discoverInternationalBlogArticles(listHtml, blogListUrl);
     const limited =
       params.maxItems !== undefined && params.maxItems > 0
@@ -1009,7 +1015,11 @@ export async function collectInternationalBlog(
 
   for (const item of targetArticles) {
     try {
-      const detailHtml = await fetchHtml(item.url, context.signal);
+      const detailHtml = await fetchHtml(
+        item.url,
+        context.signal,
+        "fetching-document",
+      );
       const extracted = extractInternationalBlogArticle(
         detailHtml,
         item.url,

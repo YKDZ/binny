@@ -1206,7 +1206,7 @@ function updateState(value: unknown): boolean {
       pause.topicId < 1 ||
       !Number.isSafeInteger(pause.milliseconds) ||
       pause.milliseconds < 1 ||
-      pause.milliseconds > 30_000
+      pause.milliseconds > 60_000
     )
       return false;
   }
@@ -1215,7 +1215,7 @@ function updateState(value: unknown): boolean {
   activeState = {
     ...activeState,
     ...updates,
-  } as SourceState;
+  };
   return true;
 }
 

@@ -21,8 +21,8 @@ import {
   buildFetchMdUrl,
   DEFAULT_CN_DOCS_INDEX_URL,
   extractDocKey,
-  isHtmlSpaOrError,
 } from "./cn-announcements-events.ts";
+import { fetchQoderDocument } from "./fetch.ts";
 import {
   cleanQoderMdx,
   extractQoderDocumentTitle,
@@ -462,6 +462,7 @@ export async function discoverCnChangelogDocs(
       } catch (error) {
         throw new Error(
           `Failed to fetch navigation overview page ${navUrl}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
       }
     }
@@ -589,6 +590,7 @@ export async function discoverInternationalChangelogDocs(
       } catch (error) {
         throw new Error(
           `Failed to fetch navigation overview page ${navUrl}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
         );
       }
     }
@@ -597,39 +599,20 @@ export async function discoverInternationalChangelogDocs(
   return directDocs;
 }
 
-/** Fetches a text document with timeout and abort signal handling. */
+/** Fetches a text document with timeout, stage, target, and abort signal handling. */
 async function fetchText(
   url: string,
   signal: AbortSignal,
+  stage: string,
   timeoutMs = 20_000,
 ): Promise<string> {
-  const requestSignal = AbortSignal.any([
+  return await fetchQoderDocument({
+    url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      accept: "text/markdown, text/plain, */*",
-      "user-agent": "Binny SourceAdapter/1.0",
-    },
-    signal: requestSignal,
+    stage,
+    timeoutMs,
+    rejectHtmlSpaOrError: true,
   });
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`Fetch failed: ${url} returned HTTP ${response.status}`);
-  }
-
-  const text = await response.text();
-  if (isHtmlSpaOrError(text)) {
-    throw new Error(
-      `Fetch failed: ${url} returned an HTML SPA shell or error page instead of markdown`,
-    );
-  }
-
-  return text;
 }
 
 function failureFromProblems(
@@ -661,9 +644,14 @@ export async function checkCnChangelogs(
 ): Promise<QoderCheckOutput> {
   const indexUrl = context.config.cnDocsIndexUrl ?? DEFAULT_CN_DOCS_INDEX_URL;
   try {
-    const text = await fetchText(indexUrl, context.signal, 10_000);
+    const text = await fetchText(
+      indexUrl,
+      context.signal,
+      "fetching-index",
+      10_000,
+    );
     const docs = await discoverCnChangelogDocs(text, indexUrl, (u) =>
-      fetchText(u, context.signal, 10_000),
+      fetchText(u, context.signal, "fetching-index", 10_000),
     );
 
     if (docs.length === 0) {
@@ -687,6 +675,7 @@ export async function checkCnChangelogs(
     const sampleMd = await fetchText(
       sampleDoc.fetchUrl,
       context.signal,
+      "fetching-document",
       10_000,
     );
     const { cleanResult } = cleanQoderMdx(sampleMd, {
@@ -740,9 +729,14 @@ export async function checkInternationalChangelogs(
   const indexUrl =
     context.config.intChangelogIndexUrl ?? DEFAULT_INTERNATIONAL_CHANGELOG_URL;
   try {
-    const text = await fetchText(indexUrl, context.signal, 10_000);
+    const text = await fetchText(
+      indexUrl,
+      context.signal,
+      "fetching-index",
+      10_000,
+    );
     const docs = await discoverInternationalChangelogDocs(text, indexUrl, (u) =>
-      fetchText(u, context.signal, 10_000),
+      fetchText(u, context.signal, "fetching-index", 10_000),
     );
 
     if (docs.length === 0) {
@@ -767,6 +761,7 @@ export async function checkInternationalChangelogs(
     const sampleMd = await fetchText(
       sampleDoc.fetchUrl,
       context.signal,
+      "fetching-document",
       10_000,
     );
     const { cleanResult } = cleanQoderMdx(sampleMd, {
@@ -831,14 +826,14 @@ async function syncRegionalChangelogs(
       DEFAULT_INTERNATIONAL_CHANGELOG_URL);
 
   const state = await loadIncrementalSyncState(context);
-  const indexText = await fetchText(indexUrl, context.signal);
+  const indexText = await fetchText(indexUrl, context.signal, "fetching-index");
 
   const activeDocs = isCn
     ? await discoverCnChangelogDocs(indexText, indexUrl, (u) =>
-        fetchText(u, context.signal),
+        fetchText(u, context.signal, "fetching-index"),
       )
     : await discoverInternationalChangelogDocs(indexText, indexUrl, (u) =>
-        fetchText(u, context.signal),
+        fetchText(u, context.signal, "fetching-index"),
       );
 
   const activeKeys = new Set(activeDocs.map((doc) => doc.docKey));
@@ -858,7 +853,11 @@ async function syncRegionalChangelogs(
     for (const doc of activeDocs) {
       if (context.signal.aborted) throw context.signal.reason;
       try {
-        const rawMd = await fetchText(doc.fetchUrl, context.signal);
+        const rawMd = await fetchText(
+          doc.fetchUrl,
+          context.signal,
+          "fetching-document",
+        );
         if (isNavigationDocKey(doc.docKey) || isNavigationPageContent(rawMd)) {
           throw new Error(
             `Navigation overview page ${doc.docKey} cannot be archived as changelog body`,
@@ -910,7 +909,11 @@ async function syncRegionalChangelogs(
   for (const doc of activeDocs) {
     if (context.signal.aborted) throw context.signal.reason;
     try {
-      const rawMd = await fetchText(doc.fetchUrl, context.signal);
+      const rawMd = await fetchText(
+        doc.fetchUrl,
+        context.signal,
+        "fetching-document",
+      );
       if (isNavigationDocKey(doc.docKey) || isNavigationPageContent(rawMd)) {
         throw new Error(
           `Navigation overview page ${doc.docKey} cannot be archived as changelog body`,
@@ -1079,13 +1082,17 @@ async function collectRegionalChangelogs(
       }
     }
   } else {
-    const indexText = await fetchText(indexUrl, context.signal);
+    const indexText = await fetchText(
+      indexUrl,
+      context.signal,
+      "fetching-index",
+    );
     const discovered = isCn
       ? await discoverCnChangelogDocs(indexText, indexUrl, (u) =>
-          fetchText(u, context.signal),
+          fetchText(u, context.signal, "fetching-index"),
         )
       : await discoverInternationalChangelogDocs(indexText, indexUrl, (u) =>
-          fetchText(u, context.signal),
+          fetchText(u, context.signal, "fetching-index"),
         );
 
     targetDocs =
@@ -1100,7 +1107,11 @@ async function collectRegionalChangelogs(
   for (const doc of targetDocs) {
     if (context.signal.aborted) throw context.signal.reason;
     try {
-      const rawMd = await fetchText(doc.fetchUrl, context.signal);
+      const rawMd = await fetchText(
+        doc.fetchUrl,
+        context.signal,
+        "fetching-document",
+      );
       if (isNavigationDocKey(doc.docKey) || isNavigationPageContent(rawMd)) {
         throw new Error(
           `Navigation overview page ${doc.docKey} cannot be archived as changelog body`,

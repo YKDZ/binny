@@ -10,6 +10,8 @@ import { runCli } from "../../src/main.ts";
 
 const requests: { readonly method: string; readonly url: URL }[] = [];
 const runId = "d34687fc-8f3e-45bb-9fa2-1162eae5edc5";
+const failedRunId = "b8c471b1-7154-4c9a-9f57-67f516c4d10b";
+const cancelledRunId = "a4f38290-9f4e-4b3e-8d12-2d1c94c8e201";
 const scheduleId = "a0a9c854-5f23-427b-9e62-1994db53e395";
 const fetch: typeof globalThis.fetch = async (input, init) => {
   const request = new Request(input, init);
@@ -75,6 +77,78 @@ const fetch: typeof globalThis.fetch = async (input, init) => {
         commits: [],
         output: { itemCount: 1 },
         stopReason: { code: "completed", message: "Action completed." },
+      },
+    });
+  }
+  if (url.pathname === `/bins/binny-one/runs/${failedRunId}`) {
+    return Response.json({
+      runId: failedRunId,
+      binId: "binny-one",
+      action: "collect",
+      sourceAdapterId: "example",
+      sourceAdapterVersion: "1.2.3",
+      status: "failed",
+      trigger: { kind: "manual" },
+      createdAt: "2026-11-03T08:15:00.000Z",
+      referenceTime: "2026-11-03T08:15:00.000Z",
+      startedAt: "2026-11-03T08:15:01.000Z",
+      finishedAt: "2026-11-03T08:15:31.000Z",
+      report: {
+        phase: "failed",
+        stage: "reading-topic",
+        target: "https://example.test/t/2401.json",
+      },
+      result: {
+        completedScopes: [],
+        commits: [],
+        stopReason: {
+          code: "linuxdo_source_unreachable",
+          message: "Source request timed out after 30000ms.",
+        },
+        error: {
+          code: "linuxdo_source_unreachable",
+          message: "Source request timed out after 30000ms.",
+          impact: "Topic was not collected.",
+          requiresHuman: false,
+          stage: "reading-topic",
+          target: "https://example.test/t/2401.json",
+          abortCause: "source_request_timeout",
+        },
+      },
+    });
+  }
+  if (url.pathname === `/bins/binny-one/runs/${cancelledRunId}`) {
+    return Response.json({
+      runId: cancelledRunId,
+      binId: "binny-one",
+      action: "sync",
+      sourceAdapterId: "example",
+      sourceAdapterVersion: "1.2.3",
+      status: "cancelled",
+      trigger: {
+        kind: "schedule",
+        scheduleId,
+        scheduledFor: "2026-11-03T08:15:00.000Z",
+      },
+      createdAt: "2026-11-03T08:15:00.000Z",
+      referenceTime: "2026-11-03T08:15:00.000Z",
+      startedAt: "2026-11-03T08:15:01.000Z",
+      finishedAt: "2026-11-03T08:15:05.000Z",
+      cancellationRequestedAt: "2026-11-03T08:15:04.000Z",
+      stopConfirmedAt: "2026-11-03T08:15:05.000Z",
+      report: {
+        phase: "cancelled",
+        stage: "scanning-post-feed",
+        target: "https://example.test/posts.json",
+        abortCause: "user_cancelled",
+      },
+      result: {
+        completedScopes: [],
+        commits: [],
+        stopReason: {
+          code: "cancelled",
+          message: "Run was cancelled.",
+        },
       },
     });
   }
@@ -266,5 +340,91 @@ void describe("run and schedule list commands", () => {
     assert.match(output, /Parameters:\n  \{/u);
     assert.match(output, /"sourceUrl": "https:\/\/example\.test\/feed"/u);
     assert.doesNotMatch(output, /"scheduleId":/u);
+  });
+
+  void it("renders failure stage, target, and abortCause in run get text and structured outputs", async () => {
+    let textOutput = "";
+    const textExitCode = await runCli({
+      argv: [
+        "node",
+        "binny",
+        "run",
+        "get",
+        "binny-one",
+        failedRunId,
+        "--output",
+        "text",
+      ],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        textOutput += chunk;
+      },
+    });
+
+    assert.equal(textExitCode, 0, textOutput);
+    assert.match(textOutput, /^Stage: reading-topic$/mu);
+    assert.match(
+      textOutput,
+      /^Target: https:\/\/example\.test\/t\/2401\.json$/mu,
+    );
+    assert.match(textOutput, /^Abort cause: source_request_timeout$/mu);
+
+    let structuredOutput = "";
+    const structuredExitCode = await runCli({
+      argv: ["node", "binny", "run", "get", "binny-one", failedRunId],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        structuredOutput += chunk;
+      },
+    });
+    assert.equal(structuredExitCode, 0, structuredOutput);
+    const wire = JSON.parse(structuredOutput) as {
+      readonly data: {
+        readonly result?: {
+          readonly error?: {
+            readonly stage?: string;
+            readonly target?: string;
+            readonly abortCause?: string;
+          };
+        };
+      };
+    };
+    assert.equal(wire.data.result?.error?.stage, "reading-topic");
+    assert.equal(
+      wire.data.result?.error?.target,
+      "https://example.test/t/2401.json",
+    );
+    assert.equal(wire.data.result?.error?.abortCause, "source_request_timeout");
+
+    let cancelledText = "";
+    const cancelledExitCode = await runCli({
+      argv: [
+        "node",
+        "binny",
+        "run",
+        "get",
+        "binny-one",
+        cancelledRunId,
+        "--output",
+        "text",
+      ],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        cancelledText += chunk;
+      },
+    });
+    assert.equal(cancelledExitCode, 0, cancelledText);
+    assert.match(cancelledText, /^Stage: scanning-post-feed$/mu);
+    assert.match(
+      cancelledText,
+      /^Target: https:\/\/example\.test\/posts\.json$/mu,
+    );
+    assert.match(cancelledText, /^Abort cause: user_cancelled$/mu);
   });
 });
