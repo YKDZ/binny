@@ -7,7 +7,9 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   type ArchiveResourceMetadata,
   type ArchiveSubmissionInput,
@@ -807,16 +809,27 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
       assert.equal(intlArticle.extensions["modelsReleaseDate"], "2026-10-28");
       assert.equal(intlArticle.extensions["articleContentDate"], "2026-10-28");
 
-      // Verify parameter limits: maxItems
+      // Verify parameter limits: maxItems truncating 2 -> 1 omits scope from completedScopes
       const { context: maxCtx, submissions: maxSubmissions } =
         createTestContext(testConfig);
       const maxResult = await sourceAdapter.actions.collect.execute(maxCtx, {
         maxItems: 1,
         sourceIds: ["cn"],
       });
-      assert.deepEqual(maxResult.completedScopes, ["cn"]);
+      assert.deepEqual(maxResult.completedScopes, []);
       // 1 models doc + 1 article = 2 submissions
       assert.equal(maxSubmissions.length, 2);
+
+      // Non-truncating maxItems retains completedScopes
+      const { context: exactCtx } = createTestContext(testConfig);
+      const exactResult = await sourceAdapter.actions.collect.execute(
+        exactCtx,
+        {
+          maxItems: 2,
+          sourceIds: ["cn"],
+        },
+      );
+      assert.deepEqual(exactResult.completedScopes, ["cn"]);
 
       // Verify parameter filtering: itemUrls
       const targetArticleUrl = `${origin}/cn/news/music-28`;
@@ -847,6 +860,165 @@ void test("MiniMax check, sync, and collect actions against mock server", async 
         },
         (err: unknown) => isSourceAdapterActionError(err),
       );
+    },
+  );
+
+  await t.test(
+    "sync isolates article B failure so C still runs, persists A/C and partial media completeness, and propagates cancellation",
+    async () => {
+      let version: 1 | 2 = 1;
+      let bFails = true;
+      let fetchesA = 0;
+      let fetchesB = 0;
+      let fetchesC = 0;
+
+      const partialServer = createServer((req, res) => {
+        const path = new URL(req.url ?? "/", "http://localhost").pathname;
+        if (path === "/cn/models.md") {
+          res.writeHead(200, {
+            "content-type": "text/markdown; charset=utf-8",
+          });
+          if (version === 1) {
+            res.end(
+              "# 模型发布\n\n## 2026-10-01\n\n- [Base](http://127.0.0.1/cn/news/base)\n",
+            );
+          } else {
+            res.end(
+              `# 模型发布\n\n## 2026-11-08\n\n- [Post A](http://127.0.0.1:${partialPort}/cn/news/a)\n- [Post B](http://127.0.0.1:${partialPort}/cn/news/b)\n- [Post C](http://127.0.0.1:${partialPort}/cn/news/c)\n`,
+            );
+          }
+          return;
+        }
+        if (path === "/cn/news/a") {
+          fetchesA += 1;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(
+            "<article><h1>Post A</h1><p>Body A</p><img src='/img/broken.png' /></article>",
+          );
+          return;
+        }
+        if (path === "/cn/news/b") {
+          fetchesB += 1;
+          if (bFails) {
+            res.writeHead(500);
+            res.end("500");
+            return;
+          }
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end("<article><h1>Post B</h1><p>Body B</p></article>");
+          return;
+        }
+        if (path === "/cn/news/c") {
+          fetchesC += 1;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end("<article><h1>Post C</h1><p>Body C</p></article>");
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      partialServer.listen(0, "127.0.0.1");
+      await once(partialServer, "listening");
+      const partialPort = (partialServer.address() as AddressInfo).port;
+      const partialConfig: MinimaxConfig = {
+        sources: [
+          {
+            id: "cn",
+            region: "cn",
+            language: "zh-CN",
+            modelsReleaseUrl: `http://127.0.0.1:${partialPort}/cn/models.md`,
+            allowedArticleHosts: ["127.0.0.1"],
+          },
+        ],
+      };
+
+      let storedState: IncrementalSyncState | undefined;
+      const persistentState = {
+        async load() {
+          return storedState;
+        },
+        async save(state: unknown) {
+          storedState = state as IncrementalSyncState;
+        },
+      };
+
+      try {
+        const { context: ctx1 } = createTestContext(partialConfig, {
+          persistentState,
+        });
+        await sourceAdapter.actions.sync.execute(ctx1, {});
+
+        version = 2;
+        const { context: ctx2, submissions: subs2 } = createTestContext(
+          partialConfig,
+          { persistentState },
+        );
+        await assert.rejects(
+          () => sourceAdapter.actions.sync.execute(ctx2, {}),
+          (err: unknown) => {
+            assert.ok(isSourceAdapterActionError(err));
+            assert.deepEqual(err.completedScopes, []);
+            return true;
+          },
+        );
+
+        // Article B failed, yet C was still attempted and A/C + models.md were persisted
+        assert.equal(fetchesA, 1);
+        assert.equal(fetchesB, 1);
+        assert.equal(fetchesC, 1);
+        assert.equal(subs2.length, 3); // release-notes:models + a + c
+        assert.equal(
+          storedState?.scopes["cn"]?.entries["article:cn/news/a"]
+            ?.archivedCompleteness,
+          "partial",
+        );
+        assert.equal(
+          storedState?.scopes["cn"]?.entries["article:cn/news/c"]
+            ?.archivedCompleteness,
+          "complete",
+        );
+        assert.equal(
+          storedState?.scopes["cn"]?.entries["article:cn/news/b"],
+          undefined,
+        );
+
+        // Retry after B recovers: A and C are NOT re-fetched
+        bFails = false;
+        const { context: ctx3, submissions: subs3 } = createTestContext(
+          partialConfig,
+          { persistentState },
+        );
+        const retryRes = await sourceAdapter.actions.sync.execute(ctx3, {});
+        assert.deepEqual(retryRes.completedScopes, ["cn"]);
+        assert.equal(fetchesA, 1);
+        assert.equal(fetchesC, 1);
+        assert.equal(fetchesB, 2);
+        assert.equal(subs3.length, 1);
+        assert.equal(subs3[0]?.items[0]?.sourceKey.key, "article:cn/news/b");
+
+        // User cancellation propagates immediately instead of being wrapped
+        const cancelController = new AbortController();
+        const originalFetch = globalThis.fetch;
+        globalThis.fetch = async (_input, init) => {
+          cancelController.abort(createActionCancelledReason());
+          throw init?.signal?.reason ?? createActionCancelledReason();
+        };
+        try {
+          const { context: cancelCtx } = createTestContext(partialConfig, {
+            persistentState,
+            signal: cancelController.signal,
+          });
+          await assert.rejects(
+            () => sourceAdapter.actions.sync.execute(cancelCtx, {}),
+            (err: unknown) => isActionCancelledReason(err),
+          );
+        } finally {
+          globalThis.fetch = originalFetch;
+        }
+      } finally {
+        partialServer.close();
+      }
     },
   );
 });

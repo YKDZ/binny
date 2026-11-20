@@ -22,6 +22,8 @@ export {
   ActionCancelledError,
   classifyAbortCause,
   createActionCancelledReason,
+  defaultSourceRequestTimeoutMs,
+  fetchSourceResponse,
   isAbortLikeError,
   isActionCancelledReason,
   isTimeoutLikeError,
@@ -31,6 +33,8 @@ export {
 export type {
   ClassifyAbortCauseInput,
   FailureDiagnosticContext,
+  FetchedSourceResponse,
+  FetchSourceResponseOptions,
 } from "./abort-diagnostics.ts";
 
 export {

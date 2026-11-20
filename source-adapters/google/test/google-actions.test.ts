@@ -5,7 +5,9 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   sourceAdapterManifest,
   type ArchiveResourceMetadata,
@@ -878,5 +880,389 @@ await test("Article full-text failure fails scope without falling back to summar
     assert.equal(entry?.archivedCompleteness, "partial");
   } finally {
     server.close();
+  }
+});
+
+await test("Incremental sync persists archived item A when item B fails, skips A on retry, and advances etag only after full feed completion", async () => {
+  const submissions: GoogleSubmission[] = [];
+  const resources: ArchiveResourceMetadata[] = [];
+  let persistentStateData: IncrementalSyncState | undefined;
+  let feedVersion: 1 | 2 = 1;
+  let articleBFails = true;
+  let articleAFetches = 0;
+  let articleBFetches = 0;
+  const seenIfNoneMatch: (string | undefined)[] = [];
+
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+
+    if (path === "/partial/rss") {
+      const etag = `"partial-v${feedVersion}"`;
+      seenIfNoneMatch.push(request.headers["if-none-match"]);
+      if (request.headers["if-none-match"] === etag) {
+        response.writeHead(304, { etag });
+        response.end();
+        return;
+      }
+
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        etag,
+      });
+
+      const items = [
+        `
+        <item>
+          <guid>urn:google:base</guid>
+          <title>Baseline Item</title>
+          <link>${origin}/partial/base</link>
+          <pubDate>Mon, 02 Nov 2026 08:00:00 GMT</pubDate>
+        </item>
+        `,
+      ];
+
+      if (feedVersion === 2) {
+        items.push(
+          `
+          <item>
+            <guid>urn:google:a</guid>
+            <title>Article A</title>
+            <link>${origin}/partial/a</link>
+            <pubDate>Tue, 03 Nov 2026 09:00:00 GMT</pubDate>
+          </item>
+          `,
+          `
+          <item>
+            <guid>urn:google:b</guid>
+            <title>Article B</title>
+            <link>${origin}/partial/b</link>
+            <pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate>
+          </item>
+          `,
+        );
+      }
+
+      response.end(`
+        <rss version="2.0">
+          <channel>
+            <title>Google AI Partial Sync</title>
+            ${items.join("")}
+          </channel>
+        </rss>
+      `);
+      return;
+    }
+
+    if (path === "/partial/a") {
+      articleAFetches += 1;
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        "<article><h1>Article A</h1><p>Full text for article A preserved across partial failure.</p></article>",
+      );
+      return;
+    }
+
+    if (path === "/partial/b") {
+      articleBFetches += 1;
+      if (articleBFails) {
+        response.writeHead(500, { "content-type": "text/plain" });
+        response.end("Temporary upstream error");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        "<article><h1>Article B</h1><p>Full text for article B after recovery.</p></article>",
+      );
+      return;
+    }
+
+    response.writeHead(404);
+    response.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const client = createMockClient(submissions, resources);
+  const makeContext = (signal = new AbortController().signal) =>
+    createSourceAdapterContext<
+      GoogleConfig,
+      typeof sourceAdapter.extensionsSchema,
+      never
+    >(
+      client,
+      {
+        binId: "google-test-bin",
+        identityId: "google-test-identity",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T00:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: {
+          sources: [
+            {
+              id: "google-ai",
+              url: `${origin}/partial/rss`,
+              title: "Google AI Blog",
+            },
+          ],
+        },
+        signal,
+        persistentState: {
+          async load() {
+            return persistentStateData;
+          },
+          async save(state: unknown) {
+            persistentStateData = state as IncrementalSyncState;
+          },
+        },
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  try {
+    // 1. Baseline sync records v1 etag
+    const baseline = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(baseline.completedScopes, ["google-ai"]);
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.etag,
+      '"partial-v1"',
+    );
+
+    // 2. Feed updates to v2 with A (succeeds) and B (fails)
+    feedVersion = 2;
+    articleBFails = true;
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => {
+        assert.ok(isSourceAdapterActionError(error));
+        assert.deepEqual(error.completedScopes, []);
+        return true;
+      },
+    );
+
+    // Article A was submitted and persisted immediately; feed etag stayed at v1
+    assert.equal(articleAFetches, 1);
+    assert.equal(articleBFetches, 1);
+    assert.equal(submissions.length, 1);
+    assert.equal(submissions[0]?.items[0]?.sourceKey.key, "urn:google:a");
+    assert.ok(
+      submissions[0]?.items[0]?.body?.markdown?.includes(
+        "Full text for article A preserved across partial failure.",
+      ),
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:a"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:b"],
+      undefined,
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.etag,
+      '"partial-v1"',
+    );
+
+    // 3. Recover B and sync again: A must NOT be re-fetched; B is archived; etag advances to v2
+    articleBFails = false;
+    const retryRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(retryRes.completedScopes, ["google-ai"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"partial-v1"');
+    assert.equal(
+      articleAFetches,
+      1,
+      "Archived unchanged item A must not be re-fetched",
+    );
+    assert.equal(articleBFetches, 2);
+    assert.equal(submissions.length, 2);
+    assert.equal(submissions[1]?.items[0]?.sourceKey.key, "urn:google:b");
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.etag,
+      '"partial-v2"',
+    );
+
+    // 4. Subsequent sync sends v2 etag and receives 304
+    const thirdRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(thirdRes.completedScopes, ["google-ai"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"partial-v2"');
+    assert.equal(articleAFetches, 1);
+    assert.equal(articleBFetches, 2);
+  } finally {
+    server.close();
+  }
+});
+
+await test("Collect omits truncated scope from completedScopes when maxItems < items.length and persists partial progress", async () => {
+  const submissions: GoogleSubmission[] = [];
+  const resources: ArchiveResourceMetadata[] = [];
+  let persistentStateData: IncrementalSyncState | undefined;
+
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+    if (path === "/feed") {
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      response.end(`
+        <rss version="2.0">
+          <channel>
+            <title>Google AI</title>
+            <item>
+              <guid>urn:google:1</guid>
+              <title>Item 1</title>
+              <link>${origin}/a1</link>
+            </item>
+            <item>
+              <guid>urn:google:2</guid>
+              <title>Item 2</title>
+              <link>${origin}/a2</link>
+            </item>
+          </channel>
+        </rss>
+      `);
+      return;
+    }
+    if (path === "/a1") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<article><h1>Item 1</h1><p>Body for item 1.</p></article>");
+      return;
+    }
+    if (path === "/a2") {
+      response.writeHead(500);
+      response.end("fail");
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const client = createMockClient(submissions, resources);
+  const context = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [{ id: "google-ai", url: `${origin}/feed` }],
+      },
+      signal: new AbortController().signal,
+      persistentState: {
+        async load() {
+          return persistentStateData;
+        },
+        async save(state: unknown) {
+          persistentStateData = state as IncrementalSyncState;
+        },
+      },
+    },
+    sourceAdapter.extensionsSchema,
+  );
+
+  try {
+    const truncated = await sourceAdapter.actions.collect.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(truncated.completedScopes, []);
+    assert.equal(submissions.length, 1);
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:1"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+
+    // Partial failure in collect also preserves A's saved entry
+    await assert.rejects(
+      () => sourceAdapter.actions.collect.execute(context, {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:1"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+  } finally {
+    server.close();
+  }
+});
+
+await test("Google adapter classifies per-request timeout and propagates user cancellation", async () => {
+  const client = createMockClient([], []);
+  const controller = new AbortController();
+  const baseContext = createSourceAdapterContext<
+    GoogleConfig,
+    typeof sourceAdapter.extensionsSchema,
+    never
+  >(
+    client,
+    {
+      binId: "google-test-bin",
+      identityId: "google-test-identity",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T00:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: {
+        sources: [{ id: "google-ai", url: "https://example.test/feed.xml" }],
+      },
+      signal: controller.signal,
+      persistentState: {
+        async load() {
+          return undefined;
+        },
+        async save() {},
+      },
+    },
+    sourceAdapter.extensionsSchema,
+  );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {
+      throw new DOMException("signal timed out", "TimeoutError");
+    };
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(baseContext, {}),
+      (error: unknown) => {
+        assert.ok(isSourceAdapterActionError(error));
+        assert.equal(error.failure.abortCause, "source_request_timeout");
+        return true;
+      },
+    );
+
+    globalThis.fetch = async (_input, init) => {
+      controller.abort(createActionCancelledReason());
+      throw init?.signal?.reason ?? createActionCancelledReason();
+    };
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(baseContext, {}),
+      (error: unknown) => isActionCancelledReason(error),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

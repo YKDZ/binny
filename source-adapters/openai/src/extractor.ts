@@ -111,7 +111,7 @@ export type AccessFailureResult =
 
 /** Detects Cloudflare challenge, 403, or soft fallback redirect. */
 export function detectOpenAiAccessFailure(
-  response: Response,
+  response: Pick<Response, "status" | "headers" | "url">,
   html: string,
   targetUrl: string,
 ): AccessFailureResult {

@@ -344,7 +344,7 @@ export async function syncCnAnnouncementsEvents(
         );
         baselineOngoingDocs[doc.docKey] = { contentHash };
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         hasFailures = true;
         problems.push({
           docKey: doc.docKey,
@@ -480,6 +480,8 @@ export async function collectCnAnnouncementsEvents(
 
   let targetDocs: DiscoveredCnDoc[] = [];
 
+  let truncatedByMaxItems = false;
+
   if (params.articleUrls && params.articleUrls.length > 0) {
     for (const url of params.articleUrls) {
       if (
@@ -510,6 +512,7 @@ export async function collectCnAnnouncementsEvents(
       params.maxItems !== undefined && params.maxItems > 0
         ? discovered.slice(0, params.maxItems)
         : discovered;
+    truncatedByMaxItems = targetDocs.length < discovered.length;
   }
 
   const problems: { docKey: string; message: string }[] = [];
@@ -587,13 +590,17 @@ export async function collectCnAnnouncementsEvents(
   if (hasFailures || problems.length > 0) {
     throw failureFromProblems(
       problems,
-      hasFailures ? [] : [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+      hasFailures || truncatedByMaxItems
+        ? []
+        : [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
     );
   }
 
   await saveIncrementalSyncState(context, state);
 
   return {
-    completedScopes: [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
+    completedScopes: truncatedByMaxItems
+      ? []
+      : [CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID],
   };
 }

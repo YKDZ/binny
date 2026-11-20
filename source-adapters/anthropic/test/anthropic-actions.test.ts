@@ -12,7 +12,9 @@ import type {
   SourceAdapterApiClient,
 } from "@binny/source-adapter-sdk";
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   sourceAdapterManifest,
 } from "@binny/source-adapter-sdk";
@@ -714,6 +716,199 @@ message = client.messages.create(model="claude-opus-5-5", max_tokens=1024)</code
       (sub) => sub.items[0]?.sourceRef === failingCollectUrl,
     );
     assert.equal(emptySubmission, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+void test("Anthropic sync/collect persist item A immediately, omit truncated maxItems sections from completedScopes, and classify timeout/cancellation", async () => {
+  let version: 1 | 2 = 1;
+  let fetchesA = 0;
+  let fetchesB = 0;
+
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path === "/news") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      if (version === 1) {
+        res.end(`
+          <html><body>
+            <a href="/news/base-item"><h3>Base Item</h3><time>Oct 1, 2026</time></a>
+          </body></html>
+        `);
+      } else {
+        res.end(`
+          <html><body>
+            <a href="/news/item-a"><h3>Item A</h3><time>Nov 1, 2026</time></a>
+            <a href="/news/item-b"><h3>Item B</h3><time>Nov 2, 2026</time></a>
+          </body></html>
+        `);
+      }
+      return;
+    }
+    if (path === "/news/item-a") {
+      fetchesA += 1;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<article><h1>Item A</h1><p>Substantive body for A.</p></article>",
+      );
+      return;
+    }
+    if (path === "/news/item-b") {
+      fetchesB += 1;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<article><h1>Item B</h1><p>Substantive body for B.</p></article>",
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  let storedState: IncrementalSyncState | undefined;
+  const persistentState = {
+    async load() {
+      return storedState;
+    },
+    async save(state: unknown) {
+      storedState = state as IncrementalSyncState;
+    },
+  };
+
+  const submissions: ArchiveSubmissionInput[] = [];
+  const makeContext = (
+    signal = new AbortController().signal,
+    abortAfterA = false,
+  ) => {
+    const controller = new AbortController();
+    const activeSignal = abortAfterA ? controller.signal : signal;
+    const mockClient = {
+      archives: {
+        async $post({ json }: { json: ArchiveSubmissionInput }) {
+          submissions.push(json);
+          if (abortAfterA && json.items[0]?.sourceKey.key === "/news/item-a") {
+            controller.abort(createActionCancelledReason());
+          }
+          return {
+            status: 201 as const,
+            json: async () => ({
+              commitId: randomUUID(),
+              archiveSeq: String(submissions.length),
+              binId: "anthropic-test-bin",
+              runId: randomUUID(),
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T00:00:00.000Z",
+              recordedAt: "2026-11-07T00:00:00.000Z",
+              items: json.items.map((item) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: item.sourceKey,
+              })),
+              relations: [],
+            }),
+          };
+        },
+      },
+      resources: {
+        async $post() {
+          return { status: 201 as const, json: async () => ({}) };
+        },
+        resolve: {
+          async $post() {
+            return {
+              status: 200 as const,
+              json: async () => ({ resources: [], items: [], mediaByUrl: {} }),
+            };
+          },
+        },
+      },
+    } as unknown as SourceAdapterApiClient;
+
+    return createSourceAdapterContext(
+      mockClient,
+      {
+        binId: "anthropic-test-bin",
+        identityId: "anthropic-test-id",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T00:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: { sections: [{ id: "news", url: `${origin}/news` }] },
+        signal: activeSignal,
+        persistentState,
+        report: async () => {},
+      },
+      sourceAdapter.extensionsSchema,
+    );
+  };
+
+  try {
+    // 1. Baseline sync
+    await sourceAdapter.actions.sync.execute(makeContext(), {});
+
+    // 2. Sync v2 aborted right after item A commits -> item A state is persisted before abort
+    version = 2;
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.sync.execute(makeContext(undefined, true), {}),
+      (err: unknown) => isActionCancelledReason(err),
+    );
+    assert.equal(fetchesA, 1);
+    assert.equal(fetchesB, 0);
+    assert.equal(
+      storedState?.scopes["news"]?.entries["/news/item-a"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+
+    // 3. Subsequent sync skips item A and archives item B
+    const resumeRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(resumeRes.completedScopes, ["section:news"]);
+    assert.equal(fetchesA, 1);
+    assert.equal(fetchesB, 1);
+
+    // 4. Collect with maxItems truncating 2 -> 1 omits section:news from completedScopes
+    const truncRes = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      {
+        sectionIds: ["news"],
+        maxItems: 1,
+      },
+    );
+    assert.deepEqual(truncRes.completedScopes, []);
+
+    const fullRes = await sourceAdapter.actions.collect.execute(makeContext(), {
+      sectionIds: ["news"],
+      maxItems: 2,
+    });
+    assert.deepEqual(fullRes.completedScopes, ["section:news"]);
+
+    // 5. Timeout classification
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => {
+        throw new DOMException("signal timed out", "TimeoutError");
+      };
+      await assert.rejects(
+        () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+        (err: unknown) => {
+          assert.ok(isSourceAdapterActionError(err));
+          assert.equal(err.failure.abortCause, "source_request_timeout");
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   } finally {
     server.close();
   }

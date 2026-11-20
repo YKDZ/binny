@@ -875,7 +875,7 @@ async function syncRegionalChangelogs(
         );
         baselineOngoingDocs[doc.docKey] = { contentHash };
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         hasFailures = true;
         problems.push({
           docKey: doc.docKey,
@@ -1041,6 +1041,7 @@ async function collectRegionalChangelogs(
 
   const state = await loadIncrementalSyncState(context);
   let targetDocs: DiscoveredChangelogDoc[] = [];
+  let truncatedByMaxItems = false;
 
   if (params.articleUrls && params.articleUrls.length > 0) {
     for (const url of params.articleUrls) {
@@ -1099,6 +1100,7 @@ async function collectRegionalChangelogs(
       params.maxItems !== undefined && params.maxItems > 0
         ? discovered.slice(0, params.maxItems)
         : discovered;
+    truncatedByMaxItems = targetDocs.length < discovered.length;
   }
 
   const problems: { docKey: string; message: string }[] = [];
@@ -1191,13 +1193,17 @@ async function collectRegionalChangelogs(
   }
 
   if (hasFailures || problems.length > 0) {
-    throw failureFromProblems(scopeId, problems, hasFailures ? [] : [scopeId]);
+    throw failureFromProblems(
+      scopeId,
+      problems,
+      hasFailures || truncatedByMaxItems ? [] : [scopeId],
+    );
   }
 
   await saveIncrementalSyncState(context, state);
 
   return {
-    completedScopes: [scopeId],
+    completedScopes: truncatedByMaxItems ? [] : [scopeId],
   };
 }
 

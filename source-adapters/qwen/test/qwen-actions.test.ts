@@ -5,6 +5,8 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   type ArchiveCommit,
   type ArchiveResourceMetadata,
@@ -47,7 +49,7 @@ function createSourceAdapterContext(options: {
     languages: ["zh-CN", "en-US"],
     endpointUrl: `${options.origin}/api/v2/article/retrieval`,
     articleType: "qwen_ai",
-    siteBaseUrl: `${options.origin}`,
+    siteBaseUrl: options.origin,
     ...options.config,
   };
 
@@ -772,17 +774,161 @@ void test("collect action supports filtering by paths and maxItems", async () =>
     assert.equal(ctxPath.submissions.length, 1);
     assert.equal(ctxPath.submissions[0]?.items[0]?.sourceKey.key, "item-2");
 
-    // Filter by maxItems
+    // Filter by maxItems (truncates 3 -> 2 so scope is omitted from completedScopes)
     const ctxMax = createSourceAdapterContext({
       origin,
       config: { languages: ["en-US"] },
     });
-    await sourceAdapter.actions.collect.execute(ctxMax.context, {
-      maxItems: 2,
-    });
+    const maxTruncatedResult = await sourceAdapter.actions.collect.execute(
+      ctxMax.context,
+      {
+        maxItems: 2,
+      },
+    );
+    assert.deepEqual(maxTruncatedResult.completedScopes, []);
     assert.equal(ctxMax.submissions.length, 2);
     assert.equal(ctxMax.submissions[0]?.items[0]?.sourceKey.key, "item-1");
     assert.equal(ctxMax.submissions[1]?.items[0]?.sourceKey.key, "item-2");
+
+    // Non-truncating maxItems retains completedScopes
+    const ctxExact = createSourceAdapterContext({
+      origin,
+      config: { languages: ["en-US"] },
+    });
+    const exactResult = await sourceAdapter.actions.collect.execute(
+      ctxExact.context,
+      {
+        maxItems: 3,
+      },
+    );
+    assert.deepEqual(exactResult.completedScopes, ["lang:en-US"]);
+  } finally {
+    server.close();
+  }
+});
+
+void test("qwen sync persists zh-CN and item A progress when en-US or item B fails, and propagates timeout/cancellation", async () => {
+  let enFails = true;
+  let phase: 1 | 2 = 1;
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/api/v2/article/retrieval") {
+      const lang = url.searchParams.get("language");
+      if (lang === "en-US" && enFails) {
+        res.writeHead(500);
+        res.end("upstream error");
+        return;
+      }
+      const articles =
+        lang === "zh-CN" && phase === 2
+          ? [
+              { path: "a", title: "A", content: "<p>Article A content</p>" },
+              { path: "b", title: "B", content: "<p>Article B content</p>" },
+            ]
+          : lang === "zh-CN"
+            ? [{ path: "base-zh", title: "Base ZH", content: "<p>Base</p>" }]
+            : [{ path: "base-en", title: "Base EN", content: "<p>Base</p>" }];
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ success: true, data: { articles } }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  try {
+    // 1. Cross-language failure: zh-CN baseline persists and stays in completedScopes when en-US fails
+    const ctx1 = createSourceAdapterContext({ origin });
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(ctx1.context, {}),
+      (error: unknown) => {
+        assert.ok(isSourceAdapterActionError(error));
+        assert.deepEqual(error.completedScopes, ["lang:zh-CN"]);
+        return true;
+      },
+    );
+    const stateAfterLangFail = ctx1.getState();
+    assert.ok(stateAfterLangFail?.scopes["lang:zh-CN"]?.entries["base-zh"]);
+
+    // 2. Within zh-CN: A submits and persists immediately; B fails submission -> next sync skips A
+    enFails = false;
+    phase = 2;
+    let failB = true;
+    const baseCtx = createSourceAdapterContext({
+      origin,
+      config: { languages: ["zh-CN"] },
+      initialState: stateAfterLangFail,
+    });
+    const ctxWithFailB: QwenTestContext = {
+      ...baseCtx.context,
+      archive: {
+        async submit(input) {
+          if (failB && input.items[0]?.sourceKey.key === "b") {
+            throw new Error("archive submit error on b");
+          }
+          return await baseCtx.context.archive.submit(input);
+        },
+      },
+    };
+
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(ctxWithFailB, {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(baseCtx.submissions.length, 1);
+    assert.equal(baseCtx.submissions[0]?.items[0]?.sourceKey.key, "a");
+    assert.equal(
+      baseCtx.getState()?.scopes["lang:zh-CN"]?.entries["a"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+
+    // Retry with B recovered: A must NOT be re-submitted
+    failB = false;
+    const retryRes = await sourceAdapter.actions.sync.execute(ctxWithFailB, {});
+    assert.deepEqual(retryRes.completedScopes, ["lang:zh-CN"]);
+    assert.equal(baseCtx.submissions.length, 2);
+    assert.equal(baseCtx.submissions[1]?.items[0]?.sourceKey.key, "b");
+
+    // 3. Timeout & user cancellation classification
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    const diagCtx = createSourceAdapterContext({
+      origin,
+      config: { languages: ["zh-CN"] },
+      signal: controller.signal,
+    });
+    try {
+      globalThis.fetch = async () => {
+        throw new DOMException("signal timed out", "TimeoutError");
+      };
+      await assert.rejects(
+        () => sourceAdapter.actions.sync.execute(diagCtx.context, {}),
+        (error: unknown) => {
+          assert.ok(isSourceAdapterActionError(error));
+          assert.equal(error.failure.abortCause, "source_request_timeout");
+          return true;
+        },
+      );
+
+      globalThis.fetch = async (_input, init) => {
+        controller.abort(createActionCancelledReason());
+        throw init?.signal?.reason ?? createActionCancelledReason();
+      };
+      await assert.rejects(
+        () => sourceAdapter.actions.sync.execute(diagCtx.context, {}),
+        (error: unknown) => isActionCancelledReason(error),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   } finally {
     server.close();
   }

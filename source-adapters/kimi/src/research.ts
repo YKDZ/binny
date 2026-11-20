@@ -3,9 +3,12 @@ import { createHash } from "node:crypto";
 
 import {
   cleanContent,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
+  readFailureDiagnosticContext,
+  saveIncrementalSyncState,
   sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
@@ -204,26 +207,18 @@ export async function fetchResearchHtml(
   signal: AbortSignal,
   timeoutMs = 20_000,
 ): Promise<{ readonly rawText: string; readonly contentType: string | null }> {
-  const requestSignal = AbortSignal.any([
+  const response = await fetchSourceResponse({
+    url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: {
-        accept: "text/html, application/xhtml+xml, */*",
-        "user-agent": "Binny SourceAdapter/1.0 (Kimi)",
-      },
-      signal: requestSignal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Network request failed (${url}): ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+    stage: "fetching-document",
+    timeoutMs,
+    headers: {
+      accept: "text/html, application/xhtml+xml, */*",
+      "user-agent": "Binny SourceAdapter/1.0 (Kimi)",
+    },
+  });
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(`Request to "${url}" returned HTTP ${response.status}.`);
   }
   const contentType = response.headers.get("content-type");
@@ -570,6 +565,7 @@ export async function checkResearchSource(
     }
     listHtml = rawText;
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     problems.push({
       code: "kimi_research_unavailable",
       message:
@@ -643,6 +639,7 @@ export async function checkResearchSource(
       );
     }
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     problems.push({
       code: "kimi_research_unavailable",
       message:
@@ -682,6 +679,8 @@ export async function syncResearchSource(
     }
     listHtml = rawText;
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     problems.push({
       code: "kimi_sync_incomplete",
       message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -689,6 +688,9 @@ export async function syncResearchSource(
       path: ["sources", source.id],
       suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
     return;
   }
@@ -716,6 +718,7 @@ export async function syncResearchSource(
       initializedAt: context.referenceTime,
       entries,
     });
+    await saveIncrementalSyncState(context, state);
     initializedScopes.push(source.id);
     completedScopes.push(source.id);
     return;
@@ -724,6 +727,7 @@ export async function syncResearchSource(
   // Subsequent sync: only fetch and archive new or changed in-site articles
   let hasArticleFailure = false;
   for (const item of blogList.inSiteArticles) {
+    if (context.signal.aborted) throw context.signal.reason;
     const previousEntry = state.scopes[source.id]?.entries[item.slug];
     const fingerprint = computeFingerprint({
       slug: item.slug,
@@ -763,7 +767,7 @@ export async function syncResearchSource(
           : {}),
       };
 
-      await submitCleanedArticle(context, {
+      const submitResult = await submitCleanedArticle(context, {
         sourceKey: buildResearchSourceKey(source, item.slug),
         sourceRef: item.url,
         title: extracted.title,
@@ -786,10 +790,15 @@ export async function syncResearchSource(
         ...(item.publishedDate !== undefined
           ? { publishedAt: item.publishedDate }
           : {}),
-        archivedCompleteness: "complete",
+        archivedCompleteness: submitResult.hasMediaFailures
+          ? "partial"
+          : "complete",
       });
+      await saveIncrementalSyncState(context, state);
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       hasArticleFailure = true;
+      const diag = readFailureDiagnosticContext(error);
       problems.push({
         code: "kimi_sync_incomplete",
         message: `Sync collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
@@ -798,15 +807,20 @@ export async function syncResearchSource(
         suggestion:
           "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
       });
     }
   }
 
-  updateIncrementalScopeValidators(state, source.id, {
-    scopeUrl: source.url,
-  });
-
   if (!hasArticleFailure) {
+    updateIncrementalScopeValidators(state, source.id, {
+      scopeUrl: source.url,
+    });
+    await saveIncrementalSyncState(context, state);
     completedScopes.push(source.id);
   }
 }
@@ -830,6 +844,8 @@ export async function collectResearchSource(
     }
     listHtml = rawText;
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     problems.push({
       code: "kimi_collection_incomplete",
       message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -837,6 +853,9 @@ export async function collectResearchSource(
       path: ["sources", source.id],
       suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
     return;
   }
@@ -850,12 +869,15 @@ export async function collectResearchSource(
     );
   }
 
+  const beforeLimitCount = candidates.length;
   if (params.maxItems !== undefined && params.maxItems > 0) {
     candidates = candidates.slice(0, params.maxItems);
   }
+  const truncatedByMaxItems = candidates.length < beforeLimitCount;
 
   let hasArticleFailure = false;
   for (const item of candidates) {
+    if (context.signal.aborted) throw context.signal.reason;
     try {
       const { rawText: articleHtml } = await fetchResearchHtml(
         item.url,
@@ -882,7 +904,7 @@ export async function collectResearchSource(
           : {}),
       };
 
-      await submitCleanedArticle(context, {
+      const submitResult = await submitCleanedArticle(context, {
         sourceKey: buildResearchSourceKey(source, item.slug),
         sourceRef: item.url,
         title: extracted.title,
@@ -900,7 +922,7 @@ export async function collectResearchSource(
         },
       });
 
-      if (state !== undefined) {
+      if (state !== undefined && context.persistentState !== undefined) {
         const fingerprint = computeFingerprint({
           slug: item.slug,
           title: item.title,
@@ -911,11 +933,16 @@ export async function collectResearchSource(
           ...(item.publishedDate !== undefined
             ? { publishedAt: item.publishedDate }
             : {}),
-          archivedCompleteness: "complete",
+          archivedCompleteness: submitResult.hasMediaFailures
+            ? "partial"
+            : "complete",
         });
+        await saveIncrementalSyncState(context, state);
       }
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       hasArticleFailure = true;
+      const diag = readFailureDiagnosticContext(error);
       problems.push({
         code: "kimi_collection_incomplete",
         message: `Collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
@@ -924,11 +951,16 @@ export async function collectResearchSource(
         suggestion:
           "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
       });
     }
   }
 
-  if (!hasArticleFailure) {
+  if (!hasArticleFailure && !truncatedByMaxItems) {
     completedScopes.push(source.id);
   }
 }
