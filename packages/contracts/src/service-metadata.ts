@@ -4,11 +4,11 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 6 removes the fixed server archive query execution budget and its
- * `query_budget_exceeded` error code while preserving client disconnect
- * cancellation (`request_cancelled`) and composable search/run diagnostic updates.
+ * Version 7 removes cross-bin browser capacity queue reasons and error codes
+ * (`browser_capacity_exhausted`, `browser_capacity_active`, and
+ * `browser_reservation_mismatch`) so independent browser bins run concurrently.
  */
-export const publicApiProtocolVersion = 6;
+export const publicApiProtocolVersion = 7;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 4;
