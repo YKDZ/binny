@@ -463,7 +463,7 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
     resources: {
       $post: async (_params: unknown, options: { init?: RequestInit }) => {
         const bytes = options?.init?.body
-          ? await new Response(options.init.body as BodyInit).arrayBuffer()
+          ? await new Response(options.init.body).arrayBuffer()
           : new ArrayBuffer(0);
         const resource: ArchiveResourceMetadata = {
           resourceId: randomUUID(),
@@ -858,6 +858,536 @@ response = client.chat.complete(model="mistral-large-4", messages=[{"role": "use
         );
       },
     );
+  } finally {
+    server.close();
+  }
+});
+
+void test("Mistral sync skips unchanged items before applying maxItems and defers validator updates until all changes complete", async () => {
+  const feedHeadersReceived: {
+    readonly ifNoneMatch: string | undefined;
+    readonly ifModifiedSince: string | undefined;
+  }[] = [];
+  const articleFetchCounts: Record<string, number> = {};
+  let phase: "baseline" | "two-changes" = "baseline";
+
+  const v1Etag = '"mistral-bounded-v1"';
+  const v1LastModified = "Wed, 04 Nov 2026 12:00:00 GMT";
+  const v2Etag = '"mistral-bounded-v2"';
+  const v2LastModified = "Thu, 05 Nov 2026 12:00:00 GMT";
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/news/rss") {
+      const ifNoneMatch = req.headers["if-none-match"];
+      const ifModifiedSince = req.headers["if-modified-since"];
+      feedHeadersReceived.push({
+        ifNoneMatch: typeof ifNoneMatch === "string" ? ifNoneMatch : undefined,
+        ifModifiedSince:
+          typeof ifModifiedSince === "string" ? ifModifiedSince : undefined,
+      });
+
+      const currentEtag = phase === "baseline" ? v1Etag : v2Etag;
+      const currentLastModified =
+        phase === "baseline" ? v1LastModified : v2LastModified;
+
+      if (
+        ifNoneMatch === currentEtag ||
+        (ifNoneMatch === undefined && ifModifiedSince === currentLastModified)
+      ) {
+        res.writeHead(304, {
+          etag: currentEtag,
+          "last-modified": currentLastModified,
+        });
+        res.end();
+        return;
+      }
+
+      res.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        etag: currentEtag,
+        "last-modified": currentLastModified,
+      });
+
+      if (phase === "baseline") {
+        res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Mistral News</title>
+    <link>${origin}/news/</link>
+    <item>
+      <title>Unchanged First</title>
+      <link>${origin}/news/unchanged-first</link>
+      <guid isPermaLink="true">${origin}/news/unchanged-first</guid>
+      <description>Baseline unchanged first.</description>
+      <pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Changed Target</title>
+      <link>${origin}/news/changed-target</link>
+      <guid isPermaLink="true">${origin}/news/changed-target</guid>
+      <description>Baseline version before edit.</description>
+      <pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>`);
+        return;
+      }
+
+      // Phase "two-changes": unchanged item first, then two changed/new items
+      res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Mistral News</title>
+    <link>${origin}/news/</link>
+    <item>
+      <title>Unchanged First</title>
+      <link>${origin}/news/unchanged-first</link>
+      <guid isPermaLink="true">${origin}/news/unchanged-first</guid>
+      <description>Baseline unchanged first.</description>
+      <pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Changed Target Updated</title>
+      <link>${origin}/news/changed-target</link>
+      <guid isPermaLink="true">${origin}/news/changed-target</guid>
+      <description>Updated description after baseline.</description>
+      <pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Trailing New Item</title>
+      <link>${origin}/news/trailing-new</link>
+      <guid isPermaLink="true">${origin}/news/trailing-new</guid>
+      <description>Second change placed after unchanged item.</description>
+      <pubDate>Thu, 05 Nov 2026 09:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>`);
+      return;
+    }
+
+    const slug = url.pathname.replace(/^\/news\//u, "");
+    articleFetchCounts[slug] = (articleFetchCounts[slug] ?? 0) + 1;
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<!DOCTYPE html>
+<html lang="en">
+<head><title>${slug}</title></head>
+<body>
+  <main>
+    <article>
+      <h1>${slug}</h1>
+      <p>Full article body content for ${slug} with enough substantial text.</p>
+    </article>
+  </main>
+</body>
+</html>`);
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const stateStore: { current: IncrementalSyncState | undefined } = {
+    current: undefined,
+  };
+  const submittedKeys: string[] = [];
+
+  const mockApiClient = {
+    archives: {
+      $post: async ({
+        json,
+      }: {
+        json: Parameters<
+          SourceAdapterApiClient["archives"]["$post"]
+        >[0]["json"];
+      }) => {
+        for (const item of json.items) {
+          submittedKeys.push(item.sourceKey.key);
+        }
+        const commit: ArchiveCommit = {
+          commitId: randomUUID(),
+          archiveSeq: String(submittedKeys.length),
+          binId: json.binId,
+          runId: json.runId,
+          sourceAdapterVersion: json.sourceAdapterVersion,
+          observedAt: new Date().toISOString(),
+          recordedAt: new Date().toISOString(),
+          items: json.items.map((item) => ({
+            itemId: randomUUID(),
+            revisionId: randomUUID(),
+            sourceKey: item.sourceKey,
+          })),
+          relations: [],
+        };
+        return new Response(JSON.stringify(commit), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+    resources: {
+      $post: async () =>
+        new Response(JSON.stringify({}), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+      resolve: {
+        $post: async () =>
+          new Response(
+            JSON.stringify({ resources: [], items: [], mediaByUrl: {} }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      },
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const runContext: SourceAdapterRunContext<MistralConfig, never> = {
+    binId: "mistral-bounded-bin",
+    identityId: "mistral-bounded-identity",
+    runId: randomUUID(),
+    referenceTime: "2026-11-07T12:00:00.000Z",
+    sourceAdapterVersion: sourceAdapter.version,
+    config: { rssUrl: `${origin}/news/rss` },
+    signal: new AbortController().signal,
+    persistentState: {
+      async load() {
+        return stateStore.current;
+      },
+      async save(state: unknown) {
+        stateStore.current = state as IncrementalSyncState;
+      },
+    },
+  };
+  const context = createSourceAdapterContext(
+    mockApiClient,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
+
+  try {
+    // 0. Baseline sync even with maxItems=1 records all baseline items without fetching HTML
+    const baseline = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(baseline.completedScopes, ["news"]);
+    assert.deepEqual(baseline.initializedScopes, ["news"]);
+    assert.equal(submittedKeys.length, 0);
+    assert.deepEqual(Object.keys(articleFetchCounts), []);
+    assert.ok(stateStore.current?.scopes["news"]?.entries["unchanged-first"]);
+    assert.ok(stateStore.current?.scopes["news"]?.entries["changed-target"]);
+    assert.equal(stateStore.current?.scopes["news"]?.etag, v1Etag);
+    assert.equal(
+      stateStore.current?.scopes["news"]?.lastModified,
+      v1LastModified,
+    );
+
+    // 1. Place two changed/new items after an unchanged item and sync with maxItems=1
+    phase = "two-changes";
+    const round1 = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(feedHeadersReceived[1], {
+      ifNoneMatch: v1Etag,
+      ifModifiedSince: v1LastModified,
+    });
+    assert.deepEqual(submittedKeys, ["changed-target"]);
+    assert.equal(articleFetchCounts["unchanged-first"] ?? 0, 0);
+    assert.equal(articleFetchCounts["changed-target"], 1);
+    assert.equal(articleFetchCounts["trailing-new"] ?? 0, 0);
+
+    // Partial completion: news must NOT be in completedScopes, and validators stay at v1
+    assert.deepEqual(round1.completedScopes, []);
+    assert.equal(round1.collectionCompleteness, "partial");
+    assert.equal(round1.processedChangedItems, 1);
+    assert.equal(round1.remainingChangedItems, 1);
+    assert.deepEqual(round1.incompleteScopes, [
+      {
+        scope: "news",
+        reasonCode: "max_items_reached",
+        message:
+          "Processed 1 changed item(s); 1 changed item(s) remain in the feed for subsequent sync runs.",
+        remainingCount: 1,
+      },
+    ]);
+    assert.equal(stateStore.current?.scopes["news"]?.etag, v1Etag);
+    assert.equal(
+      stateStore.current?.scopes["news"]?.lastModified,
+      v1LastModified,
+    );
+    assert.equal(
+      stateStore.current?.scopes["news"]?.entries["changed-target"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+
+    // 2. Second sync with maxItems=1 receives 200 (still sending v1), archives trailing-new, advances validators to v2
+    const round2 = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(feedHeadersReceived[2], {
+      ifNoneMatch: v1Etag,
+      ifModifiedSince: v1LastModified,
+    });
+    assert.deepEqual(submittedKeys, ["changed-target", "trailing-new"]);
+    assert.equal(articleFetchCounts["unchanged-first"] ?? 0, 0);
+    assert.equal(articleFetchCounts["changed-target"], 1);
+    assert.equal(articleFetchCounts["trailing-new"], 1);
+
+    assert.deepEqual(round2.completedScopes, ["news"]);
+    assert.equal(round2.collectionCompleteness, "complete");
+    assert.deepEqual(round2.incompleteScopes, []);
+    assert.equal(round2.processedChangedItems, 1);
+    assert.equal(round2.remainingChangedItems, 0);
+    assert.equal(stateStore.current?.scopes["news"]?.etag, v2Etag);
+    assert.equal(
+      stateStore.current?.scopes["news"]?.lastModified,
+      v2LastModified,
+    );
+
+    // 3. Third sync sends v2 conditional headers and receives 304 Not Modified
+    const round3 = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(feedHeadersReceived[3], {
+      ifNoneMatch: v2Etag,
+      ifModifiedSince: v2LastModified,
+    });
+    assert.deepEqual(submittedKeys, ["changed-target", "trailing-new"]);
+    assert.deepEqual(round3.completedScopes, ["news"]);
+    assert.equal(round3.collectionCompleteness, "complete");
+    assert.deepEqual(round3.incompleteScopes, []);
+    assert.equal(round3.processedChangedItems, 0);
+    assert.equal(round3.remainingChangedItems, 0);
+  } finally {
+    server.close();
+  }
+});
+
+void test("Mistral sync persists completed items on mid-run failure and settles when trailing item leaves feed", async () => {
+  let feedMode: "baseline" | "two-new" | "one-removed" = "baseline";
+  let failSecondItem = true;
+  const articleFetchCounts: Record<string, number> = {};
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/news/rss") {
+      const etag =
+        feedMode === "baseline"
+          ? '"v1"'
+          : feedMode === "two-new"
+            ? '"v2"'
+            : '"v3"';
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { etag });
+        res.end();
+        return;
+      }
+
+      res.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        etag,
+      });
+
+      if (feedMode === "baseline") {
+        res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Mistral News</title><link>${origin}/news/</link>
+  <item><title>Base</title><link>${origin}/news/base-item</link><guid>${origin}/news/base-item</guid><pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate></item>
+</channel></rss>`);
+        return;
+      }
+
+      if (feedMode === "two-new") {
+        res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Mistral News</title><link>${origin}/news/</link>
+  <item><title>Base</title><link>${origin}/news/base-item</link><guid>${origin}/news/base-item</guid><pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate></item>
+  <item><title>Item One</title><link>${origin}/news/item-one</link><guid>${origin}/news/item-one</guid><pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate></item>
+  <item><title>Item Two</title><link>${origin}/news/item-two</link><guid>${origin}/news/item-two</guid><pubDate>Wed, 04 Nov 2026 10:00:00 GMT</pubDate></item>
+</channel></rss>`);
+        return;
+      }
+
+      // feedMode === "one-removed": item-two removed by source before next run
+      res.end(`<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Mistral News</title><link>${origin}/news/</link>
+  <item><title>Base</title><link>${origin}/news/base-item</link><guid>${origin}/news/base-item</guid><pubDate>Mon, 02 Nov 2026 10:00:00 GMT</pubDate></item>
+  <item><title>Item One</title><link>${origin}/news/item-one</link><guid>${origin}/news/item-one</guid><pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate></item>
+</channel></rss>`);
+      return;
+    }
+
+    const slug = url.pathname.replace(/^\/news\//u, "");
+    articleFetchCounts[slug] = (articleFetchCounts[slug] ?? 0) + 1;
+    if (slug === "item-two" && failSecondItem) {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.end("Transient failure");
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(
+      `<!DOCTYPE html><html><head><title>${slug}</title></head><body><main><article><h1>${slug}</h1><p>Substantial body text for ${slug}.</p></article></main></body></html>`,
+    );
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const stateStore: { current: IncrementalSyncState | undefined } = {
+    current: undefined,
+  };
+  const submittedKeys: string[] = [];
+
+  const mockApiClient = {
+    archives: {
+      $post: async ({
+        json,
+      }: {
+        json: Parameters<
+          SourceAdapterApiClient["archives"]["$post"]
+        >[0]["json"];
+      }) => {
+        for (const item of json.items) {
+          submittedKeys.push(item.sourceKey.key);
+        }
+        const commit: ArchiveCommit = {
+          commitId: randomUUID(),
+          archiveSeq: String(submittedKeys.length),
+          binId: json.binId,
+          runId: json.runId,
+          sourceAdapterVersion: json.sourceAdapterVersion,
+          observedAt: new Date().toISOString(),
+          recordedAt: new Date().toISOString(),
+          items: json.items.map((item) => ({
+            itemId: randomUUID(),
+            revisionId: randomUUID(),
+            sourceKey: item.sourceKey,
+          })),
+          relations: [],
+        };
+        return new Response(JSON.stringify(commit), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+    resources: {
+      $post: async () =>
+        new Response(JSON.stringify({}), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+      resolve: {
+        $post: async () =>
+          new Response(
+            JSON.stringify({ resources: [], items: [], mediaByUrl: {} }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+      },
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const runContext: SourceAdapterRunContext<MistralConfig, never> = {
+    binId: "mistral-recovery-bin",
+    identityId: "mistral-recovery-identity",
+    runId: randomUUID(),
+    referenceTime: "2026-11-07T12:00:00.000Z",
+    sourceAdapterVersion: sourceAdapter.version,
+    config: { rssUrl: `${origin}/news/rss` },
+    signal: new AbortController().signal,
+    persistentState: {
+      async load() {
+        return stateStore.current;
+      },
+      async save(state: unknown) {
+        stateStore.current = state as IncrementalSyncState;
+      },
+    },
+  };
+  const context = createSourceAdapterContext(
+    mockApiClient,
+    runContext,
+    sourceAdapter.extensionsSchema,
+  );
+
+  try {
+    await sourceAdapter.actions.sync.execute(context, {});
+
+    // item-one succeeds, item-two fails: item-one state must persist and ETag must stay "v1"
+    feedMode = "two-new";
+    await assert.rejects(
+      async () => {
+        await sourceAdapter.actions.sync.execute(context, {});
+      },
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.deepEqual(submittedKeys, ["item-one"]);
+    assert.ok(stateStore.current?.scopes["news"]?.entries["item-one"]);
+    assert.equal(
+      stateStore.current?.scopes["news"]?.entries["item-two"],
+      undefined,
+    );
+    assert.equal(stateStore.current?.scopes["news"]?.etag, '"v1"');
+
+    // Retry after item-two heals and verify item-one is NOT re-fetched
+    failSecondItem = false;
+    const recovered = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.equal(articleFetchCounts["item-one"], 1);
+    assert.equal(articleFetchCounts["item-two"], 2);
+    assert.deepEqual(submittedKeys, ["item-one", "item-two"]);
+    assert.deepEqual(recovered.completedScopes, ["news"]);
+    assert.equal(recovered.collectionCompleteness, "complete");
+    assert.equal(stateStore.current?.scopes["news"]?.etag, '"v2"');
+
+    // Verify removed trailing item case with fresh state
+    const readState = (): IncrementalSyncState | undefined =>
+      stateStore.current;
+    stateStore.current = undefined;
+    submittedKeys.length = 0;
+    feedMode = "baseline";
+    await sourceAdapter.actions.sync.execute(context, {});
+    feedMode = "two-new";
+    const bounded = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.equal(bounded.collectionCompleteness, "partial");
+    assert.deepEqual(bounded.completedScopes, []);
+    assert.equal(readState()?.scopes["news"]?.etag, '"v1"');
+
+    // Source removes item-two before next sync -> next sync sees 0 remaining changes and completes under v3
+    feedMode = "one-removed";
+    const settled = await sourceAdapter.actions.sync.execute(context, {
+      maxItems: 1,
+    });
+    assert.deepEqual(settled.completedScopes, ["news"]);
+    assert.equal(settled.collectionCompleteness, "complete");
+    assert.equal(settled.processedChangedItems, 0);
+    assert.equal(settled.remainingChangedItems, 0);
+    assert.equal(readState()?.scopes["news"]?.etag, '"v3"');
+
+    // Explicit collect honors caller's maxItems choice
+    const partialCollect = await sourceAdapter.actions.collect.execute(
+      context,
+      { maxItems: 1 },
+    );
+    assert.deepEqual(partialCollect.completedScopes, []);
+    assert.equal(partialCollect.collectionCompleteness, "partial");
+    assert.equal(partialCollect.processedItems, 1);
+    assert.equal(partialCollect.remainingItems, 1);
+
+    const fullCollect = await sourceAdapter.actions.collect.execute(context, {
+      maxItems: 5,
+    });
+    assert.deepEqual(fullCollect.completedScopes, ["news"]);
+    assert.equal(fullCollect.collectionCompleteness, "complete");
+    assert.deepEqual(fullCollect.incompleteScopes, []);
+    assert.equal(fullCollect.processedItems, 2);
+    assert.equal(fullCollect.remainingItems, 0);
   } finally {
     server.close();
   }
