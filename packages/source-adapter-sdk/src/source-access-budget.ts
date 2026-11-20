@@ -50,34 +50,40 @@ export function isSourceAccessBudgetExceededError(
 }
 
 export type SourceAccessBudgetSnapshot = {
-  readonly maxRequests: number;
-  readonly maxElapsedMs: number;
+  readonly maxRequests?: number | undefined;
+  readonly maxElapsedMs?: number | undefined;
   readonly elapsedMs: number;
-  readonly remainingMs: number;
+  readonly remainingMs?: number | undefined;
   readonly stopReason?: SourceAccessBudgetStopReason;
 };
 
 export type SourceAccessBudgetClient = SourceAccessClient & {
   readonly signal: AbortSignal;
-  remainingMs(): number;
+  remainingMs(): number | undefined;
   budgetSnapshot(): SourceAccessBudgetSnapshot;
   close(): void;
 };
 
 /**
- * 为一次动作执行限制主动请求数量和总耗时，准入等待仍由原客户端负责。
- * 调用后立即开始耗时预算；每次准入先预留请求额度，再等待实际许可。
+ * 为一次动作执行按显式配置的维度限制主动请求数量或总耗时，准入等待仍由原客户端负责。
+ * 省略某个维度时该维度不设整轮上限；显式配置 maxElapsedMs 时立即开始耗时预算。
  */
 export function createSourceAccessBudget(input: {
   readonly client: SourceAccessClient;
   readonly signal: AbortSignal;
   readonly clock?: SourceAccessClock;
-  readonly maxRequests: number;
-  readonly maxElapsedMs: number;
+  readonly maxRequests?: number | undefined;
+  readonly maxElapsedMs?: number | undefined;
 }): SourceAccessBudgetClient {
-  if (!Number.isSafeInteger(input.maxRequests) || input.maxRequests < 1)
+  if (
+    input.maxRequests !== undefined &&
+    (!Number.isSafeInteger(input.maxRequests) || input.maxRequests < 1)
+  )
     throw new RangeError("单轮主动请求上限必须是正安全整数。");
-  if (!Number.isSafeInteger(input.maxElapsedMs) || input.maxElapsedMs < 1)
+  if (
+    input.maxElapsedMs !== undefined &&
+    (!Number.isSafeInteger(input.maxElapsedMs) || input.maxElapsedMs < 1)
+  )
     throw new RangeError("单轮耗时上限必须是正安全整数毫秒。");
 
   const clock = input.clock ?? systemClock;
@@ -102,7 +108,8 @@ export function createSourceAccessBudget(input: {
 
   const elapsedMs = () => Math.max(0, clock.monotonicNow() - startedAt);
 
-  const remainingMs = () => {
+  const remainingMs = (): number | undefined => {
+    if (input.maxElapsedMs === undefined) return undefined;
     const remaining = Math.max(0, input.maxElapsedMs - elapsedMs());
     if (remaining <= 0) stopForElapsedTime();
     return Math.ceil(remaining);
@@ -111,15 +118,21 @@ export function createSourceAccessBudget(input: {
   const budgetSnapshot = (): SourceAccessBudgetSnapshot => {
     const remaining = remainingMs();
     return {
-      maxRequests: input.maxRequests,
-      maxElapsedMs: input.maxElapsedMs,
+      ...(input.maxRequests === undefined
+        ? {}
+        : { maxRequests: input.maxRequests }),
+      ...(input.maxElapsedMs === undefined
+        ? {}
+        : { maxElapsedMs: input.maxElapsedMs }),
       elapsedMs: Math.ceil(elapsedMs()),
-      remainingMs: remaining,
+      ...(remaining === undefined ? {} : { remainingMs: remaining }),
       ...(stopReason === undefined ? {} : { stopReason }),
     };
   };
 
-  timer = clock.setTimer(stopForElapsedTime, input.maxElapsedMs);
+  if (input.maxElapsedMs !== undefined) {
+    timer = clock.setTimer(stopForElapsedTime, input.maxElapsedMs);
+  }
 
   return {
     signal,
@@ -139,18 +152,23 @@ export function createSourceAccessBudget(input: {
       if (signal.aborted)
         throw signal.reason ?? new DOMException("已取消", "AbortError");
 
-      const admittedAttempts = input.client.snapshot().admittedAttempts;
-      if (admittedAttempts + reservedRequests >= input.maxRequests) {
-        stop("request-limit");
-        throw new SourceAccessBudgetExceededError("request-limit");
+      if (input.maxRequests !== undefined) {
+        const admittedAttempts = input.client.snapshot().admittedAttempts;
+        if (admittedAttempts + reservedRequests >= input.maxRequests) {
+          stop("request-limit");
+          throw new SourceAccessBudgetExceededError("request-limit");
+        }
       }
 
       reservedRequests++;
       let operationStarted = false;
-      const deadlineEpochMs = Math.floor(clock.epochNow() + remaining);
-      if (!Number.isSafeInteger(deadlineEpochMs) || deadlineEpochMs < 0) {
-        reservedRequests--;
-        throw new Error("来源访问预算时钟没有返回有效的 epoch 时间。");
+      let deadlineEpochMs: number | undefined;
+      if (remaining !== undefined) {
+        deadlineEpochMs = Math.floor(clock.epochNow() + remaining);
+        if (!Number.isSafeInteger(deadlineEpochMs) || deadlineEpochMs < 0) {
+          reservedRequests--;
+          throw new Error("来源访问预算时钟没有返回有效的 epoch 时间。");
+        }
       }
 
       try {
@@ -163,7 +181,9 @@ export function createSourceAccessBudget(input: {
               throw signal.reason ?? new DOMException("已取消", "AbortError");
             return await operation();
           },
-          { signal, deadlineEpochMs },
+          deadlineEpochMs === undefined
+            ? { signal }
+            : { signal, deadlineEpochMs },
         );
       } catch (error) {
         if (
@@ -186,7 +206,7 @@ export function createSourceAccessBudget(input: {
     close(): void {
       if (closed) return;
       closed = true;
-      clock.clearTimer(timer);
+      if (timer !== undefined) clock.clearTimer(timer);
       if (!signal.aborted)
         budgetController.abort(
           new DOMException("单轮来源访问作用域已关闭。", "AbortError"),

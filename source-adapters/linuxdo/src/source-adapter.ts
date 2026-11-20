@@ -27,6 +27,7 @@ import {
   type SourceAccessSnapshot,
   type SourceAdapterContext,
   SourceAccessBudgetExceededError,
+  SourceAccessDeadlineExceededError,
 } from "@binny/source-adapter-sdk";
 import { chromium, type APIRequestContext, type Page } from "patchright-core";
 import { z } from "zod";
@@ -352,15 +353,15 @@ const syncParamsSchema = z
     maxRequests: z
       .int()
       .positive()
-      .max(500)
-      .default(200)
-      .describe("本轮主动来源请求总数上限，含等待获准的请求。"),
+      .optional()
+      .describe(
+        "本轮主动来源请求总数上限，含等待获准的请求；省略时不限制整轮主动请求总数。",
+      ),
     maxElapsedMs: z
       .int()
       .positive()
-      .max(900_000)
-      .default(300_000)
-      .describe("本轮动作执行总时长上限，默认 5 分钟，最高 15 分钟。"),
+      .optional()
+      .describe("本轮动作执行总时长上限（毫秒）；省略时不限制整轮耗时。"),
   })
   .superRefine((params, context) => {
     if (params.targets?.length === 0) {
@@ -863,15 +864,29 @@ const syncScopeReportSchema = z.strictObject({
     "no-forward-range",
   ]),
 });
-const syncBudgetReportSchema = z.strictObject({
-  maxRequests: z.int().positive(),
-  maxElapsedMs: z.int().positive(),
-  elapsedMs: z.int().nonnegative(),
-  remainingMs: z.int().nonnegative(),
-  stopReason: z
-    .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
-    .optional(),
-});
+const syncBudgetReportSchema = z
+  .strictObject({
+    maxRequests: z
+      .int()
+      .positive()
+      .optional()
+      .describe("显式配置的主动请求总数上限；省略表示本轮不限制主动请求总数。"),
+    maxElapsedMs: z
+      .int()
+      .positive()
+      .optional()
+      .describe("显式配置的整轮耗时上限（毫秒）；省略表示本轮不限制整轮耗时。"),
+    elapsedMs: z.int().nonnegative(),
+    remainingMs: z
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("仅在显式配置 maxElapsedMs 时记录剩余毫秒预算。"),
+    stopReason: z
+      .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
+      .optional(),
+  })
+  .describe("本轮显式配置的请求与耗时预算及执行消耗；未配置的维度省略上限。");
 const syncReportSchema = z
   .strictObject({
     phase: z.enum([
@@ -945,16 +960,23 @@ type DiagnosticStep = {
 };
 
 type JsonResponse =
-  | { readonly kind: "json"; readonly status: number; readonly value: unknown }
+  | {
+      readonly kind: "json";
+      readonly status: number;
+      readonly value: unknown;
+      readonly rateLimit?: SourceAccessReport["rateLimitResponses"][number];
+    }
   | {
       readonly kind: "nonJson";
       readonly status: number;
       readonly recoveryFailure?: string;
+      readonly rateLimit?: SourceAccessReport["rateLimitResponses"][number];
     }
   | {
       readonly kind: "invalidJson";
       readonly status: number;
       readonly recoveryFailure?: string;
+      readonly rateLimit?: SourceAccessReport["rateLimitResponses"][number];
     }
   | {
       readonly kind: "networkError";
@@ -1392,6 +1414,8 @@ async function readJson(
   stage = "reading-json",
 ): Promise<JsonResponse> {
   signal.throwIfAborted();
+  const accessState = pageSourceAccess.get(page);
+  const rateLimitCountBefore = accessState?.rateLimitResponses.length ?? 0;
   let response: PageFetchResponse;
   try {
     await ensurePageOrigin(page, url, signal);
@@ -1414,6 +1438,12 @@ async function readJson(
     };
   }
 
+  const rateLimit =
+    accessState !== undefined &&
+    accessState.rateLimitResponses.length > rateLimitCountBefore
+      ? accessState.rateLimitResponses.at(-1)
+      : undefined;
+
   const contentType = response.contentType;
   if (
     !/(?:^|\s|;)application\/(?:[a-z0-9.+-]*\+)?json(?:\s*;|$)/iu.test(
@@ -1426,6 +1456,7 @@ async function readJson(
       ...(response.recoveryFailure === undefined
         ? {}
         : { recoveryFailure: response.recoveryFailure }),
+      ...(rateLimit === undefined ? {} : { rateLimit }),
     };
   }
   try {
@@ -1433,6 +1464,7 @@ async function readJson(
       kind: "json",
       status: response.status,
       value: JSON.parse(response.body) as unknown,
+      ...(rateLimit === undefined ? {} : { rateLimit }),
     };
   } catch {
     return {
@@ -1441,8 +1473,26 @@ async function readJson(
       ...(response.recoveryFailure === undefined
         ? {}
         : { recoveryFailure: response.recoveryFailure }),
+      ...(rateLimit === undefined ? {} : { rateLimit }),
     };
   }
+}
+
+function rateLimitWaitDetail(
+  status: number,
+  rateLimit?: SourceAccessReport["rateLimitResponses"][number],
+): string {
+  if (
+    rateLimit?.outcome === "cooled" &&
+    rateLimit.cooldownUntil !== undefined
+  ) {
+    const retryAfterSuffix =
+      rateLimit.retryAfter === undefined
+        ? ""
+        : `（Retry-After: ${rateLimit.retryAfter}）`;
+    return `源站返回 HTTP ${String(status)}，要求等待冷却至 ${rateLimit.cooldownUntil}${retryAfterSuffix}。`;
+  }
+  return `源站返回 HTTP ${String(status)} 限流/暂不可用响应，需等待后重试。`;
 }
 
 async function ensurePageOrigin(
@@ -1887,6 +1937,23 @@ async function readSessionAccess(
       },
     };
   }
+  if (session.status === 429 || session.status === 503) {
+    return {
+      kind: "unavailable",
+      availability: "unknown",
+      problem: {
+        code: "linuxdo_source_rate_limited",
+        message: `Linux.do 当前会话端点受限：${rateLimitWaitDetail(session.status, session.rateLimit)}`,
+        impact: "本次检查或采集没有确认登录状态。",
+        suggestion: "等待源站冷却结束后重新触发动作。",
+        requiresHuman: false,
+      },
+      diagnostic: {
+        stage: "checking-session",
+        target: sessionUrl.href,
+      },
+    };
+  }
   if (session.kind !== "json") {
     const challenge = requiresPageReview(session);
     return {
@@ -1987,6 +2054,15 @@ async function readTopic(
       message: `已登录账号不能读取主题 ${String(topicId)}。`,
       impact: "本次检查或采集没有读取该主题。",
       suggestion: "确认主题 ID 和账号对该主题的访问权限后重新触发动作。",
+      requiresHuman: false,
+    });
+  }
+  if (topicResponse.status === 429 || topicResponse.status === 503) {
+    return accessProblem(topicId, "unknown", {
+      code: "discourse_topic_rate_limited",
+      message: `Linux.do 主题读取受限：${rateLimitWaitDetail(topicResponse.status, topicResponse.rateLimit)}`,
+      impact: "本次检查或采集没有确认主题范围。",
+      suggestion: "等待源站冷却结束后重新运行。",
       requiresHuman: false,
     });
   }
@@ -2212,6 +2288,17 @@ async function readTopicListPage(
       target: url.href,
     });
   }
+  if (response.status === 429 || response.status === 503) {
+    throw sourceAdapterActionError({
+      code: "discourse_target_rate_limited",
+      message: `Linux.do 列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
+      impact: "本次没有确认该目标的列表范围。",
+      suggestion: "等待源站冷却结束后重新运行 check 或 collect。",
+      requiresHuman: false,
+      stage: "reading-topic-list",
+      target: url.href,
+    });
+  }
   if (response.kind !== "json") {
     const challenge = requiresPageReview(response);
     throw sourceAdapterActionError({
@@ -2286,6 +2373,7 @@ function listCheckDiagnostic(
     discourse_target_challenge_response: "unknown",
     discourse_target_response_invalid: "unavailable",
     discourse_target_request_failed: "unknown",
+    discourse_target_rate_limited: "unknown",
     discourse_topic_list_response_invalid: "unknown",
     discourse_topic_list_pagination_invalid: "unknown",
   };
@@ -2708,6 +2796,12 @@ async function readVisibleCategories(
       },
     );
   }
+  if (response.status === 429 || response.status === 503) {
+    throw categoryListFailure(
+      "discourse_category_list_rate_limited",
+      `Linux.do 板块列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
+    );
+  }
   if (response.kind !== "json") {
     throw categoryListFailure(
       requiresPageReview(response)
@@ -3088,14 +3182,41 @@ function syncBudgetReport(
 ): SyncReport["budget"] {
   const snapshot = budget.budgetSnapshot();
   return {
-    maxRequests: snapshot.maxRequests,
-    maxElapsedMs: snapshot.maxElapsedMs,
+    ...(snapshot.maxRequests === undefined
+      ? {}
+      : { maxRequests: snapshot.maxRequests }),
+    ...(snapshot.maxElapsedMs === undefined
+      ? {}
+      : { maxElapsedMs: snapshot.maxElapsedMs }),
     elapsedMs: snapshot.elapsedMs,
-    remainingMs: snapshot.remainingMs,
+    ...(snapshot.remainingMs === undefined
+      ? {}
+      : { remainingMs: snapshot.remainingMs }),
     ...(snapshot.stopReason === undefined
       ? {}
       : { stopReason: snapshot.stopReason }),
   };
+}
+
+function syncBudgetStopMessage(
+  reason: "request-limit" | "elapsed-time-limit" | "wait-exceeds-budget",
+  budgetError?: SourceAccessBudgetExceededError,
+): string {
+  if (reason === "request-limit") {
+    return "本轮已达到显式配置的 maxRequests 主动请求数上限；该范围没有确认完成。";
+  }
+  if (reason === "wait-exceeds-budget") {
+    const cause = budgetError?.cause;
+    if (
+      cause instanceof SourceAccessDeadlineExceededError &&
+      cause.waitReason === "source_cooldown" &&
+      cause.notBeforeEpochMs !== undefined
+    ) {
+      return `源站要求等待冷却至 ${new Date(cause.notBeforeEpochMs).toISOString()}（HTTP ${String(cause.cooldownStatus ?? 429)}），超出显式配置的 maxElapsedMs 预算而提前停止；该范围没有确认完成。`;
+    }
+    return "来源访问等待（冷却、访问间隔或并发）超出显式配置的 maxElapsedMs 预算而提前停止；该范围没有确认完成。";
+  }
+  return "本轮已达到显式配置的 maxElapsedMs 耗时上限；该范围没有确认完成。";
 }
 
 function syncScopeName(scope: SyncScopeReference): string {
@@ -3557,6 +3678,16 @@ async function readPostFeedPage(
       issue: {
         reasonCode: "post_range_source_unreachable",
         message: `读取 Linux.do 帖子流失败：${response.message}`,
+        discovery: "failed",
+      },
+    };
+  }
+  if (response.status === 429 || response.status === 503) {
+    return {
+      kind: "error",
+      issue: {
+        reasonCode: "post_range_source_rate_limited",
+        message: `Linux.do 帖子流请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
         discovery: "failed",
       },
     };
@@ -5980,16 +6111,16 @@ async function sync(
     });
     return output(challengeRecovery);
   } catch (error) {
-    const budgetStop =
-      isSourceAccessBudgetExceededError(error) ||
-      isSourceAccessBudgetExceededError(budget.signal.reason);
+    const budgetError = isSourceAccessBudgetExceededError(error)
+      ? error
+      : isSourceAccessBudgetExceededError(budget.signal.reason)
+        ? budget.signal.reason
+        : undefined;
+    const budgetStop = budgetError !== undefined;
     const cancelled =
       isActionCancelledReason(context.signal.reason) || context.signal.aborted;
-    const budgetErrorReason = isSourceAccessBudgetExceededError(error)
-      ? error.reason
-      : isSourceAccessBudgetExceededError(budget.signal.reason)
-        ? budget.signal.reason.reason
-        : "elapsed-time-limit";
+    const budgetErrorReason = budgetError?.reason ?? "elapsed-time-limit";
+    const budgetMessage = syncBudgetStopMessage(budgetErrorReason, budgetError);
     if (activePlan !== undefined) {
       const name = syncScopeName(syncScopeReference(activePlan.target));
       reportScopes.set(name, syncPlanReport(activePlan, "unknown", true));
@@ -6001,7 +6132,7 @@ async function sync(
             ? "sync_cancelled"
             : "sync_scope_unknown",
         budgetStop
-          ? `本轮达到 ${budgetErrorReason} 上限；该已分配范围没有确认完成。`
+          ? budgetMessage
           : cancelled
             ? "本轮在处理该范围时取消；接续位置已分配，覆盖结果未知。"
             : error instanceof Error
@@ -6009,6 +6140,12 @@ async function sync(
               : "本轮在处理该范围时失败，覆盖结果未知。",
       );
       activePlan = undefined;
+    } else if (budgetStop && incompleteScopes.length === 0) {
+      addIncomplete(
+        plans.length === 0 ? "discovery" : "sync",
+        `budget_${budgetErrorReason.replaceAll("-", "_")}`,
+        budgetMessage,
+      );
     }
     if (budgetStop) {
       await persistIntent("budget-exhausted").catch(() => undefined);
@@ -6099,7 +6236,7 @@ export const sourceAdapter = defineSourceAdapter({
       linuxDoExtensionsSchema,
       {
         description:
-          "在有限请求与耗时预算内按真实 Linux.do 范围接续归档新增帖子和回复；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
+          "按真实 Linux.do 范围接续归档新增帖子和回复；省略 maxRequests 或 maxElapsedMs 时相应维度不设整轮上限，显式指定时按所选预算执行；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
         params: syncParamsSchema,
         output: syncOutputSchema,
         report: syncReportSchema,

@@ -272,7 +272,22 @@ process.on("message", (value: unknown) => {
       record.code === "source_access_state_unavailable"
         ? new SourceAccessStateUnavailableError()
         : record.code === "source_access_deadline_exceeded"
-          ? new SourceAccessDeadlineExceededError()
+          ? new SourceAccessDeadlineExceededError({
+              ...(record.waitReason === "source_cooldown" ||
+              record.waitReason === "pacing_interval" ||
+              record.waitReason === "concurrency"
+                ? { waitReason: record.waitReason }
+                : {}),
+              ...(typeof record.notBeforeEpochMs === "number"
+                ? { notBeforeEpochMs: record.notBeforeEpochMs }
+                : {}),
+              ...(record.cooldownStatus === 429 || record.cooldownStatus === 503
+                ? { cooldownStatus: record.cooldownStatus }
+                : {}),
+              ...(typeof record.retryAfter === "string"
+                ? { retryAfter: record.retryAfter }
+                : {}),
+            })
           : new Error(
               typeof record.message === "string"
                 ? record.message
