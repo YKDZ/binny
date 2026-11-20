@@ -5,10 +5,6 @@ export {
   type ArchiveStoreOptions,
 } from "./archive.ts";
 export { createBinConfigurationStore } from "./bin-configuration.ts";
-export {
-  createBrowserCapacityCoordinator,
-  type BrowserCapacityCoordinator,
-} from "./browser-capacity.ts";
 export { createRuntimeConnectionStore } from "./runtime-connection.ts";
 export { createManualRunStore } from "./manual-run.ts";
 export { createManualRunListStore } from "./manual-run-list.ts";

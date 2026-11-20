@@ -114,10 +114,10 @@ try {
     manifest = await waitForManifest(baseUrl);
   } catch (error) {
     const logs = await run("docker", ["logs", container]).catch(() => "");
-    throw new Error(`${String(error)}\n${logs}`);
+    throw new Error(`${String(error)}\n${logs}`, { cause: error });
   }
   assert.deepStrictEqual(manifest, {
-    protocolVersion: 7,
+    protocolVersion: 8,
     sourceAdapter: {
       id: "binny-runtime.configuration-validation-fixture",
       version: "1.0.0",

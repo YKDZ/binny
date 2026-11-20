@@ -456,3 +456,183 @@ void test("4. Ordinary collect without confirmedPostIdLowerBound retains conserv
   assert.equal(scanComplete.complete, true);
   assert.equal(scanComplete.issue, undefined);
 });
+
+void test("5. scanPostCreatedRange splits lowerBoundConfirmed vs headVerified and enforces maxPages on cached headPages", async () => {
+  // Case A: History exhausted, but head verification hits maxPages before catching up to initialMaxId
+  let headCallCount = 0;
+  const pageWithManyHeadInsertions = {
+    url() {
+      return "https://linux.do";
+    },
+    isClosed() {
+      return false;
+    },
+    async evaluate(_fn: unknown, arg: unknown) {
+      if (arg && typeof arg === "object" && "href" in arg) {
+        const fetchArg = arg as { href: string; bodyType: "text" | "base64" };
+        const url = new URL(fetchArg.href);
+        const before = url.searchParams.get("before");
+        let posts: DiscoursePost[] = [];
+        if (before === null) {
+          headCallCount += 1;
+          if (headCallCount === 1) {
+            // Initial page
+            posts = [
+              {
+                id: 100,
+                topic_id: 10,
+                post_number: 1,
+                created_at: "2026-10-28T02:10:00.000Z",
+              },
+            ];
+          } else {
+            // First head check page: 2 new posts inserted, does not reach initialMaxId=100 yet
+            posts = [
+              {
+                id: 104,
+                topic_id: 11,
+                post_number: 1,
+                created_at: "2026-10-28T02:12:00.000Z",
+              },
+              {
+                id: 103,
+                topic_id: 11,
+                post_number: 2,
+                created_at: "2026-10-28T02:11:30.000Z",
+              },
+            ];
+          }
+        } else if (before === "100") {
+          posts = [];
+        } else if (before === "103") {
+          posts = [
+            {
+              id: 102,
+              topic_id: 11,
+              post_number: 3,
+              created_at: "2026-10-28T02:11:00.000Z",
+            },
+            {
+              id: 100,
+              topic_id: 10,
+              post_number: 1,
+              created_at: "2026-10-28T02:10:00.000Z",
+            },
+          ];
+        }
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ latest_posts: posts }),
+          bodyType: fetchArg.bodyType,
+        };
+      }
+      return {};
+    },
+  } as unknown as Page;
+  bindPageSourceAccessForTest(pageWithManyHeadInsertions, "https://linux.do");
+
+  // maxPages = 3: 1 initial + 1 downward (empty -> lowerBoundConfirmed=true) + 1 head page (not reaching 100 -> headVerified=false)
+  const partialHeadScan = await scanPostCreatedRange(
+    pageWithManyHeadInsertions,
+    siteOrigin,
+    new AbortController().signal,
+    3,
+  );
+  assert.equal(partialHeadScan.pagesRead, 3);
+  assert.equal(partialHeadScan.maxPages, 3);
+  assert.equal(partialHeadScan.lowerBoundConfirmed, true);
+  assert.equal(partialHeadScan.headVerified, false);
+  assert.equal(partialHeadScan.complete, false);
+  assert.equal(
+    partialHeadScan.issue?.reasonCode,
+    "post_range_page_limit_reached",
+  );
+
+  // Case B: readCache.headPages has 2 pages; a scope with only 1 remaining page must stop at maxPages
+  const sharedCache: PostRangeReadCache = {
+    firstPage: [
+      {
+        id: 200,
+        topic_id: 20,
+        post_number: 1,
+        created_at: "2026-10-28T02:00:00.000Z",
+      },
+    ],
+    downwardPages: new Map([
+      [
+        200,
+        [
+          {
+            id: 190,
+            topic_id: 20,
+            post_number: 2,
+            created_at: "2026-10-28T01:55:00.000Z",
+          },
+        ],
+      ],
+      [
+        190,
+        [
+          {
+            id: 180,
+            topic_id: 20,
+            post_number: 3,
+            created_at: "2026-10-28T01:50:00.000Z",
+          },
+        ],
+      ],
+      [180, []],
+    ]),
+    headPages: [
+      [
+        {
+          id: 202,
+          topic_id: 21,
+          post_number: 1,
+          created_at: "2026-10-28T02:02:00.000Z",
+        },
+      ],
+      [
+        {
+          id: 200,
+          topic_id: 20,
+          post_number: 1,
+          created_at: "2026-10-28T02:00:00.000Z",
+        },
+      ],
+    ],
+    topics: new Map(),
+  };
+  const mockCachedPage = createMockPage(new Map());
+  // maxPages = 4: 1 firstPage + 2 downwardPages (pagesRead=3 === maxPages-1) -> 1 page remaining for headPages!
+  // Replaying 2 cached headPages must stop at 1 headPage (pagesRead=4), NOT 5, and headVerified must stay false.
+  const cachedBoundedScan = await scanPostCreatedRange(
+    mockCachedPage,
+    siteOrigin,
+    new AbortController().signal,
+    4,
+    sharedCache,
+    150,
+  );
+  assert.equal(cachedBoundedScan.pagesRead, 4);
+  assert.equal(cachedBoundedScan.maxPages, 4);
+  assert.equal(cachedBoundedScan.lowerBoundConfirmed, false);
+  assert.equal(cachedBoundedScan.headVerified, false);
+  assert.equal(cachedBoundedScan.complete, false);
+
+  // With maxPages = 5, 1 firstPage + 3 downwardPages (180 -> [] hits historyExhausted at pagesRead=4? Wait: maxPages-1=4, so downward reads 200->190, 190->180, 180->[] => pagesRead=4)
+  // Actually with maxPages = 6: 1 firstPage + 3 downwardPages (pagesRead=4) + 2 cached headPages (pagesRead=6) -> both confirmed!
+  const cachedCompleteScan = await scanPostCreatedRange(
+    mockCachedPage,
+    siteOrigin,
+    new AbortController().signal,
+    6,
+    sharedCache,
+    150,
+  );
+  assert.equal(cachedCompleteScan.pagesRead, 6);
+  assert.equal(cachedCompleteScan.lowerBoundConfirmed, true);
+  assert.equal(cachedCompleteScan.headVerified, true);
+  assert.equal(cachedCompleteScan.complete, true);
+});

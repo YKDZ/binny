@@ -369,7 +369,6 @@ function composePrefix(): readonly string[] {
 function composeEnvironment(): Readonly<Record<string, string>> {
   return {
     BINNY_IMAGE: activeServerImage,
-    BINNY_BROWSER_CAPACITY_LIMIT: "1",
     BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
     BINNY_TEST_RUNNER_SCHEMA_IMAGE: schemaVariantRuntimeImageName,
     BINNY_LIFECYCLE_STOP_GRACE_MS: "1500",
@@ -715,7 +714,15 @@ async function archiveHttpStep(
 
 type ArchiveBatchReadAcceptanceFixture = {
   readonly reference: ArchiveBatchReadReference;
+  readonly smallReference: ArchiveBatchReadReference;
+  readonly smallBodyLength: number;
+  readonly smallBodySuffix: string;
   readonly oversizedReference: ArchiveBatchReadReference;
+  readonly oversizedBodyLength: number;
+  readonly oversizedBodySuffix: string;
+  readonly cumulativeReferences: readonly ArchiveBatchReadReference[];
+  readonly cumulativeBodyLengths: readonly number[];
+  readonly cumulativeBodySuffixes: readonly string[];
   readonly bodyLength: number;
   readonly bodySuffix: string;
   readonly resourceId: string;
@@ -738,16 +745,64 @@ async function archiveBatchReadHttpStep(
   const fixture: unknown = JSON.parse(result.stdout);
   assert.ok(typeof fixture === "object" && fixture !== null);
   assert.ok("reference" in fixture);
+  assert.ok("smallReference" in fixture);
+  assert.ok(
+    "smallBodyLength" in fixture && typeof fixture.smallBodyLength === "number",
+  );
+  assert.ok(
+    "smallBodySuffix" in fixture && typeof fixture.smallBodySuffix === "string",
+  );
   assert.ok("oversizedReference" in fixture);
+  assert.ok(
+    "oversizedBodyLength" in fixture &&
+      typeof fixture.oversizedBodyLength === "number",
+  );
+  assert.ok(
+    "oversizedBodySuffix" in fixture &&
+      typeof fixture.oversizedBodySuffix === "string",
+  );
+  assert.ok(
+    "cumulativeReferences" in fixture &&
+      Array.isArray(fixture.cumulativeReferences) &&
+      fixture.cumulativeReferences.length === 2,
+  );
+  assert.ok(
+    "cumulativeBodyLengths" in fixture &&
+      Array.isArray(fixture.cumulativeBodyLengths) &&
+      fixture.cumulativeBodyLengths.length === 2,
+  );
+  assert.ok(
+    "cumulativeBodySuffixes" in fixture &&
+      Array.isArray(fixture.cumulativeBodySuffixes) &&
+      fixture.cumulativeBodySuffixes.length === 2,
+  );
   assert.ok("bodyLength" in fixture && typeof fixture.bodyLength === "number");
   assert.ok("bodySuffix" in fixture && typeof fixture.bodySuffix === "string");
   assert.ok("resourceId" in fixture && typeof fixture.resourceId === "string");
   assert.ok(Number.isSafeInteger(fixture.bodyLength) && fixture.bodyLength > 0);
   return {
     reference: archiveBatchReadReferenceSchema.parse(fixture.reference),
+    smallReference: archiveBatchReadReferenceSchema.parse(
+      fixture.smallReference,
+    ),
+    smallBodyLength: fixture.smallBodyLength,
+    smallBodySuffix: fixture.smallBodySuffix,
     oversizedReference: archiveBatchReadReferenceSchema.parse(
       fixture.oversizedReference,
     ),
+    oversizedBodyLength: fixture.oversizedBodyLength,
+    oversizedBodySuffix: fixture.oversizedBodySuffix,
+    cumulativeReferences: fixture.cumulativeReferences.map((reference) =>
+      archiveBatchReadReferenceSchema.parse(reference),
+    ),
+    cumulativeBodyLengths: fixture.cumulativeBodyLengths.map((length) => {
+      assert.ok(typeof length === "number" && Number.isSafeInteger(length));
+      return length;
+    }),
+    cumulativeBodySuffixes: fixture.cumulativeBodySuffixes.map((suffix) => {
+      assert.ok(typeof suffix === "string");
+      return suffix;
+    }),
     bodyLength: fixture.bodyLength,
     bodySuffix: fixture.bodySuffix,
     resourceId: fixture.resourceId,
@@ -831,6 +886,46 @@ async function archiveBatchReadCliStep(
   assert.deepEqual(invalidJson.path, ["references"]);
   assert.match(invalidJson.message, /valid JSON/u);
 
+  const emptyReferences = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+    readonly message: string;
+  }>(
+    await cli(baseUrl, ["archive", "batch-read", "--references", "[]"]),
+    "invalid_input",
+  );
+  assert.deepEqual(emptyReferences.path, ["references"]);
+
+  const maxReferences = cliData<{
+    readonly results: readonly {
+      readonly index: number;
+      readonly status: string;
+      readonly revision?: {
+        readonly state: { readonly body?: { readonly text?: string } };
+      };
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify(Array.from({ length: 50 }, () => fixture.smallReference)),
+    ]),
+    "read",
+  );
+  assert.equal(maxReferences.results.length, 50);
+  for (const [index, entry] of maxReferences.results.entries()) {
+    assert.equal(entry.index, index);
+    assert.equal(entry.status, "readable");
+    assert.equal(
+      entry.revision?.state.body?.text?.length,
+      fixture.smallBodyLength,
+    );
+    assert.ok(
+      entry.revision?.state.body?.text?.endsWith(fixture.smallBodySuffix),
+    );
+  }
+
   const tooMany = cliFailure<{
     readonly code: string;
     readonly path?: readonly (string | number)[];
@@ -864,6 +959,88 @@ async function archiveBatchReadCliStep(
     /Split the references into smaller requests/u,
   );
   assert.match(payloadFailure.message, /archive revision <revision-id>/u);
+
+  const singleRevisionFallback = cliData<{
+    readonly revisionId: string;
+    readonly itemId: string;
+    readonly state: { readonly body?: { readonly text?: string } };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "revision",
+      fixture.oversizedReference.revisionId,
+    ]),
+    "found",
+  );
+  assert.equal(
+    singleRevisionFallback.revisionId,
+    fixture.oversizedReference.revisionId,
+  );
+  assert.equal(
+    singleRevisionFallback.itemId,
+    fixture.oversizedReference.itemId,
+  );
+  assert.equal(
+    singleRevisionFallback.state.body?.text?.length,
+    fixture.oversizedBodyLength,
+  );
+  assert.ok(
+    singleRevisionFallback.state.body?.text?.endsWith(
+      fixture.oversizedBodySuffix,
+    ),
+  );
+
+  const cumulativePayloadFailure = cliFailure<{
+    readonly code: string;
+    readonly message: string;
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify(fixture.cumulativeReferences),
+    ]),
+    "payload_too_large",
+  );
+  assert.match(
+    cumulativePayloadFailure.message,
+    /Split the references into smaller requests/u,
+  );
+
+  for (const [
+    index,
+    cumulativeReference,
+  ] of fixture.cumulativeReferences.entries()) {
+    const splitBatch = cliData<{
+      readonly results: readonly {
+        readonly index: number;
+        readonly status: string;
+        readonly revision?: {
+          readonly state: { readonly body?: { readonly text?: string } };
+        };
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "batch-read",
+        "--references",
+        JSON.stringify([cumulativeReference]),
+      ]),
+      "read",
+    );
+    assert.equal(splitBatch.results.length, 1);
+    const splitItem = splitBatch.results[0];
+    assert.ok(splitItem?.status === "readable");
+    assert.equal(
+      splitItem.revision?.state.body?.text?.length,
+      fixture.cumulativeBodyLengths[index],
+    );
+    assert.ok(
+      splitItem.revision?.state.body?.text?.endsWith(
+        fixture.cumulativeBodySuffixes[index]!,
+      ),
+    );
+  }
 }
 
 type NativeCommandExample = {
@@ -5374,7 +5551,9 @@ async function verifyLinuxdoImageUpgrade(
   );
 }
 
-async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
+async function verifyLinuxdoIndependentBrowsersJourney(
+  baseUrl: string,
+): Promise<void> {
   const firstBinId = "binny-integration-linuxdo";
   const secondBinId = "binny-integration-linuxdo-two";
   const browserServices = ["runtime-linuxdo", "runtime-linuxdo-two"] as const;
@@ -5480,67 +5659,60 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
   await waitForPower(firstBinId, "ready");
   const firstProcess = await browserProcesses("runtime-linuxdo");
   assert.equal(firstProcess.length, 1);
-  const queuedOnCapacity = await triggerCheck(secondBinId);
-  assert.equal(queuedOnCapacity.status, "queued");
-  assert.equal(queuedOnCapacity.queueReason, "browser_capacity_exhausted");
-  assert.equal((await browserProcesses()).length, 1);
+
+  // A second independent browser bin can run and open a human session concurrently.
+  const concurrentSecondCheck = await triggerCheck(secondBinId);
+  const secondRun = await waitForRunEnd(
+    secondBinId,
+    concurrentSecondCheck.runId,
+  );
+  assert.equal(secondRun.status, "completed");
+  assert.equal(secondRun.result?.output?.availability, "unavailable");
+  await waitForPower(secondBinId, "ready");
+  const secondHuman = await openLinuxdoHumanSession(cliForLinuxdo, secondBinId);
+  await waitForPower(secondBinId, "ready");
+  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
+  assert.equal((await browserProcesses()).length, 2);
+
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   assert.equal(
     (await waitForPower(firstBinId, "ready")).browserIdleTimeoutSeconds,
     0,
   );
-  assert.deepEqual(
-    (await browserProcesses()).map(({ pid, command }) => ({ pid, command })),
-    firstProcess.map(({ pid, command }) => ({ pid, command })),
-    "人工会话 ready 时空闲策略不应关闭浏览器。",
+  assert.equal(
+    (await waitForPower(secondBinId, "ready")).browserIdleTimeoutSeconds,
+    null,
   );
+  assert.equal((await browserProcesses()).length, 2);
 
   await closeHuman(firstBinId, firstHuman.sessionId);
   const firstStopped = await waitForPower(firstBinId, "stopped");
   assert.equal(firstStopped.browserIdleTimeoutSeconds, 0);
   assert.equal((await browserProcesses("runtime-linuxdo")).length, 0);
-  assert.ok((await browserProcesses()).length <= 1);
-  const secondRun = await waitForRunEnd(secondBinId, queuedOnCapacity.runId);
-  assert.equal(secondRun.status, "completed");
-  assert.equal(secondRun.result?.output?.availability, "unavailable");
-  await waitForPower(secondBinId, "ready");
-  const disabledOwnerProcess = await waitFor(
-    () => browserProcesses(),
-    (processes) => processes.length === 1,
-    `${secondBinId} 唯一主浏览器进程收敛`,
-  );
-  assert.equal(disabledOwnerProcess.length, 1);
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 3_000));
+  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
+
+  await closeHuman(secondBinId, secondHuman.sessionId);
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   assert.equal(
     (await waitForPower(secondBinId, "ready")).browserIdleTimeoutSeconds,
     null,
   );
-  assert.deepEqual(
-    (await browserProcesses()).map(({ pid, command }) => ({ pid, command })),
-    disabledOwnerProcess.map(({ pid, command }) => ({ pid, command })),
-    "禁用空闲关闭的容量持有者应保留原浏览器进程。",
-  );
+  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
 
-  const waitingFirstRun = await triggerCheck(firstBinId);
-  assert.equal(waitingFirstRun.status, "queued");
-  assert.equal(waitingFirstRun.queueReason, "browser_capacity_exhausted");
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
-  assert.equal(
-    (await readBin(secondBinId)).execution.environment?.browser?.power?.status,
-    "ready",
-  );
-  assert.equal((await browserProcesses()).length, 1);
-  await updateIdleTimeout(secondBinId, 0);
-  await waitForPower(secondBinId, "stopped");
-  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 0);
-  assert.ok((await browserProcesses()).length <= 1);
-  const firstRun = await waitForRunEnd(firstBinId, waitingFirstRun.runId);
+  // First bin can run concurrently while second bin remains ready.
+  const concurrentFirstCheck = await triggerCheck(firstBinId);
+  const firstRun = await waitForRunEnd(firstBinId, concurrentFirstCheck.runId);
   assert.equal(firstRun.status, "completed");
   assert.equal(firstRun.result?.output?.availability, "available");
   await waitForPower(firstBinId, "stopped");
-  assert.equal((await browserProcesses()).length, 0);
+  assert.equal((await browserProcesses("runtime-linuxdo")).length, 0);
+  assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
 
-  const secondHuman = await openLinuxdoHumanSession(cliForLinuxdo, firstBinId);
+  // Same-bin exclusion still blocks automatic runs behind an active human session.
+  const blockingHuman = await openLinuxdoHumanSession(
+    cliForLinuxdo,
+    firstBinId,
+  );
   await waitForPower(firstBinId, "ready");
   const blockedRun = await triggerCheck(firstBinId);
   assert.equal(blockedRun.status, "queued");
@@ -5550,23 +5722,22 @@ async function verifyLinuxdoCapacityJourney(baseUrl: string): Promise<void> {
     (await readBin(firstBinId)).execution.environment?.browser?.power?.status,
     "ready",
   );
-  assert.equal((await browserProcesses()).length, 1);
-  await closeHuman(firstBinId, secondHuman.sessionId);
+  await closeHuman(firstBinId, blockingHuman.sessionId);
   const unblockedRun = await waitForRunEnd(firstBinId, blockedRun.runId);
   assert.equal(unblockedRun.status, "completed");
   await waitForPower(firstBinId, "stopped");
+  await updateIdleTimeout(secondBinId, 0);
+  await waitForPower(secondBinId, "stopped");
   assert.equal((await browserProcesses()).length, 0);
 
   process.stdout.write(
-    "同项目 Linux.do 容量交接实测：" +
+    "同项目 Linux.do 双桶独立浏览器实测：" +
       JSON.stringify({
-        capacityLimit: 1,
-        queuedBin: secondBinId,
-        queueReason: queuedOnCapacity.queueReason,
-        stoppedBeforeWake:
+        concurrentBrowsersObserved: 2,
+        firstStoppedAfterHumanClose:
           firstStopped.execution.environment?.browser?.power?.status,
-        disabledOwnerStayedReady: true,
-        manualRunQueueReason: blockedRun.queueReason,
+        disabledSecondStayedReady: true,
+        sameBinRunQueueReason: blockedRun.queueReason,
         finalBrowserMainProcessCount: 0,
       }) +
       "\n",
@@ -12839,12 +13010,11 @@ async function main(): Promise<void> {
         rssAcceptance,
         linuxdoImageUpdate,
       );
+      await verifyLinuxdoIndependentBrowsersJourney(baseUrl);
       if (rssLinuxdoOnly) {
         process.stdout.write(
           "RSS/Atom, Linux.do source mapping, media reuse, and public history readback passed.\n",
         );
-      } else {
-        await verifyLinuxdoCapacityJourney(baseUrl);
       }
     }
     if (!manualRunsOnly && !rssLinuxdoOnly && !rssAdapterOnly) {

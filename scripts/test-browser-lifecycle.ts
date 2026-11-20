@@ -185,7 +185,6 @@ function environment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: serverImage,
     BINNY_TEST_BROWSER_IMAGE: activeBrowserImage,
     BINNY_POSTGRES_PASSWORD: password,
-    BINNY_BROWSER_CAPACITY_LIMIT: "1",
   };
 }
 
@@ -2035,62 +2034,30 @@ async function main(): Promise<void> {
     triggerRun("binny-browser-one", "check"),
     triggerRun("binny-browser-two", "check"),
   ]);
-  const initialConcurrentBrowserCount = await activeBrowserMainProcessCount();
-  const concurrentBrowserSamples = [initialConcurrentBrowserCount];
-  assert.ok(
-    initialConcurrentBrowserCount <= 1,
-    "并发首次启动突破了部署容量上限。",
-  );
-  const concurrentRunDeadline = Date.now() + 90_000;
-  let concurrentWinner:
-    | { readonly binId: string; readonly service: BrowserService }
-    | undefined;
-  let concurrentLoser:
-    | {
-        readonly binId: string;
-        readonly service: BrowserService;
-        readonly run: Run;
-      }
-    | undefined;
-  let concurrentRunStates: readonly [Run, Run] | undefined;
-  while (Date.now() < concurrentRunDeadline) {
-    const current = await Promise.all([
-      readRun("binny-browser-one", concurrentFirstLaunches[0].runId),
-      readRun("binny-browser-two", concurrentFirstLaunches[1].runId),
-    ]);
-    concurrentRunStates = current;
-    const processCount = await activeBrowserMainProcessCount();
-    concurrentBrowserSamples.push(processCount);
-    assert.ok(processCount <= 1, "并发首次启动突破了部署容量上限。");
-    const winnerIndex = current.findIndex(
+  const [firstConcurrentRun, secondConcurrentRun] = await Promise.all([
+    waitForRun(
+      "binny-browser-one",
+      concurrentFirstLaunches[0].runId,
       (run) => run.status === "completed" || run.status === "failed",
-    );
-    const loserIndex = winnerIndex === 0 ? 1 : 0;
-    if (
-      winnerIndex !== -1 &&
-      current[loserIndex]?.status === "queued" &&
-      current[loserIndex]?.queueReason === "browser_capacity_exhausted" &&
-      processCount === 1
-    ) {
-      concurrentWinner = {
-        binId: winnerIndex === 0 ? "binny-browser-one" : "binny-browser-two",
-        service: winnerIndex === 0 ? "browser-one" : "browser-two",
-      };
-      concurrentLoser = {
-        binId: loserIndex === 0 ? "binny-browser-one" : "binny-browser-two",
-        service: loserIndex === 0 ? "browser-one" : "browser-two",
-        run: current[loserIndex],
-      };
-      break;
-    }
-    await delay(250);
-  }
-  assert.ok(
-    concurrentWinner !== undefined && concurrentLoser !== undefined,
-    `并发首次启动没有形成一个就绪占位和一个容量等待：${JSON.stringify(concurrentRunStates)}`,
+    ),
+    waitForRun(
+      "binny-browser-two",
+      concurrentFirstLaunches[1].runId,
+      (run) => run.status === "completed" || run.status === "failed",
+    ),
+  ]);
+  assert.equal(firstConcurrentRun.status, "completed");
+  assert.equal(secondConcurrentRun.status, "completed");
+  await Promise.all([
+    waitForBrowserPower("binny-browser-one", "ready"),
+    waitForBrowserPower("binny-browser-two", "ready"),
+  ]);
+  const concurrentBrowserSamples = [await activeBrowserMainProcessCount()];
+  assert.equal(
+    concurrentBrowserSamples.at(-1),
+    2,
+    "两个独立浏览器 bin 必须能同时启动并保持就绪。",
   );
-  assert.ok(Math.max(...concurrentBrowserSamples) <= 1);
-  assert.equal(concurrentLoser.run.queueReason, "browser_capacity_exhausted");
 
   await compose(["restart", "server"]);
   await waitForApi();
@@ -2099,45 +2066,33 @@ async function main(): Promise<void> {
     waitForRuntime("binny-browser-one"),
     waitForRuntime("binny-browser-two"),
   ]);
-  assert.equal(
-    (await readRun(concurrentLoser.binId, concurrentLoser.run.runId))
-      .queueReason,
-    "browser_capacity_exhausted",
-    "核心重启后仍运行的浏览器没有继续占用容量。",
-  );
+  await Promise.all([
+    waitForBrowserPower("binny-browser-one", "ready"),
+    waitForBrowserPower("binny-browser-two", "ready"),
+  ]);
   concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
-  assert.equal(concurrentBrowserSamples.at(-1), 1);
+  assert.equal(concurrentBrowserSamples.at(-1), 2);
 
-  await updateBin(concurrentWinner.binId, 0);
-  await waitForBrowserPower(concurrentWinner.binId, "stopped");
-  await waitForBrowserProcessesStopped(concurrentWinner.service);
-  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
-  assert.ok(concurrentBrowserSamples.at(-1)! <= 1);
-  const releasedConcurrentRun = await waitForRun(
-    concurrentLoser.binId,
-    concurrentLoser.run.runId,
-    (run) => run.status === "completed" || run.status === "failed",
-  );
-  assert.equal(releasedConcurrentRun.status, "completed");
-  await waitForBrowserPower(concurrentLoser.binId, "ready");
-  concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
-  assert.equal(concurrentBrowserSamples.at(-1), 1);
-  await updateBin(concurrentLoser.binId, 0);
-  await waitForBrowserPower(concurrentLoser.binId, "stopped");
-  await waitForBrowserProcessesStopped(concurrentLoser.service);
+  await Promise.all([
+    updateBin("binny-browser-one", 0),
+    updateBin("binny-browser-two", 0),
+  ]);
+  await Promise.all([
+    waitForBrowserPower("binny-browser-one", "stopped"),
+    waitForBrowserPower("binny-browser-two", "stopped"),
+  ]);
+  await Promise.all([
+    waitForBrowserProcessesStopped("browser-one"),
+    waitForBrowserProcessesStopped("browser-two"),
+  ]);
   concurrentBrowserSamples.push(await activeBrowserMainProcessCount());
   assert.equal(concurrentBrowserSamples.at(-1), 0);
   await updateBin("binny-browser-one", 30);
   await updateBin("binny-browser-two", "disabled");
-  assert.ok(Math.max(...concurrentBrowserSamples) <= 1);
   process.stdout.write(
-    `并发准入与核心重启实测：${JSON.stringify({
-      limit: 1,
-      winner: concurrentWinner.binId,
-      queuedBin: concurrentLoser.binId,
-      queuedReason: "browser_capacity_exhausted",
+    `跨 bin 独立浏览器并发与核心重启实测：${JSON.stringify({
       observedBrowserProcessCounts: concurrentBrowserSamples,
-      reservationRetainedAcrossServerRestart: true,
+      bothBinsReadyAcrossServerRestart: true,
       releasedAfterRealExit: true,
     })}\n`,
   );
@@ -2156,10 +2111,15 @@ async function main(): Promise<void> {
     "opening",
   );
   const runDuringLostOpen = await triggerRun("binny-browser-two", "check");
-  assert.equal(runDuringLostOpen.status, "queued");
-  assert.equal(runDuringLostOpen.queueReason, "browser_capacity_exhausted");
+  const concurrentDuringLostOpen = await waitForRun(
+    "binny-browser-two",
+    runDuringLostOpen.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(concurrentDuringLostOpen.status, "completed");
+  await waitForBrowserPower("binny-browser-two", "ready");
   const lostOpenBrowserSamples = [await activeBrowserMainProcessCount()];
-  assert.deepEqual(lostOpenBrowserSamples, [0]);
+  assert.equal(lostOpenBrowserSamples.at(-1), 1);
 
   const lostOpenCloseRequest = await requestHumanSessionClose(
     "binny-browser-one",
@@ -2178,29 +2138,18 @@ async function main(): Promise<void> {
     ).status,
     "closed",
   );
-  const runAfterLostOpen = await waitForRun(
-    "binny-browser-two",
-    runDuringLostOpen.runId,
-    (run) => run.status === "completed" || run.status === "failed",
-  );
-  assert.equal(runAfterLostOpen.status, "completed");
-  await waitForBrowserPower("binny-browser-two", "ready");
-  lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
-  assert.equal(lostOpenBrowserSamples.at(-1), 1);
   await updateBin("binny-browser-two", 0);
   await waitForBrowserPower("binny-browser-two", "stopped");
   await waitForBrowserProcessesStopped("browser-two");
   lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
   assert.equal(lostOpenBrowserSamples.at(-1), 0);
-  assert.ok(Math.max(...lostOpenBrowserSamples) <= 1);
   await updateBin("binny-browser-two", "disabled");
   process.stdout.write(
     `人工 open 回包丢失实测：${JSON.stringify({
-      heldReservationQueueReason: runDuringLostOpen.queueReason,
       closedSession: lostOpenSession.sessionId,
       browserProcessCounts: lostOpenBrowserSamples,
-      queuedRunCompletedAfterCancellation:
-        runAfterLostOpen.status === "completed",
+      independentBinCompletedDuringHeldOpen:
+        concurrentDuringLostOpen.status === "completed",
     })}\n`,
   );
 
@@ -2339,11 +2288,10 @@ async function main(): Promise<void> {
     await browserFixtureRunIds("binny-browser-one");
   assert.ok(archivedBeforeImageUpdate.size > 0);
 
-  await updateBin("binny-browser-two", 0);
-  const versionProofSession = await startHumanSession("binny-browser-two");
+  const versionProofSession = await startHumanSession("binny-browser-one");
   assert.equal(versionProofSession.status, "pending");
   await waitForHuman(
-    "binny-browser-two",
+    "binny-browser-one",
     versionProofSession.sessionId,
     "ready",
   );
@@ -2353,7 +2301,7 @@ async function main(): Promise<void> {
     gateId: oldVersionRunGateId,
   });
   assert.equal(queuedOldVersionRun.status, "queued");
-  assert.equal(queuedOldVersionRun.queueReason, "browser_capacity_exhausted");
+  assert.equal(queuedOldVersionRun.queueReason, "human_session_active");
   assert.equal(
     queuedOldVersionRun.sourceAdapterVersion,
     sourceAdapterVersion(browserImageUpdate.baselineManifest),
@@ -2370,6 +2318,12 @@ async function main(): Promise<void> {
   const browserImageB = await replaceBrowserRuntimeImage(
     browserImage,
     browserImageUpdate.candidateImageId,
+    async () => {
+      await requestHumanSessionClose(
+        "binny-browser-one",
+        versionProofSession.sessionId,
+      ).catch(() => undefined);
+    },
   );
   assert.equal(
     browserImageB.previous.imageId,
@@ -2390,11 +2344,10 @@ async function main(): Promise<void> {
   );
   assert.equal(updatedBrowserBin.bin.id, "binny-browser-one");
   await waitForRuntime("binny-browser-one");
-  assert.equal(
-    (await readBin("binny-browser-two")).execution.environment?.browser?.power
-      ?.status,
-    "ready",
-    "另一 bin 的人工会话必须继续持有容量，直到旧版本运行被拒绝。",
+  await waitForHuman(
+    "binny-browser-one",
+    versionProofSession.sessionId,
+    "closed",
   );
   const failedOldVersionRun = await waitForRun(
     "binny-browser-one",
@@ -2414,15 +2367,6 @@ async function main(): Promise<void> {
     ),
     "版本变更拒绝的旧运行不能提交归档。",
   );
-
-  const closedVersionProofSession = await closeHumanSession(
-    "binny-browser-two",
-    versionProofSession.sessionId,
-  );
-  assert.equal(closedVersionProofSession.status, "closed");
-  await waitForBrowserPower("binny-browser-two", "stopped");
-  await waitForBrowserProcessesStopped("browser-two");
-  await updateBin("binny-browser-two", "disabled");
 
   const imageUpdateCheck = await triggerRun("binny-browser-one", "check");
   const imageUpdateCheckResult = await waitForRun(
@@ -2614,13 +2558,16 @@ async function main(): Promise<void> {
     assert.equal(pendingWake.status, "queued");
     assert.equal(pendingWake.queueReason, "bin_busy");
     const crossBinWake = await triggerRun("binny-browser-two", "check");
-    assert.equal(crossBinWake.status, "queued");
-    assert.equal(crossBinWake.queueReason, "browser_capacity_exhausted");
-    const cancelledCrossBinWake = cliData<Run>(
-      await cli(["run", "cancel", "binny-browser-two", crossBinWake.runId]),
-      "cancellation",
+    const completedCrossBinWake = await waitForRun(
+      "binny-browser-two",
+      crossBinWake.runId,
+      (run) => run.status === "completed" || run.status === "failed",
     );
-    assert.equal(cancelledCrossBinWake.status, "cancelled");
+    assert.equal(completedCrossBinWake.status, "completed");
+    await updateBin("binny-browser-two", 0);
+    await waitForBrowserPower("binny-browser-two", "stopped");
+    await waitForBrowserProcessesStopped("browser-two");
+    await updateBin("binny-browser-two", "disabled");
     const waitingWake = await readRun("binny-browser-one", pendingWake.runId);
     assert.equal(waitingWake.queueReason, "bin_busy");
     assert.equal(
@@ -2913,127 +2860,72 @@ async function main(): Promise<void> {
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   await updateBin("binny-browser-one", 30);
   await waitForBrowserPower("binny-browser-two", "ready");
-  const browserCapacitySamples: number[] = [
+  const browserConcurrencySamples: number[] = [
     await activeBrowserMainProcessCount(),
   ];
-  assert.equal(browserCapacitySamples.at(-1), 1);
+  assert.equal(browserConcurrencySamples.at(-1), 1);
 
-  const capacityCheck = await triggerRun("binny-browser-one", "check");
-  assert.equal(capacityCheck.status, "queued");
-  assert.equal(capacityCheck.queueReason, "browser_capacity_exhausted");
-  const cancelledCapacityCheck = cliData<Run>(
-    await cli(["run", "cancel", "binny-browser-one", capacityCheck.runId]),
-    "cancellation",
+  const activeHumanOne = await startHumanSession("binny-browser-one");
+  assert.equal(activeHumanOne.status, "pending");
+  await waitForHuman("binny-browser-one", activeHumanOne.sessionId, "ready");
+  await waitForBrowserPower("binny-browser-one", "ready");
+  await waitForBrowserPower("binny-browser-two", "ready");
+  browserConcurrencySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(
+    browserConcurrencySamples.at(-1),
+    2,
+    "人工会话期间第二个独立浏览器 bin 必须继续保持就绪。",
   );
-  assert.equal(cancelledCapacityCheck.status, "cancelled");
 
+  // Same-bin run must still wait behind active human session on binny-browser-one,
+  // while binny-browser-two executes concurrently without blocking.
   const waitingCollect = await triggerRun("binny-browser-one", "collect");
   assert.equal(waitingCollect.status, "queued");
-  assert.equal(waitingCollect.queueReason, "browser_capacity_exhausted");
-  const waitingHuman = await startHumanSession("binny-browser-one");
-  assert.equal(waitingHuman.status, "pending");
-  assert.equal(waitingHuman.queueReason, "browser_capacity_exhausted");
-
-  const activeRemove = cliFailure<{
-    readonly code: string;
-    readonly message: string;
-  }>(
-    await cli(["bin", "remove", "binny-browser-two"]),
-    "browser_capacity_active",
+  assert.equal(waitingCollect.queueReason, "human_session_active");
+  const concurrentCheckTwo = await triggerRun("binny-browser-two", "check");
+  const concurrentCheckTwoResult = await waitForRun(
+    "binny-browser-two",
+    concurrentCheckTwo.runId,
+    (run) => run.status === "completed" || run.status === "failed",
   );
-  assert.match(activeRemove.message, /浏览器尚未确认退出/u);
-
-  const heldBrowser = await browserMainProcess("browser-two");
-  const heldBrowserPid = await browserContainerProcessId(heldBrowser);
-  await compose([
-    "exec",
-    "--no-TTY",
-    "browser-two",
-    "node",
-    "-e",
-    `process.kill(${String(heldBrowserPid)}, "SIGSTOP");`,
-  ]);
-  try {
-    await updateBin("binny-browser-two", 0);
-    await waitForBrowserPower("binny-browser-two", "stopping");
-    browserCapacitySamples.push(await activeBrowserMainProcessCount());
-    assert.equal(browserCapacitySamples.at(-1), 1);
-    assert.equal(
-      (await readRun("binny-browser-one", waitingCollect.runId)).queueReason,
-      "human_session_active",
-    );
-    assert.equal(
-      cliData<HumanSessionStatus>(
-        await cli([
-          "human",
-          "get",
-          "binny-browser-one",
-          waitingHuman.sessionId,
-        ]),
-        "found",
-      ).queueReason,
-      "browser_capacity_exhausted",
-    );
-    const stoppingRemove = cliFailure<{ readonly code: string }>(
-      await cli(["bin", "remove", "binny-browser-two"]),
-      "browser_capacity_active",
-    );
-    assert.equal(stoppingRemove.code, "browser_capacity_active");
-  } finally {
-    await compose([
-      "exec",
-      "--no-TTY",
-      "browser-two",
-      "node",
-      "-e",
-      `process.kill(${String(heldBrowserPid)}, "SIGCONT");`,
-    ]);
-  }
-  await waitForBrowserPower("binny-browser-two", "stopped");
-  await waitForBrowserProcessesStopped("browser-two");
-  const afterCapacityHandoffCount = await activeBrowserMainProcessCount();
-  browserCapacitySamples.push(afterCapacityHandoffCount);
-  assert.ok(
-    afterCapacityHandoffCount <= 1,
-    "关闭确认与排队人工会话恢复之间突破了容量上限。",
+  assert.equal(concurrentCheckTwoResult.status, "completed");
+  assert.equal(
+    (await readRun("binny-browser-one", waitingCollect.runId)).queueReason,
+    "human_session_active",
   );
 
-  await waitForHuman("binny-browser-one", waitingHuman.sessionId, "ready");
-  browserCapacitySamples.push(await activeBrowserMainProcessCount());
-  assert.equal(browserCapacitySamples.at(-1), 1);
-  const collectDuringHuman = await readRun(
-    "binny-browser-one",
-    waitingCollect.runId,
-  );
-  assert.equal(collectDuringHuman.status, "queued");
-  assert.equal(collectDuringHuman.queueReason, "human_session_active");
-  await closeHumanSession("binny-browser-one", waitingHuman.sessionId);
-  const capacityCollectResult = await waitForRun(
+  await closeHumanSession("binny-browser-one", activeHumanOne.sessionId);
+  const unblockedCollectResult = await waitForRun(
     "binny-browser-one",
     waitingCollect.runId,
     (run) => run.status === "completed" || run.status === "failed",
   );
-  assert.equal(capacityCollectResult.status, "completed");
-  assert.ok((capacityCollectResult.result?.commits.length ?? 0) > 0);
-  browserCapacitySamples.push(await activeBrowserMainProcessCount());
-  assert.equal(browserCapacitySamples.at(-1), 1);
-  await updateBin("binny-browser-one", 0);
-  await waitForBrowserPower("binny-browser-one", "stopped");
-  await waitForBrowserProcessesStopped("browser-one");
+  assert.equal(unblockedCollectResult.status, "completed");
+  assert.ok((unblockedCollectResult.result?.commits.length ?? 0) > 0);
+  browserConcurrencySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserConcurrencySamples.at(-1), 2);
+
+  await Promise.all([
+    updateBin("binny-browser-one", 0),
+    updateBin("binny-browser-two", 0),
+  ]);
+  await Promise.all([
+    waitForBrowserPower("binny-browser-one", "stopped"),
+    waitForBrowserPower("binny-browser-two", "stopped"),
+  ]);
+  await Promise.all([
+    waitForBrowserProcessesStopped("browser-one"),
+    waitForBrowserProcessesStopped("browser-two"),
+  ]);
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
-  browserCapacitySamples.push(await activeBrowserMainProcessCount());
-  assert.equal(browserCapacitySamples.at(-1), 0);
-  assert.ok(Math.max(...browserCapacitySamples) <= 1);
+  assert.deepEqual(await zombieBrowserProcesses("browser-two"), []);
+  browserConcurrencySamples.push(await activeBrowserMainProcessCount());
+  assert.equal(browserConcurrencySamples.at(-1), 0);
   process.stdout.write(
-    `跨 bin 容量实测：${JSON.stringify({
-      limit: 1,
-      observedBrowserProcessCounts: browserCapacitySamples,
-      heldReservationQueueReasons: [
-        "browser_capacity_exhausted",
-        "browser_capacity_exhausted",
-      ],
-      stopUnconfirmedRetained: true,
-      activeRemovalRejected: true,
+    `双桶独立浏览器实测：${JSON.stringify({
+      observedBrowserProcessCounts: browserConcurrencySamples,
+      sameBinRunQueueReason: waitingCollect.queueReason,
+      concurrentCheckTwoStatus: concurrentCheckTwoResult.status,
       stoppedRemovalAccepted: true,
     })}\n`,
   );

@@ -39,10 +39,10 @@ import { and, eq, exists, gt, inArray, lt, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
 import { validateSourceAdapterActionParameters } from "./bin-configuration.ts";
-import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { hasActiveHumanSession } from "./human-session.ts";
 import {
   interruptExpiredManualRuns,
+  isRuntimeBrowserBusy,
   isRuntimeOwnerWritable,
 } from "./manual-run-fencing.ts";
 import {
@@ -196,7 +196,6 @@ async function readRun(
   database: Database | Transaction,
   binId: string,
   runId: string,
-  browserCapacity: BrowserCapacityCoordinator,
 ) {
   const [row] = await database
     .select({
@@ -300,23 +299,17 @@ async function readRun(
   ) {
     const [owner] = await database
       .select({
-        runtimeId: runtimeConnections.runtimeId,
-        ownerGeneration: runtimeConnections.ownerGeneration,
         protocolVersion: runtimeConnections.protocolVersion,
+        environment: runtimeConnections.environment,
       })
       .from(runtimeConnections)
       .where(eq(runtimeConnections.binId, binId));
     if (owner !== undefined) {
-      queueReason =
-        (await browserCapacity.queueReason(
-          database,
-          {
-            binId,
-            runtimeId: owner.runtimeId,
-            ownerGeneration: owner.ownerGeneration,
-          },
-          owner.protocolVersion >= runtimeProtocolVersion,
-        )) ?? null;
+      if (owner.protocolVersion < runtimeProtocolVersion) {
+        queueReason = "runtime_protocol_outdated";
+      } else if (isRuntimeBrowserBusy(owner.environment)) {
+        queueReason = "bin_busy";
+      }
     }
   }
   return { ...row, queueReason };
@@ -498,10 +491,7 @@ export async function createQueuedRunInTransaction(
   };
 }
 
-export function createManualRunStore(
-  database: Database,
-  browserCapacity: BrowserCapacityCoordinator,
-): ManualRunOperations {
+export function createManualRunStore(database: Database): ManualRunOperations {
   return {
     async triggerRun(binId, input) {
       const checked = manualRunTriggerInputSchema.safeParse(input);
@@ -566,12 +556,7 @@ export function createManualRunStore(
             .environment.browser.required
         )
           return created;
-        const row = await readRun(
-          transaction,
-          binId,
-          created.value.runId,
-          browserCapacity,
-        );
+        const row = await readRun(transaction, binId, created.value.runId);
         if (row === undefined)
           throw new Error("新建运行后没有找到其排队状态。");
         return { ok: true, value: await rowToRun(transaction, row) };
@@ -581,7 +566,7 @@ export function createManualRunStore(
     async getRun(binId, runId) {
       return await database.transaction(async (transaction) => {
         await interruptExpiredManualRuns(transaction, binId);
-        const row = await readRun(transaction, binId, runId, browserCapacity);
+        const row = await readRun(transaction, binId, runId);
         return row === undefined
           ? failure(404, "run_not_found", "没有找到这个运行。", ["runId"])
           : { ok: true, value: await rowToRun(transaction, row) };
@@ -641,7 +626,7 @@ export function createManualRunStore(
           );
         }
 
-        const row = await readRun(transaction, binId, runId, browserCapacity);
+        const row = await readRun(transaction, binId, runId);
         if (row === undefined) throw new Error("取消运行后记录意外消失。");
         return { ok: true, value: await rowToRun(transaction, row) };
       });
@@ -703,7 +688,7 @@ export function createManualRunStore(
           .update(manualRuns)
           .set({ report: checked.data.report })
           .where(and(eq(manualRuns.runId, runId), eq(manualRuns.binId, binId)));
-        const row = await readRun(transaction, binId, runId, browserCapacity);
+        const row = await readRun(transaction, binId, runId);
         if (row === undefined) throw new Error("运行报告写入后记录意外消失。");
         return { ok: true, value: await rowToRun(transaction, row) };
       });
@@ -817,6 +802,7 @@ export function createManualRunStore(
             ownerGeneration: runtimeConnections.ownerGeneration,
             protocolVersion: runtimeConnections.protocolVersion,
             ownerState: runtimeConnections.ownerState,
+            environment: runtimeConnections.environment,
             matches: eq(runtimeConnections.sourceAdapter, runSourceAdapter),
           })
           .from(runtimeConnections)
@@ -825,24 +811,17 @@ export function createManualRunStore(
           runtimeConnection === undefined ||
           runtimeConnection.runtimeId !== checked.data.runtimeId ||
           runtimeConnection.ownerState !== "confirmed" ||
+          runtimeConnection.protocolVersion < runtimeProtocolVersion ||
           runtimeConnection.matches !== true
         ) {
           return { ok: true, value: null };
         }
 
-        let browserReservationId: string | undefined;
-        if (runSourceAdapter.environment.browser.required) {
-          const reservation = await browserCapacity.reserve(
-            transaction,
-            {
-              binId,
-              runtimeId: runtimeConnection.runtimeId,
-              ownerGeneration: runtimeConnection.ownerGeneration,
-            },
-            runtimeConnection.protocolVersion >= runtimeProtocolVersion,
-          );
-          if (reservation.kind !== "reserved") return { ok: true, value: null };
-          browserReservationId = reservation.reservationId;
+        if (
+          runSourceAdapter.environment.browser.required &&
+          isRuntimeBrowserBusy(runtimeConnection.environment)
+        ) {
+          return { ok: true, value: null };
         }
 
         const [updated] = await transaction
@@ -872,10 +851,6 @@ export function createManualRunStore(
           params: run.params,
           config: run.configSnapshot,
           referenceTime: run.referenceTime.toISOString(),
-          ...(browserReservationId === undefined ||
-          runtimeConnection.protocolVersion < runtimeProtocolVersion
-            ? {}
-            : { browserReservationId }),
         });
         return { ok: true, value };
       });
@@ -964,12 +939,7 @@ export function createManualRunStore(
         return { ok: true as const, value: runId };
       });
       if (!completionResult.ok) return completionResult;
-      const row = await readRun(
-        database,
-        binId,
-        completionResult.value,
-        browserCapacity,
-      );
+      const row = await readRun(database, binId, completionResult.value);
       if (row === undefined) throw new Error("运行结果提交后记录意外消失。");
       return { ok: true, value: await rowToRun(database, row) };
     },

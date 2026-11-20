@@ -118,6 +118,7 @@ export type {
   SourceAccessCoordinatorSnapshot,
   SourceAccessConfig,
   SourceAccessCooldown,
+  SourceAccessDeadlineWaitReason,
   SourceAccessGroup,
   SourceAccessKind,
   SourceAccessLease,
