@@ -715,7 +715,15 @@ async function archiveHttpStep(
 
 type ArchiveBatchReadAcceptanceFixture = {
   readonly reference: ArchiveBatchReadReference;
+  readonly smallReference: ArchiveBatchReadReference;
+  readonly smallBodyLength: number;
+  readonly smallBodySuffix: string;
   readonly oversizedReference: ArchiveBatchReadReference;
+  readonly oversizedBodyLength: number;
+  readonly oversizedBodySuffix: string;
+  readonly cumulativeReferences: readonly ArchiveBatchReadReference[];
+  readonly cumulativeBodyLengths: readonly number[];
+  readonly cumulativeBodySuffixes: readonly string[];
   readonly bodyLength: number;
   readonly bodySuffix: string;
   readonly resourceId: string;
@@ -738,16 +746,64 @@ async function archiveBatchReadHttpStep(
   const fixture: unknown = JSON.parse(result.stdout);
   assert.ok(typeof fixture === "object" && fixture !== null);
   assert.ok("reference" in fixture);
+  assert.ok("smallReference" in fixture);
+  assert.ok(
+    "smallBodyLength" in fixture && typeof fixture.smallBodyLength === "number",
+  );
+  assert.ok(
+    "smallBodySuffix" in fixture && typeof fixture.smallBodySuffix === "string",
+  );
   assert.ok("oversizedReference" in fixture);
+  assert.ok(
+    "oversizedBodyLength" in fixture &&
+      typeof fixture.oversizedBodyLength === "number",
+  );
+  assert.ok(
+    "oversizedBodySuffix" in fixture &&
+      typeof fixture.oversizedBodySuffix === "string",
+  );
+  assert.ok(
+    "cumulativeReferences" in fixture &&
+      Array.isArray(fixture.cumulativeReferences) &&
+      fixture.cumulativeReferences.length === 2,
+  );
+  assert.ok(
+    "cumulativeBodyLengths" in fixture &&
+      Array.isArray(fixture.cumulativeBodyLengths) &&
+      fixture.cumulativeBodyLengths.length === 2,
+  );
+  assert.ok(
+    "cumulativeBodySuffixes" in fixture &&
+      Array.isArray(fixture.cumulativeBodySuffixes) &&
+      fixture.cumulativeBodySuffixes.length === 2,
+  );
   assert.ok("bodyLength" in fixture && typeof fixture.bodyLength === "number");
   assert.ok("bodySuffix" in fixture && typeof fixture.bodySuffix === "string");
   assert.ok("resourceId" in fixture && typeof fixture.resourceId === "string");
   assert.ok(Number.isSafeInteger(fixture.bodyLength) && fixture.bodyLength > 0);
   return {
     reference: archiveBatchReadReferenceSchema.parse(fixture.reference),
+    smallReference: archiveBatchReadReferenceSchema.parse(
+      fixture.smallReference,
+    ),
+    smallBodyLength: fixture.smallBodyLength,
+    smallBodySuffix: fixture.smallBodySuffix,
     oversizedReference: archiveBatchReadReferenceSchema.parse(
       fixture.oversizedReference,
     ),
+    oversizedBodyLength: fixture.oversizedBodyLength,
+    oversizedBodySuffix: fixture.oversizedBodySuffix,
+    cumulativeReferences: fixture.cumulativeReferences.map((reference) =>
+      archiveBatchReadReferenceSchema.parse(reference),
+    ),
+    cumulativeBodyLengths: fixture.cumulativeBodyLengths.map((length) => {
+      assert.ok(typeof length === "number" && Number.isSafeInteger(length));
+      return length;
+    }),
+    cumulativeBodySuffixes: fixture.cumulativeBodySuffixes.map((suffix) => {
+      assert.ok(typeof suffix === "string");
+      return suffix;
+    }),
     bodyLength: fixture.bodyLength,
     bodySuffix: fixture.bodySuffix,
     resourceId: fixture.resourceId,
@@ -831,6 +887,46 @@ async function archiveBatchReadCliStep(
   assert.deepEqual(invalidJson.path, ["references"]);
   assert.match(invalidJson.message, /valid JSON/u);
 
+  const emptyReferences = cliFailure<{
+    readonly code: string;
+    readonly path?: readonly (string | number)[];
+    readonly message: string;
+  }>(
+    await cli(baseUrl, ["archive", "batch-read", "--references", "[]"]),
+    "invalid_input",
+  );
+  assert.deepEqual(emptyReferences.path, ["references"]);
+
+  const maxReferences = cliData<{
+    readonly results: readonly {
+      readonly index: number;
+      readonly status: string;
+      readonly revision?: {
+        readonly state: { readonly body?: { readonly text?: string } };
+      };
+    }[];
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify(Array.from({ length: 50 }, () => fixture.smallReference)),
+    ]),
+    "read",
+  );
+  assert.equal(maxReferences.results.length, 50);
+  for (const [index, entry] of maxReferences.results.entries()) {
+    assert.equal(entry.index, index);
+    assert.equal(entry.status, "readable");
+    assert.equal(
+      entry.revision?.state.body?.text?.length,
+      fixture.smallBodyLength,
+    );
+    assert.ok(
+      entry.revision?.state.body?.text?.endsWith(fixture.smallBodySuffix),
+    );
+  }
+
   const tooMany = cliFailure<{
     readonly code: string;
     readonly path?: readonly (string | number)[];
@@ -864,6 +960,88 @@ async function archiveBatchReadCliStep(
     /Split the references into smaller requests/u,
   );
   assert.match(payloadFailure.message, /archive revision <revision-id>/u);
+
+  const singleRevisionFallback = cliData<{
+    readonly revisionId: string;
+    readonly itemId: string;
+    readonly state: { readonly body?: { readonly text?: string } };
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "revision",
+      fixture.oversizedReference.revisionId,
+    ]),
+    "found",
+  );
+  assert.equal(
+    singleRevisionFallback.revisionId,
+    fixture.oversizedReference.revisionId,
+  );
+  assert.equal(
+    singleRevisionFallback.itemId,
+    fixture.oversizedReference.itemId,
+  );
+  assert.equal(
+    singleRevisionFallback.state.body?.text?.length,
+    fixture.oversizedBodyLength,
+  );
+  assert.ok(
+    singleRevisionFallback.state.body?.text?.endsWith(
+      fixture.oversizedBodySuffix,
+    ),
+  );
+
+  const cumulativePayloadFailure = cliFailure<{
+    readonly code: string;
+    readonly message: string;
+  }>(
+    await cli(baseUrl, [
+      "archive",
+      "batch-read",
+      "--references",
+      JSON.stringify(fixture.cumulativeReferences),
+    ]),
+    "payload_too_large",
+  );
+  assert.match(
+    cumulativePayloadFailure.message,
+    /Split the references into smaller requests/u,
+  );
+
+  for (const [
+    index,
+    cumulativeReference,
+  ] of fixture.cumulativeReferences.entries()) {
+    const splitBatch = cliData<{
+      readonly results: readonly {
+        readonly index: number;
+        readonly status: string;
+        readonly revision?: {
+          readonly state: { readonly body?: { readonly text?: string } };
+        };
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "archive",
+        "batch-read",
+        "--references",
+        JSON.stringify([cumulativeReference]),
+      ]),
+      "read",
+    );
+    assert.equal(splitBatch.results.length, 1);
+    const splitItem = splitBatch.results[0];
+    assert.ok(splitItem?.status === "readable");
+    assert.equal(
+      splitItem.revision?.state.body?.text?.length,
+      fixture.cumulativeBodyLengths[index],
+    );
+    assert.ok(
+      splitItem.revision?.state.body?.text?.endsWith(
+        fixture.cumulativeBodySuffixes[index]!,
+      ),
+    );
+  }
 }
 
 type NativeCommandExample = {

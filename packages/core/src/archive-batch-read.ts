@@ -25,7 +25,7 @@ import {
   ArchiveRequestCancelled,
   assertArchiveQueryActive,
   executeCancellableArchiveQuery,
-} from "./archive-query-budget.ts";
+} from "./archive-query-cancellation.ts";
 import type { ArchiveResourceStorage } from "./archive-resource-storage.ts";
 
 type BatchReadRow = {

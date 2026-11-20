@@ -8,7 +8,7 @@ import { sql } from "drizzle-orm";
 import {
   ArchiveRequestCancelled,
   executeCancellableArchiveQuery,
-} from "./archive-query-budget.ts";
+} from "./archive-query-cancellation.ts";
 
 void describe("cancellable archive query execution", () => {
   void it("rejects query_budget_exceeded in the public archive error schema", () => {

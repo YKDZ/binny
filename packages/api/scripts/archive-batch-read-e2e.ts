@@ -6,6 +6,7 @@ import {
   archiveBatchReadMaxResponseBytes,
   archiveBatchReadMaxReferences,
   archiveBatchReadResponseSchema,
+  archiveRevisionReadSchema,
   type ArchiveBatchReadReference,
 } from "@binny/contracts";
 
@@ -30,7 +31,15 @@ async function readBatch(
 
 async function verifyArchiveBatchRead(baseUrl: string): Promise<{
   readonly reference: ArchiveBatchReadReference;
+  readonly smallReference: ArchiveBatchReadReference;
+  readonly smallBodyLength: number;
+  readonly smallBodySuffix: string;
   readonly oversizedReference: ArchiveBatchReadReference;
+  readonly oversizedBodyLength: number;
+  readonly oversizedBodySuffix: string;
+  readonly cumulativeReferences: readonly ArchiveBatchReadReference[];
+  readonly cumulativeBodyLengths: readonly number[];
+  readonly cumulativeBodySuffixes: readonly string[];
   readonly bodyLength: number;
   readonly bodySuffix: string;
   readonly resourceId: string;
@@ -315,6 +324,35 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     );
   }
 
+  const emptyReferences = await client.archives["batch-read"].$post({
+    json: { references: [] },
+  });
+  assert.equal(emptyReferences.status, 400);
+  if (emptyReferences.status === 400) {
+    const error = (await emptyReferences.json()).error;
+    assert.equal(error.code, "invalid_input");
+    assert.deepEqual(error.path, ["references"]);
+  }
+
+  const maxReferencesBatch = await readBatch(
+    client,
+    Array.from(
+      { length: archiveBatchReadMaxReferences },
+      () => secondBinReference,
+    ),
+  );
+  assert.equal(
+    maxReferencesBatch.results.length,
+    archiveBatchReadMaxReferences,
+  );
+  for (const [index, result] of maxReferencesBatch.results.entries()) {
+    assert.equal(result.index, index);
+    assert.equal(result.status, "readable");
+    if (result.status === "readable") {
+      assert.equal(result.revision.state.body?.text, secondBinBodyText);
+    }
+  }
+
   const tooManyReferences = await client.archives["batch-read"].$post({
     json: {
       references: Array.from(
@@ -332,6 +370,14 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
   }
 
   const oversizedToken = token + ":oversized";
+  const oversizedBodySuffix = "Oversized full body suffix " + oversizedToken;
+  const oversizedBodyText =
+    "Oversized response body " +
+    oversizedToken +
+    "\n" +
+    "x".repeat(archiveBatchReadMaxResponseBytes + 1_024) +
+    "\n" +
+    oversizedBodySuffix;
   const oversizedSubmission = await client.archives.$post({
     json: {
       requestId: "e2e:archive-batch-read:oversized:" + runId,
@@ -343,13 +389,7 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
           sourcePublishedAt: null,
           sourceModifiedAt: null,
           extensions: {},
-          body: {
-            text:
-              "Oversized response body " +
-              oversizedToken +
-              "\n" +
-              "x".repeat(archiveBatchReadMaxResponseBytes + 1_024),
-          },
+          body: { text: oversizedBodyText },
           capture: {
             scope: { case: "archive-batch-read-oversized" },
             completeness: "complete",
@@ -404,16 +444,44 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     assert.match(error.message, /archive revision <revision-id>/u);
   }
 
+  const singleOversizedFallback = await client.archives.revisions[
+    ":revisionId"
+  ].$get({
+    param: { revisionId: oversizedReference.revisionId },
+  });
+  assert.equal(
+    singleOversizedFallback.status,
+    200,
+    await singleOversizedFallback.clone().text(),
+  );
+  const recoveredOversizedRevision = archiveRevisionReadSchema.parse(
+    await singleOversizedFallback.json(),
+  );
+  assert.equal(
+    recoveredOversizedRevision.revisionId,
+    oversizedReference.revisionId,
+  );
+  assert.equal(recoveredOversizedRevision.itemId, oversizedReference.itemId);
+  assert.equal(recoveredOversizedRevision.state.body?.text, oversizedBodyText);
+
   const cumulativeReferences: ArchiveBatchReadReference[] = [];
+  const cumulativeBodySuffixes = [
+    "Cumulative suffix one " + token,
+    "Cumulative suffix two " + token,
+  ];
   const cumulativeBodies = [
     "Cumulative response one " +
       token +
       "\n" +
-      "a".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024),
+      "a".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024) +
+      "\n" +
+      cumulativeBodySuffixes[0]!,
     "Cumulative response two " +
       token +
       "\n" +
-      "b".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024),
+      "b".repeat(archiveBatchReadMaxResponseBytes / 2 + 1_024) +
+      "\n" +
+      cumulativeBodySuffixes[1]!,
   ];
   for (const [index, cumulativeBody] of cumulativeBodies.entries()) {
     const cumulativeToken = token + ":cumulative:" + String(index);
@@ -485,6 +553,16 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     assert.equal(error.code, "payload_too_large");
   }
 
+  for (const [index, cumulativeReference] of cumulativeReferences.entries()) {
+    const splitRead = await readBatch(client, [cumulativeReference]);
+    const splitResult = splitRead.results[0];
+    assert.ok(splitResult?.status === "readable");
+    assert.equal(
+      splitResult.revision.state.body?.text,
+      cumulativeBodies[index],
+    );
+  }
+
   const repeatedOversizedRead = await client.archives["batch-read"].$post({
     json: {
       references: Array.from(
@@ -510,7 +588,15 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
 
   return {
     reference: firstBinReference,
+    smallReference: secondBinReference,
+    smallBodyLength: secondBinBodyText.length,
+    smallBodySuffix: secondBinBodyText,
     oversizedReference,
+    oversizedBodyLength: oversizedBodyText.length,
+    oversizedBodySuffix,
+    cumulativeReferences,
+    cumulativeBodyLengths: cumulativeBodies.map((body) => body.length),
+    cumulativeBodySuffixes,
     bodyLength: bodyText.length,
     bodySuffix,
     resourceId: uppercaseResourceId,

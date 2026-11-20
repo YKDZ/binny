@@ -3779,6 +3779,12 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     observedAt: "2026-11-09T15:00:00.000Z",
     items: [makeItem("page-c", "Page C", paginationToken)],
   });
+  await submitArchive(client, {
+    requestId: "e2e:fixed-search:pagination-second-bin:" + runId,
+    binId: "binny-runs-two",
+    observedAt: "2026-11-09T14:30:00.000Z",
+    items: [makeItem("page-d", "Page D", paginationToken)],
+  });
   const stableIds = [
     ...newerPage.items.map(({ itemId }) => itemId).toSorted(),
     ...olderPage.items.map(({ itemId }) => itemId).toSorted(),
@@ -3801,11 +3807,43 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
   );
   assert.ok(firstPage.nextCursor);
 
+  const distributionSnapshotFirstResponse = await client.archives.search.$post({
+    json: {
+      bins: ["binny-runs-one", "binny-runs-two"],
+      text: { in: "body", groups: [[paginationToken]] },
+      includeCandidates: false,
+      asOf: firstPage.snapshot.asOf,
+      distribution: { by: "bin", limit: 1 },
+    },
+  });
+  assert.equal(distributionSnapshotFirstResponse.status, 200);
+  if (distributionSnapshotFirstResponse.status !== 200) {
+    throw new Error("Distribution snapshot page 1 failed.");
+  }
+  const distributionSnapshotFirst =
+    await distributionSnapshotFirstResponse.json();
+  assert.equal(
+    distributionSnapshotFirst.snapshot.asOf,
+    firstPage.snapshot.asOf,
+  );
+  assert.equal(distributionSnapshotFirst.distribution?.totalItems, "4");
+  assert.deepEqual(distributionSnapshotFirst.distribution?.groups, [
+    { kind: "bin", binId: "binny-runs-one", itemCount: "3" },
+  ]);
+  assert.equal(distributionSnapshotFirst.distribution?.hasMore, true);
+  assert.ok(distributionSnapshotFirst.distribution?.nextCursor);
+
   await submitArchive(client, {
     requestId: "e2e:fixed-search:pagination-after-snapshot:" + runId,
     binId: "binny-runs-one",
     observedAt: "2026-11-10T16:00:00.000Z",
     items: [makeItem("page-late", "Later page", paginationToken)],
+  });
+  await submitArchive(client, {
+    requestId: "e2e:fixed-search:pagination-after-snapshot-two:" + runId,
+    binId: "binny-runs-two",
+    observedAt: "2026-11-10T16:05:00.000Z",
+    items: [makeItem("page-late-two", "Later page two", paginationToken)],
   });
   const secondResponse = await client.archives.search.$post({
     json: {
@@ -3825,6 +3863,38 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
     stableIds.slice(1),
   );
   assert.equal(secondPage.nextCursor, undefined);
+
+  const distributionSnapshotSecondResponse = await client.archives.search.$post(
+    {
+      json: {
+        bins: ["binny-runs-one", "binny-runs-two"],
+        text: { in: "body", groups: [[paginationToken]] },
+        includeCandidates: false,
+        asOf: firstPage.snapshot.asOf,
+        distribution: {
+          by: "bin",
+          limit: 1,
+          cursor: distributionSnapshotFirst.distribution.nextCursor,
+        },
+      },
+    },
+  );
+  assert.equal(distributionSnapshotSecondResponse.status, 200);
+  if (distributionSnapshotSecondResponse.status !== 200) {
+    throw new Error("Distribution snapshot page 2 failed.");
+  }
+  const distributionSnapshotSecond =
+    await distributionSnapshotSecondResponse.json();
+  assert.equal(
+    distributionSnapshotSecond.snapshot.asOf,
+    firstPage.snapshot.asOf,
+  );
+  assert.equal(distributionSnapshotSecond.distribution?.totalItems, "4");
+  assert.deepEqual(distributionSnapshotSecond.distribution?.groups, [
+    { kind: "bin", binId: "binny-runs-two", itemCount: "1" },
+  ]);
+  assert.equal(distributionSnapshotSecond.distribution?.hasMore, false);
+  assert.equal(distributionSnapshotSecond.distribution?.nextCursor, undefined);
 
   const reusedSnapshot = await client.archives.search.$post({
     json: {
