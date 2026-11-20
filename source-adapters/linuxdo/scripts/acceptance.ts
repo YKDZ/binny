@@ -1199,10 +1199,14 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.match(sync.description ?? "", /已有范围按接续位置从旧到新处理/u);
   assert.match(sync.description ?? "", /同一位置沿用原范围顺序/u);
   const syncParams = sync.params as {
-    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly properties?: Readonly<
+      Record<string, Readonly<Record<string, unknown>>>
+    >;
   };
   for (const name of ["maxPages", "maxRequests", "maxElapsedMs"])
     assert.ok(syncParams.properties?.[name] !== undefined);
+  assert.equal(syncParams.properties?.maxRequests?.default, undefined);
+  assert.equal(syncParams.properties?.maxElapsedMs?.default, undefined);
   const syncReport = sync.report as {
     readonly properties?: Readonly<Record<string, unknown>>;
   };
@@ -4529,10 +4533,10 @@ type SyncRunReport = {
       };
   readonly discovery: string;
   readonly budget: {
-    readonly maxRequests: number;
-    readonly maxElapsedMs: number;
+    readonly maxRequests?: number;
+    readonly maxElapsedMs?: number;
     readonly elapsedMs: number;
-    readonly remainingMs: number;
+    readonly remainingMs?: number;
     readonly stopReason?: string;
   };
   readonly sourceAccess: {
@@ -5718,6 +5722,10 @@ async function verifyBoundedSync(): Promise<string> {
       syncReport(cooled).sourceAccess.rateLimitResponses[0]?.outcome,
       "cooled",
     );
+    assert.equal(
+      syncReport(cooled).incompleteScopes[0]?.reasonCode,
+      "post_range_source_rate_limited",
+    );
 
     const cooledUpperBound = syncReport(cooled).upperBound;
     await setTestClockAt(
@@ -5733,6 +5741,13 @@ async function verifyBoundedSync(): Promise<string> {
     assert.equal(
       syncReport(waitLimit).budget.stopReason,
       "wait-exceeds-budget",
+    );
+    assert.equal(waitLimit.report?.abortCause, "action_budget_exhausted");
+    assert.equal(
+      syncOutput(waitLimit).incompleteScopes.some(
+        ({ reasonCode }) => reasonCode === "budget_wait_exceeds_budget",
+      ),
+      true,
     );
     assert.equal(syncOutput(waitLimit).outcome, "partial");
     assert.equal(syncOutput(waitLimit).scopes.length, 0);
@@ -6357,6 +6372,8 @@ async function verifySyncScopeTransitions(): Promise<void> {
     const costEvents = (await sourceState()).events;
     assert.equal(costReport.phase, "completed", JSON.stringify(costReport));
     assert.equal(costReport.budget.maxRequests, 30);
+    assert.equal(costReport.budget.maxElapsedMs, undefined);
+    assert.equal(costReport.budget.remainingMs, undefined);
     assert.equal(costReport.budget.stopReason, undefined);
     assert.equal(costReport.scopes.length, 6);
     assert.ok(

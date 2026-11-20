@@ -6,6 +6,7 @@ import {
   createSourceAccessCoordinator,
   createSourceAccessClient,
   SourceAccessBudgetExceededError,
+  SourceAccessDeadlineExceededError,
   sourceAccessConfigSchema,
   type SourceAccessClock,
   type SourceAccessLease,
@@ -563,7 +564,7 @@ void test("其他来源组持久写失败后不得放行已完成准备写的准
       { groupId: "second", kind: "rejected" },
     ],
   );
-  const firstOutcome = outcomes[0]!;
+  const firstOutcome = outcomes[0];
   assert.equal(firstOutcome.kind, "rejected");
   if (firstOutcome.kind === "rejected")
     assert.equal(firstOutcome.code, "source_access_state_unavailable");
@@ -1435,10 +1436,7 @@ void test("单轮预算在同一来源准入前预留并限制主动请求数", 
     assert.equal(settled.kind, "failed");
     if (settled.kind === "failed") {
       assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
-      assert.equal(
-        (settled.error as SourceAccessBudgetExceededError).reason,
-        "request-limit",
-      );
+      assert.equal(settled.error.reason, "request-limit");
     }
     assert.equal(operations, 0);
     assert.equal(access.snapshot().admittedAttempts, 0);
@@ -1536,7 +1534,7 @@ void test("关闭单轮预算时撤销排队请求但不伪造预算耗尽", asy
     assert.equal(settled.kind, "failed");
     if (settled.kind === "failed") {
       assert.ok(settled.error instanceof DOMException);
-      assert.equal((settled.error as DOMException).name, "AbortError");
+      assert.equal(settled.error.name, "AbortError");
     }
 
     await coordinator.release(ownerId, held.leaseId);
@@ -1642,10 +1640,7 @@ void test("单轮预算耗尽时取消在途操作并记录精确单调耗时", 
     assert.equal(settled.kind, "failed");
     if (settled.kind === "failed") {
       assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
-      assert.equal(
-        (settled.error as SourceAccessBudgetExceededError).reason,
-        "elapsed-time-limit",
-      );
+      assert.equal(settled.error.reason, "elapsed-time-limit");
     }
     assert.equal(budget.budgetSnapshot().elapsedMs, 250);
     assert.equal(budget.budgetSnapshot().stopReason, "elapsed-time-limit");
@@ -1755,10 +1750,7 @@ void test("单轮耗时预算到期会撤销同一协调器中排队的准入", 
     assert.equal(settled.kind, "failed");
     if (settled.kind === "failed") {
       assert.ok(settled.error instanceof SourceAccessBudgetExceededError);
-      assert.equal(
-        (settled.error as SourceAccessBudgetExceededError).reason,
-        "elapsed-time-limit",
-      );
+      assert.equal(settled.error.reason, "elapsed-time-limit");
     }
     assert.equal(budget.budgetSnapshot().elapsedMs, 250);
   } finally {
@@ -1842,11 +1834,293 @@ void test("最早来源准入时刻晚于预算期限时立即停止本轮等待
     );
     assert.equal(operationStarted, false);
     assert.equal(access.snapshot().admittedAttempts, 0);
-    assert.equal(
-      budget.budgetSnapshot().stopReason as string,
-      "wait-exceeds-budget",
-    );
+    assert.equal(budget.budgetSnapshot().stopReason, "wait-exceeds-budget");
     assert.equal(budget.budgetSnapshot().elapsedMs, 0);
+  } finally {
+    budget.close();
+    await coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("省略整轮预算维度时不设上限，允许超过旧默认请求与耗时并等待冷却", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const ownerId = "owner-unbounded-budget";
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const signal = new AbortController().signal;
+  const transport: SourceAccessTransport = {
+    async acquire(request, acquireSignal) {
+      return await coordinator.acquire(ownerId, request, config, acquireSignal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-unbounded-budget",
+    signal,
+    declarations: config,
+    transport,
+  });
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal,
+    clock: controlled.clock,
+  });
+
+  try {
+    assert.equal(budget.remainingMs(), undefined);
+    assert.deepEqual(budget.budgetSnapshot(), { elapsedMs: 0 });
+    assert.equal("maxRequests" in budget.budgetSnapshot(), false);
+    assert.equal("maxElapsedMs" in budget.budgetSnapshot(), false);
+    assert.equal("remainingMs" in budget.budgetSnapshot(), false);
+
+    // Exceed old 200-request and 300_000ms defaults without stopping.
+    for (let index = 0; index < 205; index++) {
+      await budget.withAdmission(
+        { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+        async () => undefined,
+      );
+    }
+    await controlled.advanceBy(350_000);
+    assert.equal(budget.signal.aborted, false);
+    assert.equal(budget.remainingMs(), undefined);
+
+    await budget.observeResponse(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      { status: 429, retryAfter: "5" },
+    );
+
+    let admittedAfterCooldown = false;
+    const pending = budget.withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => {
+        admittedAfterCooldown = true;
+      },
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(admittedAfterCooldown, false);
+    await controlled.advanceBy(5_000);
+    await pending;
+    assert.equal(admittedAfterCooldown, true);
+    assert.equal(access.snapshot().admittedAttempts, 206);
+    assert.deepEqual(budget.budgetSnapshot(), { elapsedMs: 355_000 });
+  } finally {
+    budget.close();
+    await coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("单轮预算仅显式配置单个维度时各自独立生效", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const ownerId = "owner-single-dimension-budget";
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const transport: SourceAccessTransport = {
+    async acquire(request, acquireSignal) {
+      return await coordinator.acquire(ownerId, request, config, acquireSignal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+
+  // Case 1: maxRequests only (maxElapsedMs omitted)
+  const requestOnlyAccess = createSourceAccessClient({
+    runId: "run-requests-only",
+    signal: new AbortController().signal,
+    declarations: config,
+    transport,
+  });
+  const requestOnlyBudget = createSourceAccessBudget({
+    client: requestOnlyAccess,
+    signal: new AbortController().signal,
+    clock: controlled.clock,
+    maxRequests: 2,
+  });
+  try {
+    assert.equal(requestOnlyBudget.remainingMs(), undefined);
+    await controlled.advanceBy(400_000);
+    await requestOnlyBudget.withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => undefined,
+    );
+    await requestOnlyBudget.withAdmission(
+      { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+      async () => undefined,
+    );
+    await assert.rejects(
+      requestOnlyBudget.withAdmission(
+        { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+        async () => undefined,
+      ),
+      (error: unknown) =>
+        error instanceof SourceAccessBudgetExceededError &&
+        error.reason === "request-limit",
+    );
+    assert.deepEqual(requestOnlyBudget.budgetSnapshot(), {
+      maxRequests: 2,
+      elapsedMs: 400_000,
+      stopReason: "request-limit",
+    });
+  } finally {
+    requestOnlyBudget.close();
+  }
+
+  // Case 2: maxElapsedMs only (maxRequests omitted)
+  const timeOnlyAccess = createSourceAccessClient({
+    runId: "run-time-only",
+    signal: new AbortController().signal,
+    declarations: config,
+    transport,
+  });
+  const timeOnlyBudget = createSourceAccessBudget({
+    client: timeOnlyAccess,
+    signal: new AbortController().signal,
+    clock: controlled.clock,
+    maxElapsedMs: 1_000,
+  });
+  try {
+    for (let index = 0; index < 205; index++) {
+      await timeOnlyBudget.withAdmission(
+        { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+        async () => undefined,
+      );
+    }
+    assert.equal(timeOnlyAccess.snapshot().admittedAttempts, 205);
+    assert.deepEqual(timeOnlyBudget.budgetSnapshot(), {
+      maxElapsedMs: 1_000,
+      elapsedMs: 0,
+      remainingMs: 1_000,
+    });
+    await controlled.advanceBy(1_000);
+    assert.equal(timeOnlyBudget.signal.aborted, true);
+    assert.ok(
+      timeOnlyBudget.signal.reason instanceof SourceAccessBudgetExceededError &&
+        timeOnlyBudget.signal.reason.reason === "elapsed-time-limit",
+    );
+  } finally {
+    timeOnlyBudget.close();
+    await coordinator.closeOwner(ownerId);
+  }
+});
+
+void test("源站冷却超出显式耗时预算时保留冷却等待原因", async () => {
+  const controlled = createControlledClock();
+  const config = sourceAccessConfigSchema.parse({
+    groups: {
+      linuxdo: {
+        sources: ["site"],
+        minimumIntervalMs: 0,
+        maxConcurrency: 1,
+      },
+    },
+  });
+  const ownerId = "owner-cooldown-exceeds-budget";
+  const coordinator = await createSourceAccessCoordinator({
+    clock: controlled.clock,
+    store: {
+      async load() {
+        return undefined;
+      },
+      async save() {},
+    },
+  });
+  const signal = new AbortController().signal;
+  const transport: SourceAccessTransport = {
+    async acquire(request, acquireSignal) {
+      return await coordinator.acquire(ownerId, request, config, acquireSignal);
+    },
+    async release(leaseId) {
+      await coordinator.release(ownerId, leaseId);
+    },
+    async observeResponse(request, response) {
+      return await coordinator.observeResponse(
+        ownerId,
+        request,
+        config,
+        response,
+      );
+    },
+  };
+  const access = createSourceAccessClient({
+    runId: "run-cooldown-exceeds-budget",
+    signal,
+    declarations: config,
+    transport,
+  });
+  await access.observeResponse(
+    { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+    { status: 429, retryAfter: "30" },
+  );
+  const budget = createSourceAccessBudget({
+    client: access,
+    signal,
+    clock: controlled.clock,
+    maxElapsedMs: 5_000,
+  });
+  try {
+    await assert.rejects(
+      budget.withAdmission(
+        { groupId: "linuxdo", source: "site", origin: "https://linux.do" },
+        async () => undefined,
+      ),
+      (error: unknown) =>
+        error instanceof SourceAccessBudgetExceededError &&
+        error.reason === "wait-exceeds-budget" &&
+        error.cause instanceof SourceAccessDeadlineExceededError &&
+        error.cause.waitReason === "source_cooldown" &&
+        error.cause.cooldownStatus === 429 &&
+        error.cause.notBeforeEpochMs === 1_030_000,
+    );
   } finally {
     budget.close();
     await coordinator.closeOwner(ownerId);

@@ -190,12 +190,36 @@ export type SourceAccessCoordinator = {
   closeOwner(ownerId: string): Promise<void>;
 };
 
+export type SourceAccessDeadlineWaitReason =
+  | "source_cooldown"
+  | "pacing_interval"
+  | "concurrency";
+
 export class SourceAccessDeadlineExceededError extends Error {
   readonly code = "source_access_deadline_exceeded";
+  readonly waitReason?: SourceAccessDeadlineWaitReason | undefined;
+  readonly notBeforeEpochMs?: number | undefined;
+  readonly cooldownStatus?: 429 | 503 | undefined;
+  readonly retryAfter?: string | undefined;
 
-  constructor() {
-    super("本轮剩余时间不足以等待来源准入。", { cause: undefined });
+  constructor(details?: {
+    readonly waitReason?: SourceAccessDeadlineWaitReason;
+    readonly notBeforeEpochMs?: number;
+    readonly cooldownStatus?: 429 | 503;
+    readonly retryAfter?: string;
+  }) {
+    super(
+      details?.waitReason === "source_cooldown" &&
+        details.notBeforeEpochMs !== undefined
+        ? `源站要求等待冷却至 ${new Date(details.notBeforeEpochMs).toISOString()}（HTTP ${String(details.cooldownStatus ?? 429)}），超出本轮剩余时间预算。`
+        : "本轮剩余时间不足以等待来源准入。",
+      { cause: undefined },
+    );
     this.name = "SourceAccessDeadlineExceededError";
+    this.waitReason = details?.waitReason;
+    this.notBeforeEpochMs = details?.notBeforeEpochMs;
+    this.cooldownStatus = details?.cooldownStatus;
+    this.retryAfter = details?.retryAfter;
   }
 }
 
@@ -569,10 +593,11 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
     }
     if (state.timer !== undefined) this.clock.clearTimer(state.timer);
     const waiter = state.queue[0]!;
+    const cooldown = this.cooldownByGroup.get(groupId);
     const nextAt = Math.max(
       this.effectiveLastAdmittedAt(groupId) + waiter.group.minimumIntervalMs,
       waiter.request.notBeforeEpochMs ?? 0,
-      this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
+      cooldown?.notBeforeEpochMs ?? 0,
     );
     const now = this.clock.epochNow();
     if (
@@ -580,7 +605,7 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       nextAt > waiter.request.deadlineEpochMs
     ) {
       this.removeWaiter(state, waiter);
-      waiter.reject(new SourceAccessDeadlineExceededError());
+      waiter.reject(this.deadlineError(nextAt, cooldown, "pacing_interval"));
       this.schedulePump(groupId, state);
       return;
     }
@@ -589,7 +614,11 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
         const untilDeadline = waiter.request.deadlineEpochMs - now + 1;
         if (untilDeadline <= 0) {
           this.removeWaiter(state, waiter);
-          waiter.reject(new SourceAccessDeadlineExceededError());
+          waiter.reject(
+            new SourceAccessDeadlineExceededError({
+              waitReason: "concurrency",
+            }),
+          );
           this.schedulePump(groupId, state);
           return;
         }
@@ -673,10 +702,11 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
         waiter.reject(new Error("来源准入时钟返回了无效的 epoch 时间。"));
         return;
       }
+      const cooldown = this.cooldownByGroup.get(groupId);
       const requiredAt = Math.max(
         this.effectiveLastAdmittedAt(groupId) + waiter.group.minimumIntervalMs,
         waiter.request.notBeforeEpochMs ?? 0,
-        this.cooldownByGroup.get(groupId)?.notBeforeEpochMs ?? 0,
+        cooldown?.notBeforeEpochMs ?? 0,
       );
       if (
         waiter.request.deadlineEpochMs !== undefined &&
@@ -684,7 +714,9 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       ) {
         await this.restorePreparedAdmission(groupId, previousRecovery);
         this.removeWaiter(state, waiter);
-        waiter.reject(new SourceAccessDeadlineExceededError());
+        waiter.reject(
+          this.deadlineError(requiredAt, cooldown, "pacing_interval"),
+        );
         return;
       }
       if (timestamp < requiredAt) {
@@ -725,6 +757,25 @@ class SdkSourceAccessCoordinator implements SourceAccessCoordinator {
       state.pumping = false;
       this.schedulePump(groupId, state);
     }
+  }
+
+  private deadlineError(
+    requiredAt: number,
+    cooldown: SourceAccessCooldown | undefined,
+    fallbackWaitReason: SourceAccessDeadlineWaitReason,
+  ): SourceAccessDeadlineExceededError {
+    if (cooldown !== undefined && cooldown.notBeforeEpochMs >= requiredAt) {
+      return new SourceAccessDeadlineExceededError({
+        waitReason: "source_cooldown",
+        notBeforeEpochMs: cooldown.notBeforeEpochMs,
+        cooldownStatus: cooldown.status,
+        retryAfter: cooldown.retryAfter,
+      });
+    }
+    return new SourceAccessDeadlineExceededError({
+      waitReason: fallbackWaitReason,
+      notBeforeEpochMs: requiredAt,
+    });
   }
 
   private trackOwnerTask(ownerId: string, task: Promise<void>): void {
