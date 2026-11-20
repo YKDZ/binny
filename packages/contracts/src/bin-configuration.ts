@@ -194,6 +194,26 @@ export const sourceAdapterManifestSchema = withPostgresJsonSchemaProjection(
   sourceAdapterManifestCheckedSchema,
 );
 
+export const runtimeSleepIdleTimeoutSecondsSchema = z
+  .number()
+  .int("Runtime sleep idle timeout must be an integer number of seconds.")
+  .min(0, "Runtime sleep idle timeout cannot be negative.")
+  .max(2_147_483, "Runtime sleep idle timeout cannot exceed 2147483 seconds.");
+
+export const runtimeSleepPolicySchema = withPostgresJsonSchemaProjection(
+  z
+    .object({
+      idleTimeoutSeconds: runtimeSleepIdleTimeoutSecondsSchema.nullable(),
+    })
+    .strict(),
+);
+
+export const runtimeSleepPhaseSchema = z.enum([
+  "stopping",
+  "sleeping",
+  "waking",
+]);
+
 export const browserIdleTimeoutSecondsSchema = z
   .number()
   .int("浏览器空闲关闭时长必须是整数秒。")
@@ -271,6 +291,7 @@ export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
     .object({
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
+      runtimeSleep: runtimeSleepPolicySchema.optional(),
       browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
         .nullable()
         .optional(),
@@ -504,6 +525,13 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
     sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
   z.object({
+    status: z.literal("sleeping"),
+    phase: runtimeSleepPhaseSchema,
+    runtimeId: postgresTextSchema.optional(),
+    lastHeartbeatAt: z.iso.datetime().optional(),
+    sourceStateSnapshot: sourceStateSnapshotSchema,
+  }),
+  z.object({
     status: z.literal("offline"),
     reason: z.enum([
       "runtime_not_connected",
@@ -538,6 +566,7 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
     sourceAdapter: sourceAdapterManifestStoredSchema,
     identityId: identityIdSchema,
     config: jsonObjectSchema,
+    runtimeSleep: runtimeSleepPolicySchema,
     browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
     status: binStatusSchema,
     execution: runtimeExecutionSchema,
@@ -546,7 +575,12 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
   }),
 );
 
-const binExecutionStatusSchema = z.enum(["online", "offline", "incompatible"]);
+const binExecutionStatusSchema = z.enum([
+  "online",
+  "sleeping",
+  "offline",
+  "incompatible",
+]);
 
 /** Stable, concise identity and runtime status for each entry in `bin list`. */
 export const binListItemSchema = withPostgresJsonSchemaProjection(
@@ -572,6 +606,14 @@ const binExecutionSummarySchema = z.discriminatedUnion("status", [
       runtimeId: postgresTextSchema,
       lastHeartbeatAt: z.iso.datetime(),
       environment: runtimeEnvironmentSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("sleeping"),
+      phase: runtimeSleepPhaseSchema,
+      runtimeId: postgresTextSchema.optional(),
+      lastHeartbeatAt: z.iso.datetime().optional(),
     })
     .strict(),
   z
@@ -631,6 +673,7 @@ export const binDetailsSchema = withPostgresJsonSchemaProjection(
       sourceAdapterId: sourceAdapterIdSchema,
       identityId: identityIdSchema,
       config: jsonObjectSchema,
+      runtimeSleep: runtimeSleepPolicySchema,
       browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
       status: binStatusSchema,
       execution: binExecutionSummarySchema,

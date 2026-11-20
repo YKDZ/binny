@@ -1043,8 +1043,22 @@ function createCliContract(identity: CliCommandIdentity) {
     execution: z.infer<typeof cliBinDetailsSchema>["execution"],
   ): string => {
     if (execution.status === "online") return "online";
+    if (execution.status === "sleeping") {
+      return execution.phase === "sleeping"
+        ? "sleeping (idle_policy)"
+        : `sleeping (${execution.phase})`;
+    }
     if (execution.status === "offline") return `offline (${execution.reason})`;
     return `incompatible (${execution.error.code})`;
+  };
+  const runtimeSleepPolicyLabel = (
+    runtimeSleep: z.infer<typeof cliBinDetailsSchema>["runtimeSleep"],
+  ): string => {
+    if (runtimeSleep.idleTimeoutSeconds === null) return "disabled (resident)";
+    if (runtimeSleep.idleTimeoutSeconds === 0) {
+      return "0s (sleep immediately after work)";
+    }
+    return `${runtimeSleep.idleTimeoutSeconds}s idle`;
   };
   const browserWorkStateLabel = (
     execution: z.infer<typeof cliBinDetailsSchema>["execution"],
@@ -1066,6 +1080,7 @@ function createCliContract(identity: CliCommandIdentity) {
       `Source adapter: ${bin.sourceAdapterId}`,
       `Status: ${bin.status}`,
       `Runtime connection: ${runtimeConnectionLabel(bin.execution)}`,
+      `Runtime sleep: ${runtimeSleepPolicyLabel(bin.runtimeSleep)}`,
       `Browser: ${browserWorkStateLabel(bin.execution)}`,
       `Source state: ${bin.sourceStateSnapshot.freshness}${
         "updatedAt" in bin.sourceStateSnapshot
@@ -1342,6 +1357,7 @@ function createCliContract(identity: CliCommandIdentity) {
       identityId: identityIdSchema.optional(),
       config: jsonObjectTextSchema.optional(),
       browserIdleTimeoutSeconds: browserIdleTimeoutOptionSchema.optional(),
+      idleTimeoutSeconds: browserIdleTimeoutOptionSchema.optional(),
     }),
   );
   const runTriggerInputSchema = withPostgresJsonSchemaProjection(
@@ -1830,20 +1846,48 @@ function createCliContract(identity: CliCommandIdentity) {
     typeof binUpdateSuccess,
     typeof failureSchemas
   > = async ({ input, dependencies, outcome }) => {
-    const { id, browserIdleTimeoutSeconds, ...fields } = input;
-    const idleTimeout =
+    const { id, browserIdleTimeoutSeconds, idleTimeoutSeconds, ...fields } =
+      input;
+    const browserIdleTimeout =
       browserIdleTimeoutSeconds === undefined
         ? undefined
         : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
-    if (idleTimeout !== undefined && "error" in idleTimeout)
-      return outcome.failure.apiError(idleTimeout.error);
-    const patch =
-      idleTimeout === undefined
-        ? fields
+    if (browserIdleTimeout !== undefined && "error" in browserIdleTimeout)
+      return outcome.failure.apiError(browserIdleTimeout.error);
+    const runtimeSleepIdleTimeout =
+      idleTimeoutSeconds === undefined
+        ? undefined
+        : parseBrowserIdleTimeoutOption(idleTimeoutSeconds);
+    if (
+      runtimeSleepIdleTimeout !== undefined &&
+      "error" in runtimeSleepIdleTimeout
+    )
+      return outcome.failure.apiError(runtimeSleepIdleTimeout.error);
+    if (
+      browserIdleTimeout !== undefined &&
+      runtimeSleepIdleTimeout !== undefined &&
+      browserIdleTimeout.value !== runtimeSleepIdleTimeout.value
+    ) {
+      return outcome.failure.apiError({
+        code: "invalid_input",
+        message:
+          "--idle-timeout-seconds and --browser-idle-timeout-seconds must match when both are provided.",
+        path: ["runtimeSleep", "idleTimeoutSeconds"],
+      });
+    }
+    const patch = {
+      ...fields,
+      ...(browserIdleTimeout === undefined
+        ? {}
+        : { browserIdleTimeoutSeconds: browserIdleTimeout.value }),
+      ...(runtimeSleepIdleTimeout === undefined
+        ? {}
         : {
-            ...fields,
-            browserIdleTimeoutSeconds: idleTimeout.value,
-          };
+            runtimeSleep: {
+              idleTimeoutSeconds: runtimeSleepIdleTimeout.value,
+            },
+          }),
+    };
     const response = await dependencies.createClient().bins[":binId"].$patch({
       param: { binId: id },
       json: patch,
@@ -3321,11 +3365,22 @@ function createCliContract(identity: CliCommandIdentity) {
             description:
               "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
           },
+          idleTimeoutSeconds: {
+            kind: "valueOption",
+            longOption: "--idle-timeout-seconds",
+            description:
+              "Idle seconds before runtime container sleep; 0 sleeps right after work finishes, disabled keeps resident",
+          },
         },
         usageConstraints: [
           {
             kind: "count",
-            fields: ["identityId", "config", "browserIdleTimeoutSeconds"],
+            fields: [
+              "identityId",
+              "config",
+              "browserIdleTimeoutSeconds",
+              "idleTimeoutSeconds",
+            ],
             min: 1,
           },
         ],

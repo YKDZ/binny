@@ -51,6 +51,7 @@ function createService(
         sourceAdapterId: "rss",
         identityId: "account-main",
         config: { feedUrl: "https://example.test/feed.xml" },
+        runtimeSleep: { idleTimeoutSeconds: null },
         browserIdleTimeoutSeconds: null,
         status: "active",
         execution: { status: "offline", reason: "runtime_not_connected" },
@@ -172,6 +173,7 @@ void describe("bin discovery", () => {
         sourceAdapterId: "linuxdo",
         identityId: "account-linuxdo",
         config: { baseUrl: "https://linux.do" },
+        runtimeSleep: { idleTimeoutSeconds: 0 },
         browserIdleTimeoutSeconds: 0,
         status: "active",
         execution: {
@@ -199,6 +201,7 @@ void describe("bin discovery", () => {
         sourceAdapterId: "rss",
         identityId: "account-rss",
         config: { feedUrl: "https://example.test/feed.xml" },
+        runtimeSleep: { idleTimeoutSeconds: null },
         browserIdleTimeoutSeconds: null,
         status: "active",
         execution: {
@@ -218,11 +221,33 @@ void describe("bin discovery", () => {
         createdAt: "2026-11-01T00:00:00.000Z",
         updatedAt: "2026-11-02T00:00:00.000Z",
       },
+      "rss-sleeping": {
+        id: "rss-sleeping",
+        sourceAdapterId: "rss",
+        identityId: "account-rss-sleep",
+        config: { feedUrl: "https://example.test/sleep.xml" },
+        runtimeSleep: { idleTimeoutSeconds: 300 },
+        browserIdleTimeoutSeconds: 300,
+        status: "active",
+        execution: {
+          status: "sleeping",
+          phase: "sleeping",
+          runtimeId: "runtime-rss-sleep-1",
+          lastHeartbeatAt: "2026-11-02T00:00:00.000Z",
+        },
+        sourceStateSnapshot: {
+          freshness: "stale",
+          updatedAt: "2026-11-02T00:00:00.000Z",
+        },
+        createdAt: "2026-11-01T00:00:00.000Z",
+        updatedAt: "2026-11-02T00:00:00.000Z",
+      },
       "broken-browser": {
         id: "broken-browser",
         sourceAdapterId: "linuxdo",
         identityId: "account-broken",
         config: {},
+        runtimeSleep: { idleTimeoutSeconds: 60 },
         browserIdleTimeoutSeconds: 60,
         status: "active",
         execution: {
@@ -298,6 +323,18 @@ void describe("bin discovery", () => {
       incompatibleText.output,
       /^Browser: unknown \(runtime incompatible\)$/mu,
     );
+
+    const sleepingText = await run(
+      ["bin", "get", "rss-sleeping", "--output", "text"],
+      customFetch,
+    );
+    assert.equal(sleepingText.exitCode, 0, sleepingText.output);
+    assert.match(sleepingText.output, /^Status: active$/mu);
+    assert.match(
+      sleepingText.output,
+      /^Runtime connection: sleeping \(idle_policy\)$/mu,
+    );
+    assert.match(sleepingText.output, /^Runtime sleep: 300s idle$/mu);
   });
 
   void it("renders list output as readable text without changing structured shape", async () => {

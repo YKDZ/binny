@@ -32,6 +32,7 @@ import {
   humanSessions,
   manualRuns,
   runtimeConnections,
+  runtimeContainers,
   type Database,
   type Transaction,
 } from "@binny/db";
@@ -47,9 +48,11 @@ import {
 } from "./manual-run-fencing.ts";
 import {
   actionInputSnapshotStillCurrent,
+  checkActionPreflightPreconditions,
   preflightActionInput,
 } from "./runtime-action-validation.ts";
 import { readRuntimeExecution } from "./runtime-connection.ts";
+import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
 
 const runSelection = {
   runId: manualRuns.runId,
@@ -491,7 +494,11 @@ export async function createQueuedRunInTransaction(
   };
 }
 
-export function createManualRunStore(database: Database): ManualRunOperations {
+export function createManualRunStore(
+  database: Database,
+  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
+): ManualRunOperations {
+  const containerCoordinator = options?.containerCoordinator;
   return {
     async triggerRun(binId, input) {
       const checked = manualRunTriggerInputSchema.safeParse(input);
@@ -505,62 +512,91 @@ export function createManualRunStore(database: Database): ManualRunOperations {
         );
       }
 
-      const preflight = await preflightActionInput(
-        database,
-        binId,
-        checked.data.action,
-        checked.data.params,
-      );
-      if (!preflight.ok) return preflight;
+      const executeTrigger = async (): Promise<
+        ManualRunOperation<ManualRun>
+      > => {
+        const preflight = await preflightActionInput(
+          database,
+          binId,
+          checked.data.action,
+          checked.data.params,
+        );
+        if (!preflight.ok) return preflight;
 
-      return await database.transaction(async (transaction) => {
-        const [bin] = await transaction
-          .select({
-            id: binConfigurations.id,
-            sourceAdapter: binConfigurations.sourceAdapter,
-            identityId: binConfigurations.identityId,
-            config: binConfigurations.config,
-            configNativeValid: binConfigurations.configNativeValid,
-            status: binConfigurations.status,
-          })
-          .from(binConfigurations)
-          .where(eq(binConfigurations.id, binId))
-          .for("update");
-        if (bin === undefined)
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+        return await database.transaction(async (transaction) => {
+          const [bin] = await transaction
+            .select({
+              id: binConfigurations.id,
+              sourceAdapter: binConfigurations.sourceAdapter,
+              identityId: binConfigurations.identityId,
+              config: binConfigurations.config,
+              configNativeValid: binConfigurations.configNativeValid,
+              status: binConfigurations.status,
+            })
+            .from(binConfigurations)
+            .where(eq(binConfigurations.id, binId))
+            .for("update");
+          if (bin === undefined)
+            return failure(404, "bin_not_found", "没有找到这个 bin。", [
+              "binId",
+            ]);
 
-        if (
-          !(await actionInputSnapshotStillCurrent(
+          if (
+            !(await actionInputSnapshotStillCurrent(
+              transaction,
+              preflight.snapshot,
+            ))
+          ) {
+            return failure(
+              409,
+              "action_input_changed",
+              "长期配置或运行器在动作参数原生校验期间发生变化，请重新提交。",
+              ["params"],
+            );
+          }
+
+          await interruptExpiredManualRuns(transaction, binId);
+          const created = await createQueuedRunInTransaction(
             transaction,
-            preflight.snapshot,
-          ))
-        ) {
+            bin,
+            checked.data,
+            { kind: "manual" },
+          );
+          if (!created.ok) return created;
+          if (
+            !sourceAdapterManifestStoredSchema.parse(bin.sourceAdapter)
+              .environment.browser.required
+          )
+            return created;
+          const row = await readRun(transaction, binId, created.value.runId);
+          if (row === undefined)
+            throw new Error("新建运行后没有找到其排队状态。");
+          return { ok: true, value: await rowToRun(transaction, row) };
+        });
+      };
+
+      if (containerCoordinator !== undefined) {
+        const preconditionFailure = await checkActionPreflightPreconditions(
+          database,
+          binId,
+        );
+        if (preconditionFailure !== undefined) return preconditionFailure;
+        const wake = await containerCoordinator.ensureAwakeAndRun(
+          binId,
+          executeTrigger,
+        );
+        if (!wake.ok) {
           return failure(
             409,
-            "action_input_changed",
-            "长期配置或运行器在动作参数原生校验期间发生变化，请重新提交。",
+            "runtime_action_validation_unavailable",
+            wake.message,
             ["params"],
           );
         }
+        return wake.value;
+      }
 
-        await interruptExpiredManualRuns(transaction, binId);
-        const created = await createQueuedRunInTransaction(
-          transaction,
-          bin,
-          checked.data,
-          { kind: "manual" },
-        );
-        if (!created.ok) return created;
-        if (
-          !sourceAdapterManifestStoredSchema.parse(bin.sourceAdapter)
-            .environment.browser.required
-        )
-          return created;
-        const row = await readRun(transaction, binId, created.value.runId);
-        if (row === undefined)
-          throw new Error("新建运行后没有找到其排队状态。");
-        return { ok: true, value: await rowToRun(transaction, row) };
-      });
+      return await executeTrigger();
     },
 
     async getRun(binId, runId) {
@@ -574,7 +610,8 @@ export function createManualRunStore(database: Database): ManualRunOperations {
     },
 
     async cancelRun(binId, runId) {
-      return await database.transaction(async (transaction) => {
+      let cancelledQueued = false;
+      const result = await database.transaction(async (transaction) => {
         await interruptExpiredManualRuns(transaction, binId);
         const [current] = await transaction
           .select({ status: manualRuns.status })
@@ -582,9 +619,15 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)))
           .for("update");
         if (current === undefined)
-          return failure(404, "run_not_found", "没有找到这个运行。", ["runId"]);
+          return failure<ManualRun>(
+            404,
+            "run_not_found",
+            "没有找到这个运行。",
+            ["runId"],
+          );
 
         if (current.status === "queued") {
+          cancelledQueued = true;
           await transaction
             .update(manualRuns)
             .set({
@@ -618,7 +661,7 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           current.status !== "cancelling" &&
           current.status !== "cancelled"
         ) {
-          return failure(
+          return failure<ManualRun>(
             409,
             "run_not_cancellable",
             "这个运行已经终结，不能再请求取消。",
@@ -628,8 +671,12 @@ export function createManualRunStore(database: Database): ManualRunOperations {
 
         const row = await readRun(transaction, binId, runId);
         if (row === undefined) throw new Error("取消运行后记录意外消失。");
-        return { ok: true, value: await rowToRun(transaction, row) };
+        return { ok: true as const, value: await rowToRun(transaction, row) };
       });
+      if (result.ok && cancelledQueued) {
+        await containerCoordinator?.markWorkCompleted(binId);
+      }
+      return result;
     },
 
     async reportRun(binId, runId, input) {
@@ -730,6 +777,16 @@ export function createManualRunStore(database: Database): ManualRunOperations {
           .from(runtimeConnections)
           .where(eq(runtimeConnections.binId, binId));
         if (owner?.ownerState !== "confirmed") return { ok: true, value: null };
+        const [container] = await transaction
+          .select({ lifecyclePhase: runtimeContainers.lifecyclePhase })
+          .from(runtimeContainers)
+          .where(eq(runtimeContainers.binId, binId));
+        if (
+          container?.lifecyclePhase === "stopping" ||
+          container?.lifecyclePhase === "sleeping"
+        ) {
+          return { ok: true, value: null };
+        }
         if (await hasActiveHumanSession(transaction, binId)) {
           return { ok: true, value: null };
         }
@@ -939,6 +996,7 @@ export function createManualRunStore(database: Database): ManualRunOperations {
         return { ok: true as const, value: runId };
       });
       if (!completionResult.ok) return completionResult;
+      await containerCoordinator?.markWorkCompleted(binId);
       const row = await readRun(database, binId, completionResult.value);
       if (row === undefined) throw new Error("运行结果提交后记录意外消失。");
       return { ok: true, value: await rowToRun(database, row) };

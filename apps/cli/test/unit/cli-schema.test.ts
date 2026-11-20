@@ -134,6 +134,7 @@ void describe("native offline CLI contract discovery", () => {
           sourceAdapterId: "rss",
           identityId: "account-primary",
           config: { userAgent: "Binny E2E updated", key: "aaz" },
+          runtimeSleep: { idleTimeoutSeconds: 0 },
           browserIdleTimeoutSeconds: 0,
           status: "active",
           execution: { status: "offline", reason: "runtime_not_connected" },
@@ -154,6 +155,43 @@ void describe("native offline CLI contract discovery", () => {
       config: { userAgent: "Binny E2E updated", key: "aaz" },
       browserIdleTimeoutSeconds: 0,
     });
+
+    const sleepPolicyChange = await run(
+      ["bin", "update", "rss-main", "--idle-timeout-seconds", "300"],
+      async (inputRequest, init) => {
+        const request = new Request(inputRequest, init);
+        if (new URL(request.url).pathname === "/meta") {
+          return Response.json({
+            product: { name: "Binny", version: "1.2.3" },
+            protocols: { httpApi: publicApiProtocolVersion },
+            capabilities: ["archives.search", "archive.query-contract"],
+            contracts: {
+              archiveQuery: {
+                version: archiveQueryContractVersion,
+                path: "/meta/query",
+              },
+            },
+          });
+        }
+        assert.deepEqual(await request.clone().json(), {
+          runtimeSleep: { idleTimeoutSeconds: 300 },
+        });
+        return Response.json({
+          id: "rss-main",
+          sourceAdapterId: "rss",
+          identityId: "account-primary",
+          config: { userAgent: "Binny E2E updated", key: "aaz" },
+          runtimeSleep: { idleTimeoutSeconds: 300 },
+          browserIdleTimeoutSeconds: 300,
+          status: "active",
+          execution: { status: "offline", reason: "runtime_not_connected" },
+          sourceStateSnapshot: { freshness: "unknown" },
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        });
+      },
+    );
+    assert.equal(sleepPolicyChange.exitCode, 0, sleepPolicyChange.stderr);
   });
 
   void it("lists direct root children without expanding command schemas", async () => {

@@ -27,8 +27,10 @@ import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { createQueuedRunInTransaction } from "./manual-run.ts";
 import {
   actionInputSnapshotStillCurrent,
+  checkActionPreflightPreconditions,
   preflightActionInput,
 } from "./runtime-action-validation.ts";
+import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
 
 type ScheduleStore = ScheduleOperations & {
   readonly processDueSchedules: () => Promise<void>;
@@ -387,7 +389,11 @@ export async function startScheduleDispatcher(
   }
 }
 
-export function createScheduleStore(database: Database): ScheduleStore {
+export function createScheduleStore(
+  database: Database,
+  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
+): ScheduleStore {
+  const containerCoordinator = options?.containerCoordinator;
   return {
     async getSchedule(binId, scheduleId) {
       return await database.transaction(async (transaction) => {
@@ -436,56 +442,86 @@ export function createScheduleStore(database: Database): ScheduleStore {
       );
       if (!initialNextDue.ok)
         return { ok: false, status: 400, error: initialNextDue.error };
-      const preflight = await preflightActionInput(
-        database,
-        binId,
-        checked.data.action,
-        checked.data.params,
-      );
-      if (!preflight.ok) return preflight;
-      const nextDue = computeNextDue(
-        checked.data.expression,
-        checked.data.timeZone,
-        scheduleId,
-        new Date(),
-      );
-      if (!nextDue.ok) return { ok: false, status: 400, error: nextDue.error };
 
-      return await database.transaction(async (transaction) => {
-        const [bin] = await readBinForRun(transaction, binId);
-        if (bin === undefined) {
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
-        }
-        if (
-          !(await actionInputSnapshotStillCurrent(
-            transaction,
-            preflight.snapshot,
-          ))
-        ) {
+      const executeCreate = async (): Promise<ScheduleOperation<Schedule>> => {
+        const preflight = await preflightActionInput(
+          database,
+          binId,
+          checked.data.action,
+          checked.data.params,
+        );
+        if (!preflight.ok) return preflight;
+        const nextDue = computeNextDue(
+          checked.data.expression,
+          checked.data.timeZone,
+          scheduleId,
+          new Date(),
+        );
+        if (!nextDue.ok)
+          return { ok: false, status: 400, error: nextDue.error };
+
+        return await database.transaction(async (transaction) => {
+          const [bin] = await readBinForRun(transaction, binId);
+          if (bin === undefined) {
+            return failure(404, "bin_not_found", "没有找到这个 bin。", [
+              "binId",
+            ]);
+          }
+          if (
+            !(await actionInputSnapshotStillCurrent(
+              transaction,
+              preflight.snapshot,
+            ))
+          ) {
+            return failure(
+              409,
+              "action_input_changed",
+              "长期配置或运行器在计划参数原生校验期间发生变化，请重新提交。",
+              ["params"],
+            );
+          }
+          const [row] = await transaction
+            .insert(schedules)
+            .values({
+              scheduleId,
+              binId,
+              expression: checked.data.expression,
+              timeZone: checked.data.timeZone,
+              action: checked.data.action,
+              params: checked.data.params,
+              overlapPolicy: checked.data.overlapPolicy,
+              enabled: checked.data.enabled ?? true,
+              nextDueAt: nextDue.value,
+            })
+            .returning();
+          if (row === undefined)
+            throw new Error("采集计划创建后没有返回记录。");
+          return { ok: true, value: toSchedule(row) };
+        });
+      };
+
+      if (containerCoordinator !== undefined) {
+        const preconditionFailure = await checkActionPreflightPreconditions(
+          database,
+          binId,
+        );
+        if (preconditionFailure !== undefined) return preconditionFailure;
+        const wake = await containerCoordinator.ensureAwakeAndRun(
+          binId,
+          executeCreate,
+        );
+        if (!wake.ok) {
           return failure(
             409,
-            "action_input_changed",
-            "长期配置或运行器在计划参数原生校验期间发生变化，请重新提交。",
+            "runtime_action_validation_unavailable",
+            wake.message,
             ["params"],
           );
         }
-        const [row] = await transaction
-          .insert(schedules)
-          .values({
-            scheduleId,
-            binId,
-            expression: checked.data.expression,
-            timeZone: checked.data.timeZone,
-            action: checked.data.action,
-            params: checked.data.params,
-            overlapPolicy: checked.data.overlapPolicy,
-            enabled: checked.data.enabled ?? true,
-            nextDueAt: nextDue.value,
-          })
-          .returning();
-        if (row === undefined) throw new Error("采集计划创建后没有返回记录。");
-        return { ok: true, value: toSchedule(row) };
-      });
+        return wake.value;
+      }
+
+      return await executeCreate();
     },
 
     async updateSchedule(binId, scheduleId, input) {
@@ -534,89 +570,120 @@ export function createScheduleStore(database: Database): ScheduleStore {
       if (!initialNextDue.ok)
         return { ok: false, status: 400, error: initialNextDue.error };
 
-      const preflight = hasInputChange
-        ? await preflightActionInput(
-            database,
-            binId,
-            initialUpdated.action,
-            initialUpdated.params,
-          )
-        : undefined;
-      if (preflight !== undefined && !preflight.ok) return preflight;
+      const executeUpdate = async (): Promise<ScheduleOperation<Schedule>> => {
+        const preflight = hasInputChange
+          ? await preflightActionInput(
+              database,
+              binId,
+              initialUpdated.action,
+              initialUpdated.params,
+            )
+          : undefined;
+        if (preflight !== undefined && !preflight.ok) return preflight;
 
-      return await database.transaction(async (transaction) => {
-        const [bin] = await readBinForRun(transaction, binId);
-        if (bin === undefined) {
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
-        }
-        const rows = await transaction
-          .select()
-          .from(schedules)
-          .where(
-            and(
-              eq(schedules.binId, binId),
-              eq(schedules.scheduleId, scheduleId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const current = rows[0];
-        if (current === undefined) {
-          return failure(404, "schedule_not_found", "没有找到这个采集计划。", [
-            "scheduleId",
+        return await database.transaction(async (transaction) => {
+          const [bin] = await readBinForRun(transaction, binId);
+          if (bin === undefined) {
+            return failure(404, "bin_not_found", "没有找到这个 bin。", [
+              "binId",
+            ]);
+          }
+          const rows = await transaction
+            .select()
+            .from(schedules)
+            .where(
+              and(
+                eq(schedules.binId, binId),
+                eq(schedules.scheduleId, scheduleId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const current = rows[0];
+          if (current === undefined) {
+            return failure(
+              404,
+              "schedule_not_found",
+              "没有找到这个采集计划。",
+              ["scheduleId"],
+            );
+          }
+          if (
+            hasInputChange &&
+            (preflight === undefined ||
+              current.action !== initial.current.action ||
+              !isDeepStrictEqual(current.params, initial.current.params) ||
+              !(await actionInputSnapshotStillCurrent(
+                transaction,
+                preflight.snapshot,
+              )))
+          ) {
+            return failure(
+              409,
+              "action_input_changed",
+              "计划参数、长期配置或运行器在原生校验期间发生变化，请重新提交。",
+              ["params"],
+            );
+          }
+          const updated = {
+            expression: checked.data.expression ?? current.expression,
+            timeZone: checked.data.timeZone ?? current.timeZone,
+            action: checked.data.action ?? current.action,
+            params: checked.data.params ?? current.params,
+            overlapPolicy: checked.data.overlapPolicy ?? current.overlapPolicy,
+          };
+          const nextDue = computeNextDue(
+            updated.expression,
+            updated.timeZone,
+            current.scheduleId,
+            new Date(),
+          );
+          if (!nextDue.ok)
+            return { ok: false, status: 400, error: nextDue.error };
+          const [row] = await transaction
+            .update(schedules)
+            .set({
+              ...updated,
+              nextDueAt: nextDue.value,
+              lastError: null,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(eq(schedules.scheduleId, scheduleId))
+            .returning();
+          if (row === undefined)
+            throw new Error("采集计划修改后没有返回记录。");
+          const lastRunIds = await latestScheduleRunIds(transaction, binId, [
+            scheduleId,
           ]);
-        }
-        if (
-          hasInputChange &&
-          (preflight === undefined ||
-            current.action !== initial.current.action ||
-            !isDeepStrictEqual(current.params, initial.current.params) ||
-            !(await actionInputSnapshotStillCurrent(
-              transaction,
-              preflight.snapshot,
-            )))
-        ) {
+          return {
+            ok: true,
+            value: toSchedule(row, lastRunIds.get(scheduleId)),
+          };
+        });
+      };
+
+      if (hasInputChange && containerCoordinator !== undefined) {
+        const preconditionFailure = await checkActionPreflightPreconditions(
+          database,
+          binId,
+        );
+        if (preconditionFailure !== undefined) return preconditionFailure;
+        const wake = await containerCoordinator.ensureAwakeAndRun(
+          binId,
+          executeUpdate,
+        );
+        if (!wake.ok) {
           return failure(
             409,
-            "action_input_changed",
-            "计划参数、长期配置或运行器在原生校验期间发生变化，请重新提交。",
+            "runtime_action_validation_unavailable",
+            wake.message,
             ["params"],
           );
         }
-        const updated = {
-          expression: checked.data.expression ?? current.expression,
-          timeZone: checked.data.timeZone ?? current.timeZone,
-          action: checked.data.action ?? current.action,
-          params: checked.data.params ?? current.params,
-          overlapPolicy: checked.data.overlapPolicy ?? current.overlapPolicy,
-        };
-        const nextDue = computeNextDue(
-          updated.expression,
-          updated.timeZone,
-          current.scheduleId,
-          new Date(),
-        );
-        if (!nextDue.ok)
-          return { ok: false, status: 400, error: nextDue.error };
-        const [row] = await transaction
-          .update(schedules)
-          .set({
-            ...updated,
-            nextDueAt: nextDue.value,
-            lastError: null,
-            updatedAt: sql`clock_timestamp()`,
-          })
-          .where(eq(schedules.scheduleId, scheduleId))
-          .returning();
-        if (row === undefined) throw new Error("采集计划修改后没有返回记录。");
-        const lastRunIds = await latestScheduleRunIds(transaction, binId, [
-          scheduleId,
-        ]);
-        return {
-          ok: true,
-          value: toSchedule(row, lastRunIds.get(scheduleId)),
-        };
-      });
+        return wake.value;
+      }
+
+      return await executeUpdate();
     },
 
     async setScheduleEnabled(binId, scheduleId, enabled) {

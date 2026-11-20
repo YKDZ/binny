@@ -17,6 +17,7 @@ import {
   createManualRunStore,
   createScheduleListStore,
   createRuntimeConnectionStore,
+  createRuntimeContainerCoordinator,
   createScheduleStore,
   startScheduleDispatcher,
 } from "@binny/core";
@@ -25,6 +26,7 @@ import { connectDatabase, migrateDatabase } from "@binny/db";
 import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
 
+import { createDockerEngineContainerDriver } from "./docker-engine.ts";
 import { HumanSessionGateway } from "./human-session-gateway.ts";
 import { humanSessionViewerPage } from "./human-session-viewer.ts";
 
@@ -77,10 +79,22 @@ export async function createServerRuntime(options: {
       100,
     ),
   });
-  const runtime = createRuntimeConnectionStore(database);
-  const runs = createManualRunStore(database);
+  const dockerDriver = await createDockerEngineContainerDriver();
+  const containerCoordinator = createRuntimeContainerCoordinator({
+    database,
+    driver: dockerDriver,
+    wakeTimeoutMs: environmentMilliseconds(
+      "BINNY_RUNTIME_WAKE_TIMEOUT_MS",
+      30_000,
+      1_000,
+    ),
+  });
+  const runtime = createRuntimeConnectionStore(database, {
+    containerCoordinator,
+  });
+  const runs = createManualRunStore(database, { containerCoordinator });
   const runListings = createManualRunListStore(database);
-  const schedules = createScheduleStore(database);
+  const schedules = createScheduleStore(database, { containerCoordinator });
   const scheduleListings = createScheduleListStore(database);
   const humanSessions = createHumanSessionStore(database);
   const viewerWaitMs = environmentMilliseconds(
@@ -98,6 +112,8 @@ export async function createServerRuntime(options: {
     },
   });
   let pendingTimeout: NodeJS.Timeout | undefined;
+  let containerSweepTimer: NodeJS.Timeout | undefined;
+  let containerSweepWork: Promise<void> | undefined;
   let scheduleDispatcher:
     | Awaited<ReturnType<typeof startScheduleDispatcher>>
     | undefined;
@@ -105,6 +121,7 @@ export async function createServerRuntime(options: {
     await migrateDatabase(database);
     await archives.initializeResourceStorage();
     await humanSessions.reconcileHumanSessionsAfterGatewayRestart();
+    await containerCoordinator.reconcileOnStartup();
     scheduleDispatcher = await startScheduleDispatcher(
       schedules,
       database,
@@ -123,14 +140,34 @@ export async function createServerRuntime(options: {
       Math.min(viewerWaitMs, 5_000),
     );
     pendingTimeout.unref();
+    if (dockerDriver !== undefined) {
+      containerSweepTimer = setInterval(() => {
+        if (containerSweepWork !== undefined) return;
+        containerSweepWork = containerCoordinator
+          .sweepIdleContainers()
+          .catch((error: unknown) => {
+            process.stderr.write(
+              `Runtime container sweep failed: ${error instanceof Error ? error.message : String(error)}\n`,
+            );
+          })
+          .finally(() => {
+            containerSweepWork = undefined;
+          });
+      }, schedulePollIntervalMs);
+      containerSweepTimer.unref();
+    }
   } catch (error) {
     try {
-      if (scheduleDispatcher !== undefined) await scheduleDispatcher.close();
+      await containerCoordinator.close();
     } finally {
       try {
-        await archives.close();
+        if (scheduleDispatcher !== undefined) await scheduleDispatcher.close();
       } finally {
-        await connection.close();
+        try {
+          await archives.close();
+        } finally {
+          await connection.close();
+        }
       }
     }
     throw error;
@@ -197,7 +234,7 @@ export async function createServerRuntime(options: {
   };
   const app = createApiRoutes(
     {
-      bins: createBinConfigurationStore(database),
+      bins: createBinConfigurationStore(database, { containerCoordinator }),
       runtime: runtimeOperations,
       runs,
       runListings,
@@ -221,12 +258,19 @@ export async function createServerRuntime(options: {
     schedulePoll = undefined;
     if (pendingTimeout !== undefined) clearInterval(pendingTimeout);
     pendingTimeout = undefined;
+    if (containerSweepTimer !== undefined) clearInterval(containerSweepTimer);
+    containerSweepTimer = undefined;
     backgroundWorkStop = (async () => {
       await scheduleWork;
+      await containerSweepWork;
       try {
-        await activeScheduleDispatcher.close();
+        await containerCoordinator.close();
       } finally {
-        await humanSessions.beginHumanGatewayShutdown();
+        try {
+          await activeScheduleDispatcher.close();
+        } finally {
+          await humanSessions.beginHumanGatewayShutdown();
+        }
       }
     })();
     return backgroundWorkStop;

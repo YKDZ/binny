@@ -1,0 +1,305 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "3decea6e-b123-47a4-9ccf-9b38a0d65a55",
+  "prevIds": ["83ac1c06-60ca-417c-b584-1a684a15cbd5"],
+  "footprints": [
+    {
+      "statementType": "create_table",
+      "statementTarget": ["table", "public", "runtime_containers"],
+      "writes": [
+        "s|tbl|public.runtime_containers",
+        "n|tbl|public.runtime_containers",
+        "e|tbl|public.runtime_containers",
+        "n|rel|public.runtime_containers",
+        "n|type|public.runtime_containers",
+        "n|rel|public.runtime_containers_pkey"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "runtime_sleep_idle_timeout_seconds"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.runtime_sleep_idle_timeout_seconds",
+        "n|col|public.bin_configurations.runtime_sleep_idle_timeout_seconds",
+        "e|col|public.bin_configurations.runtime_sleep_idle_timeout_seconds"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    },
+    {
+      "statementType": "create_fk",
+      "statementTarget": ["table", "public", "runtime_containers"],
+      "writes": [
+        "s|fk|public.runtime_containers.runtime_containers_bin_id_bin_configurations_id_fkey",
+        "n|fk|public.runtime_containers.runtime_containers_bin_id_bin_configurations_id_fkey",
+        "e|fk|public.runtime_containers.runtime_containers_bin_id_bin_configurations_id_fkey",
+        "n|con|public.runtime_containers.runtime_containers_bin_id_bin_configurations_id_fkey"
+      ],
+      "reads": [
+        "n|tbl|public.runtime_containers",
+        "n|sch|public",
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.runtime_containers.bin_id",
+        "n|col|public.bin_configurations.id",
+        "e|uniqueness|public.bin_configurations.id"
+      ]
+    },
+    {
+      "statementType": "add_check",
+      "statementTarget": ["table", "public", "bin_configurations"],
+      "writes": [
+        "s|ck|public.bin_configurations.bin_configurations_runtime_sleep_idle_timeout_seconds_check",
+        "n|ck|public.bin_configurations.bin_configurations_runtime_sleep_idle_timeout_seconds_check",
+        "e|ck|public.bin_configurations.bin_configurations_runtime_sleep_idle_timeout_seconds_check",
+        "n|con|public.bin_configurations.bin_configurations_runtime_sleep_idle_timeout_seconds_check"
+      ],
+      "reads": [
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "n|col|public.bin_configurations.runtime_sleep_idle_timeout_seconds"
+      ]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "name": "runtime_containers",
+        "isRlsEnabled": false,
+        "entityType": "tables"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "runtime_sleep_idle_timeout_seconds",
+        "type": "integer",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": "300",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "bin_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "compose_project",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "compose_service",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "container_id",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "lifecycle_phase",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "container_started_at",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "stopped_container_finished_at",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "idle_since",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "last_wake_error",
+        "type": "jsonb",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "updated_at",
+        "type": "timestamp with time zone",
+        "typeSchema": null,
+        "notNull": true,
+        "dimensions": 0,
+        "default": "clock_timestamp()",
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "runtime_containers_bin_id_bin_configurations_id_fkey",
+        "nameExplicit": false,
+        "columns": ["bin_id"],
+        "schemaTo": "public",
+        "tableTo": "bin_configurations",
+        "columnsTo": ["id"],
+        "onUpdate": "NO ACTION",
+        "onDelete": "CASCADE",
+        "entityType": "fks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "runtime_containers_pkey",
+        "columns": ["bin_id"],
+        "nameExplicit": false,
+        "entityType": "pks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "bin_configurations",
+        "name": "bin_configurations_runtime_sleep_idle_timeout_seconds_check",
+        "value": "\"runtime_sleep_idle_timeout_seconds\" between 0 and 2147483",
+        "entityType": "checks"
+      }
+    },
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "runtime_containers",
+        "name": "runtime_containers_lifecycle_phase_check",
+        "value": "\"lifecycle_phase\" in ('running', 'waking', 'stopping', 'sleeping', 'offline')",
+        "entityType": "checks"
+      }
+    }
+  ]
+}

@@ -11848,6 +11848,423 @@ async function runRssAcceptance(
   };
 }
 
+async function verifyRssRuntimeSleepJourney(
+  initialBaseUrl: string,
+  source: RssControlSource,
+  rss: RssAcceptanceResult,
+): Promise<string> {
+  let baseUrl = initialBaseUrl;
+  type SleepBinDetails = {
+    readonly id: string;
+    readonly status: "active" | "disabled";
+    readonly config: Record<string, unknown>;
+    readonly runtimeSleep: { readonly idleTimeoutSeconds: number | null };
+    readonly execution: {
+      readonly status: "online" | "sleeping" | "offline" | "incompatible";
+      readonly phase?: string;
+      readonly reason?: string;
+      readonly runtimeId?: string;
+    };
+  };
+
+  const getBin = async (binId: string): Promise<SleepBinDetails> =>
+    cliData<SleepBinDetails>(
+      await cli(baseUrl, ["bin", "get", binId]),
+      "found",
+    );
+
+  const serviceContainerId = async (service: string): Promise<string> => {
+    const result = await compose(["ps", "--all", "--quiet", service]);
+    const cid = result.stdout.trim().split("\n")[0];
+    assert.ok(cid, `Compose service ${service} has no container ID.`);
+    return cid;
+  };
+
+  const inspectContainerState = async (
+    containerId: string,
+  ): Promise<{
+    readonly status: string;
+    readonly exitCode: number;
+    readonly startedAt: string;
+  }> => {
+    const result = await run(
+      "docker",
+      [
+        "inspect",
+        "--format",
+        "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.StartedAt}}",
+        containerId,
+      ],
+      { env: composeEnvironment() },
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const [status = "", exitCodeText = "0", startedAt = ""] = result.stdout
+      .trim()
+      .split("\t");
+    return { status, exitCode: Number(exitCodeText), startedAt };
+  };
+
+  const waitForContainerSleeping = async (
+    binId: string,
+    service: string,
+  ): Promise<string> => {
+    const cid = await serviceContainerId(service);
+    await waitFor(
+      async () => {
+        const [bin, dockerState] = await Promise.all([
+          getBin(binId),
+          inspectContainerState(cid),
+        ]);
+        return { bin, dockerState };
+      },
+      ({ bin, dockerState }) =>
+        bin.execution.status === "sleeping" &&
+        bin.execution.phase === "sleeping" &&
+        dockerState.status === "exited" &&
+        dockerState.exitCode === 0,
+      `${binId} 进入容器休眠 (exited 0)`,
+    );
+    return cid;
+  };
+
+  const waitForRunFinished = async (
+    binId: string,
+    runId: string,
+  ): Promise<RssManualRun> =>
+    await waitFor(
+      async () =>
+        cliData<RssManualRun>(
+          await cli(baseUrl, ["run", "get", binId, runId]),
+          "found",
+        ),
+      (current) =>
+        current.status === "completed" || current.status === "failed",
+      `运行 ${binId}/${runId} 结束`,
+    );
+
+  // 1. Default lightweight idle timeout is 300s and both RSS bins are online.
+  const initialOne = await getBin("binny-rss-one");
+  const initialTwo = await getBin("binny-rss-two");
+  assert.equal(initialOne.runtimeSleep.idleTimeoutSeconds, 300);
+  assert.equal(initialTwo.runtimeSleep.idleTimeoutSeconds, 300);
+  assert.equal(initialOne.execution.status, "online");
+  assert.equal(initialTwo.execution.status, "online");
+
+  // 2. Updating idle timeout to 0 without changing config stops the container cleanly.
+  const updatedPolicy = cliData<SleepBinDetails>(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny-rss-one",
+      "--idle-timeout-seconds",
+      "0",
+    ]),
+    "updated",
+  );
+  assert.equal(updatedPolicy.runtimeSleep.idleTimeoutSeconds, 0);
+  const rssOneCid = await waitForContainerSleeping(
+    "binny-rss-one",
+    "runtime-rss",
+  );
+
+  // Distinguish sleeping vs disabled vs offline in bin list / bin get.
+  cliData(await cli(baseUrl, ["bin", "disable", "binny-rss-two"]), "disabled");
+  const listResult = cliData<{
+    readonly bins: readonly {
+      readonly id: string;
+      readonly status: string;
+      readonly execution: { readonly status: string };
+    }[];
+  }>(await cli(baseUrl, ["bin", "list"]), "listed");
+  const listedOne = listResult.bins.find(({ id }) => id === "binny-rss-one");
+  const listedTwo = listResult.bins.find(({ id }) => id === "binny-rss-two");
+  assert.equal(listedOne?.status, "active");
+  assert.equal(listedOne?.execution.status, "sleeping");
+  assert.equal(listedTwo?.status, "disabled");
+  const sleepingText = await cli(baseUrl, [
+    "bin",
+    "get",
+    "binny-rss-one",
+    "--output",
+    "text",
+  ]);
+  assert.equal(sleepingText.code, 0, sleepingText.stderr);
+  assert.match(
+    sleepingText.stdout,
+    /^Runtime connection: sleeping \(idle_policy\)$/mu,
+  );
+  assert.match(
+    sleepingText.stdout,
+    /^Runtime sleep: 0s \(sleep immediately after work\)$/mu,
+  );
+  cliData(await cli(baseUrl, ["bin", "enable", "binny-rss-two"]), "enabled");
+
+  // 3. Read-only operations succeed while sleeping without starting container or touching RSS source.
+  const sourceRequestsBeforeReadOnly = (await source.requests()).length;
+  cliData(
+    await cli(baseUrl, ["bin", "config-schema", "binny-rss-one"]),
+    "discovered",
+  );
+  cliData(
+    await cli(baseUrl, ["bin", "actions", "binny-rss-one"]),
+    "discovered",
+  );
+  const runHistory = cliData<{ readonly runs: readonly unknown[] }>(
+    await cli(baseUrl, ["run", "list", "--bin-id", "binny-rss-one"]),
+    "listed",
+  );
+  assert.ok(runHistory.runs.length > 0);
+  const archivedSearchHits = await searchRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 全文测试文章",
+  );
+  assert.equal(archivedSearchHits.length, 1);
+  cliData(
+    await cli(baseUrl, [
+      "archive",
+      "item",
+      rss.itemId,
+      "--bin",
+      "binny-rss-one",
+    ]),
+    "found",
+  );
+  cliData(
+    await cli(baseUrl, ["archive", "revision", rss.initialRevisionId]),
+    "found",
+  );
+  if (rss.resourceIds[0] !== undefined) {
+    await readRssResource(baseUrl, rss.resourceIds[0]);
+  }
+  const dockerAfterReadOnly = await inspectContainerState(rssOneCid);
+  assert.equal(dockerAfterReadOnly.status, "exited");
+  assert.equal((await source.requests()).length, sourceRequestsBeforeReadOnly);
+
+  // 4. Native validation failures while sleeping wake for validation, reject without persisting, and return to sleep.
+  const savedConfigBeforeFailure = (await getBin("binny-rss-one")).config;
+  const invalidConfigResult = await cli(baseUrl, [
+    "bin",
+    "update",
+    "binny-rss-one",
+    "--config",
+    JSON.stringify({ feeds: [] }),
+  ]);
+  assert.notEqual(invalidConfigResult.code, 0);
+  assert.deepEqual(
+    (await getBin("binny-rss-one")).config,
+    savedConfigBeforeFailure,
+  );
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+
+  const runsBeforeInvalidTrigger = cliData<{
+    readonly runs: readonly { readonly runId: string }[];
+  }>(
+    await cli(baseUrl, ["run", "list", "--bin-id", "binny-rss-one"]),
+    "listed",
+  );
+  const invalidTriggerResult = await cli(baseUrl, [
+    "run",
+    "trigger",
+    "binny-rss-one",
+    "collect",
+    "--params",
+    JSON.stringify({ feedIds: ["invalid feed!"] }),
+  ]);
+  assert.notEqual(invalidTriggerResult.code, 0);
+  const runsAfterInvalidTrigger = cliData<{
+    readonly runs: readonly { readonly runId: string }[];
+  }>(
+    await cli(baseUrl, ["run", "list", "--bin-id", "binny-rss-one"]),
+    "listed",
+  );
+  assert.equal(
+    runsAfterInvalidTrigger.runs.length,
+    runsBeforeInvalidTrigger.runs.length,
+  );
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+
+  // 5. Manual wake + action execution + automatic sleep + archive readback.
+  await source.setPhotoAvailable(true);
+  await source.setRssVersion(9);
+  const wokenCollect = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "collect",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(wokenCollect.status, "completed");
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+  const v9Archive = await readRssArchive(
+    baseUrl,
+    "binny-rss-one",
+    "RSS 正文版本 9",
+  );
+  assert.equal(v9Archive.itemId, rss.itemId);
+
+  // 6. Concurrent wake coalescing while sleeping -> single container start serves both requests.
+  const startedAtBeforeConcurrent = (await inspectContainerState(rssOneCid))
+    .startedAt;
+  const [concurrentResOne, concurrentResTwo] = await Promise.all([
+    fetch(`${baseUrl}/bins/binny-rss-one/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "check",
+        params: { feedIds: ["rss-main"] },
+      }),
+    }),
+    fetch(`${baseUrl}/bins/binny-rss-one/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "check",
+        params: { feedIds: ["rss-main"] },
+      }),
+    }),
+  ]);
+  assert.equal(concurrentResOne.status, 202);
+  assert.equal(concurrentResTwo.status, 202);
+  const [concurrentRunOne, concurrentRunTwo] = (await Promise.all([
+    concurrentResOne.json(),
+    concurrentResTwo.json(),
+  ])) as readonly [{ readonly runId: string }, { readonly runId: string }];
+  const [doneOne, doneTwo] = await Promise.all([
+    waitForRunFinished("binny-rss-one", concurrentRunOne.runId),
+    waitForRunFinished("binny-rss-one", concurrentRunTwo.runId),
+  ]);
+  assert.equal(doneOne.status, "completed");
+  assert.equal(doneTwo.status, "completed");
+  const startedAtAfterConcurrent = (await inspectContainerState(rssOneCid))
+    .startedAt;
+  assert.notEqual(startedAtAfterConcurrent, startedAtBeforeConcurrent);
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+
+  // 7. Stopping-period handoff: bring online (300s), switch to 0s and immediately trigger new check.
+  cliData(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny-rss-one",
+      "--idle-timeout-seconds",
+      "300",
+    ]),
+    "updated",
+  );
+  const wakeForStopRace = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "check",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(wakeForStopRace.status, "completed");
+  await waitForRuntime(baseUrl, "binny-rss-one");
+
+  const [zeroPolicyRes, raceRunRes] = await Promise.all([
+    fetch(`${baseUrl}/bins/binny-rss-one`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runtimeSleep: { idleTimeoutSeconds: 0 } }),
+    }),
+    fetch(`${baseUrl}/bins/binny-rss-one/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "check",
+        params: { feedIds: ["rss-main"] },
+      }),
+    }),
+  ]);
+  assert.equal(zeroPolicyRes.status, 200);
+  assert.equal(raceRunRes.status, 202);
+  const raceRun = (await raceRunRes.json()) as { readonly runId: string };
+  assert.equal(
+    (await waitForRunFinished("binny-rss-one", raceRun.runId)).status,
+    "completed",
+  );
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+
+  // 8. Server restart reconciliation: policy-sleeping stays sleeping; manual docker stop becomes offline and won't auto-wake.
+  await waitForRuntime(baseUrl, "binny-rss-two");
+  await compose(["stop", "runtime-rss-two"]);
+  await waitFor(
+    () => getBin("binny-rss-two"),
+    (bin) =>
+      bin.execution.status === "offline" &&
+      bin.execution.reason === "runtime_not_connected",
+    "手工停止 runtime-rss-two 后公开状态为 offline",
+  );
+  const rssTwoCid = await serviceContainerId("runtime-rss-two");
+
+  await compose([
+    "up",
+    "--detach",
+    "--force-recreate",
+    "--wait",
+    "--wait-timeout",
+    "90",
+    "server",
+  ]);
+  composePort = await publishedPort("server", 3000);
+  baseUrl = apiBaseUrl();
+  await waitForApiAndDatabase(baseUrl);
+
+  const sleepingAfterRestart = await getBin("binny-rss-one");
+  assert.equal(sleepingAfterRestart.execution.status, "sleeping");
+  assert.equal(sleepingAfterRestart.execution.phase, "sleeping");
+  assert.equal((await inspectContainerState(rssOneCid)).status, "exited");
+
+  const offlineAfterRestart = await getBin("binny-rss-two");
+  assert.equal(offlineAfterRestart.execution.status, "offline");
+  assert.equal(offlineAfterRestart.execution.reason, "runtime_not_connected");
+  assert.equal((await inspectContainerState(rssTwoCid)).status, "exited");
+
+  const offlineTrigger = await fetch(`${baseUrl}/bins/binny-rss-two/runs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "check",
+      params: { feedIds: ["rss-main"] },
+    }),
+  });
+  assert.equal(offlineTrigger.status, 409);
+  assert.equal((await inspectContainerState(rssTwoCid)).status, "exited");
+
+  const postRestartWakeCheck = await triggerRssAction(
+    baseUrl,
+    "binny-rss-one",
+    "check",
+    { feedIds: ["rss-main"] },
+  );
+  assert.equal(postRestartWakeCheck.status, "completed");
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+
+  // 9. Container replacement via compose --force-recreate re-registers new containerId and obeys sleep policy.
+  await compose(["up", "--detach", "--force-recreate", "runtime-rss"]);
+  const replacedCid = await waitFor(
+    () => serviceContainerId("runtime-rss"),
+    (cid) => cid !== rssOneCid,
+    "runtime-rss 容器已替换",
+  );
+  await waitForContainerSleeping("binny-rss-one", "runtime-rss");
+  assert.equal((await inspectContainerState(replacedCid)).status, "exited");
+
+  // Restore standard 300s idle policy and bring both RSS runtimes online cleanly for any downstream checks.
+  cliData(
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      "binny-rss-one",
+      "--idle-timeout-seconds",
+      "300",
+    ]),
+    "updated",
+  );
+  await compose(["start", "runtime-rss-two"]);
+  await waitForRuntime(baseUrl, "binny-rss-two");
+  return baseUrl;
+}
+
 type PostgresPerformanceStats = {
   readonly sequentialScans: number;
   readonly sequentialTuplesRead: number;
@@ -12885,9 +13302,18 @@ async function main(): Promise<void> {
     } else if (rssAdapterOnly) {
       assert.ok(rssImageUpdate !== undefined);
       assert.ok(rssControlSource !== undefined);
-      await runRssAcceptance(baseUrl, rssControlSource, rssImageUpdate);
+      const rssAcceptance = await runRssAcceptance(
+        baseUrl,
+        rssControlSource,
+        rssImageUpdate,
+      );
+      baseUrl = await verifyRssRuntimeSleepJourney(
+        baseUrl,
+        rssControlSource,
+        rssAcceptance,
+      );
       process.stdout.write(
-        "RSS archive, packaged adapter image upgrade, and CLI readback passed.\n",
+        "RSS archive, packaged adapter image upgrade, lightweight runtime sleep/wake, and CLI readback passed.\n",
       );
     } else if (runFunctionalJourney) {
       assert.ok(rssImageUpdate !== undefined);
@@ -12913,6 +13339,11 @@ async function main(): Promise<void> {
         baseUrl,
         rssControlSource,
         rssImageUpdate,
+      );
+      baseUrl = await verifyRssRuntimeSleepJourney(
+        baseUrl,
+        rssControlSource,
+        rssAcceptance,
       );
       if (!rssLinuxdoOnly) {
         await runArticleAdaptersJourney({

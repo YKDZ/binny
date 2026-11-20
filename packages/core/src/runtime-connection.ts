@@ -28,6 +28,7 @@ import {
   binConfigurations,
   manualRuns,
   runtimeConnections,
+  runtimeContainers,
   type Database,
   type Transaction,
 } from "@binny/db";
@@ -41,6 +42,7 @@ import {
   interruptReplacedManualRuns,
 } from "./manual-run-fencing.ts";
 import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
+import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
 
 const runtimeSelection = {
   binId: binConfigurations.id,
@@ -48,6 +50,8 @@ const runtimeSelection = {
   config: binConfigurations.config,
   configNativeValid: binConfigurations.configNativeValid,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
+  runtimeSleepIdleTimeoutSeconds:
+    binConfigurations.runtimeSleepIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
   runtimeSourceAdapter: runtimeConnections.sourceAdapter,
   environment: runtimeConnections.environment,
@@ -58,6 +62,7 @@ const runtimeSelection = {
   protocolVersion: runtimeConnections.protocolVersion,
   runtimeControlUrl: runtimeConnections.runtimeControlUrl,
   sourceStateSnapshot: runtimeConnections.sourceStateSnapshot,
+  containerLifecyclePhase: runtimeContainers.lifecyclePhase,
 };
 
 type RuntimeCompatibilityError = {
@@ -288,6 +293,27 @@ function projectSourceStateSnapshot(
   };
 }
 
+function defaultIdleTimeoutSecondsForAdapter(
+  sourceAdapter: SourceAdapterManifest,
+): number | null {
+  if (
+    sourceAdapter.environment.browser.required &&
+    !sourceAdapter.environment.browser.profileReuseAfterRestart
+  ) {
+    return null;
+  }
+  return 300;
+}
+
+function effectiveIdleTimeoutSeconds(row: {
+  readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
+  readonly browserIdleTimeoutSeconds: number | null;
+}): number | null {
+  return row.runtimeSleepIdleTimeoutSeconds !== undefined
+    ? row.runtimeSleepIdleTimeoutSeconds
+    : row.browserIdleTimeoutSeconds;
+}
+
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
   if (
     row.runtimeId === null ||
@@ -317,6 +343,24 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     if (row.disconnected === true) return offline("runtime_not_connected", row);
     // 旧协议快照没有报告浏览器电源状态，不能据此推断已停止或就绪。
     return offline("runtime_protocol_outdated", row);
+  }
+
+  const heartbeatFresh =
+    !row.disconnected &&
+    Date.now() - row.lastHeartbeatAt.getTime() <= runtimeHeartbeatTimeoutMs;
+
+  if (
+    row.containerLifecyclePhase === "stopping" ||
+    row.containerLifecyclePhase === "sleeping" ||
+    (row.containerLifecyclePhase === "waking" && !heartbeatFresh)
+  ) {
+    return {
+      status: "sleeping",
+      phase: row.containerLifecyclePhase,
+      runtimeId: row.runtimeId,
+      lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+      sourceStateSnapshot: projectSourceStateSnapshot(row),
+    };
   }
 
   const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
@@ -360,6 +404,10 @@ async function selectRuntimeConnection(
       runtimeConnections,
       eq(runtimeConnections.binId, binConfigurations.id),
     )
+    .leftJoin(
+      runtimeContainers,
+      eq(runtimeContainers.binId, binConfigurations.id),
+    )
     .where(eq(binConfigurations.id, binId));
   return row;
 }
@@ -384,7 +432,9 @@ export async function readRuntimeExecution(
 
 export function createRuntimeConnectionStore(
   database: Database,
+  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
 ): RuntimeConnectionOperations {
+  const containerCoordinator = options?.containerCoordinator;
   return {
     async getExecution(binId) {
       return await readRuntimeExecution(database, binId);
@@ -484,310 +534,377 @@ export function createRuntimeConnectionStore(
         };
       }
 
-      return await database.transaction(async (transaction) => {
-        let [bin] = await transaction
-          .select({
-            id: binConfigurations.id,
-            sourceAdapter: binConfigurations.sourceAdapter,
-            config: binConfigurations.config,
-            lastIssuedOwnerGeneration:
-              binConfigurations.lastIssuedOwnerGeneration,
-          })
-          .from(binConfigurations)
-          .where(eq(binConfigurations.id, binId))
-          .for("update");
-        if (bin === undefined) {
-          if (registration?.kind !== "create") {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "bin 在心跳准备期间发生变化，请重试。",
-              path: ["binId"],
-            });
+      type HeartbeatTxResult =
+        | {
+            readonly ok: true;
+            readonly value: RuntimeHeartbeatResult;
+            readonly notification?: {
+              readonly ownerState: "confirmed" | "unconfirmed";
+              readonly executionStatus: RuntimeExecution["status"];
+              readonly idleTimeoutSeconds: number | null;
+            };
           }
-          const [created] = await transaction
-            .insert(binConfigurations)
-            .values({
-              id: binId,
-              sourceAdapter: incoming.sourceAdapter,
-              identityId: binId,
-              config: registration.config,
-              configNativeValid: registration.nativeValid,
-              browserIdleTimeoutSeconds: 300,
-              status: "active",
-              lastIssuedOwnerGeneration: "0",
-            })
-            .onConflictDoNothing({ target: binConfigurations.id })
-            .returning({
+        | {
+            readonly ok: false;
+            readonly status: 400 | 404 | 409;
+            readonly error: BinError;
+            readonly notification?: {
+              readonly ownerState: "confirmed" | "unconfirmed";
+              readonly executionStatus: RuntimeExecution["status"];
+              readonly idleTimeoutSeconds: number | null;
+            };
+          };
+
+      const txResult = await database.transaction<HeartbeatTxResult>(
+        async (transaction) => {
+          let [bin] = await transaction
+            .select({
               id: binConfigurations.id,
               sourceAdapter: binConfigurations.sourceAdapter,
               config: binConfigurations.config,
               lastIssuedOwnerGeneration:
                 binConfigurations.lastIssuedOwnerGeneration,
-            });
-          [bin] =
-            created === undefined
-              ? await transaction
-                  .select({
-                    id: binConfigurations.id,
-                    sourceAdapter: binConfigurations.sourceAdapter,
-                    config: binConfigurations.config,
-                    lastIssuedOwnerGeneration:
-                      binConfigurations.lastIssuedOwnerGeneration,
-                  })
-                  .from(binConfigurations)
-                  .where(eq(binConfigurations.id, binId))
-                  .for("update")
-              : [created];
-          if (bin === undefined) throw new Error("自注册后没有找到 bin。");
-          if (
-            !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
-            !isDeepStrictEqual(bin.config, registration.config)
-          ) {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "另一个运行器已使用相同 bin 身份完成注册。",
-              path: ["binId"],
-            });
-          }
-        } else if (registration?.kind === "create") {
-          if (
-            !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
-            !isDeepStrictEqual(bin.config, registration.config)
-          ) {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "bin 在首次原生校验期间已被其他操作改变。",
-              path: ["binId"],
-            });
-          }
-        } else if (registration?.kind === "manifest-update") {
-          if (
-            !isDeepStrictEqual(bin.sourceAdapter, registration.sourceAdapter) &&
-            !isDeepStrictEqual(
-              bin.sourceAdapter,
-              before?.configuredSourceAdapter,
-            )
-          ) {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "源码声明在原生校验期间发生变化，请重试。",
-              path: ["sourceAdapter"],
-            });
-          }
-          if (
-            !isDeepStrictEqual(bin.config, registration.config) ||
-            !isDeepStrictEqual(
-              bin.sourceAdapter,
-              before?.configuredSourceAdapter,
-            )
-          ) {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "配置或源码声明在原生校验期间发生变化，请重试。",
-              path: ["config"],
-            });
-          }
-        }
-
-        const [current] = await transaction
-          .select({
-            runtimeId: runtimeConnections.runtimeId,
-            ownerState: runtimeConnections.ownerState,
-            ownerGeneration: runtimeConnections.ownerGeneration,
-            environment: runtimeConnections.environment,
-            sourceAdapter: runtimeConnections.sourceAdapter,
-            runtimeControlUrl: runtimeConnections.runtimeControlUrl,
-            protocolVersion: runtimeConnections.protocolVersion,
-          })
-          .from(runtimeConnections)
-          .where(eq(runtimeConnections.binId, binId));
-        const incomingGeneration = BigInt(checked.data.ownerGeneration);
-        const currentGeneration = current?.ownerGeneration;
-        // 在 bin 行锁下比较已记录代际，使未登记的旧首包也会被新 owner 淘汰。
-        if (
-          current !== undefined &&
-          currentGeneration !== undefined &&
-          incomingGeneration < currentGeneration
-        ) {
-          return failure(409, {
-            code: "runtime_owner_mismatch",
-            message: "运行器所有权代际已过期，不能覆盖当前所有者。",
-            path: ["ownerGeneration"],
-          });
-        }
-        if (
-          current !== undefined &&
-          currentGeneration !== undefined &&
-          incomingGeneration === currentGeneration &&
-          current.runtimeId !== checked.data.runtimeId
-        ) {
-          return failure(409, {
-            code: "runtime_owner_mismatch",
-            message: "相同所有权代际只能由原运行器继续持有。",
-            path: ["ownerGeneration"],
-          });
-        }
-        if (
-          current !== undefined &&
-          currentGeneration !== undefined &&
-          incomingGeneration > currentGeneration &&
-          current.runtimeId === checked.data.runtimeId
-        ) {
-          return failure(409, {
-            code: "runtime_owner_mismatch",
-            message: "运行器身份不能切换到新的所有权代际。",
-            path: ["ownerGeneration"],
-          });
-        }
-
-        const expiredRunIds = await interruptExpiredManualRuns(
-          transaction,
-          binId,
-        );
-        let ownerState: "confirmed" | "unconfirmed" =
-          current?.ownerState === "unconfirmed" || expiredRunIds.length > 0
-            ? "unconfirmed"
-            : "confirmed";
-
-        if (
-          current !== undefined &&
-          current.runtimeId !== checked.data.runtimeId
-        ) {
-          if (
-            checked.data.activeRunId !== null ||
-            checked.data.claimInFlight ||
-            checked.data.stoppedRunId !== undefined
-          ) {
-            return failure(409, {
-              code: "runtime_owner_mismatch",
-              message: "新运行器尚未确认旧执行进程已经退出。",
-              path: ["activeRunId"],
-            });
-          }
-          await interruptReplacedManualRuns(
-            transaction,
-            binId,
-            current.runtimeId,
-          );
-          ownerState = "confirmed";
-        } else if (checked.data.stoppedRunId !== undefined) {
-          const stopped = await confirmManualRunOwnerStopped(
-            transaction,
-            binId,
-            checked.data.runtimeId,
-            checked.data.stoppedRunId,
-          );
-          if (stopped) ownerState = "confirmed";
-        }
-
-        if (registration?.kind === "manifest-update") {
-          const runtimeUnchanged =
-            current?.runtimeId === registration.runtimeId &&
-            current?.ownerGeneration === registration.ownerGeneration &&
-            current?.protocolVersion === registration.protocolVersion &&
-            current?.runtimeControlUrl === registration.runtimeControlUrl &&
-            isDeepStrictEqual(
-              current?.sourceAdapter,
-              registration.runtimeSourceAdapter,
-            );
-          if (!runtimeUnchanged) {
-            return failure(409, {
-              code: "configuration_changed",
-              message: "运行器所有者在原生校验期间发生变化，请重试。",
-              path: ["runtimeId"],
-            });
-          }
-          if (
-            ownerState !== "confirmed" ||
-            checked.data.activeRunId !== null ||
-            checked.data.claimInFlight
-          ) {
-            return failure(409, {
-              code: "runtime_owner_mismatch",
-              message: "更新源码声明前必须确认旧动作已停止。",
-              path: ["activeRunId"],
-            });
-          }
-          await transaction
-            .update(binConfigurations)
-            .set({
-              sourceAdapter: registration.sourceAdapter,
-              configNativeValid: registration.configNativeValid,
-              updatedAt: sql`now()`,
             })
-            .where(eq(binConfigurations.id, binId));
-        }
+            .from(binConfigurations)
+            .where(eq(binConfigurations.id, binId))
+            .for("update");
+          if (bin === undefined) {
+            if (registration?.kind !== "create") {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "bin 在心跳准备期间发生变化，请重试。",
+                path: ["binId"],
+              });
+            }
+            const defaultIdleTimeout = defaultIdleTimeoutSecondsForAdapter(
+              sourceAdapterManifestStoredSchema.parse(incoming.sourceAdapter),
+            );
+            const [created] = await transaction
+              .insert(binConfigurations)
+              .values({
+                id: binId,
+                sourceAdapter: incoming.sourceAdapter,
+                identityId: binId,
+                config: registration.config,
+                configNativeValid: registration.nativeValid,
+                browserIdleTimeoutSeconds: defaultIdleTimeout,
+                runtimeSleepIdleTimeoutSeconds: defaultIdleTimeout,
+                status: "active",
+                lastIssuedOwnerGeneration: "0",
+              })
+              .onConflictDoNothing({ target: binConfigurations.id })
+              .returning({
+                id: binConfigurations.id,
+                sourceAdapter: binConfigurations.sourceAdapter,
+                config: binConfigurations.config,
+                lastIssuedOwnerGeneration:
+                  binConfigurations.lastIssuedOwnerGeneration,
+              });
+            [bin] =
+              created === undefined
+                ? await transaction
+                    .select({
+                      id: binConfigurations.id,
+                      sourceAdapter: binConfigurations.sourceAdapter,
+                      config: binConfigurations.config,
+                      lastIssuedOwnerGeneration:
+                        binConfigurations.lastIssuedOwnerGeneration,
+                    })
+                    .from(binConfigurations)
+                    .where(eq(binConfigurations.id, binId))
+                    .for("update")
+                : [created];
+            if (bin === undefined) throw new Error("自注册后没有找到 bin。");
+            if (
+              !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
+              !isDeepStrictEqual(bin.config, registration.config)
+            ) {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "另一个运行器已使用相同 bin 身份完成注册。",
+                path: ["binId"],
+              });
+            }
+          } else if (registration?.kind === "create") {
+            if (
+              !isDeepStrictEqual(bin.sourceAdapter, incoming.sourceAdapter) ||
+              !isDeepStrictEqual(bin.config, registration.config)
+            ) {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "bin 在首次原生校验期间已被其他操作改变。",
+                path: ["binId"],
+              });
+            }
+          } else if (registration?.kind === "manifest-update") {
+            if (
+              !isDeepStrictEqual(
+                bin.sourceAdapter,
+                registration.sourceAdapter,
+              ) &&
+              !isDeepStrictEqual(
+                bin.sourceAdapter,
+                before?.configuredSourceAdapter,
+              )
+            ) {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "源码声明在原生校验期间发生变化，请重试。",
+                path: ["sourceAdapter"],
+              });
+            }
+            if (
+              !isDeepStrictEqual(bin.config, registration.config) ||
+              !isDeepStrictEqual(
+                bin.sourceAdapter,
+                before?.configuredSourceAdapter,
+              )
+            ) {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "配置或源码声明在原生校验期间发生变化，请重试。",
+                path: ["config"],
+              });
+            }
+          }
 
-        await transaction
-          .insert(runtimeConnections)
-          .values({
+          const [current] = await transaction
+            .select({
+              runtimeId: runtimeConnections.runtimeId,
+              ownerState: runtimeConnections.ownerState,
+              ownerGeneration: runtimeConnections.ownerGeneration,
+              environment: runtimeConnections.environment,
+              sourceAdapter: runtimeConnections.sourceAdapter,
+              runtimeControlUrl: runtimeConnections.runtimeControlUrl,
+              protocolVersion: runtimeConnections.protocolVersion,
+            })
+            .from(runtimeConnections)
+            .where(eq(runtimeConnections.binId, binId));
+          const incomingGeneration = BigInt(checked.data.ownerGeneration);
+          const currentGeneration = current?.ownerGeneration;
+          // 在 bin 行锁下比较已记录代际，使未登记的旧首包也会被新 owner 淘汰。
+          if (
+            current !== undefined &&
+            currentGeneration !== undefined &&
+            incomingGeneration < currentGeneration
+          ) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "运行器所有权代际已过期，不能覆盖当前所有者。",
+              path: ["ownerGeneration"],
+            });
+          }
+          if (
+            current !== undefined &&
+            currentGeneration !== undefined &&
+            incomingGeneration === currentGeneration &&
+            current.runtimeId !== checked.data.runtimeId
+          ) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "相同所有权代际只能由原运行器继续持有。",
+              path: ["ownerGeneration"],
+            });
+          }
+          if (
+            current !== undefined &&
+            currentGeneration !== undefined &&
+            incomingGeneration > currentGeneration &&
+            current.runtimeId === checked.data.runtimeId
+          ) {
+            return failure(409, {
+              code: "runtime_owner_mismatch",
+              message: "运行器身份不能切换到新的所有权代际。",
+              path: ["ownerGeneration"],
+            });
+          }
+
+          const expiredRunIds = await interruptExpiredManualRuns(
+            transaction,
             binId,
-            runtimeId: checked.data.runtimeId,
-            sourceAdapter: checked.data.sourceAdapter,
-            environment: checked.data.environment,
-            sourceStateSnapshot: checked.data.sourceStateSnapshot ?? null,
-            protocolVersion: checked.data.protocolVersion,
-            runtimeControlUrl: checked.data.runtimeControlUrl,
-            disconnected: false,
-            ownerState,
-            ownerGeneration: incomingGeneration,
-          })
-          .onConflictDoUpdate({
-            target: runtimeConnections.binId,
-            set: {
+          );
+          let ownerState: "confirmed" | "unconfirmed" =
+            current?.ownerState === "unconfirmed" || expiredRunIds.length > 0
+              ? "unconfirmed"
+              : "confirmed";
+
+          if (
+            current !== undefined &&
+            current.runtimeId !== checked.data.runtimeId
+          ) {
+            if (
+              checked.data.activeRunId !== null ||
+              checked.data.claimInFlight ||
+              checked.data.stoppedRunId !== undefined
+            ) {
+              return failure(409, {
+                code: "runtime_owner_mismatch",
+                message: "新运行器尚未确认旧执行进程已经退出。",
+                path: ["activeRunId"],
+              });
+            }
+            await interruptReplacedManualRuns(
+              transaction,
+              binId,
+              current.runtimeId,
+            );
+            ownerState = "confirmed";
+          } else if (checked.data.stoppedRunId !== undefined) {
+            const stopped = await confirmManualRunOwnerStopped(
+              transaction,
+              binId,
+              checked.data.runtimeId,
+              checked.data.stoppedRunId,
+            );
+            if (stopped) ownerState = "confirmed";
+          }
+
+          if (registration?.kind === "manifest-update") {
+            const runtimeUnchanged =
+              current?.runtimeId === registration.runtimeId &&
+              current?.ownerGeneration === registration.ownerGeneration &&
+              current?.protocolVersion === registration.protocolVersion &&
+              current?.runtimeControlUrl === registration.runtimeControlUrl &&
+              isDeepStrictEqual(
+                current?.sourceAdapter,
+                registration.runtimeSourceAdapter,
+              );
+            if (!runtimeUnchanged) {
+              return failure(409, {
+                code: "configuration_changed",
+                message: "运行器所有者在原生校验期间发生变化，请重试。",
+                path: ["runtimeId"],
+              });
+            }
+            if (
+              ownerState !== "confirmed" ||
+              checked.data.activeRunId !== null ||
+              checked.data.claimInFlight
+            ) {
+              return failure(409, {
+                code: "runtime_owner_mismatch",
+                message: "更新源码声明前必须确认旧动作已停止。",
+                path: ["activeRunId"],
+              });
+            }
+            await transaction
+              .update(binConfigurations)
+              .set({
+                sourceAdapter: registration.sourceAdapter,
+                configNativeValid: registration.configNativeValid,
+                updatedAt: sql`now()`,
+              })
+              .where(eq(binConfigurations.id, binId));
+          }
+
+          await transaction
+            .insert(runtimeConnections)
+            .values({
+              binId,
               runtimeId: checked.data.runtimeId,
               sourceAdapter: checked.data.sourceAdapter,
               environment: checked.data.environment,
-              ...(checked.data.sourceStateSnapshot === undefined
-                ? {}
-                : { sourceStateSnapshot: checked.data.sourceStateSnapshot }),
+              sourceStateSnapshot: checked.data.sourceStateSnapshot ?? null,
               protocolVersion: checked.data.protocolVersion,
               runtimeControlUrl: checked.data.runtimeControlUrl,
-              // 保持 PostgreSQL 服务端时钟语义。
-              lastHeartbeatAt: sql`clock_timestamp()`,
               disconnected: false,
               ownerState,
               ownerGeneration: incomingGeneration,
-            },
-          });
-
-        if (incomingGeneration > BigInt(bin.lastIssuedOwnerGeneration ?? "0")) {
-          await transaction
-            .update(binConfigurations)
-            .set({
-              lastIssuedOwnerGeneration: incomingGeneration.toString(),
             })
-            .where(eq(binConfigurations.id, binId));
-        }
+            .onConflictDoUpdate({
+              target: runtimeConnections.binId,
+              set: {
+                runtimeId: checked.data.runtimeId,
+                sourceAdapter: checked.data.sourceAdapter,
+                environment: checked.data.environment,
+                ...(checked.data.sourceStateSnapshot === undefined
+                  ? {}
+                  : { sourceStateSnapshot: checked.data.sourceStateSnapshot }),
+                protocolVersion: checked.data.protocolVersion,
+                runtimeControlUrl: checked.data.runtimeControlUrl,
+                // 保持 PostgreSQL 服务端时钟语义。
+                lastHeartbeatAt: sql`clock_timestamp()`,
+                disconnected: false,
+                ownerState,
+                ownerGeneration: incomingGeneration,
+              },
+            });
 
-        const row = await selectRuntimeConnection(transaction, binId);
-        if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
-        const execution = rowExecution(row);
-        const humanSession = await applyRuntimeHumanSessionHeartbeat(
-          transaction,
-          {
-            binId,
-            runtimeId: checked.data.runtimeId,
-            ownerGeneration: checked.data.ownerGeneration,
-            ownerConfirmed:
-              ownerState === "confirmed" && execution.status === "online",
-            runtimeEnvironment: checked.data.environment,
-            ...(checked.data.humanSessionEvent === undefined
-              ? {}
-              : { event: checked.data.humanSessionEvent }),
-          },
-        );
-        return execution.status === "incompatible"
-          ? { ok: false, status: 409, error: execution.error }
-          : {
-              ok: true,
-              value: {
-                ...execution,
-                browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
-                ...(humanSession === undefined ? {} : { humanSession }),
-              } satisfies RuntimeHeartbeatResult,
-            };
-      });
+          if (
+            incomingGeneration > BigInt(bin.lastIssuedOwnerGeneration ?? "0")
+          ) {
+            await transaction
+              .update(binConfigurations)
+              .set({
+                lastIssuedOwnerGeneration: incomingGeneration.toString(),
+              })
+              .where(eq(binConfigurations.id, binId));
+          }
+
+          const row = await selectRuntimeConnection(transaction, binId);
+          if (row === undefined)
+            throw new Error("心跳写入后 bin 配置意外消失。");
+          const execution = rowExecution(row);
+          const humanSession = await applyRuntimeHumanSessionHeartbeat(
+            transaction,
+            {
+              binId,
+              runtimeId: checked.data.runtimeId,
+              ownerGeneration: checked.data.ownerGeneration,
+              ownerConfirmed:
+                ownerState === "confirmed" && execution.status === "online",
+              runtimeEnvironment: checked.data.environment,
+              ...(checked.data.humanSessionEvent === undefined
+                ? {}
+                : { event: checked.data.humanSessionEvent }),
+            },
+          );
+          const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(row);
+          return execution.status === "incompatible"
+            ? {
+                ok: false as const,
+                status: 409 as const,
+                error: execution.error,
+                notification: {
+                  ownerState,
+                  executionStatus: execution.status,
+                  idleTimeoutSeconds,
+                },
+              }
+            : {
+                ok: true as const,
+                value: {
+                  ...execution,
+                  browserIdleTimeoutSeconds: idleTimeoutSeconds,
+                  ...(humanSession === undefined ? {} : { humanSession }),
+                } satisfies RuntimeHeartbeatResult,
+                notification: {
+                  ownerState,
+                  executionStatus: execution.status,
+                  idleTimeoutSeconds,
+                },
+              };
+        },
+      );
+      if ("notification" in txResult) {
+        if (
+          checked.data.stoppedRunId !== undefined &&
+          txResult.notification.ownerState === "confirmed"
+        ) {
+          await containerCoordinator?.markWorkCompleted(binId);
+        }
+        await containerCoordinator?.onRuntimeHeartbeat({
+          binId,
+          runtimeId: checked.data.runtimeId,
+          ownerState: txResult.notification.ownerState,
+          executionStatus: txResult.notification.executionStatus,
+          environment: checked.data.environment,
+          idleTimeoutSeconds: txResult.notification.idleTimeoutSeconds,
+        });
+      }
+      return txResult.ok
+        ? { ok: true, value: txResult.value }
+        : { ok: false, status: txResult.status, error: txResult.error };
     },
 
     async disconnect(binId, input) {
@@ -800,14 +917,14 @@ export function createRuntimeConnectionStore(
           ...(issue === undefined ? {} : { path: pathParts(issue.path) }),
         });
       }
-      return await database.transaction(async (transaction) => {
+      const result = await database.transaction(async (transaction) => {
         const [bin] = await transaction
           .select({ id: binConfigurations.id })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, binId))
           .for("update");
         if (bin === undefined) {
-          return failure(404, {
+          return failure<RuntimeExecution>(404, {
             code: "bin_not_found",
             message: "没有找到这个 bin。",
             path: ["binId"],
@@ -826,8 +943,17 @@ export function createRuntimeConnectionStore(
         if (current === undefined)
           throw new Error("运行器断开后 bin 配置意外消失。");
         // 旧运行器退出时不能覆盖同一 bin 新运行器的在线状态。
-        return { ok: true, value: rowExecution(current) };
+        return { ok: true as const, value: rowExecution(current) };
       });
+      if (result.ok) {
+        await containerCoordinator?.onRuntimeDisconnected(
+          binId,
+          checked.data.runtimeId,
+        );
+        const refreshed = await readRuntimeExecution(database, binId);
+        if (refreshed.ok) return refreshed;
+      }
+      return result;
     },
 
     async claimOwnership(binId, input) {
@@ -866,6 +992,8 @@ export function createRuntimeConnectionStore(
           if (!validation.ok && validation.kind === "unavailable") {
             return failure(409, validation.error);
           }
+          const defaultIdleTimeout =
+            defaultIdleTimeoutSecondsForAdapter(sourceAdapter);
           const [created] = await transaction
             .insert(binConfigurations)
             .values({
@@ -874,7 +1002,8 @@ export function createRuntimeConnectionStore(
               identityId: binId,
               config: jsonObjectSchema.parse({}),
               configNativeValid: validation.ok,
-              browserIdleTimeoutSeconds: 300,
+              browserIdleTimeoutSeconds: defaultIdleTimeout,
+              runtimeSleepIdleTimeoutSeconds: defaultIdleTimeout,
               status: "active",
               lastIssuedOwnerGeneration: "0",
             })

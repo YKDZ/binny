@@ -1679,6 +1679,7 @@ async function disconnect(): Promise<void> {
 function closeServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     server.close((error) => (error === undefined ? resolve() : reject(error)));
+    server.closeIdleConnections();
   });
 }
 
