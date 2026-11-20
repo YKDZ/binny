@@ -729,16 +729,84 @@ const listCategoriesReportSchema = z.strictObject({
   abortCause: manualRunAbortCauseSchema.optional(),
   sourceAccess: sourceAccessReportSchema,
 });
+const syncRangeSchema = z.strictObject({
+  from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
+  to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
+});
+const postRangeCoverageSchema = z.strictObject({
+  pagesRead: z
+    .int()
+    .nonnegative()
+    .describe("本次扫描已读取的帖子流分页数（区别于整轮 HTTP 请求总数）。"),
+  maxPages: z.int().positive().describe("本次扫描允许的帖子流最大页数上限。"),
+  lowerBoundConfirmed: z
+    .boolean()
+    .describe("向下历史扫描是否已覆盖所需帖子 ID 下界或穷尽历史分页。"),
+  headVerified: z.boolean().describe("首页复查是否已追上本次扫描起点。"),
+});
+type PostRangeCoverage = z.output<typeof postRangeCoverageSchema>;
+const collectionTargetSummarySchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("topic"),
+    topicId: topicIdSchema,
+  }),
+  z.strictObject({ kind: z.literal("all-visible") }),
+  z.strictObject({
+    kind: z.literal("targets"),
+    targets: actionTargetsSchema,
+  }),
+]);
+const backfillCollectParamsSchema = z.strictObject({
+  topicId: topicIdSchema.optional(),
+  targets: actionTargetsSchema.optional(),
+  postCreatedRange: postCreatedRangeSchema,
+});
+const syncSkippedGapSchema = z.strictObject({
+  range: syncRangeSchema.describe(
+    "被一小时自动接续上限跳过的 [from, to) 时间区间。",
+  ),
+  message: z.string().min(1),
+  backfillCollectParams: backfillCollectParamsSchema,
+});
+type SyncSkippedGap = z.output<typeof syncSkippedGapSchema>;
 const collectionIncompleteScopeSchema = z.strictObject({
   scope: z.string().min(1),
   reasonCode: z.string().min(1),
   message: z.string().min(1),
+  target: collectionTargetSummarySchema
+    .optional()
+    .describe("受影响的目标范围。"),
+  range: syncRangeSchema.optional().describe("受影响的 [from, to) 时间区间。"),
+  pagesRead: z
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("本次扫描已读取的帖子流分页数。"),
+  maxPages: z
+    .int()
+    .positive()
+    .optional()
+    .describe("本次扫描允许的帖子流最大页数上限。"),
+  lowerBoundConfirmed: z
+    .boolean()
+    .optional()
+    .describe("向下历史扫描是否已覆盖所需帖子 ID 下界或穷尽历史分页。"),
+  headVerified: z
+    .boolean()
+    .optional()
+    .describe("首页复查是否已追上本次扫描起点。"),
+  backfillCollectParams: backfillCollectParamsSchema
+    .optional()
+    .describe(
+      "可直接用于显式 collect 补采的参数建议（可按流量调大 maxPages）。",
+    ),
 });
 const collectOutputSchema = z.strictObject({
   challengeRecovery: challengeRecoverySchema,
   completedScopes: z.array(z.string()).readonly(),
   collectionCompleteness: z.enum(["complete", "partial"]),
   incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
+  rangeCoverage: postRangeCoverageSchema.optional(),
 });
 const collectReportSchema = z.strictObject({
   phase: z
@@ -748,6 +816,7 @@ const collectReportSchema = z.strictObject({
       "discovering-targets",
       "collecting",
       "completed",
+      "partial",
       "failed",
       "cancelled",
     ])
@@ -766,19 +835,9 @@ const collectReportSchema = z.strictObject({
       postCreatedRange: postCreatedRangeSchema
         .optional()
         .describe("按帖子创建时间筛选的左闭右开区间及有限页数上限。"),
-      target: z
-        .discriminatedUnion("kind", [
-          z.strictObject({
-            kind: z.literal("topic"),
-            topicId: topicIdSchema,
-          }),
-          z.strictObject({ kind: z.literal("all-visible") }),
-          z.strictObject({
-            kind: z.literal("targets"),
-            targets: actionTargetsSchema,
-          }),
-        ])
-        .describe("触发时请求的主题、可见范围或显式目标。"),
+      target: collectionTargetSummarySchema.describe(
+        "触发时请求的主题、可见范围或显式目标。",
+      ),
       maxTopics: z
         .int()
         .positive()
@@ -835,14 +894,12 @@ const collectReportSchema = z.strictObject({
             "unknown",
           ])
           .describe("该范围本轮的最后确认状态。"),
+        coverage: postRangeCoverageSchema.optional(),
       }),
     )
     .describe("动态发现并分配的实际范围及其状态。")
     .readonly(),
-});
-const syncRangeSchema = z.strictObject({
-  from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
-  to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
+  incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
 });
 const syncScopeReportSchema = z.strictObject({
   scope: syncScopeReferenceSchema,
@@ -853,6 +910,8 @@ const syncScopeReportSchema = z.strictObject({
     .datetime()
     .describe("被一小时上限截去的旧范围起点；本轮从 range.from 接续。")
     .optional(),
+  skippedGap: syncSkippedGapSchema.optional(),
+  coverage: postRangeCoverageSchema.optional(),
   status: z.enum([
     "initializing",
     "initialized",
@@ -939,6 +998,8 @@ const syncOutputSchema = z.strictObject({
         ]),
         range: syncRangeSchema.optional(),
         skippedBefore: z.iso.datetime().optional(),
+        skippedGap: syncSkippedGapSchema.optional(),
+        coverage: postRangeCoverageSchema.optional(),
       }),
     )
     .readonly(),
@@ -947,8 +1008,12 @@ const syncOutputSchema = z.strictObject({
   incompleteScopes: z.array(collectionIncompleteScopeSchema).readonly(),
 });
 type CollectionReport = z.output<typeof collectReportSchema>;
-type CollectionReportUpdate = Omit<CollectionReport, "sourceAccess"> & {
+type CollectionReportUpdate = Omit<
+  CollectionReport,
+  "sourceAccess" | "incompleteScopes"
+> & {
   readonly sourceAccess?: CollectionReport["sourceAccess"];
+  readonly incompleteScopes?: CollectionReport["incompleteScopes"];
 };
 type SyncReport = z.output<typeof syncReportSchema>;
 type CollectionIncompleteScope = z.infer<
@@ -3247,11 +3312,32 @@ function syncStateWithIntent(
   });
 }
 
+function buildSyncSkippedGap(plan: SyncScopePlan): SyncSkippedGap | undefined {
+  if (plan.skippedBefore === undefined || plan.range === undefined) {
+    return undefined;
+  }
+  const skippedRange = { from: plan.skippedBefore, to: plan.range.from };
+  const name = syncScopeName(syncScopeReference(plan.target));
+  return {
+    range: skippedRange,
+    message: `范围 ${name} 上次接续位置（${plan.skippedBefore}）早于一小时自动接续起点（${plan.range.from}），sync 已跳过 [${skippedRange.from}, ${skippedRange.to})；请使用 collect 的 postCreatedRange 显式补采并按流量调整 maxPages。`,
+    backfillCollectParams: {
+      targets: [plan.target],
+      postCreatedRange: postCreatedRangeSchema.parse({
+        from: skippedRange.from,
+        to: skippedRange.to,
+      }),
+    },
+  };
+}
+
 function syncPlanReport(
   plan: SyncScopePlan,
   status: SyncReport["scopes"][number]["status"],
   assigned = false,
+  coverage?: PostRangeCoverage,
 ): SyncReport["scopes"][number] {
+  const skippedGap = buildSyncSkippedGap(plan);
   return {
     scope: syncScopeReference(plan.target),
     mode: plan.mode,
@@ -3262,6 +3348,8 @@ function syncPlanReport(
     ...(plan.skippedBefore === undefined
       ? {}
       : { skippedBefore: plan.skippedBefore }),
+    ...(skippedGap === undefined ? {} : { skippedGap }),
+    ...(coverage === undefined ? {} : { coverage }),
     status,
   };
 }
@@ -3636,6 +3724,9 @@ type PostRangeScanIssue = {
 type PostRangeScan = {
   readonly posts: readonly DiscoursePost[];
   readonly pagesRead: number;
+  readonly maxPages: number;
+  readonly lowerBoundConfirmed: boolean;
+  readonly headVerified: boolean;
   readonly complete: boolean;
   readonly issue?: PostRangeScanIssue;
 };
@@ -3831,6 +3922,9 @@ async function scanPostCreatedRange(
     return {
       posts: [],
       pagesRead,
+      maxPages,
+      lowerBoundConfirmed: false,
+      headVerified: false,
       complete: false,
       ...(issue === undefined ? {} : { issue }),
     };
@@ -3904,6 +3998,7 @@ async function scanPostCreatedRange(
     const baseline = initialMaxId ?? 0;
     if (readCache?.headPages !== undefined) {
       for (const headPage of readCache.headPages) {
+        if (pagesRead >= maxPages) break;
         pagesRead += 1;
         validPageCount += 1;
         keepPosts(headPage);
@@ -3949,15 +4044,24 @@ async function scanPostCreatedRange(
   }
 
   if (issue === undefined && (!historyExhausted || !headVerified)) {
+    const detail =
+      !historyExhausted && !headVerified
+        ? "历史下界与首页复查均未确认"
+        : !historyExhausted
+          ? "首页复查已追上扫描起点，但历史下界未确认"
+          : "历史下界已确认，但首页复查未追上扫描起点";
     issue = {
       reasonCode: "post_range_page_limit_reached",
-      message: `帖子流最多扫描 ${String(maxPages)} 页，尚未同时确认历史分页耗尽和首页复查。`,
+      message: `帖子流已扫描 ${String(pagesRead)}/${String(maxPages)} 页上限，${detail}。`,
       discovery: "partial",
     };
   }
   return {
     posts: [...postsById.values()],
     pagesRead,
+    maxPages,
+    lowerBoundConfirmed: historyExhausted,
+    headVerified,
     complete: historyExhausted && headVerified && issue === undefined,
     ...(issue === undefined ? {} : { issue }),
   };
@@ -5222,6 +5326,12 @@ async function collectPostCreatedRange(
   const selection =
     selectionOverride ??
     (await resolvePostRangeTargets(page, site, params, context.signal));
+  const affectedTarget =
+    params.topicId !== undefined
+      ? ({ kind: "topic", topicId: params.topicId } as const)
+      : params.targets === undefined
+        ? ({ kind: "all-visible" } as const)
+        : ({ kind: "targets", targets: params.targets } as const);
   const scan = await scanPostCreatedRange(
     page,
     site.origin,
@@ -5230,11 +5340,48 @@ async function collectPostCreatedRange(
     readCache,
     confirmedPostIdLowerBound,
   );
+  const coverage: PostRangeCoverage = {
+    pagesRead: scan.pagesRead,
+    maxPages: scan.maxPages,
+    lowerBoundConfirmed: scan.lowerBoundConfirmed,
+    headVerified: scan.headVerified,
+  };
   if (scan.issue !== undefined) {
+    const suggestedMaxPages = Math.min(
+      1_000,
+      Math.max(scan.maxPages * 2, scan.pagesRead + 20),
+    );
+    const targetLabel =
+      params.topicId !== undefined
+        ? `topic:${String(params.topicId)}`
+        : params.targets === undefined
+          ? "all-visible"
+          : params.targets.map((target) => targetScope(target)).join("、");
+    const backfillHint =
+      scan.issue.reasonCode === "post_range_page_limit_reached"
+        ? scan.maxPages >= 1_000
+          ? `已达到 collect.postCreatedRange.maxPages 上限 1000，请缩小 [${range.from}, ${range.to}) 时间区间或按具体 topicId 调用 collect 显式补采。`
+          : `请使用 collect 的 postCreatedRange [${range.from}, ${range.to}) 并调大 maxPages（建议至少 ${String(suggestedMaxPages)}，上限 1000）显式补采。`
+        : `可使用 collect 的 postCreatedRange [${range.from}, ${range.to}) 显式重试补采该范围。`;
     incompleteScopes.push({
       scope: rangeScope,
       reasonCode: scan.issue.reasonCode,
-      message: `${scan.issue.message} 已读取 ${String(scan.pagesRead)} 页；本轮覆盖保留为部分或未知。`,
+      message: `${scan.issue.message} 受影响范围：${targetLabel} [${range.from}, ${range.to})，已读 ${String(scan.pagesRead)}/${String(scan.maxPages)} 页（lowerBoundConfirmed=${String(scan.lowerBoundConfirmed)}，headVerified=${String(scan.headVerified)}）；本轮已保留已确认归档结果，${backfillHint}`,
+      target: affectedTarget,
+      range,
+      pagesRead: scan.pagesRead,
+      maxPages: scan.maxPages,
+      lowerBoundConfirmed: scan.lowerBoundConfirmed,
+      headVerified: scan.headVerified,
+      backfillCollectParams: {
+        ...(params.topicId === undefined ? {} : { topicId: params.topicId }),
+        ...(params.targets === undefined ? {} : { targets: params.targets }),
+        postCreatedRange: {
+          from: range.from,
+          to: range.to,
+          maxPages: suggestedMaxPages,
+        },
+      },
     });
   }
 
@@ -5322,7 +5469,7 @@ async function collectPostCreatedRange(
         ? ("unknown" as const)
         : ("incomplete" as const);
   await publishReport({
-    phase: "completed",
+    phase: incompleteScopes.length === 0 ? "completed" : "partial",
     referenceTime: context.referenceTime,
     intent: {
       ...(params.date === undefined ? {} : { date: params.date }),
@@ -5330,25 +5477,21 @@ async function collectPostCreatedRange(
       ...(params.postCreatedRange === undefined
         ? {}
         : { postCreatedRange: params.postCreatedRange }),
-      target:
-        params.topicId !== undefined
-          ? { kind: "topic", topicId: params.topicId }
-          : params.targets === undefined
-            ? { kind: "all-visible" }
-            : { kind: "targets", targets: params.targets },
+      target: affectedTarget,
       ...(params.maxTopics === undefined
         ? {}
         : { maxTopics: params.maxTopics }),
     },
     window: range,
     discovery: scan.issue === undefined ? "complete" : scan.issue.discovery,
-    scopes: [{ scope: rangeScope, ...range, status: scopeStatus }],
+    scopes: [{ scope: rangeScope, ...range, status: scopeStatus, coverage }],
   });
   return {
     completedScopes,
     collectionCompleteness:
       incompleteScopes.length === 0 ? "complete" : "partial",
     incompleteScopes,
+    rangeCoverage: coverage,
     observedPosts,
     topicsExamined,
     scan,
@@ -5386,11 +5529,13 @@ async function collectTopic(
     discovery: "not-started",
     sourceAccess: emptySourceAccessReport(),
     scopes: [],
+    incompleteScopes: [],
   });
   const publishReport = async (next: CollectionReportUpdate) => {
     report = collectReportSchema.parse({
       ...next,
       sourceAccess: next.sourceAccess ?? report.sourceAccess,
+      incompleteScopes: next.incompleteScopes ?? incompleteScopes,
     });
     await context.report(report);
   };
@@ -5447,6 +5592,9 @@ async function collectTopic(
             completedScopes: rangeOutput.completedScopes,
             collectionCompleteness: rangeOutput.collectionCompleteness,
             incompleteScopes: rangeOutput.incompleteScopes,
+            ...(rangeOutput.rangeCoverage === undefined
+              ? {}
+              : { rangeCoverage: rangeOutput.rangeCoverage }),
           };
         }
         if (params.topicId !== undefined) {
@@ -5505,7 +5653,7 @@ async function collectTopic(
           if (incomplete !== undefined) incompleteScopes.push(incomplete);
           await publishReport({
             ...report,
-            phase: "completed",
+            phase: incompleteScopes.length === 0 ? "completed" : "partial",
             scopes: report.scopes.map((scope) => ({
               ...scope,
               status: incomplete === undefined ? "completed" : "incomplete",
@@ -5709,7 +5857,10 @@ async function collectTopic(
             ),
           });
         }
-        await publishReport({ ...report, phase: "completed" });
+        await publishReport({
+          ...report,
+          phase: incompleteScopes.length === 0 ? "completed" : "partial",
+        });
         return output();
       },
       (sourceAccess) =>
@@ -5723,7 +5874,12 @@ async function collectTopic(
       },
     );
     const { sourceAccess, ...result } = browserOutput;
-    await publishReport({ ...report, phase: "completed", sourceAccess });
+    await publishReport({
+      ...report,
+      phase:
+        result.collectionCompleteness === "partial" ? "partial" : "completed",
+      sourceAccess,
+    });
     return result;
   } catch (error) {
     const abortFields = resolveActionAbortFields(
@@ -5835,21 +5991,17 @@ async function sync(
     await saveSyncPersistentState(context, next);
     state = next;
   };
-  const addIncomplete = (
-    scope: string,
-    reasonCode: string,
-    message: string,
-  ) => {
+  const addIncomplete = (entry: CollectionIncompleteScope) => {
     if (
       incompleteScopes.some(
         (current) =>
-          current.scope === scope &&
-          current.reasonCode === reasonCode &&
-          current.message === message,
+          current.scope === entry.scope &&
+          current.reasonCode === entry.reasonCode &&
+          current.message === entry.message,
       )
     )
       return;
-    incompleteScopes.push({ scope, reasonCode, message });
+    incompleteScopes.push(entry);
   };
   const output = (
     challengeRecovery = emptyChallengeRecovery(),
@@ -5862,6 +6014,10 @@ async function sync(
       ...(scope.skippedBefore === undefined
         ? {}
         : { skippedBefore: scope.skippedBefore }),
+      ...(scope.skippedGap === undefined
+        ? {}
+        : { skippedGap: scope.skippedGap }),
+      ...(scope.coverage === undefined ? {} : { coverage: scope.coverage }),
     }));
     const incomplete =
       report.phase === "budget-exhausted" ||
@@ -6028,13 +6184,13 @@ async function sync(
             beforeIncompleteCount,
           );
           for (const incomplete of addedIncomplete) {
-            addIncomplete(
-              incomplete.scope === "post-created-range"
-                ? name
-                : incomplete.scope,
-              incomplete.reasonCode,
-              incomplete.message,
-            );
+            addIncomplete({
+              ...incomplete,
+              scope:
+                incomplete.scope === "post-created-range"
+                  ? name
+                  : incomplete.scope,
+            });
           }
           const scopeIncomplete = addedIncomplete.length > 0;
           if (!scopeIncomplete && result.scan.complete) {
@@ -6068,12 +6224,32 @@ async function sync(
               }
             }
           }
+          const skippedGap = buildSyncSkippedGap(plan);
+          if (skippedGap !== undefined) {
+            addIncomplete({
+              scope: name,
+              reasonCode: "sync_skipped_before_window",
+              message: skippedGap.message,
+              target: { kind: "targets", targets: [plan.target] },
+              range: skippedGap.range,
+              backfillCollectParams: skippedGap.backfillCollectParams,
+            });
+          }
+          const scopeCoverage: PostRangeCoverage = {
+            pagesRead: result.scan.pagesRead,
+            maxPages: result.scan.maxPages,
+            lowerBoundConfirmed: result.scan.lowerBoundConfirmed,
+            headVerified: result.scan.headVerified,
+          };
           const scopeStatus = !scopeIncomplete
             ? "completed"
             : scopeDiscovery === "failed"
               ? "unknown"
               : "partial";
-          reportScopes.set(name, syncPlanReport(plan, scopeStatus, true));
+          reportScopes.set(
+            name,
+            syncPlanReport(plan, scopeStatus, true, scopeCoverage),
+          );
           activePlan = undefined;
           await publishReport({
             ...report,
@@ -6124,28 +6300,41 @@ async function sync(
     if (activePlan !== undefined) {
       const name = syncScopeName(syncScopeReference(activePlan.target));
       reportScopes.set(name, syncPlanReport(activePlan, "unknown", true));
-      addIncomplete(
-        name,
-        budgetStop
+      addIncomplete({
+        scope: name,
+        reasonCode: budgetStop
           ? `budget_${budgetErrorReason.replaceAll("-", "_")}`
           : cancelled
             ? "sync_cancelled"
             : "sync_scope_unknown",
-        budgetStop
+        message: budgetStop
           ? budgetMessage
           : cancelled
             ? "本轮在处理该范围时取消；接续位置已分配，覆盖结果未知。"
             : error instanceof Error
               ? `本轮在处理该范围时失败：${error.message}`
               : "本轮在处理该范围时失败，覆盖结果未知。",
-      );
+        target: { kind: "targets", targets: [activePlan.target] },
+        ...(activePlan.range === undefined ? {} : { range: activePlan.range }),
+      });
+      const skippedGap = buildSyncSkippedGap(activePlan);
+      if (skippedGap !== undefined) {
+        addIncomplete({
+          scope: name,
+          reasonCode: "sync_skipped_before_window",
+          message: skippedGap.message,
+          target: { kind: "targets", targets: [activePlan.target] },
+          range: skippedGap.range,
+          backfillCollectParams: skippedGap.backfillCollectParams,
+        });
+      }
       activePlan = undefined;
     } else if (budgetStop && incompleteScopes.length === 0) {
-      addIncomplete(
-        plans.length === 0 ? "discovery" : "sync",
-        `budget_${budgetErrorReason.replaceAll("-", "_")}`,
-        budgetMessage,
-      );
+      addIncomplete({
+        scope: plans.length === 0 ? "discovery" : "sync",
+        reasonCode: `budget_${budgetErrorReason.replaceAll("-", "_")}`,
+        message: budgetMessage,
+      });
     }
     if (budgetStop) {
       await persistIntent("budget-exhausted").catch(() => undefined);

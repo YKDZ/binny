@@ -5,17 +5,22 @@ import {
   cleanContent,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
+  isSourceAdapterActionError,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
+  type FetchedSourceResponse,
   type IncrementalEntryRecord,
+  type ManualRunFailure,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
@@ -292,28 +297,34 @@ export async function fetchQwenArticleList(
   readonly articles: readonly RawQwenArticle[];
 }> {
   const url = buildRetrievalUrl(endpointUrl, articleType, language);
-  let response: Response;
+  let response: FetchedSourceResponse;
   try {
-    response = await fetch(url, {
-      method: "GET",
+    response = await fetchSourceResponse({
+      url,
+      signal,
+      stage: "fetching-index",
       headers: {
         accept: "application/json",
         "user-agent": "Binny SourceAdapter/1.0",
       },
-      signal,
     });
   } catch (error) {
-    if (signal.aborted) throw error;
+    if (signal.aborted) throw signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     throw sourceAdapterActionError({
       code: "qwen_source_invalid_response",
       message: `Failed to fetch Qwen articles from ${url}: ${error instanceof Error ? error.message : String(error)}`,
       impact: `Retrieval for language "${language}" failed.`,
       suggestion: "Verify network connectivity and endpoint availability.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
   }
 
   if (response.status !== 200) {
+    await response.cancelBody();
     throw sourceAdapterActionError({
       code: "qwen_source_invalid_response",
       message: `Qwen retrieval endpoint returned HTTP ${response.status}.`,
@@ -327,12 +338,17 @@ export async function fetchQwenArticleList(
   try {
     json = await response.json();
   } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     throw sourceAdapterActionError({
       code: "qwen_source_invalid_response",
       message: `Qwen retrieval response is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       impact: `Retrieval for language "${language}" failed.`,
       suggestion: "Check whether the endpoint returns a valid JSON document.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
   }
 
@@ -366,16 +382,18 @@ async function checkAction(
       language,
     );
     try {
-      const response = await fetch(url, {
-        method: "GET",
+      const response = await fetchSourceResponse({
+        url,
+        signal: context.signal,
+        stage: "fetching-index",
         headers: {
           accept: "application/json",
           "user-agent": "Binny SourceAdapter/1.0",
         },
-        signal: context.signal,
       });
 
       if (response.status !== 200) {
+        await response.cancelBody();
         problems.push({
           code: "qwen_source_invalid_response",
           message: `Qwen endpoint for language "${language}" returned HTTP ${response.status}.`,
@@ -389,7 +407,8 @@ async function checkAction(
       let json: unknown;
       try {
         json = await response.json();
-      } catch {
+      } catch (error) {
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         problems.push({
           code: "qwen_source_invalid_response",
           message: `Qwen endpoint for language "${language}" did not return valid JSON.`,
@@ -462,6 +481,28 @@ async function checkAction(
   };
 }
 
+function failureFromProblems(
+  problems: readonly ManualRunFailure[],
+  completedScopes: readonly string[],
+) {
+  const first = problems[0]!;
+  if (problems.length === 1) {
+    return sourceAdapterActionError(first, completedScopes);
+  }
+  return sourceAdapterActionError(
+    {
+      ...first,
+      message: `${problems
+        .slice(0, 8)
+        .map((p) => p.message)
+        .join(
+          "; ",
+        )}${problems.length > 8 ? `; and ${problems.length - 8} more problems` : ""}`,
+    },
+    completedScopes,
+  );
+}
+
 async function syncAction(
   context: SourceAdapterContext<QwenConfig>,
   params: QwenParams,
@@ -470,18 +511,45 @@ async function syncAction(
   const languages = params.languages ?? context.config.languages;
   const completedScopes: string[] = [];
   const initializedScopes: string[] = [];
+  const problems: ManualRunFailure[] = [];
 
   for (const language of languages) {
     if (context.signal.aborted) throw context.signal.reason;
     const scopeId = `lang:${language}`;
     const isInitialized = isIncrementalScopeInitialized(state, scopeId);
 
-    const { url, articles } = await fetchQwenArticleList(
-      context.config.endpointUrl,
-      context.config.articleType,
-      language,
-      context.signal,
-    );
+    let url: string;
+    let articles: readonly RawQwenArticle[];
+    try {
+      const listResult = await fetchQwenArticleList(
+        context.config.endpointUrl,
+        context.config.articleType,
+        language,
+        context.signal,
+      );
+      url = listResult.url;
+      articles = listResult.articles;
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      if (isSourceAdapterActionError(error)) {
+        problems.push(error.failure);
+      } else {
+        const diag = readFailureDiagnosticContext(error);
+        problems.push({
+          code: "qwen_source_invalid_response",
+          message: `Failed to fetch Qwen articles for "${language}": ${error instanceof Error ? error.message : String(error)}`,
+          impact: `Retrieval for language "${language}" failed.`,
+          suggestion: "Verify network connectivity and endpoint availability.",
+          requiresHuman: false,
+          ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+          ...(diag.target === undefined ? {} : { target: diag.target }),
+          ...(diag.abortCause === undefined
+            ? {}
+            : { abortCause: diag.abortCause }),
+        });
+      }
+      continue;
+    }
 
     if (!isInitialized) {
       const baselineEntries: Record<string, IncrementalEntryRecord> = {};
@@ -518,9 +586,11 @@ async function syncAction(
         scopeUrl: url,
         entries: baselineEntries,
       });
+      await saveIncrementalSyncState(context, state);
       initializedScopes.push(scopeId);
       completedScopes.push(scopeId);
     } else {
+      let scopeFailed = false;
       for (const article of articles) {
         if (context.signal.aborted) throw context.signal.reason;
         if (!article.path || typeof article.path !== "string") continue;
@@ -552,42 +622,65 @@ async function syncAction(
 
         if (changed) {
           const canonicalUrl = extractCanonicalUrl(article.content ?? "");
-          const submitResult = await submitCleanedArticle(context, {
-            sourceKey: {
-              namespace: `qwen:${language}`,
-              key: article.path,
-            },
-            sourceRef,
-            title: article.title?.trim() || null,
-            sourcePublishedAt,
-            sourceModifiedAt: null,
-            extensions: qwenExtensions(article, language, canonicalUrl),
-            cleanResult,
-            captureScope: {
-              language,
-              region: "global",
-              articleType: context.config.articleType,
-              path: article.path,
-            },
-          });
+          try {
+            const submitResult = await submitCleanedArticle(context, {
+              sourceKey: {
+                namespace: `qwen:${language}`,
+                key: article.path,
+              },
+              sourceRef,
+              title: article.title?.trim() || null,
+              sourcePublishedAt,
+              sourceModifiedAt: null,
+              extensions: qwenExtensions(article, language, canonicalUrl),
+              cleanResult,
+              captureScope: {
+                language,
+                region: "global",
+                articleType: context.config.articleType,
+                path: article.path,
+              },
+            });
 
-          upsertIncrementalScopeEntry(state, scopeId, article.path, {
-            fingerprint,
-            ...(sourcePublishedAt !== null
-              ? { publishedAt: sourcePublishedAt.value }
-              : {}),
-            archivedCompleteness: submitResult.hasMediaFailures
-              ? "partial"
-              : "complete",
-          });
+            upsertIncrementalScopeEntry(state, scopeId, article.path, {
+              fingerprint,
+              ...(sourcePublishedAt !== null
+                ? { publishedAt: sourcePublishedAt.value }
+                : {}),
+              archivedCompleteness: submitResult.hasMediaFailures
+                ? "partial"
+                : "complete",
+            });
+            await saveIncrementalSyncState(context, state);
+          } catch (error) {
+            if (context.signal.aborted) throw context.signal.reason ?? error;
+            scopeFailed = true;
+            if (isSourceAdapterActionError(error)) {
+              problems.push(error.failure);
+            } else {
+              problems.push({
+                code: "qwen_article_sync_failed",
+                message: `Failed to submit Qwen article "${article.path}" (${language}): ${error instanceof Error ? error.message : String(error)}`,
+                impact: `Article "${article.path}" was not archived.`,
+                path: ["languages", language, article.path],
+                suggestion: "Check archive service availability and retry.",
+                requiresHuman: false,
+              });
+            }
+          }
         }
       }
 
-      completedScopes.push(scopeId);
+      if (!scopeFailed) {
+        completedScopes.push(scopeId);
+      }
     }
   }
 
-  await saveIncrementalSyncState(context, state);
+  if (problems.length > 0) {
+    throw failureFromProblems(problems, completedScopes);
+  }
+
   return {
     completedScopes,
     ...(initializedScopes.length > 0 ? { initializedScopes } : {}),
@@ -601,17 +694,42 @@ async function collectAction(
   const state = await loadIncrementalSyncState(context);
   const languages = params.languages ?? context.config.languages;
   const completedScopes: string[] = [];
+  const problems: ManualRunFailure[] = [];
 
   for (const language of languages) {
     if (context.signal.aborted) throw context.signal.reason;
     const scopeId = `lang:${language}`;
 
-    const { articles } = await fetchQwenArticleList(
-      context.config.endpointUrl,
-      context.config.articleType,
-      language,
-      context.signal,
-    );
+    let articles: readonly RawQwenArticle[];
+    try {
+      const listResult = await fetchQwenArticleList(
+        context.config.endpointUrl,
+        context.config.articleType,
+        language,
+        context.signal,
+      );
+      articles = listResult.articles;
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      if (isSourceAdapterActionError(error)) {
+        problems.push(error.failure);
+      } else {
+        const diag = readFailureDiagnosticContext(error);
+        problems.push({
+          code: "qwen_source_invalid_response",
+          message: `Failed to fetch Qwen articles for "${language}": ${error instanceof Error ? error.message : String(error)}`,
+          impact: `Retrieval for language "${language}" failed.`,
+          suggestion: "Verify network connectivity and endpoint availability.",
+          requiresHuman: false,
+          ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+          ...(diag.target === undefined ? {} : { target: diag.target }),
+          ...(diag.abortCause === undefined
+            ? {}
+            : { abortCause: diag.abortCause }),
+        });
+      }
+      continue;
+    }
 
     let targetArticles = articles.filter(
       (a): a is RawQwenArticle & { path: string } =>
@@ -623,10 +741,13 @@ async function collectAction(
       targetArticles = targetArticles.filter((a) => allowedPaths.has(a.path));
     }
 
+    const beforeLimitCount = targetArticles.length;
     if (params.maxItems !== undefined && params.maxItems > 0) {
       targetArticles = targetArticles.slice(0, params.maxItems);
     }
+    const truncatedByMaxItems = targetArticles.length < beforeLimitCount;
 
+    let scopeFailed = false;
     for (const article of targetArticles) {
       if (context.signal.aborted) throw context.signal.reason;
       const sourceRef = buildArticleReadingUrl(
@@ -642,47 +763,70 @@ async function collectAction(
       const sourcePublishedAt = sourceTimeFrom(dateInfo.publishedDate);
       const canonicalUrl = extractCanonicalUrl(article.content ?? "");
 
-      const submitResult = await submitCleanedArticle(context, {
-        sourceKey: {
-          namespace: `qwen:${language}`,
-          key: article.path,
-        },
-        sourceRef,
-        title: article.title?.trim() || null,
-        sourcePublishedAt,
-        sourceModifiedAt: null,
-        extensions: qwenExtensions(article, language, canonicalUrl),
-        cleanResult,
-        captureScope: {
-          language,
-          region: "global",
-          articleType: context.config.articleType,
-          path: article.path,
-        },
-      });
+      try {
+        const submitResult = await submitCleanedArticle(context, {
+          sourceKey: {
+            namespace: `qwen:${language}`,
+            key: article.path,
+          },
+          sourceRef,
+          title: article.title?.trim() || null,
+          sourcePublishedAt,
+          sourceModifiedAt: null,
+          extensions: qwenExtensions(article, language, canonicalUrl),
+          cleanResult,
+          captureScope: {
+            language,
+            region: "global",
+            articleType: context.config.articleType,
+            path: article.path,
+          },
+        });
 
-      const fingerprint = computeArticleFingerprint(
-        article.title ?? "",
-        rawDate ?? "",
-        cleanResult.markdown,
-        cleanResult.text,
-      );
+        const fingerprint = computeArticleFingerprint(
+          article.title ?? "",
+          rawDate ?? "",
+          cleanResult.markdown,
+          cleanResult.text,
+        );
 
-      upsertIncrementalScopeEntry(state, scopeId, article.path, {
-        fingerprint,
-        ...(sourcePublishedAt !== null
-          ? { publishedAt: sourcePublishedAt.value }
-          : {}),
-        archivedCompleteness: submitResult.hasMediaFailures
-          ? "partial"
-          : "complete",
-      });
+        upsertIncrementalScopeEntry(state, scopeId, article.path, {
+          fingerprint,
+          ...(sourcePublishedAt !== null
+            ? { publishedAt: sourcePublishedAt.value }
+            : {}),
+          archivedCompleteness: submitResult.hasMediaFailures
+            ? "partial"
+            : "complete",
+        });
+        await saveIncrementalSyncState(context, state);
+      } catch (error) {
+        if (context.signal.aborted) throw context.signal.reason ?? error;
+        scopeFailed = true;
+        if (isSourceAdapterActionError(error)) {
+          problems.push(error.failure);
+        } else {
+          problems.push({
+            code: "qwen_article_collect_failed",
+            message: `Failed to submit Qwen article "${article.path}" (${language}): ${error instanceof Error ? error.message : String(error)}`,
+            impact: `Article "${article.path}" was not archived.`,
+            path: ["languages", language, article.path],
+            suggestion: "Check archive service availability and retry.",
+            requiresHuman: false,
+          });
+        }
+      }
     }
 
-    completedScopes.push(scopeId);
+    if (!scopeFailed && !truncatedByMaxItems) {
+      completedScopes.push(scopeId);
+    }
   }
 
-  await saveIncrementalSyncState(context, state);
+  if (problems.length > 0) {
+    throw failureFromProblems(problems, completedScopes);
+  }
+
   return { completedScopes };
 }
 

@@ -2,17 +2,21 @@
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
   type IncrementalEntryRecord,
+  type IncrementalSyncState,
+  type ManualRunAbortCause,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
@@ -119,6 +123,20 @@ interface ProblemItem {
   readonly message: string;
   readonly path?: readonly (string | number)[] | undefined;
   readonly suggestion?: string | undefined;
+  readonly stage?: string | undefined;
+  readonly target?: string | undefined;
+  readonly abortCause?: ManualRunAbortCause | undefined;
+}
+
+function problemDiagnostics(
+  error: unknown,
+): Pick<ProblemItem, "stage" | "target" | "abortCause"> {
+  const diag = readFailureDiagnosticContext(error);
+  return {
+    ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+    ...(diag.target === undefined ? {} : { target: diag.target }),
+    ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
+  };
 }
 
 function failureFromProblems(
@@ -136,6 +154,7 @@ function failureFromProblems(
     completedScopes.length === 0
       ? ""
       : `Completed scopes retained: ${completedScopes.join(", ")}. `;
+  const first = problems[0];
   return sourceAdapterActionError(
     {
       code: "anthropic_collection_incomplete",
@@ -143,6 +162,11 @@ function failureFromProblems(
       impact: `${completed}Submitted material remains in archive; failed scopes were not advanced.`,
       suggestion: "Check network reachability and Anthropic page structure.",
       requiresHuman: false,
+      ...(first?.stage === undefined ? {} : { stage: first.stage }),
+      ...(first?.target === undefined ? {} : { target: first.target }),
+      ...(first?.abortCause === undefined
+        ? {}
+        : { abortCause: first.abortCause }),
     },
     completedScopes,
   );
@@ -179,16 +203,21 @@ async function fetchHtml(
   url: string,
   signal: AbortSignal,
 ): Promise<{ readonly status: number; readonly body: string }> {
-  const response = await fetch(url, {
-    method: "GET",
+  const response = await fetchSourceResponse({
+    url,
+    signal,
+    stage: "fetching-document",
     headers: {
       accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
       "user-agent": "Binny AnthropicAdapter/1.0",
     },
-    signal,
   });
 
-  const body = response.status === 200 ? await response.text() : "";
+  if (response.status !== 200) {
+    await response.cancelBody();
+    return { status: response.status, body: "" };
+  }
+  const body = await response.text();
   return { status: response.status, body };
 }
 
@@ -361,12 +390,13 @@ async function syncAnthropic(
       }
       html = res.body;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       failedSections.add(section.id);
       problems.push({
         sectionId: section.id,
         message: `Section request failed: ${error instanceof Error ? error.message : String(error)}`,
         path: ["sections", section.id],
+        ...problemDiagnostics(error),
       });
       continue;
     }
@@ -399,6 +429,7 @@ async function syncAnthropic(
         initializedAt: context.referenceTime,
         entries: baselineEntries,
       });
+      await saveIncrementalSyncState(context, state);
 
       initializedScopes.push(section.id);
       completedScopes.push(`section:${section.id}`);
@@ -447,7 +478,8 @@ async function syncAnthropic(
       if (sitemapRes.status === 200) {
         sitemapLastModMap = parseSitemap(sitemapRes.body);
       }
-    } catch {
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       // Optional sitemap fetch failure does not stop article collection
     }
   }
@@ -475,13 +507,14 @@ async function syncAnthropic(
       }
       detailHtml = res.body;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       for (const sec of candidate.sections) {
         failedSections.add(sec);
       }
       problems.push({
         message: `Failed to fetch article detail at "${candidate.url}": ${error instanceof Error ? error.message : String(error)}`,
         path: ["articles", candidate.canonicalPath],
+        ...problemDiagnostics(error),
       });
       continue;
     }
@@ -561,8 +594,9 @@ async function syncAnthropic(
           entryRecord,
         );
       }
+      await saveIncrementalSyncState(context, state);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       for (const sec of candidate.sections) {
         failedSections.add(sec);
       }
@@ -580,8 +614,6 @@ async function syncAnthropic(
       completedScopes.push(scopeId);
     }
   }
-
-  await saveIncrementalSyncState(context, state);
 
   if (problems.length > 0) {
     throw failureFromProblems(problems, completedScopes);
@@ -699,7 +731,13 @@ async function collectAnthropic(
     });
   }
 
+  let state: IncrementalSyncState | undefined;
+  if (context.persistentState !== undefined) {
+    state = await loadIncrementalSyncState(context);
+  }
+
   const candidatesMap = new Map<string, CandidateArticle>();
+  const truncatedSections = new Set<string>();
 
   for (const section of selected) {
     if (context.signal.aborted) throw context.signal.reason;
@@ -718,12 +756,13 @@ async function collectAnthropic(
       }
       html = res.body;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       failedSections.add(section.id);
       problems.push({
         sectionId: section.id,
         message: `Section request failed: ${error instanceof Error ? error.message : String(error)}`,
         path: ["sections", section.id],
+        ...problemDiagnostics(error),
       });
       continue;
     }
@@ -734,6 +773,9 @@ async function collectAnthropic(
       params.maxItems !== undefined
         ? discovered.slice(0, params.maxItems)
         : discovered;
+    if (targetArticles.length < discovered.length) {
+      truncatedSections.add(section.id);
+    }
 
     for (const item of targetArticles) {
       const existing = candidatesMap.get(item.canonicalPath);
@@ -772,13 +814,14 @@ async function collectAnthropic(
       }
       detailHtml = res.body;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       for (const sec of candidate.sections) {
         failedSections.add(sec);
       }
       problems.push({
         message: `Failed to fetch article detail at "${candidate.url}": ${error instanceof Error ? error.message : String(error)}`,
         path: ["articles", candidate.canonicalPath],
+        ...problemDiagnostics(error),
       });
       continue;
     }
@@ -805,7 +848,7 @@ async function collectAnthropic(
     const sections = Array.from(candidate.sections).sort();
 
     try {
-      await submitCleanedArticle(context, {
+      const archiveResult = await submitCleanedArticle(context, {
         sourceKey: {
           namespace: "anthropic:article",
           key: candidate.canonicalPath,
@@ -830,8 +873,34 @@ async function collectAnthropic(
           sections,
         },
       });
+
+      if (state !== undefined && context.persistentState !== undefined) {
+        const entryRecord: IncrementalEntryRecord = {
+          fingerprint: candidate.fingerprint,
+          ...(article.sourceModifiedAt
+            ? { updatedAt: article.sourceModifiedAt }
+            : {}),
+          ...(article.publishedAt
+            ? { publishedAt: article.publishedAt }
+            : article.publishedDate
+              ? { publishedAt: article.publishedDate }
+              : {}),
+          archivedCompleteness: archiveResult.hasMediaFailures
+            ? "partial"
+            : "complete",
+        };
+        for (const secId of candidate.sections) {
+          upsertIncrementalScopeEntry(
+            state,
+            secId,
+            candidate.canonicalPath,
+            entryRecord,
+          );
+        }
+        await saveIncrementalSyncState(context, state);
+      }
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       for (const sec of candidate.sections) {
         failedSections.add(sec);
       }
@@ -843,7 +912,7 @@ async function collectAnthropic(
   }
 
   for (const section of selected) {
-    if (!failedSections.has(section.id)) {
+    if (!failedSections.has(section.id) && !truncatedSections.has(section.id)) {
       completedScopes.push(`section:${section.id}`);
     }
   }

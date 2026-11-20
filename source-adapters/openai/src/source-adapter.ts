@@ -3,16 +3,20 @@ import {
   cleanContent,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   upsertIncrementalScopeEntry,
+  type FetchedSourceResponse,
+  type ManualRunAbortCause,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { parseFeed } from "@rowanmanning/feed-parser";
@@ -150,7 +154,21 @@ type Problem = {
   readonly path?: (string | number)[] | undefined;
   readonly suggestion: string;
   readonly requiresHuman: boolean;
+  readonly stage?: string | undefined;
+  readonly target?: string | undefined;
+  readonly abortCause?: ManualRunAbortCause | undefined;
 };
+
+function problemDiagnostics(
+  error: unknown,
+): Pick<Problem, "stage" | "target" | "abortCause"> {
+  const diag = readFailureDiagnosticContext(error);
+  return {
+    ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+    ...(diag.target === undefined ? {} : { target: diag.target }),
+    ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
+  };
+}
 
 function selectedScopes(
   config: OpenAIConfig,
@@ -224,16 +242,19 @@ async function fetchNewsRssItems(
   userAgent: string,
   signal: AbortSignal,
 ): Promise<FeedDiscoveryItem[]> {
-  const response = await fetch(rssUrl, {
+  const response = await fetchSourceResponse({
+    url: rssUrl,
+    signal,
+    stage: "fetching-feed",
     headers: {
       "User-Agent": userAgent,
       Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
     },
-    signal,
   });
 
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(
       `OpenAI News RSS feed request returned HTTP ${response.status}`,
     );
@@ -274,6 +295,9 @@ type NewsArticleArchiveResult =
       readonly ok: false;
       readonly code: string;
       readonly message: string;
+      readonly stage?: string | undefined;
+      readonly target?: string | undefined;
+      readonly abortCause?: ManualRunAbortCause | undefined;
     };
 
 async function fetchAndArchiveNewsArticle(
@@ -288,21 +312,36 @@ async function fetchAndArchiveNewsArticle(
     "Accept-Language": "en-US,en;q=0.9",
   };
 
-  let response: Response;
+  let response: FetchedSourceResponse;
   try {
-    response = await fetch(articleUrl, {
-      headers: newsHeaders,
+    response = await fetchSourceResponse({
+      url: articleUrl,
       signal: context.signal,
+      stage: "fetching-article",
+      headers: newsHeaders,
     });
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     return {
       ok: false,
       code: "openai_news_challenge_or_forbidden",
       message: `Failed to request article at ${articleUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      ...problemDiagnostics(error),
     };
   }
 
-  const html = await response.text();
+  let html: string;
+  try {
+    html = await response.text();
+  } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    return {
+      ok: false,
+      code: "openai_news_challenge_or_forbidden",
+      message: `Failed to read article at ${articleUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      ...problemDiagnostics(error),
+    };
+  }
   const accessFailure = detectOpenAiAccessFailure(response, html, articleUrl);
   if (accessFailure.failed) {
     return {
@@ -380,16 +419,19 @@ async function fetchDevelopersBlogList(
   userAgent: string,
   signal: AbortSignal,
 ): Promise<DevelopersBlogPostListing[]> {
-  const response = await fetch(listUrl, {
+  const response = await fetchSourceResponse({
+    url: listUrl,
+    signal,
+    stage: "fetching-index",
     headers: {
       "User-Agent": userAgent,
       Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
     },
-    signal,
   });
 
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(
       `Developers blog list request returned HTTP ${response.status}`,
     );
@@ -409,6 +451,9 @@ type DevelopersBlogArchiveResult =
       readonly ok: false;
       readonly code: string;
       readonly message: string;
+      readonly stage?: string | undefined;
+      readonly target?: string | undefined;
+      readonly abortCause?: ManualRunAbortCause | undefined;
     };
 
 async function fetchAndArchiveDevelopersBlogArticle(
@@ -428,13 +473,15 @@ async function fetchAndArchiveDevelopersBlogArticle(
   if (preferMarkdown) {
     const mdUrl = `${listing.url}.md`;
     try {
-      const mdResponse = await fetch(mdUrl, {
+      const mdResponse = await fetchSourceResponse({
+        url: mdUrl,
+        signal: context.signal,
+        stage: "fetching-article",
         headers: {
           "User-Agent": userAgent,
           Accept: "text/markdown, text/plain, */*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
         },
-        signal: context.signal,
       });
 
       if (mdResponse.status === 200) {
@@ -450,33 +497,52 @@ async function fetchAndArchiveDevelopersBlogArticle(
           rawBody = text;
           isMarkdown = true;
         }
+      } else {
+        await mdResponse.cancelBody();
       }
-    } catch {
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      if (
+        readFailureDiagnosticContext(error).abortCause ===
+        "source_request_timeout"
+      ) {
+        return {
+          ok: false,
+          code: "openai_developers_blog_body_unavailable",
+          message: `Failed to request developers blog markdown at ${mdUrl}: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
+        };
+      }
       // Fallback to HTML
     }
   }
 
   if (rawBody === undefined) {
-    let htmlResponse: Response;
+    let htmlResponse: FetchedSourceResponse;
     try {
-      htmlResponse = await fetch(listing.url, {
+      htmlResponse = await fetchSourceResponse({
+        url: listing.url,
+        signal: context.signal,
+        stage: "fetching-article",
         headers: {
           "User-Agent": userAgent,
           Accept:
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
         },
-        signal: context.signal,
       });
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       return {
         ok: false,
         code: "openai_developers_blog_body_unavailable",
         message: `Failed to request developers blog at ${listing.url}: ${error instanceof Error ? error.message : String(error)}`,
+        ...problemDiagnostics(error),
       };
     }
 
     if (htmlResponse.status !== 200) {
+      await htmlResponse.cancelBody();
       return {
         ok: false,
         code: "openai_developers_blog_body_unavailable",
@@ -484,7 +550,18 @@ async function fetchAndArchiveDevelopersBlogArticle(
       };
     }
 
-    const html = await htmlResponse.text();
+    let html: string;
+    try {
+      html = await htmlResponse.text();
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      return {
+        ok: false,
+        code: "openai_developers_blog_body_unavailable",
+        message: `Failed to read developers blog HTML at ${listing.url}: ${error instanceof Error ? error.message : String(error)}`,
+        ...problemDiagnostics(error),
+      };
+    }
     const extracted = extractDevelopersBlogArticle(html, listing.url);
     if (!extracted) {
       return {
@@ -591,6 +668,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_news_rss_unavailable",
                 message: `Failed to fetch OpenAI News RSS feed: ${error instanceof Error ? error.message : String(error)}`,
@@ -634,18 +712,21 @@ export const sourceAdapter = defineSourceAdapter({
               continue;
             }
 
-            let response: Response;
+            let response: FetchedSourceResponse;
             try {
-              response = await fetch(candidateItem.url, {
+              response = await fetchSourceResponse({
+                url: candidateItem.url,
+                signal: context.signal,
+                stage: "fetching-article",
                 headers: {
                   "User-Agent": context.config.news.userAgent,
                   Accept:
                     "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                   "Accept-Language": "en-US,en;q=0.9",
                 },
-                signal: context.signal,
               });
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_news_challenge_or_forbidden",
                 message: `Failed to fetch OpenAI News article HTML: ${error instanceof Error ? error.message : String(error)}`,
@@ -721,6 +802,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_developers_blog_list_unavailable",
                 message: `Failed to fetch OpenAI Developers Blog list: ${error instanceof Error ? error.message : String(error)}`,
@@ -757,13 +839,15 @@ export const sourceAdapter = defineSourceAdapter({
 
             if (context.config.developersBlog.preferMarkdown) {
               try {
-                const mdResponse = await fetch(`${candidatePost.url}.md`, {
+                const mdResponse = await fetchSourceResponse({
+                  url: `${candidatePost.url}.md`,
+                  signal: context.signal,
+                  stage: "fetching-article",
                   headers: {
                     "User-Agent": context.config.news.userAgent,
                     Accept: "text/markdown, text/plain, */*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                   },
-                  signal: context.signal,
                 });
                 if (mdResponse.status === 200) {
                   const contentType = (
@@ -778,25 +862,33 @@ export const sourceAdapter = defineSourceAdapter({
                     rawBody = text;
                     isMarkdown = true;
                   }
+                } else {
+                  await mdResponse.cancelBody();
                 }
-              } catch {
+              } catch (error) {
+                if (context.signal.aborted)
+                  throw context.signal.reason ?? error;
                 // Fallback to HTML
               }
             }
 
             if (rawBody === undefined) {
-              let htmlResponse: Response;
+              let htmlResponse: FetchedSourceResponse;
               try {
-                htmlResponse = await fetch(candidatePost.url, {
+                htmlResponse = await fetchSourceResponse({
+                  url: candidatePost.url,
+                  signal: context.signal,
+                  stage: "fetching-article",
                   headers: {
                     "User-Agent": context.config.news.userAgent,
                     Accept:
                       "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Accept-Language": "en-US,en;q=0.9",
                   },
-                  signal: context.signal,
                 });
               } catch (error) {
+                if (context.signal.aborted)
+                  throw context.signal.reason ?? error;
                 problems.push({
                   code: "openai_developers_blog_body_unavailable",
                   message: `Failed to fetch Developers blog HTML: ${error instanceof Error ? error.message : String(error)}`,
@@ -809,6 +901,7 @@ export const sourceAdapter = defineSourceAdapter({
               }
 
               if (htmlResponse.status !== 200) {
+                await htmlResponse.cancelBody();
                 problems.push({
                   code: "openai_developers_blog_body_unavailable",
                   message: `Developers blog article request returned HTTP ${htmlResponse.status}`,
@@ -914,6 +1007,8 @@ export const sourceAdapter = defineSourceAdapter({
                   context.signal,
                 );
               } catch (error) {
+                if (context.signal.aborted)
+                  throw context.signal.reason ?? error;
                 problems.push({
                   code: "openai_news_rss_unavailable",
                   message: `Initial sync failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
@@ -921,6 +1016,7 @@ export const sourceAdapter = defineSourceAdapter({
                   path: ["news", "rssUrl"],
                   suggestion: "Check network connectivity to OpenAI News RSS.",
                   requiresHuman: false,
+                  ...problemDiagnostics(error),
                 });
                 continue;
               }
@@ -968,6 +1064,8 @@ export const sourceAdapter = defineSourceAdapter({
                   context.signal,
                 );
               } catch (error) {
+                if (context.signal.aborted)
+                  throw context.signal.reason ?? error;
                 problems.push({
                   code: "openai_developers_blog_list_unavailable",
                   message: `Initial sync failed to fetch blog list: ${error instanceof Error ? error.message : String(error)}`,
@@ -977,6 +1075,7 @@ export const sourceAdapter = defineSourceAdapter({
                   suggestion:
                     "Check network connectivity to developers.openai.com/blog.",
                   requiresHuman: false,
+                  ...problemDiagnostics(error),
                 });
                 continue;
               }
@@ -1032,6 +1131,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_news_rss_unavailable",
                 message: `Subsequent sync failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1039,6 +1139,7 @@ export const sourceAdapter = defineSourceAdapter({
                 path: ["news", "rssUrl"],
                 suggestion: "Check network connectivity.",
                 requiresHuman: false,
+                ...problemDiagnostics(error),
               });
               continue;
             }
@@ -1083,6 +1184,15 @@ export const sourceAdapter = defineSourceAdapter({
                   path: ["news", item.url],
                   suggestion: "Check access restrictions or Cloudflare status.",
                   requiresHuman: false,
+                  ...(archiveResult.stage === undefined
+                    ? {}
+                    : { stage: archiveResult.stage }),
+                  ...(archiveResult.target === undefined
+                    ? {}
+                    : { target: archiveResult.target }),
+                  ...(archiveResult.abortCause === undefined
+                    ? {}
+                    : { abortCause: archiveResult.abortCause }),
                 });
                 continue;
               }
@@ -1108,6 +1218,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_developers_blog_list_unavailable",
                 message: `Subsequent sync failed to fetch blog list: ${error instanceof Error ? error.message : String(error)}`,
@@ -1115,6 +1226,7 @@ export const sourceAdapter = defineSourceAdapter({
                 path: ["developersBlog", "listUrl"],
                 suggestion: "Check network connectivity.",
                 requiresHuman: false,
+                ...problemDiagnostics(error),
               });
               continue;
             }
@@ -1151,6 +1263,15 @@ export const sourceAdapter = defineSourceAdapter({
                   path: ["developersBlog", item.url],
                   suggestion: "Check post availability.",
                   requiresHuman: false,
+                  ...(archiveResult.stage === undefined
+                    ? {}
+                    : { stage: archiveResult.stage }),
+                  ...(archiveResult.target === undefined
+                    ? {}
+                    : { target: archiveResult.target }),
+                  ...(archiveResult.abortCause === undefined
+                    ? {}
+                    : { abortCause: archiveResult.abortCause }),
                 });
                 continue;
               }
@@ -1174,6 +1295,7 @@ export const sourceAdapter = defineSourceAdapter({
         }
 
         if (problems.length > 0) {
+          const first = problems[0]!;
           throw sourceAdapterActionError(
             {
               code: "openai_sync_incomplete",
@@ -1183,6 +1305,11 @@ export const sourceAdapter = defineSourceAdapter({
               suggestion:
                 "Check network reachability, Cloudflare challenge, or article selectors and re-run.",
               requiresHuman: false,
+              ...(first.stage === undefined ? {} : { stage: first.stage }),
+              ...(first.target === undefined ? {} : { target: first.target }),
+              ...(first.abortCause === undefined
+                ? {}
+                : { abortCause: first.abortCause }),
             },
             completedScopes,
           );
@@ -1209,6 +1336,7 @@ export const sourceAdapter = defineSourceAdapter({
         for (const scope of scopes) {
           if (context.signal.aborted) throw context.signal.reason;
           let scopeFailed = false;
+          let truncatedByMaxItems = false;
 
           if (scope === "news") {
             let feedItems: FeedDiscoveryItem[];
@@ -1219,6 +1347,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_news_rss_unavailable",
                 message: `Collect failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1226,6 +1355,7 @@ export const sourceAdapter = defineSourceAdapter({
                 path: ["news", "rssUrl"],
                 suggestion: "Check RSS feed URL or network reachability.",
                 requiresHuman: false,
+                ...problemDiagnostics(error),
               });
               continue;
             }
@@ -1236,9 +1366,11 @@ export const sourceAdapter = defineSourceAdapter({
                 (item) => item.url && params.itemUrls?.includes(item.url),
               );
             }
+            const beforeLimitCount = candidateItems.length;
             if (params.maxItems !== undefined && params.maxItems > 0) {
               candidateItems = candidateItems.slice(0, params.maxItems);
             }
+            truncatedByMaxItems = candidateItems.length < beforeLimitCount;
 
             for (const item of candidateItems) {
               if (context.signal.aborted) throw context.signal.reason;
@@ -1258,6 +1390,15 @@ export const sourceAdapter = defineSourceAdapter({
                   path: ["news", item.url],
                   suggestion: "Check article URL or Cloudflare mitigation.",
                   requiresHuman: false,
+                  ...(archiveResult.stage === undefined
+                    ? {}
+                    : { stage: archiveResult.stage }),
+                  ...(archiveResult.target === undefined
+                    ? {}
+                    : { target: archiveResult.target }),
+                  ...(archiveResult.abortCause === undefined
+                    ? {}
+                    : { abortCause: archiveResult.abortCause }),
                 });
                 continue;
               }
@@ -1293,6 +1434,7 @@ export const sourceAdapter = defineSourceAdapter({
                 context.signal,
               );
             } catch (error) {
+              if (context.signal.aborted) throw context.signal.reason ?? error;
               problems.push({
                 code: "openai_developers_blog_list_unavailable",
                 message: `Collect failed to fetch developers blog list: ${error instanceof Error ? error.message : String(error)}`,
@@ -1300,6 +1442,7 @@ export const sourceAdapter = defineSourceAdapter({
                 path: ["developersBlog", "listUrl"],
                 suggestion: "Check developers blog list URL.",
                 requiresHuman: false,
+                ...problemDiagnostics(error),
               });
               continue;
             }
@@ -1310,9 +1453,11 @@ export const sourceAdapter = defineSourceAdapter({
                 params.itemUrls?.includes(item.url),
               );
             }
+            const beforeLimitCount = candidateItems.length;
             if (params.maxItems !== undefined && params.maxItems > 0) {
               candidateItems = candidateItems.slice(0, params.maxItems);
             }
+            truncatedByMaxItems = candidateItems.length < beforeLimitCount;
 
             for (const item of candidateItems) {
               if (context.signal.aborted) throw context.signal.reason;
@@ -1330,6 +1475,15 @@ export const sourceAdapter = defineSourceAdapter({
                   path: ["developersBlog", item.url],
                   suggestion: "Check blog post URL or structure.",
                   requiresHuman: false,
+                  ...(archiveResult.stage === undefined
+                    ? {}
+                    : { stage: archiveResult.stage }),
+                  ...(archiveResult.target === undefined
+                    ? {}
+                    : { target: archiveResult.target }),
+                  ...(archiveResult.abortCause === undefined
+                    ? {}
+                    : { abortCause: archiveResult.abortCause }),
                 });
                 continue;
               }
@@ -1357,12 +1511,13 @@ export const sourceAdapter = defineSourceAdapter({
             }
           }
 
-          if (!scopeFailed) {
+          if (!scopeFailed && !truncatedByMaxItems) {
             completedScopes.push(scope);
           }
         }
 
         if (problems.length > 0) {
+          const first = problems[0]!;
           throw sourceAdapterActionError(
             {
               code: "openai_collection_incomplete",
@@ -1371,6 +1526,11 @@ export const sourceAdapter = defineSourceAdapter({
               suggestion:
                 "Check network reachability, Cloudflare challenge, or article selectors and re-run.",
               requiresHuman: false,
+              ...(first.stage === undefined ? {} : { stage: first.stage }),
+              ...(first.target === undefined ? {} : { target: first.target }),
+              ...(first.abortCause === undefined
+                ? {}
+                : { abortCause: first.abortCause }),
             },
             completedScopes,
           );

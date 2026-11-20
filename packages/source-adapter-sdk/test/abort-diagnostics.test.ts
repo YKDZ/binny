@@ -7,11 +7,14 @@ import {
   cleanContent,
   classifyAbortCause,
   createActionCancelledReason,
+  fetchSourceResponse,
   fetchValidatedMedia,
   isActionCancelledReason,
   isSourceAccessBudgetExceededError,
   MediaFetchError,
+  readFailureDiagnosticContext,
   SourceAccessBudgetExceededError,
+  SourceRequestError,
   uploadCleanedMedia,
 } from "../src/index.ts";
 
@@ -175,6 +178,54 @@ void describe("abort diagnostics and evidence-based classification", () => {
             cleaned,
             { timeoutMs: 5_000 },
           ),
+        (error: unknown) => isActionCancelledReason(error),
+      );
+    } finally {
+      server.closeAllConnections();
+      server.close();
+      await once(server, "close");
+    }
+  });
+
+  void it("classifies timeout, unknown abort, and user cancellation in fetchSourceResponse", async () => {
+    const server = createServer((_req, _res) => {
+      // Leave open to trigger timeout / cancellation.
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address !== null && typeof address !== "string");
+    const slowUrl = `http://127.0.0.1:${String(address.port)}/slow`;
+
+    try {
+      await assert.rejects(
+        () =>
+          fetchSourceResponse({
+            url: slowUrl,
+            signal: new AbortController().signal,
+            stage: "fetching-feed",
+            timeoutMs: 30,
+          }),
+        (error: unknown) => {
+          assert.ok(error instanceof SourceRequestError);
+          const diag = readFailureDiagnosticContext(error);
+          assert.equal(diag.stage, "fetching-feed");
+          assert.equal(diag.target, slowUrl);
+          assert.equal(diag.abortCause, "source_request_timeout");
+          return true;
+        },
+      );
+
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(createActionCancelledReason()), 20);
+      await assert.rejects(
+        () =>
+          fetchSourceResponse({
+            url: slowUrl,
+            signal: controller.signal,
+            stage: "fetching-feed",
+            timeoutMs: 5_000,
+          }),
         (error: unknown) => isActionCancelledReason(error),
       );
     } finally {

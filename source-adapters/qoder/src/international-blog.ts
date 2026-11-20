@@ -982,6 +982,8 @@ export async function collectInternationalBlog(
     card?: DiscoveredBlogArticle | undefined;
   }[] = [];
 
+  let truncatedByMaxItems = false;
+
   if (params.articleUrls && params.articleUrls.length > 0) {
     for (const url of params.articleUrls) {
       const slug = extractBlogSlug(url);
@@ -1003,6 +1005,7 @@ export async function collectInternationalBlog(
       params.maxItems !== undefined && params.maxItems > 0
         ? discovered.slice(0, params.maxItems)
         : discovered;
+    truncatedByMaxItems = limited.length < discovered.length;
     targetArticles = limited.map((card) => ({
       slug: card.slug,
       url: card.url,
@@ -1096,11 +1099,11 @@ export async function collectInternationalBlog(
   if (hasFailures || problems.length > 0) {
     throw failureFromProblems(
       problems,
-      hasFailures ? [] : [INTERNATIONAL_BLOG_SCOPE_ID],
+      hasFailures || truncatedByMaxItems ? [] : [INTERNATIONAL_BLOG_SCOPE_ID],
     );
   }
 
   return {
-    completedScopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+    completedScopes: truncatedByMaxItems ? [] : [INTERNATIONAL_BLOG_SCOPE_ID],
   };
 }

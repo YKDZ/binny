@@ -6,8 +6,11 @@ import { createServer, type Server } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
+  readFailureDiagnosticContext,
   type ArchiveResourceMetadata,
   type ArchiveSubmissionInput,
   type IncrementalSyncState,
@@ -26,6 +29,7 @@ import {
   executeDeepSeekCollect,
   executeDeepSeekSync,
   extractNewsSlug,
+  fetchNewsArticle,
   isHomepageFallback,
   normalizeDate,
 } from "../src/source-adapter.ts";
@@ -349,7 +353,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             assert(Array.isArray(item.resources), "Resources must be an array");
           }
 
-          const extensions = item.extensions as Record<string, unknown>;
+          const extensions = item.extensions;
           assert.equal(
             extensions.region,
             "unpartitioned",
@@ -377,10 +381,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "changelog:updates",
         );
       assert(zhUpdates !== undefined, "Chinese changelog must be archived");
-      assert.equal(
-        (zhUpdates.extensions as Record<string, unknown>).kind,
-        "changelog",
-      );
+      assert.equal(zhUpdates.extensions.kind, "changelog");
 
       const enUpdates = submissions
         .flatMap((s) => s.items)
@@ -390,10 +391,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "changelog:updates",
         );
       assert(enUpdates !== undefined, "English changelog must be archived");
-      assert.equal(
-        (enUpdates.extensions as Record<string, unknown>).kind,
-        "changelog",
-      );
+      assert.equal(enUpdates.extensions.kind, "changelog");
 
       const zhNews = submissions
         .flatMap((s) => s.items)
@@ -403,7 +401,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "news:news261020",
         );
       assert(zhNews !== undefined, "Chinese news article must be archived");
-      assert.equal((zhNews.extensions as Record<string, unknown>).kind, "news");
+      assert.equal(zhNews.extensions.kind, "news");
 
       const enNews = submissions
         .flatMap((s) => s.items)
@@ -413,7 +411,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
             it.sourceKey.key === "news:news261020",
         );
       assert(enNews !== undefined, "English news article must be archived");
-      assert.equal((enNews.extensions as Record<string, unknown>).kind, "news");
+      assert.equal(enNews.extensions.kind, "news");
 
       // Verify media resource upload
       assert(uploadedResources.length > 0, "Image must be uploaded");
@@ -672,10 +670,7 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
         .find((it) => it.sourceKey.key === "changelog:updates");
       assert(zhChangelog !== undefined);
 
-      const changelogExtensions = zhChangelog.extensions as Record<
-        string,
-        unknown
-      >;
+      const changelogExtensions = zhChangelog.extensions;
       assert.equal(changelogExtensions.latestUpdateDate, "2026-10-20");
       assert.equal(changelogExtensions.latestUpdateDatePrecision, "day");
       assert.equal(zhChangelog.sourcePublishedAt, null);
@@ -732,4 +727,145 @@ void test("DeepSeek source adapter unit and action tests", async (t) => {
     assert.equal(result.problems.length, 0);
     assert.deepEqual(result.scope, ["zh-cn", "en"]);
   });
+
+  await t.test(
+    "collect omits truncated scope from completedScopes when maxItems < articles.length",
+    async () => {
+      updatesVersion = 1;
+      const { context: truncCtx, submissions: truncSubs } =
+        createTestContext(testConfig);
+      const truncRes = await executeDeepSeekCollect(truncCtx, {
+        sourceIds: ["en"],
+        maxItems: 1,
+      });
+      assert.deepEqual(truncRes.completedScopes, []);
+      // 1 changelog + 1 news article = 2 submissions
+      assert.equal(truncSubs.length, 2);
+
+      const { context: fullCtx } = createTestContext(testConfig);
+      const fullRes = await executeDeepSeekCollect(fullCtx, {
+        sourceIds: ["en"],
+        maxItems: 10,
+      });
+      assert.deepEqual(fullRes.completedScopes, ["en"]);
+    },
+  );
+
+  await t.test(
+    "sync persists changelog and archived item A before mid-run cancellation",
+    async () => {
+      updatesVersion = 1;
+      let storedState: IncrementalSyncState | undefined;
+      const persistentState = {
+        async load() {
+          return storedState;
+        },
+        async save(state: unknown) {
+          storedState = state as IncrementalSyncState;
+        },
+      };
+
+      const { context: initCtx } = createTestContext(testConfig, {
+        persistentState,
+      });
+      await executeDeepSeekSync(initCtx, { sourceIds: ["en"] });
+
+      // Update to version 2 (updates changelog + adds news261101)
+      updatesVersion = 2;
+      const cancelController = new AbortController();
+      const { context: baseCtx, submissions: cancelSubs } = createTestContext(
+        testConfig,
+        {
+          persistentState,
+          signal: cancelController.signal,
+        },
+      );
+
+      // Abort right after changelog:updates is submitted, before news261101
+      const cancelCtx: typeof baseCtx = {
+        ...baseCtx,
+        archive: {
+          async submit(input) {
+            const res = await baseCtx.archive.submit(input);
+            if (input.items[0]?.sourceKey.key === "changelog:updates") {
+              cancelController.abort(createActionCancelledReason());
+            }
+            return res;
+          },
+        },
+      };
+
+      await assert.rejects(
+        () => executeDeepSeekSync(cancelCtx, { sourceIds: ["en"] }),
+        (err: unknown) => isActionCancelledReason(err),
+      );
+
+      assert.equal(cancelSubs.length, 1);
+      // Changelog ongoingDocument hash MUST already be persisted
+      assert.ok(
+        storedState?.scopes["en"]?.ongoingDocuments?.["changelog:updates"]
+          ?.contentHash,
+      );
+
+      // Next sync must NOT re-submit changelog:updates; only news261101 is archived
+      const { context: resumeCtx, submissions: resumeSubs } = createTestContext(
+        testConfig,
+        { persistentState },
+      );
+      const resumeRes = await executeDeepSeekSync(resumeCtx, {
+        sourceIds: ["en"],
+      });
+      assert.deepEqual(resumeRes.completedScopes, ["en"]);
+      assert.equal(resumeSubs.length, 1);
+      assert.equal(resumeSubs[0]?.items[0]?.sourceKey.key, "news:news261101");
+    },
+  );
+
+  await t.test(
+    "fetchNewsArticle classifies per-request timeout and propagates user cancellation",
+    async () => {
+      const originalFetch = globalThis.fetch;
+      const controller = new AbortController();
+      try {
+        globalThis.fetch = async () => {
+          throw new DOMException("signal timed out", "TimeoutError");
+        };
+        await assert.rejects(
+          () =>
+            fetchNewsArticle(
+              "https://example.test/news/news261101",
+              "https://example.test/updates.md",
+              new AbortController().signal,
+            ),
+          (err: unknown) => {
+            assert.equal(
+              readFailureDiagnosticContext(err).abortCause,
+              "source_request_timeout",
+            );
+            return true;
+          },
+        );
+
+        let fetchCalls = 0;
+        globalThis.fetch = async (_input, init) => {
+          fetchCalls += 1;
+          controller.abort(createActionCancelledReason());
+          throw init?.signal?.reason ?? createActionCancelledReason();
+        };
+        await assert.rejects(
+          () =>
+            fetchNewsArticle(
+              "https://example.test/news/news261101",
+              "https://example.test/updates.md",
+              controller.signal,
+            ),
+          (err: unknown) => isActionCancelledReason(err),
+        );
+        // Must not fall back to HTML fetch after user cancellation on .md fetch
+        assert.equal(fetchCalls, 1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
 });

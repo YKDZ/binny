@@ -6,6 +6,7 @@ import {
   computeOngoingDocumentHash,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   getIncrementalScopeOngoingDocument,
   hasIncrementalEntryChanged,
   hasOngoingDocumentChanged,
@@ -13,6 +14,7 @@ import {
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
@@ -544,26 +546,18 @@ export async function fetchText(
   readonly contentType: string | null;
   readonly status: number;
 }> {
-  const requestSignal = AbortSignal.any([
+  const response = await fetchSourceResponse({
+    url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: {
-        accept: "text/markdown, text/plain, text/html, */*",
-        "user-agent": "Binny SourceAdapter/1.0 (DeepSeek)",
-      },
-      signal: requestSignal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Network request failed for ${url}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+    stage: "fetching-document",
+    timeoutMs,
+    headers: {
+      accept: "text/markdown, text/plain, text/html, */*",
+      "user-agent": "Binny SourceAdapter/1.0 (DeepSeek)",
+    },
+  });
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(`HTTP ${response.status} when requesting ${url}.`);
   }
   const text = await response.text();
@@ -585,13 +579,14 @@ export async function fetchNewsArticle(
   const mdUrl = `${cleanUrl}.md`;
 
   try {
-    const mdRes = await fetch(mdUrl, {
-      method: "GET",
+    const mdRes = await fetchSourceResponse({
+      url: mdUrl,
+      signal,
+      stage: "fetching-article",
       headers: {
         accept: "text/markdown, text/plain, */*",
         "user-agent": "Binny SourceAdapter/1.0 (DeepSeek)",
       },
-      signal,
     });
     if (mdRes.status === 200) {
       const text = await mdRes.text();
@@ -626,20 +621,31 @@ export async function fetchNewsArticle(
           };
         }
       }
+    } else {
+      await mdRes.cancelBody();
     }
-  } catch {
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    if (
+      readFailureDiagnosticContext(error).abortCause ===
+      "source_request_timeout"
+    ) {
+      throw error;
+    }
     // Fall back to HTML
   }
 
-  const htmlRes = await fetch(cleanUrl, {
-    method: "GET",
+  const htmlRes = await fetchSourceResponse({
+    url: cleanUrl,
+    signal,
+    stage: "fetching-article",
     headers: {
       accept: "text/html, application/xhtml+xml, */*",
       "user-agent": "Binny SourceAdapter/1.0 (DeepSeek)",
     },
-    signal,
   });
   if (htmlRes.status !== 200) {
+    await htmlRes.cancelBody();
     throw new Error(
       `News article at ${cleanUrl} returned HTTP ${htmlRes.status}.`,
     );
@@ -871,6 +877,7 @@ export async function executeDeepSeekSync(
   const state = await loadIncrementalSyncState(context);
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     const scopeId = source.id;
     try {
       const isInitialized = isIncrementalScopeInitialized(
@@ -934,6 +941,7 @@ export async function executeDeepSeekSync(
           },
           entries: initialEntries,
         });
+        await saveIncrementalSyncState(context, state);
         initializedScopes.push(scopeId);
         completedScopes.push(scopeId);
       } else {
@@ -962,11 +970,13 @@ export async function executeDeepSeekSync(
               updatedAt: context.referenceTime,
             },
           );
+          await saveIncrementalSyncState(context, state);
         }
 
         let hasArticleFailure = false;
         const scopeState = state.scopes[scopeId]!;
         for (const article of articles) {
+          if (context.signal.aborted) throw context.signal.reason;
           const newsKey = `news:${article.slug}`;
           const previousEntry = scopeState.entries[newsKey];
           const isChanged = hasIncrementalEntryChanged(
@@ -1006,18 +1016,27 @@ export async function executeDeepSeekSync(
                 : "complete",
               updatedAt: context.referenceTime,
             });
+            await saveIncrementalSyncState(context, state);
           } catch (articleError) {
-            if (context.signal.aborted) throw articleError;
+            if (context.signal.aborted) {
+              throw context.signal.reason ?? articleError;
+            }
             hasArticleFailure = true;
-            problems.push(
-              createActionFailure(
+            const diag = readFailureDiagnosticContext(articleError);
+            problems.push({
+              ...createActionFailure(
                 "deepseek_article_sync_failed",
                 `Failed to fetch or archive news article "${article.slug}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
                 `News article "${article.slug}" could not be archived during sync.`,
                 "Verify news detail URL availability and content format.",
                 ["sources", source.id, "news", article.slug],
               ),
-            );
+              ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+              ...(diag.target === undefined ? {} : { target: diag.target }),
+              ...(diag.abortCause === undefined
+                ? {}
+                : { abortCause: diag.abortCause }),
+            });
           }
         }
 
@@ -1025,24 +1044,29 @@ export async function executeDeepSeekSync(
           updateIncrementalScopeValidators(state, scopeId, {
             scopeUrl: source.updatesUrl,
           });
+          await saveIncrementalSyncState(context, state);
           completedScopes.push(scopeId);
         }
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
-      problems.push(
-        createActionFailure(
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      const diag = readFailureDiagnosticContext(error);
+      problems.push({
+        ...createActionFailure(
           "deepseek_sync_failed",
           `Failed to synchronize source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
           `Scope "${source.id}" could not complete synchronization.`,
           "Verify updatesUrl availability and content format.",
           ["sources", source.id],
         ),
-      );
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
+      });
     }
   }
-
-  await saveIncrementalSyncState(context, state);
 
   if (problems.length > 0) {
     const first = problems[0]!;
@@ -1085,6 +1109,7 @@ export async function executeDeepSeekCollect(
   }
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     try {
       const { rawText, contentType } = await fetchText(
         source.updatesUrl,
@@ -1124,6 +1149,7 @@ export async function executeDeepSeekCollect(
 
       let shouldArchiveChangelog = true;
       let articlesToCollect = articles;
+      let truncatedByMaxItems = false;
 
       if (params.itemUrls && params.itemUrls.length > 0) {
         const urlSet = new Set(params.itemUrls);
@@ -1133,6 +1159,7 @@ export async function executeDeepSeekCollect(
         );
       } else if (params.maxItems !== undefined && params.maxItems > 0) {
         articlesToCollect = articles.slice(0, params.maxItems);
+        truncatedByMaxItems = articlesToCollect.length < articles.length;
       }
 
       if (shouldArchiveChangelog) {
@@ -1142,7 +1169,7 @@ export async function executeDeepSeekCollect(
           cleanResult,
           latestChangelogDate,
         );
-        if (state !== undefined) {
+        if (state !== undefined && context.persistentState !== undefined) {
           upsertIncrementalScopeOngoingDocument(
             state,
             source.id,
@@ -1152,11 +1179,13 @@ export async function executeDeepSeekCollect(
               updatedAt: context.referenceTime,
             },
           );
+          await saveIncrementalSyncState(context, state);
         }
       }
 
       let hasArticleFailure = false;
       for (const article of articlesToCollect) {
+        if (context.signal.aborted) throw context.signal.reason;
         try {
           const fetchedNews = await fetchNewsArticle(
             article.url,
@@ -1177,7 +1206,7 @@ export async function executeDeepSeekCollect(
             article,
             fetchedNews,
           );
-          if (state !== undefined) {
+          if (state !== undefined && context.persistentState !== undefined) {
             upsertIncrementalScopeEntry(
               state,
               source.id,
@@ -1193,41 +1222,52 @@ export async function executeDeepSeekCollect(
                 updatedAt: context.referenceTime,
               },
             );
+            await saveIncrementalSyncState(context, state);
           }
         } catch (articleError) {
-          if (context.signal.aborted) throw articleError;
+          if (context.signal.aborted) {
+            throw context.signal.reason ?? articleError;
+          }
           hasArticleFailure = true;
-          problems.push(
-            createActionFailure(
+          const diag = readFailureDiagnosticContext(articleError);
+          problems.push({
+            ...createActionFailure(
               "deepseek_article_collect_failed",
               `Failed to collect news article "${article.slug}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
               `News article "${article.slug}" could not be archived.`,
               "Verify news detail URL and content format.",
               ["sources", source.id, "news", article.slug],
             ),
-          );
+            ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+            ...(diag.target === undefined ? {} : { target: diag.target }),
+            ...(diag.abortCause === undefined
+              ? {}
+              : { abortCause: diag.abortCause }),
+          });
         }
       }
 
-      if (!hasArticleFailure) {
+      if (!hasArticleFailure && !truncatedByMaxItems) {
         completedScopes.push(source.id);
       }
     } catch (error) {
-      if (context.signal.aborted) throw error;
-      problems.push(
-        createActionFailure(
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      const diag = readFailureDiagnosticContext(error);
+      problems.push({
+        ...createActionFailure(
           "deepseek_collect_failed",
           `Failed to collect source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
           `Scope "${source.id}" could not be collected.`,
           "Verify updatesUrl and network connectivity.",
           ["sources", source.id],
         ),
-      );
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
+      });
     }
-  }
-
-  if (state !== undefined && context.persistentState !== undefined) {
-    await saveIncrementalSyncState(context, state);
   }
 
   if (problems.length > 0) {

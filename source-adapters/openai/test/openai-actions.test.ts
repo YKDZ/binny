@@ -5,6 +5,8 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   sourceAdapterManifest,
   type ArchiveCommit,
@@ -1163,6 +1165,176 @@ await test("OpenAI sync establishes initial baseline with zero detail requests, 
         ?.archivedCompleteness,
       "complete",
     );
+  } finally {
+    server.close();
+  }
+});
+
+await test("OpenAI collect omits truncated scopes from completedScopes and propagates timeout/cancellation", async () => {
+  const submissions: OpenAIArchiveSubmission[] = [];
+  let storedState: IncrementalSyncState | undefined;
+
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path === "/news/rss.xml") {
+      res.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      res.end(`
+        <rss version="2.0"><channel><title>OpenAI</title>
+          <item><guid>1</guid><title>News 1</title><link>${origin}/index/n1/</link></item>
+          <item><guid>2</guid><title>News 2</title><link>${origin}/index/n2/</link></item>
+        </channel></rss>
+      `);
+      return;
+    }
+    if (path === "/blog") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(`
+        <html><body>
+          <article class="card"><h2><a href="/blog/p1">Post 1</a></h2><time>2026-10-01</time></article>
+          <article class="card"><h2><a href="/blog/p2">Post 2</a></h2><time>2026-10-02</time></article>
+        </body></html>
+      `);
+      return;
+    }
+    if (path === "/index/n1/" || path === "/index/n2/") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<main><article><h1>News</h1><p>Substantive OpenAI news paragraph content.</p></article></main>",
+      );
+      return;
+    }
+    if (path === "/blog/p1.md" || path === "/blog/p2.md") {
+      res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+      res.end(
+        "# Dev Post\n\nSubstantive OpenAI developers blog markdown content.",
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const makeContext = (
+    signal = new AbortController().signal,
+  ): OpenAIContext => ({
+    binId: "openai-test-bin",
+    identityId: "openai-test-id",
+    runId: randomUUID(),
+    referenceTime: "2026-11-01T00:00:00.000Z",
+    sourceAdapterVersion: sourceAdapter.version,
+    config: {
+      news: {
+        enabled: true,
+        rssUrl: `${origin}/news/rss.xml`,
+        userAgent: "TestAgent",
+      },
+      developersBlog: {
+        enabled: true,
+        listUrl: `${origin}/blog`,
+        preferMarkdown: true,
+      },
+    },
+    signal,
+    persistentState: {
+      async load() {
+        return storedState;
+      },
+      async save(state) {
+        storedState = state as IncrementalSyncState;
+      },
+    },
+    archive: {
+      async submit(input) {
+        submissions.push(input);
+        return {
+          commitId: randomUUID(),
+          archiveSeq: String(submissions.length),
+          binId: "openai-test-bin",
+          runId: randomUUID(),
+          sourceAdapterVersion: sourceAdapter.version,
+          observedAt: "2026-11-01T00:00:00.000Z",
+          recordedAt: "2026-11-01T00:00:00.000Z",
+          items: input.items.map((item) => ({
+            itemId: randomUUID(),
+            revisionId: randomUUID(),
+            sourceKey: item.sourceKey,
+          })),
+          relations: [],
+        };
+      },
+    },
+    resources: {
+      async upload(): Promise<ArchiveResourceUpload> {
+        return {
+          ok: true,
+          resource: {
+            resourceId: randomUUID(),
+            sha256: "0".repeat(64),
+            mediaType: "image/png",
+            size: 10,
+          },
+        };
+      },
+      async resolve() {
+        return { resources: [], items: [], mediaByUrl: {} };
+      },
+    },
+  });
+
+  try {
+    const truncRes = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      {
+        maxItems: 1,
+      },
+    );
+    assert.deepEqual(truncRes.completedScopes, []);
+    assert.equal(submissions.length, 2);
+
+    const fullRes = await sourceAdapter.actions.collect.execute(makeContext(), {
+      maxItems: 2,
+    });
+    assert.deepEqual(fullRes.completedScopes, ["news", "developers-blog"]);
+
+    // Timeout and cancellation classification
+    const originalFetch = globalThis.fetch;
+    const cancelController = new AbortController();
+    try {
+      globalThis.fetch = async () => {
+        throw new DOMException("signal timed out", "TimeoutError");
+      };
+      await assert.rejects(
+        () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+        (err: unknown) => {
+          assert.ok(isSourceAdapterActionError(err));
+          assert.equal(err.failure.abortCause, "source_request_timeout");
+          return true;
+        },
+      );
+
+      globalThis.fetch = async (_input, init) => {
+        cancelController.abort(createActionCancelledReason());
+        throw init?.signal?.reason ?? createActionCancelledReason();
+      };
+      await assert.rejects(
+        () =>
+          sourceAdapter.actions.sync.execute(
+            makeContext(cancelController.signal),
+            {},
+          ),
+        (err: unknown) => isActionCancelledReason(err),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   } finally {
     server.close();
   }

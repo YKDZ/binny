@@ -5,7 +5,9 @@ import { createServer, type Server } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   type ArchiveResourceMetadata,
   type ArchiveSubmissionInput,
@@ -1378,5 +1380,137 @@ void test("Kimi regional research articles source adapter actions and lifecycle"
       submissions[0]?.items[0]?.sourceKey.key,
       "research:kimi-k3-1-pro",
     );
+
+    // maxItems truncating discovered list omits source from completedScopes
+    const { context: truncCtx, submissions: truncSubs } =
+      createTestContext(filterConfig);
+    const truncRes = await sourceAdapter.actions.collect.execute(truncCtx, {
+      maxItems: 1,
+    });
+    assert.equal(truncSubs.length, 1);
+    assert.deepEqual(truncRes.completedScopes, []);
   });
+
+  await t.test(
+    "sync persists item A before mid-run cancellation and propagates cancellation instead of wrapping",
+    async () => {
+      let version: 1 | 2 = 1;
+      let fetchesA = 0;
+      let fetchesB = 0;
+
+      const cancelServer = createServer((req, res) => {
+        const path = new URL(req.url ?? "/", "http://localhost").pathname;
+        if (path === "/blog") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          if (version === 1) {
+            res.end("<main><a href='/blog/base'>Base</a></main>");
+          } else {
+            res.end(
+              "<main><a href='/blog/post-a'>Post A</a><a href='/blog/post-b'>Post B</a></main>",
+            );
+          }
+          return;
+        }
+        if (path === "/blog/post-a") {
+          fetchesA += 1;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end("<main><h1>Post A</h1><p>Substantive body for A.</p></main>");
+          return;
+        }
+        if (path === "/blog/post-b") {
+          fetchesB += 1;
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end("<main><h1>Post B</h1><p>Substantive body for B.</p></main>");
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      cancelServer.listen(0, "127.0.0.1");
+      await once(cancelServer, "listening");
+      const port = (cancelServer.address() as { port: number }).port;
+
+      const cfg: KimiConfig = {
+        sources: [
+          {
+            id: "int-research",
+            kind: "research",
+            region: "international",
+            language: "en",
+            url: `http://127.0.0.1:${port}/blog`,
+          },
+        ],
+      };
+
+      let storedState: IncrementalSyncState | undefined;
+      const persistentState = {
+        async load() {
+          return storedState;
+        },
+        async save(state: unknown) {
+          storedState = state as IncrementalSyncState;
+        },
+      };
+
+      try {
+        const { context: initCtx } = createTestContext(cfg, {
+          persistentState,
+        });
+        await sourceAdapter.actions.sync.execute(initCtx, {});
+
+        version = 2;
+        const cancelController = new AbortController();
+        const { context: baseCtx, submissions: cancelSubs } = createTestContext(
+          cfg,
+          {
+            persistentState,
+            signal: cancelController.signal,
+          },
+        );
+
+        const cancelCtx: typeof baseCtx = {
+          ...baseCtx,
+          archive: {
+            async submit(input) {
+              const res = await baseCtx.archive.submit(input);
+              if (input.items[0]?.sourceKey.key === "research:post-a") {
+                cancelController.abort(createActionCancelledReason());
+              }
+              return res;
+            },
+          },
+        };
+
+        await assert.rejects(
+          () => sourceAdapter.actions.sync.execute(cancelCtx, {}),
+          (err: unknown) => isActionCancelledReason(err),
+        );
+
+        assert.equal(fetchesA, 1);
+        assert.equal(fetchesB, 0);
+        assert.equal(cancelSubs.length, 1);
+        assert.equal(
+          storedState?.scopes["int-research"]?.entries["post-a"]
+            ?.archivedCompleteness,
+          "complete",
+        );
+
+        // Next sync skips already persisted post-a and archives post-b
+        const { context: resumeCtx, submissions: resumeSubs } =
+          createTestContext(cfg, { persistentState });
+        const resumeRes = await sourceAdapter.actions.sync.execute(
+          resumeCtx,
+          {},
+        );
+        assert.deepEqual(resumeRes.completedScopes, ["int-research"]);
+        assert.equal(fetchesA, 1);
+        assert.equal(fetchesB, 1);
+        assert.equal(resumeSubs.length, 1);
+        assert.equal(resumeSubs[0]?.items[0]?.sourceKey.key, "research:post-b");
+      } finally {
+        cancelServer.close();
+      }
+    },
+  );
 });

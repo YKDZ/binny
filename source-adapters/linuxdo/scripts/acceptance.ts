@@ -4392,6 +4392,7 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   const repeatedPage = await trigger("collect", rangeParams);
   assert.equal(repeatedPage.status, "completed", JSON.stringify(repeatedPage));
   assert.equal(repeatedPage.result?.output?.collectionCompleteness, "partial");
+  assert.equal(repeatedPage.report?.phase, "partial");
   assert.equal(repeatedPage.report?.discovery, "partial");
   assert.ok(
     repeatedPage.result?.output?.incompleteScopes?.some(
@@ -4411,6 +4412,7 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   const invalidPage = await trigger("collect", rangeParams);
   assert.equal(invalidPage.status, "completed", JSON.stringify(invalidPage));
   assert.equal(invalidPage.result?.output?.collectionCompleteness, "partial");
+  assert.equal(invalidPage.report?.phase, "partial");
   assert.equal(invalidPage.report?.discovery, "failed");
   assert.ok(
     invalidPage.result?.output?.incompleteScopes?.some(
@@ -4429,12 +4431,31 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   });
   assert.equal(pageLimit.status, "completed", JSON.stringify(pageLimit));
   assert.equal(pageLimit.result?.output?.collectionCompleteness, "partial");
-  assert.ok(
-    pageLimit.result?.output?.incompleteScopes?.some(
-      ({ reasonCode }) => reasonCode === "post_range_page_limit_reached",
-    ),
-    JSON.stringify(pageLimit),
-  );
+  assert.equal(pageLimit.report?.phase, "partial");
+  const pageLimitIncomplete = pageLimit.result?.output?.incompleteScopes?.find(
+    ({ reasonCode }) => reasonCode === "post_range_page_limit_reached",
+  ) as
+    | {
+        readonly scope: string;
+        readonly reasonCode: string;
+        readonly pagesRead?: number;
+        readonly maxPages?: number;
+        readonly lowerBoundConfirmed?: boolean;
+        readonly headVerified?: boolean;
+        readonly range?: { readonly from: string; readonly to: string };
+        readonly backfillCollectParams?: unknown;
+      }
+    | undefined;
+  assert.ok(pageLimitIncomplete !== undefined, JSON.stringify(pageLimit));
+  assert.equal(pageLimitIncomplete.pagesRead, 2);
+  assert.equal(pageLimitIncomplete.maxPages, 2);
+  assert.equal(pageLimitIncomplete.lowerBoundConfirmed, false);
+  assert.equal(pageLimitIncomplete.headVerified, true);
+  assert.deepEqual(pageLimitIncomplete.range, {
+    from: "2026-10-28T02:00:00.000Z",
+    to: "2026-10-28T04:00:00.000Z",
+  });
+  assert.ok(pageLimitIncomplete.backfillCollectParams !== undefined);
 
   await setTestClockAt("2026-10-28T03:00:00.000Z");
   const archiveBeforeFutureRange = await searchArchiveItem("区间新增回复内容");
@@ -4494,6 +4515,32 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   });
 }
 
+type PostRangeCoverageSummary = {
+  readonly pagesRead: number;
+  readonly maxPages: number;
+  readonly lowerBoundConfirmed: boolean;
+  readonly headVerified: boolean;
+};
+
+type SyncIncompleteScopeSummary = {
+  readonly scope: string;
+  readonly reasonCode: string;
+  readonly message: string;
+  readonly target?: { readonly kind: string };
+  readonly range?: { readonly from: string; readonly to: string };
+  readonly pagesRead?: number;
+  readonly maxPages?: number;
+  readonly lowerBoundConfirmed?: boolean;
+  readonly headVerified?: boolean;
+  readonly backfillCollectParams?: Record<string, unknown>;
+};
+
+type SyncSkippedGapSummary = {
+  readonly range: { readonly from: string; readonly to: string };
+  readonly message: string;
+  readonly backfillCollectParams: Record<string, unknown>;
+};
+
 type SyncRunOutput = {
   readonly outcome: "initialized" | "advanced" | "no-forward-range" | "partial";
   readonly upperBound: string;
@@ -4512,14 +4559,12 @@ type SyncRunOutput = {
       | "no-forward-range";
     readonly range?: { readonly from: string; readonly to: string };
     readonly skippedBefore?: string;
+    readonly skippedGap?: SyncSkippedGapSummary;
+    readonly coverage?: PostRangeCoverageSummary;
   }[];
   readonly observedPosts: number;
   readonly topicsExamined: number;
-  readonly incompleteScopes: readonly {
-    readonly scope: string;
-    readonly reasonCode: string;
-    readonly message: string;
-  }[];
+  readonly incompleteScopes: readonly SyncIncompleteScopeSummary[];
 };
 
 type SyncRunReport = {
@@ -4575,15 +4620,13 @@ type SyncRunReport = {
     readonly position: string;
     readonly range?: { readonly from: string; readonly to: string };
     readonly skippedBefore?: string;
+    readonly skippedGap?: SyncSkippedGapSummary;
+    readonly coverage?: PostRangeCoverageSummary;
     readonly status: string;
   }[];
   readonly observedPosts: number;
   readonly topicsExamined: number;
-  readonly incompleteScopes: readonly {
-    readonly scope: string;
-    readonly reasonCode: string;
-    readonly message: string;
-  }[];
+  readonly incompleteScopes: readonly SyncIncompleteScopeSummary[];
 };
 
 function syncOutput(run: ManualRun): SyncRunOutput {
@@ -5613,6 +5656,16 @@ async function verifyBoundedSync(): Promise<string> {
     assert.equal(
       syncReport(afterLongQueue).scopes[0]?.skippedBefore,
       workerRecovery.upperBound,
+    );
+    assert.deepEqual(syncReport(afterLongQueue).scopes[0]?.skippedGap?.range, {
+      from: workerRecovery.upperBound,
+      to: expectedLongRangeFrom,
+    });
+    assert.ok(
+      syncOutput(afterLongQueue).incompleteScopes.some(
+        ({ reasonCode }) => reasonCode === "sync_skipped_before_window",
+      ),
+      JSON.stringify(syncOutput(afterLongQueue)),
     );
     const archiveAfterLongQueue = await searchArchiveItem(
       "超过一小时范围的旧回复",

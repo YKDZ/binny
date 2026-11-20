@@ -3,6 +3,9 @@ import {
   defineSourceAdapter,
   defineSourceAdapterAction,
   incrementalSyncStateSchema,
+  isSourceAdapterActionError,
+  readFailureDiagnosticContext,
+  sourceAdapterActionError,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { z } from "zod";
@@ -253,6 +256,57 @@ async function executeCheck(
   };
 }
 
+function throwMergedScopeErrors(
+  actionErrors: readonly unknown[],
+  completedScopes: readonly string[],
+  fallbackCode: "qoder_sync_incomplete" | "qoder_collection_incomplete",
+): never {
+  const mergedCompleted = [...completedScopes];
+  for (const error of actionErrors) {
+    if (isSourceAdapterActionError(error)) {
+      for (const scope of error.completedScopes) {
+        if (!mergedCompleted.includes(scope)) {
+          mergedCompleted.push(scope);
+        }
+      }
+    }
+  }
+
+  const first = actionErrors[0];
+  if (
+    mergedCompleted.length === 0 &&
+    actionErrors.length === 1 &&
+    !isSourceAdapterActionError(first)
+  ) {
+    throw first;
+  }
+
+  if (isSourceAdapterActionError(first)) {
+    throw sourceAdapterActionError(first.failure, mergedCompleted);
+  }
+
+  const diag = readFailureDiagnosticContext(first);
+  throw sourceAdapterActionError(
+    {
+      code: fallbackCode,
+      message:
+        first instanceof Error
+          ? first.message
+          : "One or more Qoder scopes failed.",
+      impact:
+        mergedCompleted.length > 0
+          ? `Completed scopes retained: ${mergedCompleted.join(", ")}.`
+          : "Affected Qoder scopes failed.",
+      suggestion: "Check Qoder source availability and retry.",
+      requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
+    },
+    mergedCompleted,
+  );
+}
+
 async function executeSync(
   context: SourceAdapterContext<QoderConfig, never, QoderExtensions>,
   params: QoderSyncParams,
@@ -312,7 +366,11 @@ async function executeSync(
   }
 
   if (actionErrors.length > 0) {
-    throw actionErrors[0];
+    throwMergedScopeErrors(
+      actionErrors,
+      completedScopes,
+      "qoder_sync_incomplete",
+    );
   }
 
   return {
@@ -367,7 +425,11 @@ async function executeCollect(
   }
 
   if (actionErrors.length > 0) {
-    throw actionErrors[0];
+    throwMergedScopeErrors(
+      actionErrors,
+      completedScopes,
+      "qoder_collection_incomplete",
+    );
   }
 
   return {

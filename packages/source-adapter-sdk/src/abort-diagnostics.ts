@@ -205,3 +205,121 @@ export function readFailureDiagnosticContext(
     ...(abortCause === undefined ? {} : { abortCause }),
   };
 }
+
+export const defaultSourceRequestTimeoutMs = 20_000;
+
+export type FetchSourceResponseOptions = {
+  readonly url: string;
+  readonly signal: AbortSignal;
+  readonly stage: string;
+  readonly timeoutMs?: number | undefined;
+  readonly method?: string | undefined;
+  readonly headers?: Readonly<Record<string, string>> | undefined;
+};
+
+export type FetchedSourceResponse = {
+  readonly status: number;
+  readonly ok: boolean;
+  readonly url: string;
+  readonly headers: Headers;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+  cancelBody(): Promise<void>;
+};
+
+function throwClassifiedRequestError(
+  error: unknown,
+  options: {
+    readonly url: string;
+    readonly signal: AbortSignal;
+    readonly timeoutSignal: AbortSignal;
+    readonly stage: string;
+    readonly timeoutMs: number;
+    readonly phase: "request" | "body";
+  },
+): never {
+  const abortCause = classifyAbortCause({
+    error,
+    signal: options.signal,
+    timeoutSignal: options.timeoutSignal,
+  });
+  if (
+    abortCause === "user_cancelled" ||
+    abortCause === "action_budget_exhausted"
+  ) {
+    throw options.signal.reason ?? error;
+  }
+  const label = options.phase === "request" ? "Request" : "Response body";
+  const message =
+    abortCause === "source_request_timeout"
+      ? `${label} timed out after ${String(options.timeoutMs)}ms for ${options.url}.`
+      : abortCause === "unknown"
+        ? `${label} aborted for an unknown reason for ${options.url}.`
+        : `${label} failed for ${options.url}: ${error instanceof Error ? error.message : String(error)}`;
+  throw new SourceRequestError(message, {
+    stage: options.stage,
+    target: options.url,
+    ...(abortCause === undefined ? {} : { abortCause }),
+    cause: error,
+  });
+}
+
+/**
+ * Performs an HTTP fetch bounded by a per-request timeout while preserving
+ * user cancellation, action budget exhaustion, and timeout diagnostics.
+ */
+export async function fetchSourceResponse(
+  options: FetchSourceResponseOptions,
+): Promise<FetchedSourceResponse> {
+  const timeoutMs = options.timeoutMs ?? defaultSourceRequestTimeoutMs;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const requestSignal = AbortSignal.any([options.signal, timeoutSignal]);
+
+  let response: Response;
+  try {
+    response = await fetch(options.url, {
+      method: options.method ?? "GET",
+      ...(options.headers === undefined ? {} : { headers: options.headers }),
+      signal: requestSignal,
+    });
+  } catch (error) {
+    throwClassifiedRequestError(error, {
+      url: options.url,
+      signal: options.signal,
+      timeoutSignal,
+      stage: options.stage,
+      timeoutMs,
+      phase: "request",
+    });
+  }
+
+  const readText = async (): Promise<string> => {
+    try {
+      return await response.text();
+    } catch (error) {
+      throwClassifiedRequestError(error, {
+        url: options.url,
+        signal: options.signal,
+        timeoutSignal,
+        stage: options.stage,
+        timeoutMs,
+        phase: "body",
+      });
+    }
+  };
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    url: response.url,
+    headers: response.headers,
+    text: readText,
+    async json(): Promise<unknown> {
+      const bodyText = await readText();
+      return JSON.parse(bodyText) as unknown;
+    },
+    async cancelBody(): Promise<void> {
+      await response.body?.cancel();
+    },
+  };
+}

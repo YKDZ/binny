@@ -2,10 +2,13 @@
 import {
   cleanContent,
   computeOngoingDocumentHash,
+  fetchSourceResponse,
   getIncrementalScopeOngoingDocument,
   hasOngoingDocumentChanged,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
+  readFailureDiagnosticContext,
+  saveIncrementalSyncState,
   sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
@@ -485,26 +488,18 @@ export async function fetchChangelog(
   signal: AbortSignal,
   timeoutMs = 20_000,
 ): Promise<{ readonly rawText: string; readonly contentType: string | null }> {
-  const requestSignal = AbortSignal.any([
+  const response = await fetchSourceResponse({
+    url: source.url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-  let response: Response;
-  try {
-    response = await fetch(source.url, {
-      method: "GET",
-      headers: {
-        accept: "text/markdown, text/plain, */*",
-        "user-agent": "Binny SourceAdapter/1.0 (Kimi)",
-      },
-      signal: requestSignal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Network request failed (${source.url}): ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+    stage: "fetching-document",
+    timeoutMs,
+    headers: {
+      accept: "text/markdown, text/plain, */*",
+      "user-agent": "Binny SourceAdapter/1.0 (Kimi)",
+    },
+  });
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(`Source "${source.id}" returned HTTP ${response.status}.`);
   }
   const contentType = response.headers.get("content-type");
@@ -572,6 +567,7 @@ export async function checkChangelogSource(
     );
     cleanAndValidateChangelog(source, rawText, contentType);
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     problems.push({
       code: "kimi_changelog_unavailable",
       message:
@@ -627,15 +623,18 @@ export async function collectChangelogSource(
       cleanResult.text,
     );
 
-    if (state !== undefined) {
+    if (state !== undefined && context.persistentState !== undefined) {
       upsertIncrementalScopeOngoingDocument(state, source.id, source.id, {
         contentHash,
         updatedAt: context.referenceTime,
       });
+      await saveIncrementalSyncState(context, state);
     }
 
     completedScopes.push(source.id);
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     problems.push({
       code: "kimi_collection_incomplete",
       message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -644,6 +643,9 @@ export async function collectChangelogSource(
       suggestion:
         "Verify network accessibility and content formatting before retrying collection.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
   }
 }
@@ -691,6 +693,7 @@ export async function syncChangelogSource(
           },
         },
       });
+      await saveIncrementalSyncState(context, state);
       initializedScopes.push(source.id);
       completedScopes.push(source.id);
     } else {
@@ -721,13 +724,17 @@ export async function syncChangelogSource(
           contentHash,
           updatedAt: context.referenceTime,
         });
+        await saveIncrementalSyncState(context, state);
       }
       updateIncrementalScopeValidators(state, source.id, {
         scopeUrl: source.url,
       });
+      await saveIncrementalSyncState(context, state);
       completedScopes.push(source.id);
     }
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
     problems.push({
       code: "kimi_sync_incomplete",
       message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -736,6 +743,9 @@ export async function syncChangelogSource(
       suggestion:
         "Verify network accessibility and content formatting before retrying sync.",
       requiresHuman: false,
+      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+      ...(diag.target === undefined ? {} : { target: diag.target }),
+      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
     });
   }
 }
