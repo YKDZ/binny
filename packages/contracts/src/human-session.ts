@@ -17,7 +17,6 @@ export const humanSessionStatusSchema = z.enum([
 export const humanSessionQueueReasonSchema = z.enum([
   "runtime_offline",
   "bin_busy",
-  "browser_capacity_exhausted",
   "runtime_protocol_outdated",
 ]);
 

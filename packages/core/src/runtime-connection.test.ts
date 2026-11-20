@@ -8,7 +8,6 @@ import {
   type Database,
 } from "@binny/db";
 
-import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { createRuntimeConnectionStore } from "./runtime-connection.ts";
 
 type MockBin = {
@@ -144,8 +143,6 @@ function createMockDatabase(options: {
   };
 }
 
-const mockBrowserCapacity = {} as unknown as BrowserCapacityCoordinator;
-
 const mockSourceAdapter = {
   id: "test.adapter",
   version: "1.0.0",
@@ -186,10 +183,7 @@ void describe("runtime connection state endpoints", () => {
       initialConnection: undefined,
     });
 
-    const store = createRuntimeConnectionStore(
-      mock.database,
-      mockBrowserCapacity,
-    );
+    const store = createRuntimeConnectionStore(mock.database);
 
     // 1. Claim ownership initially without any prior connection.
     const claimResult = await store.claimOwnership("bin-1", {
@@ -305,10 +299,7 @@ void describe("runtime connection state endpoints", () => {
       },
     });
 
-    const store = createRuntimeConnectionStore(
-      mock.database,
-      mockBrowserCapacity,
-    );
+    const store = createRuntimeConnectionStore(mock.database);
 
     // New runtime claims ownership over the disconnected old runtime.
     const claimResult = await store.claimOwnership("bin-1", {

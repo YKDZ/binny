@@ -1,0 +1,91 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "83ac1c06-60ca-417c-b584-1a684a15cbd5",
+  "prevIds": ["50614202-4951-4573-8d22-ea9976f8d417"],
+  "footprints": [
+    {
+      "statementType": "drop_table",
+      "statementTarget": ["table", "public", "browser_capacity_coordinator"],
+      "writes": [
+        "s|tbl|public.browser_capacity_coordinator",
+        "n|tbl|public.browser_capacity_coordinator",
+        "e|tbl|public.browser_capacity_coordinator",
+        "n|rel|public.browser_capacity_coordinator",
+        "n|type|public.browser_capacity_coordinator"
+      ],
+      "reads": ["n|sch|public"]
+    },
+    {
+      "statementType": "drop_table",
+      "statementTarget": ["table", "public", "browser_capacity_reservation"],
+      "writes": [
+        "s|tbl|public.browser_capacity_reservation",
+        "n|tbl|public.browser_capacity_reservation",
+        "e|tbl|public.browser_capacity_reservation",
+        "n|rel|public.browser_capacity_reservation",
+        "n|type|public.browser_capacity_reservation"
+      ],
+      "reads": ["n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "drop",
+      "key": "tables\u0000[\"public\",\"browser_capacity_coordinator\"]"
+    },
+    {
+      "op": "drop",
+      "key": "tables\u0000[\"public\",\"browser_capacity_reservation\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_coordinator\",\"coordinator_id\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"reservation_id\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"bin_id\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"runtime_id\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"owner_generation\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"browser_capacity_reservation\",\"status\"]"
+    },
+    {
+      "op": "drop",
+      "key": "indexes\u0000[\"public\",\"browser_capacity_reservation_bin_id_key\"]"
+    },
+    {
+      "op": "drop",
+      "key": "pks\u0000[\"public\",\"browser_capacity_coordinator\",\"browser_capacity_coordinator_pkey\"]"
+    },
+    {
+      "op": "drop",
+      "key": "pks\u0000[\"public\",\"browser_capacity_reservation\",\"browser_capacity_reservation_pkey\"]"
+    },
+    {
+      "op": "drop",
+      "key": "checks\u0000[\"public\",\"browser_capacity_coordinator\",\"browser_capacity_coordinator_id_check\"]"
+    },
+    {
+      "op": "drop",
+      "key": "checks\u0000[\"public\",\"browser_capacity_reservation\",\"browser_capacity_reservation_owner_generation_check\"]"
+    },
+    {
+      "op": "drop",
+      "key": "checks\u0000[\"public\",\"browser_capacity_reservation\",\"browser_capacity_reservation_status_check\"]"
+    }
+  ]
+}
