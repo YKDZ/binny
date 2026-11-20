@@ -71,6 +71,7 @@ services:
     volumes:
       - bins:/var/lib/binny/bins
       - resource-data:/var/lib/binny/resources
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   browser-session-source:
@@ -121,6 +122,8 @@ services:
       BINNY_BIN_ID: binny-runtime-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     ports:
       - "${BINNY_RUNTIME_ONE_PORT:-14141}:8080"
     restart: unless-stopped
@@ -137,6 +140,8 @@ services:
       BINNY_BIN_ID: binny-runtime-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     ports:
       - "${BINNY_RUNTIME_TWO_PORT:-14142}:8080"
     restart: unless-stopped
@@ -153,6 +158,8 @@ services:
       BINNY_BIN_ID: binny-runtime-resource
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     ports:
       - "${BINNY_RUNTIME_RESOURCE_PORT:-14143}:8080"
     restart: unless-stopped
@@ -170,6 +177,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-fifteen-two:
@@ -185,6 +194,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-fifteen-schema-two:
@@ -200,6 +211,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
       BINNY_RUNTIME_RUN_STOP_GRACE_MS: ${BINNY_LIFECYCLE_STOP_GRACE_MS:-2000}
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -219,6 +232,8 @@ services:
       BINNY_BIN_ID: binny-rss-one
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     develop:
@@ -237,6 +252,8 @@ services:
       BINNY_BIN_ID: binny-rss-two
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     develop:
@@ -255,6 +272,8 @@ services:
       BINNY_BIN_ID: binny-article-openai
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-article-anthropic:
@@ -269,6 +288,8 @@ services:
       BINNY_BIN_ID: binny-article-anthropic
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-article-google:
@@ -283,6 +304,8 @@ services:
       BINNY_BIN_ID: binny-article-google
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-article-huggingface:
@@ -297,6 +320,8 @@ services:
       BINNY_BIN_ID: binny-article-huggingface
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -313,6 +338,8 @@ services:
       BINNY_BIN_ID: binny-article-mistral
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -329,6 +356,8 @@ services:
       BINNY_BIN_ID: binny-document-deepseek
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-document-qwen:
@@ -343,6 +372,8 @@ services:
       BINNY_BIN_ID: binny-document-qwen
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-document-kimi:
@@ -357,6 +388,8 @@ services:
       BINNY_BIN_ID: binny-document-kimi
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-document-minimax:
@@ -371,6 +404,8 @@ services:
       BINNY_BIN_ID: binny-document-minimax
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   runtime-document-qoder:
@@ -385,6 +420,8 @@ services:
       BINNY_BIN_ID: binny-document-qoder
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: lightweight
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   browser-one:

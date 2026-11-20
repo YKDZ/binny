@@ -18,3 +18,13 @@ export {
   createHumanSessionStore,
   type HumanSessionStore,
 } from "./human-session.ts";
+export {
+  createRuntimeContainerCoordinator,
+  type ManagedContainerHealthStatus,
+  type ManagedContainerInspectResult,
+  type ManagedContainerStatus,
+  type RuntimeContainerCoordinator,
+  type RuntimeContainerCoordinatorOptions,
+  type RuntimeContainerDriver,
+  type RuntimeWakeResult,
+} from "./runtime-container.ts";

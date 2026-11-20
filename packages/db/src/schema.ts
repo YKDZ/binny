@@ -42,6 +42,13 @@ const manualRunStatuses = [
 const manualRunTriggerTypes = ["manual", "schedule"] as const;
 const scheduleOverlapPolicies = ["queue", "skip"] as const;
 const runtimeOwnerStates = ["confirmed", "unconfirmed"] as const;
+const runtimeContainerLifecyclePhases = [
+  "running",
+  "waking",
+  "stopping",
+  "sleeping",
+  "offline",
+] as const;
 const humanSessionStatuses = [
   "pending",
   "opening",
@@ -67,6 +74,9 @@ export const binConfigurations = pgTable(
     browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
       300,
     ),
+    runtimeSleepIdleTimeoutSeconds: integer(
+      "runtime_sleep_idle_timeout_seconds",
+    ).default(300),
     status: text("status", { enum: binConfigurationStatuses }).notNull(),
     persistentState: jsonb("persistent_state"),
     sourceAccessState: jsonb("source_access_state"),
@@ -88,6 +98,10 @@ export const binConfigurations = pgTable(
     check(
       "bin_configurations_browser_idle_timeout_seconds_check",
       sql`${table.browserIdleTimeoutSeconds} between 0 and 2147483`,
+    ),
+    check(
+      "bin_configurations_runtime_sleep_idle_timeout_seconds_check",
+      sql`${table.runtimeSleepIdleTimeoutSeconds} between 0 and 2147483`,
     ),
   ],
 );
@@ -126,6 +140,34 @@ export const runtimeConnections = pgTable(
     check(
       "runtime_connections_owner_generation_check",
       gte(table.ownerGeneration, 0n),
+    ),
+  ],
+);
+
+export const runtimeContainers = pgTable(
+  "runtime_containers",
+  {
+    binId: text("bin_id")
+      .primaryKey()
+      .references(() => binConfigurations.id, { onDelete: "cascade" }),
+    composeProject: text("compose_project").notNull(),
+    composeService: text("compose_service").notNull(),
+    containerId: text("container_id").notNull(),
+    lifecyclePhase: text("lifecycle_phase", {
+      enum: runtimeContainerLifecyclePhases,
+    }).notNull(),
+    containerStartedAt: text("container_started_at"),
+    stoppedContainerFinishedAt: text("stopped_container_finished_at"),
+    idleSince: timestamp("idle_since", { withTimezone: true, mode: "date" }),
+    lastWakeError: jsonb("last_wake_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (table) => [
+    check(
+      "runtime_containers_lifecycle_phase_check",
+      inArray(table.lifecyclePhase, runtimeContainerLifecyclePhases),
     ),
   ],
 );

@@ -4,11 +4,10 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 7 removes cross-bin browser capacity queue reasons and error codes
- * (`browser_capacity_exhausted`, `browser_capacity_active`, and
- * `browser_reservation_mismatch`) so independent browser bins run concurrently.
+ * Version 8 adds unified `runtimeSleep` configuration and the `"sleeping"`
+ * runtime execution status on bin details and listings.
  */
-export const publicApiProtocolVersion = 7;
+export const publicApiProtocolVersion = 8;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 4;

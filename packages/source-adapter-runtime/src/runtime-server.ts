@@ -1,9 +1,9 @@
 import {
   createServer,
   type IncomingMessage,
+  type Server,
   type ServerResponse,
 } from "node:http";
-import type { Server } from "node:net";
 
 import {
   runtimeActionParametersValidationInputSchema,

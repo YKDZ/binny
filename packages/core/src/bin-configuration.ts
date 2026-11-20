@@ -30,6 +30,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
+import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
 
 const binSelection = {
   id: binConfigurations.id,
@@ -38,6 +39,8 @@ const binSelection = {
   config: binConfigurations.config,
   configNativeValid: binConfigurations.configNativeValid,
   browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
+  runtimeSleepIdleTimeoutSeconds:
+    binConfigurations.runtimeSleepIdleTimeoutSeconds,
   status: binConfigurations.status,
   createdAt: binConfigurations.createdAt,
   updatedAt: binConfigurations.updatedAt,
@@ -279,13 +282,14 @@ export function validateSourceAdapterConfiguration(
   };
 }
 
-function validateBrowserIdlePolicy(
+function validateRuntimeSleepIdlePolicy(
   sourceAdapter: SourceAdapterManifest,
-  browserIdleTimeoutSeconds: number | null,
+  idleTimeoutSeconds: number | null,
+  errorPath: (string | number)[],
 ): BinError | undefined {
   const browser = sourceAdapter.environment.browser;
   if (
-    browserIdleTimeoutSeconds === null ||
+    idleTimeoutSeconds === null ||
     !browser.required ||
     browser.profileReuseAfterRestart
   )
@@ -298,7 +302,7 @@ function validateBrowserIdlePolicy(
       reason === undefined
         ? "信源适配器不支持关闭浏览器后复用持久配置文件。"
         : `信源适配器不支持关闭浏览器后复用持久配置文件：${reason}`,
-    path: ["browserIdleTimeoutSeconds"],
+    path: errorPath,
   };
 }
 
@@ -390,13 +394,24 @@ async function selectConfigurationValidationSnapshot(
 
 type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
 
+function effectiveIdleTimeoutSeconds(row: {
+  readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
+  readonly browserIdleTimeoutSeconds: number | null;
+}): number | null {
+  return row.runtimeSleepIdleTimeoutSeconds !== undefined
+    ? row.runtimeSleepIdleTimeoutSeconds
+    : row.browserIdleTimeoutSeconds;
+}
+
 function rowToConfiguration(row: BinRow): BinConfiguration {
+  const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(row);
   return binConfigurationSchema.parse({
     id: row.id,
     sourceAdapter: row.sourceAdapter,
     identityId: row.identityId,
     config: row.config,
-    browserIdleTimeoutSeconds: row.browserIdleTimeoutSeconds,
+    runtimeSleep: { idleTimeoutSeconds },
+    browserIdleTimeoutSeconds: idleTimeoutSeconds,
     status: row.status,
     execution: {
       status: "offline",
@@ -417,7 +432,9 @@ function notFound<T>(_id: string): BinOperation<T> {
 
 export function createBinConfigurationStore(
   database: Database,
+  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
 ): BinConfigurationOperations {
+  const containerCoordinator = options?.containerCoordinator;
   return {
     async listBins() {
       const rows = await database
@@ -446,149 +463,210 @@ export function createBinConfigurationStore(
         );
       }
 
-      const validationSnapshot =
-        checked.data.config === undefined
-          ? undefined
-          : await selectConfigurationValidationSnapshot(database, id);
-      if (validationSnapshot === undefined && checked.data.config !== undefined)
-        return notFound(id);
-
-      if (validationSnapshot !== undefined) {
-        const available =
-          validationSnapshot.runtimeId !== null &&
-          validationSnapshot.runtimeControlUrl !== null &&
-          validationSnapshot.protocolVersion === runtimeProtocolVersion &&
-          validationSnapshot.lastHeartbeatAt !== null &&
-          !validationSnapshot.disconnected &&
-          Date.now() - validationSnapshot.lastHeartbeatAt.getTime() <=
-            runtimeHeartbeatTimeoutMs &&
-          isDeepStrictEqual(
-            validationSnapshot.sourceAdapter,
-            validationSnapshot.runtimeSourceAdapter,
-          );
-        if (!available) {
-          return failure(
-            409,
-            "runtime_configuration_validation_unavailable",
-            "当前运行器离线、协议过期或源码声明未同步，不能验证长期配置。",
-            ["config"],
-          );
-        }
-        const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
-          validationSnapshot.sourceAdapter,
+      if (
+        checked.data.runtimeSleep !== undefined &&
+        checked.data.browserIdleTimeoutSeconds !== undefined &&
+        checked.data.runtimeSleep.idleTimeoutSeconds !==
+          checked.data.browserIdleTimeoutSeconds
+      ) {
+        return failure(
+          400,
+          "invalid_input",
+          "runtimeSleep.idleTimeoutSeconds and browserIdleTimeoutSeconds must match when both are provided.",
+          ["runtimeSleep", "idleTimeoutSeconds"],
         );
-        const validation = await validateConfigurationAtRuntime(
-          validationSnapshot.runtimeControlUrl!,
-          sourceAdapter,
-          checked.data.config!,
-        );
-        if (!validation.ok) {
-          return {
-            ok: false,
-            status: validation.kind === "invalid" ? 400 : 409,
-            error: validation.error,
-          } as const;
-        }
       }
 
-      return await database.transaction(async (transaction) => {
-        const [previous] = await transaction
-          .select(binSelection)
-          .from(binConfigurations)
-          .where(eq(binConfigurations.id, id))
-          .for("update");
-        if (previous === undefined) return notFound(id);
+      const requestedIdleTimeout =
+        checked.data.runtimeSleep !== undefined
+          ? checked.data.runtimeSleep.idleTimeoutSeconds
+          : checked.data.browserIdleTimeoutSeconds;
+      const idlePolicyPath =
+        checked.data.runtimeSleep !== undefined
+          ? ["runtimeSleep", "idleTimeoutSeconds"]
+          : ["browserIdleTimeoutSeconds"];
 
-        const existing = binConfigurationSettingsSchema.parse({
-          id: previous.id,
-          sourceAdapter: previous.sourceAdapter,
-          identityId: previous.identityId,
-          config: previous.config,
-        });
-        const sourceAdapter = existing.sourceAdapter;
-        const config = checked.data.config ?? existing.config;
-        const browserIdleTimeoutSeconds =
-          checked.data.browserIdleTimeoutSeconds === undefined
-            ? previous.browserIdleTimeoutSeconds
-            : checked.data.browserIdleTimeoutSeconds;
-        const invalid = validateSourceAdapterConfiguration(
-          sourceAdapter,
-          config,
-        );
-        if (invalid !== undefined && checked.data.config === undefined)
-          return { ok: false as const, status: 400 as const, error: invalid };
+      const applyUpdate = async (): Promise<BinOperation<BinConfiguration>> => {
+        const validationSnapshot =
+          checked.data.config === undefined
+            ? undefined
+            : await selectConfigurationValidationSnapshot(database, id);
+        if (
+          validationSnapshot === undefined &&
+          checked.data.config !== undefined
+        )
+          return notFound(id);
 
         if (validationSnapshot !== undefined) {
-          const [currentRuntime] = await transaction
-            .select(configValidationSelection)
-            .from(binConfigurations)
-            .leftJoin(
-              runtimeConnections,
-              eq(runtimeConnections.binId, binConfigurations.id),
-            )
-            .where(eq(binConfigurations.id, id));
-          if (
-            currentRuntime === undefined ||
-            !isDeepStrictEqual(
-              currentRuntime.config,
-              validationSnapshot.config,
-            ) ||
-            !isDeepStrictEqual(
-              currentRuntime.sourceAdapter,
+          const available =
+            validationSnapshot.runtimeId !== null &&
+            validationSnapshot.runtimeControlUrl !== null &&
+            validationSnapshot.protocolVersion === runtimeProtocolVersion &&
+            validationSnapshot.lastHeartbeatAt !== null &&
+            !validationSnapshot.disconnected &&
+            Date.now() - validationSnapshot.lastHeartbeatAt.getTime() <=
+              runtimeHeartbeatTimeoutMs &&
+            isDeepStrictEqual(
               validationSnapshot.sourceAdapter,
-            ) ||
-            currentRuntime.runtimeId !== validationSnapshot.runtimeId ||
-            currentRuntime.ownerGeneration !==
-              validationSnapshot.ownerGeneration ||
-            currentRuntime.protocolVersion !==
-              validationSnapshot.protocolVersion ||
-            currentRuntime.runtimeControlUrl !==
-              validationSnapshot.runtimeControlUrl ||
-            !isDeepStrictEqual(
-              currentRuntime.runtimeSourceAdapter,
               validationSnapshot.runtimeSourceAdapter,
-            ) ||
-            currentRuntime.disconnected ||
-            currentRuntime.lastHeartbeatAt === null ||
-            Date.now() - currentRuntime.lastHeartbeatAt.getTime() >
-              runtimeHeartbeatTimeoutMs
-          ) {
+            );
+          if (!available) {
             return failure(
               409,
-              "configuration_changed",
-              "配置或运行器声明在原生校验期间发生变化，请重新提交并验证。",
+              "runtime_configuration_validation_unavailable",
+              "当前运行器离线、协议过期或源码声明未同步，不能验证长期配置。",
               ["config"],
             );
           }
+          const sourceAdapter = sourceAdapterManifestStoredSchema.parse(
+            validationSnapshot.sourceAdapter,
+          );
+          const validation = await validateConfigurationAtRuntime(
+            validationSnapshot.runtimeControlUrl!,
+            sourceAdapter,
+            checked.data.config!,
+          );
+          if (!validation.ok) {
+            return {
+              ok: false,
+              status: validation.kind === "invalid" ? 400 : 409,
+              error: validation.error,
+            } as const;
+          }
         }
-        const invalidIdlePolicy = validateBrowserIdlePolicy(
-          sourceAdapter,
-          browserIdleTimeoutSeconds,
-        );
-        if (invalidIdlePolicy !== undefined)
-          return {
-            ok: false as const,
-            status: 400 as const,
-            error: invalidIdlePolicy,
-          };
 
-        // Drizzle 没有用于 UPDATE 的事务时间 helper；保留原来的 PostgreSQL now() 语义。
-        const [updated] = await transaction
-          .update(binConfigurations)
-          .set({
-            identityId: checked.data.identityId ?? existing.identityId,
+        return await database.transaction(async (transaction) => {
+          const [previous] = await transaction
+            .select(binSelection)
+            .from(binConfigurations)
+            .where(eq(binConfigurations.id, id))
+            .for("update");
+          if (previous === undefined) return notFound(id);
+
+          const existing = binConfigurationSettingsSchema.parse({
+            id: previous.id,
+            sourceAdapter: previous.sourceAdapter,
+            identityId: previous.identityId,
+            config: previous.config,
+          });
+          const sourceAdapter = existing.sourceAdapter;
+          const config = checked.data.config ?? existing.config;
+          const idleTimeoutSeconds =
+            requestedIdleTimeout === undefined
+              ? effectiveIdleTimeoutSeconds(previous)
+              : requestedIdleTimeout;
+          const invalid = validateSourceAdapterConfiguration(
+            sourceAdapter,
             config,
-            ...(checked.data.config === undefined
-              ? {}
-              : { configNativeValid: true }),
-            browserIdleTimeoutSeconds,
-            updatedAt: sql`now()`,
-          })
-          .where(eq(binConfigurations.id, id))
-          .returning(binSelection);
-        if (updated === undefined) throw new Error("bin 更新后没有返回记录。");
-        return { ok: true as const, value: rowToConfiguration(updated) };
-      });
+          );
+          if (invalid !== undefined && checked.data.config === undefined)
+            return { ok: false as const, status: 400 as const, error: invalid };
+
+          if (validationSnapshot !== undefined) {
+            const [currentRuntime] = await transaction
+              .select(configValidationSelection)
+              .from(binConfigurations)
+              .leftJoin(
+                runtimeConnections,
+                eq(runtimeConnections.binId, binConfigurations.id),
+              )
+              .where(eq(binConfigurations.id, id));
+            if (
+              currentRuntime === undefined ||
+              !isDeepStrictEqual(
+                currentRuntime.config,
+                validationSnapshot.config,
+              ) ||
+              !isDeepStrictEqual(
+                currentRuntime.sourceAdapter,
+                validationSnapshot.sourceAdapter,
+              ) ||
+              currentRuntime.runtimeId !== validationSnapshot.runtimeId ||
+              currentRuntime.ownerGeneration !==
+                validationSnapshot.ownerGeneration ||
+              currentRuntime.protocolVersion !==
+                validationSnapshot.protocolVersion ||
+              currentRuntime.runtimeControlUrl !==
+                validationSnapshot.runtimeControlUrl ||
+              !isDeepStrictEqual(
+                currentRuntime.runtimeSourceAdapter,
+                validationSnapshot.runtimeSourceAdapter,
+              ) ||
+              currentRuntime.disconnected ||
+              currentRuntime.lastHeartbeatAt === null ||
+              Date.now() - currentRuntime.lastHeartbeatAt.getTime() >
+                runtimeHeartbeatTimeoutMs
+            ) {
+              return failure(
+                409,
+                "configuration_changed",
+                "配置或运行器声明在原生校验期间发生变化，请重新提交并验证。",
+                ["config"],
+              );
+            }
+          }
+          const invalidIdlePolicy = validateRuntimeSleepIdlePolicy(
+            sourceAdapter,
+            idleTimeoutSeconds,
+            idlePolicyPath,
+          );
+          if (invalidIdlePolicy !== undefined)
+            return {
+              ok: false as const,
+              status: 400 as const,
+              error: invalidIdlePolicy,
+            };
+
+          // Drizzle 没有用于 UPDATE 的事务时间 helper；保留原来的 PostgreSQL now() 语义。
+          const [updated] = await transaction
+            .update(binConfigurations)
+            .set({
+              identityId: checked.data.identityId ?? existing.identityId,
+              config,
+              ...(checked.data.config === undefined
+                ? {}
+                : { configNativeValid: true }),
+              browserIdleTimeoutSeconds: idleTimeoutSeconds,
+              runtimeSleepIdleTimeoutSeconds: idleTimeoutSeconds,
+              updatedAt: sql`now()`,
+            })
+            .where(eq(binConfigurations.id, id))
+            .returning(binSelection);
+          if (updated === undefined)
+            throw new Error("bin 更新后没有返回记录。");
+          return { ok: true as const, value: rowToConfiguration(updated) };
+        });
+      };
+
+      if (
+        checked.data.config !== undefined &&
+        containerCoordinator !== undefined
+      ) {
+        const existingBin = await selectBin(database, id);
+        if (existingBin === undefined) return notFound(id);
+        const wake = await containerCoordinator.ensureAwakeAndRun(
+          id,
+          applyUpdate,
+        );
+        if (!wake.ok) {
+          return failure(
+            409,
+            "runtime_configuration_validation_unavailable",
+            wake.message,
+            ["config"],
+          );
+        }
+        return wake.value;
+      }
+
+      const result = await applyUpdate();
+      if (result.ok && requestedIdleTimeout !== undefined) {
+        await containerCoordinator?.onIdlePolicyUpdated(
+          id,
+          result.value.runtimeSleep.idleTimeoutSeconds,
+        );
+      }
+      return result;
     },
 
     async setBinStatus(id, status) {
@@ -624,13 +702,13 @@ export function createBinConfigurationStore(
     },
 
     async removeBin(id) {
-      return await database.transaction(async (transaction) => {
+      const result = await database.transaction(async (transaction) => {
         const [bin] = await transaction
           .select({ id: binConfigurations.id })
           .from(binConfigurations)
           .where(eq(binConfigurations.id, id))
           .for("update");
-        if (bin === undefined) return notFound(id);
+        if (bin === undefined) return notFound<{ readonly id: string }>(id);
 
         await transaction
           .update(manualRuns)
@@ -652,9 +730,11 @@ export function createBinConfigurationStore(
           .where(eq(binConfigurations.id, id))
           .returning({ id: binConfigurations.id });
         return removed === undefined
-          ? notFound(id)
+          ? notFound<{ readonly id: string }>(id)
           : { ok: true as const, value: removed };
       });
+      if (result.ok) containerCoordinator?.onBinRemoved(id);
+      return result;
     },
   };
 }

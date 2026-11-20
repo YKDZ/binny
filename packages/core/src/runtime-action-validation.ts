@@ -205,7 +205,7 @@ function failure(
   code: ActionInputPreflightError["code"],
   message: string,
   path?: readonly (string | number)[],
-): ActionInputPreflight {
+): Extract<ActionInputPreflight, { readonly ok: false }> {
   return {
     ok: false,
     status,
@@ -215,6 +215,34 @@ function failure(
       ...(path === undefined ? {} : { path: [...path] }),
     },
   };
+}
+
+/** Check bin existence, enabled status, and native config validity before waking a sleeping runtime. */
+export async function checkActionPreflightPreconditions(
+  database: Database,
+  binId: string,
+): Promise<Extract<ActionInputPreflight, { readonly ok: false }> | undefined> {
+  const [snapshot] = await database
+    .select({
+      status: binConfigurations.status,
+      configNativeValid: binConfigurations.configNativeValid,
+    })
+    .from(binConfigurations)
+    .where(eq(binConfigurations.id, binId));
+  if (snapshot === undefined)
+    return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+  if (snapshot.status === "disabled")
+    return failure(409, "bin_disabled", "这个 bin 已停用，不能接受新动作。", [
+      "binId",
+    ]);
+  if (!snapshot.configNativeValid)
+    return failure(
+      400,
+      "invalid_configuration",
+      "长期配置尚未通过当前运行器的原生校验，请先更新配置。",
+      ["config"],
+    );
+  return undefined;
 }
 
 /** 新参数写入事务前，先由运行器执行完整原生校验。 */

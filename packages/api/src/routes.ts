@@ -102,6 +102,7 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       sourceAdapterId: configuration.sourceAdapter.id,
       identityId: configuration.identityId,
       config: configuration.config,
+      runtimeSleep: configuration.runtimeSleep,
       browserIdleTimeoutSeconds: configuration.browserIdleTimeoutSeconds,
       status: configuration.status,
       execution:
@@ -118,19 +119,32 @@ function makeApp(operations: ApiOperations, productVersion: string) {
                     lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
                   }),
             }
-          : configuration.execution.status === "incompatible"
+          : configuration.execution.status === "sleeping"
             ? {
                 status: configuration.execution.status,
-                runtimeId: configuration.execution.runtimeId,
-                lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
-                error: { code: configuration.execution.error.code },
+                phase: configuration.execution.phase,
+                ...(configuration.execution.runtimeId === undefined
+                  ? {}
+                  : { runtimeId: configuration.execution.runtimeId }),
+                ...(configuration.execution.lastHeartbeatAt === undefined
+                  ? {}
+                  : {
+                      lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                    }),
               }
-            : {
-                status: configuration.execution.status,
-                runtimeId: configuration.execution.runtimeId,
-                lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
-                environment: configuration.execution.environment,
-              },
+            : configuration.execution.status === "incompatible"
+              ? {
+                  status: configuration.execution.status,
+                  runtimeId: configuration.execution.runtimeId,
+                  lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                  error: { code: configuration.execution.error.code },
+                }
+              : {
+                  status: configuration.execution.status,
+                  runtimeId: configuration.execution.runtimeId,
+                  lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                  environment: configuration.execution.environment,
+                },
       sourceStateSnapshot:
         configuration.execution.sourceStateSnapshot.freshness === "unknown"
           ? { freshness: "unknown" }
