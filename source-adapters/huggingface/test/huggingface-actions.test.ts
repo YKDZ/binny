@@ -15,7 +15,9 @@ import type {
   SourceAdapterRunContext,
 } from "@binny/source-adapter-sdk";
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   sourceAdapterManifest,
 } from "@binny/source-adapter-sdk";
@@ -35,7 +37,12 @@ void test("Hugging Face blog source adapter manifest and defaults", () => {
 
   const parsedConfig = sourceAdapter.configSchema.parse({});
   assert.equal(parsedConfig.feedUrl, "https://huggingface.co/blog/feed.xml");
-  assert.equal(parsedConfig.defaultCollectMaxItems, 20);
+  assert.equal(parsedConfig.defaultCollectMaxItems, undefined);
+  assert.equal(
+    sourceAdapter.configSchema.parse({ defaultCollectMaxItems: 5 })
+      .defaultCollectMaxItems,
+    5,
+  );
 
   const manifest = sourceAdapterManifest(sourceAdapter);
   assert.equal(manifest.extensionsSchema.additionalProperties, false);
@@ -479,7 +486,7 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
     assert.equal(submissions[1]!.items[0]!.sourceKey.key, "history-2");
 
     // -------------------------------------------------------------
-    // Test 6: Collect with maxItems limits the number of collected items
+    // Test 6: Collect with maxItems limits items and omits truncated scope from completedScopes
     // -------------------------------------------------------------
     submissions.length = 0;
     const collectMaxResult = await sourceAdapter.actions.collect.execute(
@@ -488,11 +495,11 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
         maxItems: 3,
       },
     );
-    assert.deepEqual(collectMaxResult.completedScopes, ["blog"]);
+    assert.deepEqual(collectMaxResult.completedScopes, []);
     assert.equal(submissions.length, 3);
 
     // -------------------------------------------------------------
-    // Test 7: Collect without parameters defaults to defaultCollectMaxItems (20)
+    // Test 7: Collect without parameters does not silently truncate to 20 items
     // -------------------------------------------------------------
     submissions.length = 0;
     const collectDefaultResult = await sourceAdapter.actions.collect.execute(
@@ -500,7 +507,7 @@ void test("Hugging Face blog incremental sync, content extraction, and collectio
       {},
     );
     assert.deepEqual(collectDefaultResult.completedScopes, ["blog"]);
-    assert.equal(submissions.length, 20);
+    assert.equal(submissions.length, 56);
 
     // -------------------------------------------------------------
     // Test 8: Subsequent sync with 304 Not Modified triggers 0 article fetches
@@ -679,4 +686,302 @@ void test("Hugging Face blog HTML extractor strips unwanted sections and preserv
     extracted.cleanResult.media[0]!.url,
     "https://huggingface.co/assets/benchmark.png",
   );
+});
+
+void test("Hugging Face sync persists item A & C when B fails, skips A & C on retry, and advances etag only after full feed completion", async () => {
+  let storedPersistentState: IncrementalSyncState | undefined;
+  const persistentState = {
+    async load() {
+      return storedPersistentState as unknown as JsonObject | undefined;
+    },
+    async save(state: JsonObject) {
+      storedPersistentState = state as unknown as IncrementalSyncState;
+    },
+  };
+
+  let feedVersion: 1 | 2 = 1;
+  let itemBFails = true;
+  let fetchCountA = 0;
+  let fetchCountB = 0;
+  let fetchCountC = 0;
+  const seenIfNoneMatch: (string | undefined)[] = [];
+
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path === "/blog/feed.xml") {
+      const etag = `"hf-partial-v${feedVersion}"`;
+      seenIfNoneMatch.push(req.headers["if-none-match"]);
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { etag });
+        res.end();
+        return;
+      }
+      const items = [
+        `<item><title>Base</title><link>${origin}/blog/base</link><guid>base</guid></item>`,
+      ];
+      if (feedVersion === 2) {
+        items.push(
+          `<item><title>Post A</title><link>${origin}/blog/post-a</link><guid>post-a</guid></item>`,
+          `<item><title>Post B</title><link>${origin}/blog/post-b</link><guid>post-b</guid></item>`,
+          `<item><title>Post C</title><link>${origin}/blog/post-c</link><guid>post-c</guid></item>`,
+        );
+      }
+      res.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        etag,
+      });
+      res.end(
+        `<rss version="2.0"><channel><title>HF</title>${items.join("")}</channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/blog/post-a") {
+      fetchCountA += 1;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<div class='blog-content'><h1>Post A</h1><p>Body for Post A.</p></div>",
+      );
+      return;
+    }
+    if (path === "/blog/post-b") {
+      fetchCountB += 1;
+      if (itemBFails) {
+        res.writeHead(500);
+        res.end("Upstream 500");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<div class='blog-content'><h1>Post B</h1><p>Body for Post B.</p></div>",
+      );
+      return;
+    }
+    if (path === "/blog/post-c") {
+      fetchCountC += 1;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        "<div class='blog-content'><h1>Post C</h1><p>Body for Post C.</p></div>",
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const submissions: HuggingFaceSubmission[] = [];
+  const client = {
+    archives: {
+      async $post({ json }: { json: HuggingFaceSubmission }) {
+        submissions.push(json);
+        return {
+          status: 201,
+          async json() {
+            return {
+              commitId: randomUUID(),
+              archiveSeq: String(submissions.length),
+              binId: "hf-partial-bin",
+              runId: randomUUID(),
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T12:00:00.000Z",
+              recordedAt: "2026-11-07T12:00:00.000Z",
+              items: json.items.map((it) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: it.sourceKey,
+              })),
+              relations: [],
+            };
+          },
+        };
+      },
+    },
+    resources: {
+      async $post() {
+        return {
+          status: 201,
+          async json() {
+            return {};
+          },
+        };
+      },
+      resolve: {
+        async $post() {
+          return {
+            status: 200,
+            async json() {
+              return { resources: [], items: [], mediaByUrl: {} };
+            },
+          };
+        },
+      },
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const makeContext = (signal = new AbortController().signal) =>
+    createSourceAdapterContext(
+      client,
+      {
+        binId: "hf-partial-bin",
+        identityId: "hf-partial-id",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: { feedUrl: `${origin}/blog/feed.xml` },
+        signal,
+        persistentState,
+        report: async () => {},
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  try {
+    const baseRes = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.deepEqual(baseRes.completedScopes, ["blog"]);
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.etag,
+      '"hf-partial-v1"',
+    );
+
+    // Feed updates to v2: A succeeds, B fails, C succeeds
+    feedVersion = 2;
+    itemBFails = true;
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => {
+        assert.ok(isSourceAdapterActionError(error));
+        assert.deepEqual(error.completedScopes, []);
+        return true;
+      },
+    );
+
+    assert.equal(fetchCountA, 1);
+    assert.equal(fetchCountB, 1);
+    assert.equal(fetchCountC, 1);
+    assert.equal(submissions.length, 2);
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-a"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-c"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-b"],
+      undefined,
+    );
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.etag,
+      '"hf-partial-v1"',
+    );
+
+    // Retry after B recovers: A & C are skipped, B is archived, etag advances to v2
+    itemBFails = false;
+    const retryRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(retryRes.completedScopes, ["blog"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"hf-partial-v1"');
+    assert.equal(fetchCountA, 1, "Unchanged A must not be re-fetched");
+    assert.equal(fetchCountC, 1, "Unchanged C must not be re-fetched");
+    assert.equal(fetchCountB, 2);
+    assert.equal(submissions.length, 3);
+    assert.equal(submissions[2]?.items[0]?.sourceKey.key, "post-b");
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.etag,
+      '"hf-partial-v2"',
+    );
+
+    // Subsequent sync hits 304
+    const thirdRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(thirdRes.completedScopes, ["blog"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"hf-partial-v2"');
+  } finally {
+    server.close();
+  }
+});
+
+void test("Hugging Face adapter classifies per-request timeout and propagates user cancellation", async () => {
+  const client = {
+    archives: {
+      async $post() {
+        throw new Error("unused");
+      },
+    },
+    resources: {
+      async $post() {
+        throw new Error("unused");
+      },
+      resolve: {
+        async $post() {
+          return {
+            status: 200,
+            async json() {
+              return {};
+            },
+          };
+        },
+      },
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const controller = new AbortController();
+  const context = createSourceAdapterContext(
+    client,
+    {
+      binId: "hf-diag-bin",
+      identityId: "hf-diag-id",
+      runId: randomUUID(),
+      referenceTime: "2026-11-07T12:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: { feedUrl: "https://example.test/blog/feed.xml" },
+      signal: controller.signal,
+      persistentState: {
+        async load() {
+          return undefined;
+        },
+        async save() {},
+      },
+      report: async () => {},
+    },
+    sourceAdapter.extensionsSchema,
+  );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {
+      throw new DOMException("signal timed out", "TimeoutError");
+    };
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(context, {}),
+      (error: unknown) => {
+        assert.ok(isSourceAdapterActionError(error));
+        assert.equal(error.failure.abortCause, "source_request_timeout");
+        return true;
+      },
+    );
+
+    globalThis.fetch = async (_input, init) => {
+      controller.abort(createActionCancelledReason());
+      throw init?.signal?.reason ?? createActionCancelledReason();
+    };
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(context, {}),
+      (error: unknown) => isActionCancelledReason(error),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

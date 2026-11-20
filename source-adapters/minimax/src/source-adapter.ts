@@ -4,6 +4,7 @@ import {
   computeOngoingDocumentHash,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   getIncrementalScopeOngoingDocument,
   hasIncrementalEntryChanged,
   hasOngoingDocumentChanged,
@@ -11,6 +12,7 @@ import {
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
@@ -559,8 +561,8 @@ function findElements(
     for (const child of root.childNodes) {
       walk(child);
     }
-  } else if (isElement(root as Node)) {
-    walk(root as Node);
+  } else if (isElement(root)) {
+    walk(root);
   }
   return matches;
 }
@@ -748,26 +750,18 @@ async function fetchText(
   accept = "*/*",
   timeoutMs = 20_000,
 ): Promise<{ text: string; contentType: string | null }> {
-  const requestSignal = AbortSignal.any([
+  const response = await fetchSourceResponse({
+    url,
     signal,
-    AbortSignal.timeout(timeoutMs),
-  ]);
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: {
-        accept,
-        "user-agent": "Binny SourceAdapter/1.0 (MiniMax)",
-      },
-      signal: requestSignal,
-    });
-  } catch (error) {
-    throw new Error(
-      `Network request failed (${url}): ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+    stage: "fetching-document",
+    timeoutMs,
+    headers: {
+      accept,
+      "user-agent": "Binny SourceAdapter/1.0 (MiniMax)",
+    },
+  });
   if (response.status !== 200) {
+    await response.cancelBody();
     throw new Error(`HTTP ${response.status} returned from ${url}`);
   }
   const contentType = response.headers.get("content-type");
@@ -948,6 +942,7 @@ export async function executeMinimaxCheck(
   }
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     scope.push(source.id);
     try {
       const { text: rawModels } = await fetchText(
@@ -975,6 +970,7 @@ export async function executeMinimaxCheck(
         await extractArticleContent(discovered[0], source, context.signal);
       }
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       problems.push({
         code: "minimax_source_unavailable",
         message:
@@ -1027,6 +1023,7 @@ export async function executeMinimaxSync(
   const state = await loadIncrementalSyncState(context);
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     try {
       const isInitialized = isIncrementalScopeInitialized(
         state,
@@ -1106,6 +1103,7 @@ export async function executeMinimaxSync(
           },
           entries: initialEntries,
         });
+        await saveIncrementalSyncState(context, state);
         initializedScopes.push(source.id);
         completedScopes.push(source.id);
       } else {
@@ -1148,11 +1146,14 @@ export async function executeMinimaxSync(
               updatedAt: context.referenceTime,
             },
           );
+          await saveIncrementalSyncState(context, state);
         }
 
         // For any newly added or fingerprint-changed first-party article link in models.md, fetch and submit it
         const currentScopeEntries = state.scopes[source.id]?.entries ?? {};
+        let hasArticleFailure = false;
         for (const article of discoveredArticles) {
+          if (context.signal.aborted) throw context.signal.reason;
           const articleKey = `article:${article.articlePath}`;
           const fingerprint = computeOngoingDocumentHash(
             article.url,
@@ -1165,46 +1166,78 @@ export async function executeMinimaxSync(
           );
 
           if (entryChanged) {
-            const articleContent = await extractArticleContent(
-              article,
-              source,
-              context.signal,
-            );
-            await submitCleanedArticle(context, {
-              sourceKey: {
-                namespace: `minimax:${source.region}`,
-                key: articleKey,
-              },
-              sourceRef: article.url,
-              title: articleContent.title,
-              sourcePublishedAt: sourceTimeFrom(
-                articleContent.sourcePublishedAt,
-              ),
-              sourceModifiedAt: sourceTimeFrom(articleContent.sourceModifiedAt),
-              extensions: articleContent.extensions,
-              cleanResult: articleContent.cleanResult,
-              captureScope: {
-                sourceId: source.id,
-                region: source.region,
-                kind: "article",
-                url: article.url,
-                articlePath: article.articlePath,
-              },
-            });
-            upsertIncrementalScopeEntry(state, source.id, articleKey, {
-              fingerprint,
-              updatedAt: context.referenceTime,
-              archivedCompleteness: "complete",
-            });
+            try {
+              const articleContent = await extractArticleContent(
+                article,
+                source,
+                context.signal,
+              );
+              const submitResult = await submitCleanedArticle(context, {
+                sourceKey: {
+                  namespace: `minimax:${source.region}`,
+                  key: articleKey,
+                },
+                sourceRef: article.url,
+                title: articleContent.title,
+                sourcePublishedAt: sourceTimeFrom(
+                  articleContent.sourcePublishedAt,
+                ),
+                sourceModifiedAt: sourceTimeFrom(
+                  articleContent.sourceModifiedAt,
+                ),
+                extensions: articleContent.extensions,
+                cleanResult: articleContent.cleanResult,
+                captureScope: {
+                  sourceId: source.id,
+                  region: source.region,
+                  kind: "article",
+                  url: article.url,
+                  articlePath: article.articlePath,
+                },
+              });
+              upsertIncrementalScopeEntry(state, source.id, articleKey, {
+                fingerprint,
+                updatedAt: context.referenceTime,
+                archivedCompleteness: submitResult.hasMediaFailures
+                  ? "partial"
+                  : "complete",
+              });
+              await saveIncrementalSyncState(context, state);
+            } catch (articleError) {
+              if (context.signal.aborted) {
+                throw context.signal.reason ?? articleError;
+              }
+              hasArticleFailure = true;
+              const diag = readFailureDiagnosticContext(articleError);
+              problems.push({
+                code: "minimax_sync_incomplete",
+                message: `Synchronization failed for article "${article.url}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
+                impact: `Article "${article.articlePath}" failed to archive; incremental state was not advanced for it.`,
+                path: ["sources", source.id, article.articlePath],
+                suggestion:
+                  "Verify network accessibility and article formatting before retrying.",
+                requiresHuman: false,
+                ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+                ...(diag.target === undefined ? {} : { target: diag.target }),
+                ...(diag.abortCause === undefined
+                  ? {}
+                  : { abortCause: diag.abortCause }),
+              });
+            }
           }
         }
 
-        updateIncrementalScopeValidators(state, source.id, {
-          scopeUrl: source.modelsReleaseUrl,
-        });
-        completedScopes.push(source.id);
+        if (!hasArticleFailure) {
+          updateIncrementalScopeValidators(state, source.id, {
+            scopeUrl: source.modelsReleaseUrl,
+          });
+          await saveIncrementalSyncState(context, state);
+          completedScopes.push(source.id);
+        }
       }
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      const diag = readFailureDiagnosticContext(error);
       problems.push({
         code: "minimax_sync_incomplete",
         message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -1213,11 +1246,14 @@ export async function executeMinimaxSync(
         suggestion:
           "Verify network accessibility and source formatting before retrying.",
         requiresHuman: false,
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
       });
     }
   }
-
-  await saveIncrementalSyncState(context, state);
 
   if (problems.length > 0) {
     const firstProblem = problems[0];
@@ -1262,6 +1298,7 @@ export async function executeMinimaxCollect(
   }
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     try {
       const { text: rawModels } = await fetchText(
         source.modelsReleaseUrl,
@@ -1334,7 +1371,7 @@ export async function executeMinimaxCollect(
           },
         });
 
-        if (state !== undefined) {
+        if (state !== undefined && context.persistentState !== undefined) {
           upsertIncrementalScopeOngoingDocument(
             state,
             source.id,
@@ -1344,6 +1381,7 @@ export async function executeMinimaxCollect(
               updatedAt: context.referenceTime,
             },
           );
+          await saveIncrementalSyncState(context, state);
         }
       }
 
@@ -1354,52 +1392,85 @@ export async function executeMinimaxCollect(
           params.itemUrls!.includes(a.url),
         );
       }
+      const beforeLimitCount = targetArticles.length;
       if (params.maxItems !== undefined) {
         targetArticles = targetArticles.slice(0, params.maxItems);
       }
+      const truncatedByMaxItems = targetArticles.length < beforeLimitCount;
 
+      let hasArticleFailure = false;
       for (const article of targetArticles) {
-        const articleContent = await extractArticleContent(
-          article,
-          source,
-          context.signal,
-        );
-        const articleKey = `article:${article.articlePath}`;
-        await submitCleanedArticle(context, {
-          sourceKey: {
-            namespace: `minimax:${source.region}`,
-            key: articleKey,
-          },
-          sourceRef: article.url,
-          title: articleContent.title,
-          sourcePublishedAt: sourceTimeFrom(articleContent.sourcePublishedAt),
-          sourceModifiedAt: sourceTimeFrom(articleContent.sourceModifiedAt),
-          extensions: articleContent.extensions,
-          cleanResult: articleContent.cleanResult,
-          captureScope: {
-            sourceId: source.id,
-            region: source.region,
-            kind: "article",
-            url: article.url,
-            articlePath: article.articlePath,
-          },
-        });
-
-        if (state !== undefined) {
-          const fingerprint = computeOngoingDocumentHash(
-            article.url,
-            (article.title ?? "") + (article.releaseDate ?? ""),
+        if (context.signal.aborted) throw context.signal.reason;
+        try {
+          const articleContent = await extractArticleContent(
+            article,
+            source,
+            context.signal,
           );
-          upsertIncrementalScopeEntry(state, source.id, articleKey, {
-            fingerprint,
-            updatedAt: context.referenceTime,
-            archivedCompleteness: "complete",
+          const articleKey = `article:${article.articlePath}`;
+          const submitResult = await submitCleanedArticle(context, {
+            sourceKey: {
+              namespace: `minimax:${source.region}`,
+              key: articleKey,
+            },
+            sourceRef: article.url,
+            title: articleContent.title,
+            sourcePublishedAt: sourceTimeFrom(articleContent.sourcePublishedAt),
+            sourceModifiedAt: sourceTimeFrom(articleContent.sourceModifiedAt),
+            extensions: articleContent.extensions,
+            cleanResult: articleContent.cleanResult,
+            captureScope: {
+              sourceId: source.id,
+              region: source.region,
+              kind: "article",
+              url: article.url,
+              articlePath: article.articlePath,
+            },
+          });
+
+          if (state !== undefined && context.persistentState !== undefined) {
+            const fingerprint = computeOngoingDocumentHash(
+              article.url,
+              (article.title ?? "") + (article.releaseDate ?? ""),
+            );
+            upsertIncrementalScopeEntry(state, source.id, articleKey, {
+              fingerprint,
+              updatedAt: context.referenceTime,
+              archivedCompleteness: submitResult.hasMediaFailures
+                ? "partial"
+                : "complete",
+            });
+            await saveIncrementalSyncState(context, state);
+          }
+        } catch (articleError) {
+          if (context.signal.aborted) {
+            throw context.signal.reason ?? articleError;
+          }
+          hasArticleFailure = true;
+          const diag = readFailureDiagnosticContext(articleError);
+          problems.push({
+            code: "minimax_collection_incomplete",
+            message: `Collection failed for article "${article.url}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
+            impact: `Article "${article.articlePath}" failed to be archived.`,
+            path: ["sources", source.id, article.articlePath],
+            suggestion:
+              "Verify network accessibility and content formatting before retrying.",
+            requiresHuman: false,
+            ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+            ...(diag.target === undefined ? {} : { target: diag.target }),
+            ...(diag.abortCause === undefined
+              ? {}
+              : { abortCause: diag.abortCause }),
           });
         }
       }
 
-      completedScopes.push(source.id);
+      if (!hasArticleFailure && !truncatedByMaxItems) {
+        completedScopes.push(source.id);
+      }
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      const diag = readFailureDiagnosticContext(error);
       problems.push({
         code: "minimax_collection_incomplete",
         message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
@@ -1408,12 +1479,13 @@ export async function executeMinimaxCollect(
         suggestion:
           "Verify network accessibility and content formatting before retrying.",
         requiresHuman: false,
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
       });
     }
-  }
-
-  if (state !== undefined && context.persistentState !== undefined) {
-    await saveIncrementalSyncState(context, state);
   }
 
   if (problems.length > 0) {

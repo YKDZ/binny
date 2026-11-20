@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
@@ -16,6 +18,7 @@ import {
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
   type IncrementalEntryRecord,
+  type ManualRunAbortCause,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
 import { parseFeed } from "@rowanmanning/feed-parser";
@@ -185,6 +188,9 @@ interface ActionProblem {
   readonly message: string;
   readonly path?: readonly (string | number)[] | undefined;
   readonly suggestion?: string | undefined;
+  readonly stage?: string | undefined;
+  readonly target?: string | undefined;
+  readonly abortCause?: ManualRunAbortCause | undefined;
 }
 
 interface CheckProblem {
@@ -239,10 +245,11 @@ async function fetchFeed(
     headers["if-modified-since"] = validators.lastModified;
   }
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers,
+  const response = await fetchSourceResponse({
+    url,
     signal,
+    stage: "fetching-feed",
+    headers,
   });
 
   const etag = response.headers.get("etag") ?? undefined;
@@ -253,10 +260,12 @@ async function fetchFeed(
   };
 
   if (response.status === 304) {
+    await response.cancelBody();
     return { status: 304, validators: resValidators };
   }
 
   if (!response.ok) {
+    await response.cancelBody();
     throw new Error(`Feed request returned HTTP ${response.status}.`);
   }
 
@@ -336,21 +345,34 @@ async function fetchArticleHtml(
   url: string,
   signal: AbortSignal,
 ): Promise<{ ok: boolean; status: number; html: string }> {
-  const response = await fetch(url, {
-    method: "GET",
+  const response = await fetchSourceResponse({
+    url,
+    signal,
+    stage: "fetching-article",
     headers: {
       accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "user-agent": "Binny Google SourceAdapter/1.0",
     },
-    signal,
   });
 
   if (!response.ok) {
+    await response.cancelBody();
     return { ok: false, status: response.status, html: "" };
   }
 
   const html = await response.text();
   return { ok: true, status: response.status, html };
+}
+
+function problemDiagnostics(
+  error: unknown,
+): Pick<ActionProblem, "stage" | "target" | "abortCause"> {
+  const diag = readFailureDiagnosticContext(error);
+  return {
+    ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+    ...(diag.target === undefined ? {} : { target: diag.target }),
+    ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
+  };
 }
 
 function failureFromProblems(
@@ -379,6 +401,11 @@ function failureFromProblems(
         first?.suggestion ??
         "Check failing article URLs or media sources and re-run. Already archived items will be deduplicated by source key.",
       requiresHuman: false,
+      ...(first?.stage === undefined ? {} : { stage: first.stage }),
+      ...(first?.target === undefined ? {} : { target: first.target }),
+      ...(first?.abortCause === undefined
+        ? {}
+        : { abortCause: first.abortCause }),
     },
     completedScopes,
   );
@@ -527,10 +554,11 @@ async function sync(
       try {
         feedRes = await fetchFeed(source.url, {}, context.signal);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         problems.push({
           sourceId: source.id,
           message: `Failed to fetch feed on baseline sync: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
         continue;
       }
@@ -579,10 +607,11 @@ async function sync(
     try {
       feedRes = await fetchFeed(source.url, validators, context.signal);
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       problems.push({
         sourceId: source.id,
         message: `Failed to fetch feed on incremental sync: ${error instanceof Error ? error.message : String(error)}`,
+        ...problemDiagnostics(error),
       });
       continue;
     }
@@ -611,11 +640,12 @@ async function sync(
       try {
         articleRes = await fetchArticleHtml(item.articleUrl, context.signal);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
           message: `Article "${item.articleUrl}" fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
         continue;
       }
@@ -688,8 +718,10 @@ async function sync(
             ? "partial"
             : "complete",
         });
+        // Persist immediately after each archived article so partial failures do not drop committed progress.
+        await saveIncrementalSyncState(context, state);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
@@ -742,11 +774,13 @@ async function collect(
       fingerprint: string;
     }[] = [];
 
+    let truncatedByMaxItems = false;
     if (params.itemUrls && params.itemUrls.length > 0) {
       let feedRes: FeedFetchResult | undefined;
       try {
         feedRes = await fetchFeed(source.url, {}, context.signal);
-      } catch {
+      } catch (error) {
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         // Feed fetch optional when direct URLs are provided
       }
 
@@ -782,10 +816,11 @@ async function collect(
       try {
         feedRes = await fetchFeed(source.url, {}, context.signal);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         problems.push({
           sourceId: source.id,
           message: `Failed to fetch feed on collect: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
         continue;
       }
@@ -798,6 +833,7 @@ async function collect(
       itemsToCollect = [...feedRes.items];
       if (params.maxItems !== undefined && params.maxItems > 0) {
         itemsToCollect = itemsToCollect.slice(0, params.maxItems);
+        truncatedByMaxItems = itemsToCollect.length < feedRes.items.length;
       }
     }
 
@@ -809,11 +845,12 @@ async function collect(
       try {
         articleRes = await fetchArticleHtml(item.articleUrl, context.signal);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
           message: `Article "${item.articleUrl}" fetch failed: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
         continue;
       }
@@ -886,8 +923,9 @@ async function collect(
             ? "partial"
             : "complete",
         });
+        await saveIncrementalSyncState(context, state);
       } catch (error) {
-        if (context.signal.aborted) throw error;
+        if (context.signal.aborted) throw context.signal.reason ?? error;
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
@@ -897,8 +935,7 @@ async function collect(
       }
     }
 
-    if (!scopeFailed) {
-      await saveIncrementalSyncState(context, state);
+    if (!scopeFailed && !truncatedByMaxItems) {
       completedScopes.push(source.id);
     }
   }

@@ -4,7 +4,6 @@ import {
   defineSourceAdapterAction,
   incrementalSyncStateSchema,
   loadIncrementalSyncState,
-  saveIncrementalSyncState,
   sourceAdapterActionError,
   type ManualRunFailure,
   type SourceAdapterContext,
@@ -106,6 +105,7 @@ export async function executeKimiCollect(
   }
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     if (source.kind === "changelog") {
       await collectChangelogSource(
         source,
@@ -124,10 +124,6 @@ export async function executeKimiCollect(
         problems,
       );
     }
-  }
-
-  if (state !== undefined && context.persistentState !== undefined) {
-    await saveIncrementalSyncState(context, state);
   }
 
   if (problems.length > 0) {
@@ -165,6 +161,7 @@ export async function executeKimiSync(
   const state = await loadIncrementalSyncState(context);
 
   for (const source of sources) {
+    if (context.signal.aborted) throw context.signal.reason;
     if (source.kind === "changelog") {
       await syncChangelogSource(
         source,
@@ -185,9 +182,6 @@ export async function executeKimiSync(
       );
     }
   }
-
-  // Save state for any successfully processed scopes
-  await saveIncrementalSyncState(context, state);
 
   if (problems.length > 0) {
     const firstProblem = problems[0];

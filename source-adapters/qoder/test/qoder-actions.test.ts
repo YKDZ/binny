@@ -2464,4 +2464,167 @@ ${updatesMd}
       globalThis.fetch = originalFetch;
     }
   });
+
+  void test("preserves completedScopes across sub-scopes when another sub-scope fails, and omits truncated maxItems scopes", async (t) => {
+    const server = createServer((req, res) => {
+      const path = new URL(req.url ?? "/", "http://localhost").pathname;
+      if (path === "/blog") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(`
+          <html><body>
+            <a href="/blog/post-1"><h2>Post 1</h2><time>2026-11-01</time></a>
+            <a href="/blog/post-2"><h2>Post 2</h2><time>2026-11-02</time></a>
+          </body></html>
+        `);
+        return;
+      }
+      if (path === "/blog/post-1" || path === "/blog/post-2") {
+        const slug = path.endsWith("post-1") ? "Post 1" : "Post 2";
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          `<html><head><title>${slug}</title></head><body><main><h1>${slug}</h1><p>Substantive blog body paragraph for ${slug} verification.</p></main></body></html>`,
+        );
+        return;
+      }
+      if (path === "/cn/llms.txt") {
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+        res.end(
+          "# Qoder CN Docs\n\n## 产品公告\n\n- [Notice](/announcements/notice.md)\n",
+        );
+        return;
+      }
+      if (path === "/announcements/notice.md") {
+        res.writeHead(500);
+        res.end("error");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    t.after(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const addr = server.address();
+    assert.ok(addr !== null && typeof addr !== "string");
+    const origin = `http://127.0.0.1:${addr.port}`;
+
+    let storedState: IncrementalSyncState | undefined;
+    const submissions: SourceAdapterArchiveSubmission<QoderExtensions>[] = [];
+    let commitSeq = 0;
+    const runId = randomUUID();
+    const context: SourceAdapterContext<QoderConfig, never, QoderExtensions> = {
+      binId: "qoder-multi-scope",
+      identityId: "qoder-id",
+      runId,
+      referenceTime: "2026-11-07T12:00:00.000Z",
+      sourceAdapterVersion: sourceAdapter.version,
+      config: configSchema.parse({
+        blogListUrl: `${origin}/blog`,
+        cnDocsIndexUrl: `${origin}/cn/llms.txt`,
+        intChangelogIndexUrl: `${origin}/int/llms.txt`,
+      }),
+      signal: new AbortController().signal,
+      persistentState: {
+        async load() {
+          return storedState;
+        },
+        async save(state: unknown) {
+          storedState = state as IncrementalSyncState;
+        },
+      },
+      archive: {
+        async submit(input) {
+          submissions.push(input);
+          commitSeq += 1;
+          return {
+            commitId: randomUUID(),
+            archiveSeq: String(commitSeq),
+            binId: "qoder-multi-scope",
+            runId,
+            sourceAdapterVersion: sourceAdapter.version,
+            observedAt: "2026-11-07T12:00:00.000Z",
+            recordedAt: "2026-11-07T12:00:00.000Z",
+            items: input.items.map((i) => ({
+              itemId: randomUUID(),
+              revisionId: randomUUID(),
+              sourceKey: i.sourceKey,
+            })),
+            relations: [],
+          } satisfies ArchiveCommit;
+        },
+      },
+      resources: {
+        async resolve() {
+          return { resources: [], items: [], mediaByUrl: {} };
+        },
+        async upload(body, mediaType) {
+          const bytes = await new Response(body).arrayBuffer();
+          return {
+            ok: true,
+            resource: {
+              resourceId: randomUUID(),
+              sha256: "0".repeat(64),
+              mediaType,
+              size: bytes.byteLength,
+            } satisfies ArchiveResourceMetadata,
+          } as const;
+        },
+      },
+    };
+
+    try {
+      // 1. Multi-scope sync where international-blog succeeds and cn-announcements-events fails
+      await assert.rejects(
+        () =>
+          sourceAdapter.actions.sync.execute(context, {
+            scopes: [
+              INTERNATIONAL_BLOG_SCOPE_ID,
+              CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+            ],
+          }),
+        (err: unknown) => {
+          assert.ok(isSourceAdapterActionError(err));
+          assert.deepEqual(err.completedScopes, [INTERNATIONAL_BLOG_SCOPE_ID]);
+          return true;
+        },
+      );
+
+      // 2. Multi-scope collect where cn-announcements-events fails and international-blog succeeds
+      await assert.rejects(
+        () =>
+          sourceAdapter.actions.collect.execute(context, {
+            scopes: [
+              CN_ANNOUNCEMENTS_EVENTS_SCOPE_ID,
+              INTERNATIONAL_BLOG_SCOPE_ID,
+            ],
+          }),
+        (err: unknown) => {
+          assert.ok(isSourceAdapterActionError(err));
+          assert.deepEqual(err.completedScopes, [INTERNATIONAL_BLOG_SCOPE_ID]);
+          return true;
+        },
+      );
+
+      // 3. collect with maxItems truncating 2 -> 1 omits scope from completedScopes
+      const truncRes = await sourceAdapter.actions.collect.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+        maxItems: 1,
+      });
+      assert.deepEqual(truncRes.completedScopes, []);
+
+      const fullRes = await sourceAdapter.actions.collect.execute(context, {
+        scopes: [INTERNATIONAL_BLOG_SCOPE_ID],
+        maxItems: 2,
+      });
+      assert.deepEqual(fullRes.completedScopes, [INTERNATIONAL_BLOG_SCOPE_ID]);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
 });
