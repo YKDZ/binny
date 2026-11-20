@@ -130,6 +130,9 @@ function createFakeDriver(initial: readonly ManagedContainerInspectResult[]) {
   let onStart:
     | ((container: ManagedContainerInspectResult) => Promise<void> | void)
     | undefined;
+  let onBeforeStart:
+    | ((container: ManagedContainerInspectResult) => Promise<void> | void)
+    | undefined;
 
   const driver: RuntimeContainerDriver = {
     async discoverManagedContainers() {
@@ -143,6 +146,7 @@ function createFakeDriver(initial: readonly ManagedContainerInspectResult[]) {
       startCalls.push(containerId);
       const entry = containers.get(containerId);
       if (entry === undefined) return "not_found";
+      await onBeforeStart?.(entry);
       if (entry.status === "running") return "already_running";
       const updated: ManagedContainerInspectResult = {
         ...entry,
@@ -192,6 +196,13 @@ function createFakeDriver(initial: readonly ManagedContainerInspectResult[]) {
         | undefined,
     ) {
       onStart = handler;
+    },
+    setBeforeStart(
+      handler:
+        | ((container: ManagedContainerInspectResult) => Promise<void> | void)
+        | undefined,
+    ) {
+      onBeforeStart = handler;
     },
   };
 }
@@ -257,9 +268,12 @@ function createFakeDatabase(initial: {
         compiled.sql.includes("status") &&
         compiled.params.includes("queued")
       ) {
-        rows = rows.filter((r) =>
-          ["queued", "executing", "cancelling"].includes(r.status),
+        const statuses = compiled.params.filter(
+          (p): p is string =>
+            typeof p === "string" &&
+            ["queued", "executing", "cancelling"].includes(p),
         );
+        rows = rows.filter((r) => statuses.includes(r.status));
       } else if (
         compiled.sql.includes("stop_confirmed_at") &&
         compiled.sql.includes("is null")
@@ -1087,6 +1101,488 @@ void describe("runtime container coordinator", () => {
         db.containers.get("bin-missing-wake")?.lifecyclePhase,
         "offline",
       );
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("recovers queued runs for policy-sleeping containers on startup without waking idle sleeping or offline containers", async () => {
+    const db = createFakeDatabase({
+      bins: [
+        makeLightweightBin("bin-sleep-queued", 300),
+        makeLightweightBin("bin-sleep-idle", 300),
+        makeLightweightBin("bin-offline-queued", 300),
+      ],
+      connections: [
+        { ...makeOnlineConnection("bin-sleep-queued"), disconnected: true },
+        { ...makeOnlineConnection("bin-sleep-idle"), disconnected: true },
+        { ...makeOnlineConnection("bin-offline-queued"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-sleep-queued",
+          composeProject: "binny",
+          composeService: "s-sleep-queued",
+          containerId: "cid-sleep-queued",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+        {
+          binId: "bin-sleep-idle",
+          composeProject: "binny",
+          composeService: "s-sleep-idle",
+          containerId: "cid-sleep-idle",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+        {
+          binId: "bin-offline-queued",
+          composeProject: "binny",
+          composeService: "s-offline-queued",
+          containerId: "cid-offline-queued",
+          lifecyclePhase: "offline",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [
+        {
+          runId: "run-sleep-queued",
+          binId: "bin-sleep-queued",
+          status: "queued",
+          stopConfirmedAt: null,
+          failure: null,
+        },
+        {
+          runId: "run-offline-queued",
+          binId: "bin-offline-queued",
+          status: "queued",
+          stopConfirmedAt: null,
+          failure: null,
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-sleep-queued",
+        composeProject: "binny",
+        composeService: "s-sleep-queued",
+        binId: "bin-sleep-queued",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+      {
+        containerId: "cid-sleep-idle",
+        composeProject: "binny",
+        composeService: "s-sleep-idle",
+        binId: "bin-sleep-idle",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+      {
+        containerId: "cid-offline-queued",
+        composeProject: "binny",
+        composeService: "s-offline-queued",
+        binId: "bin-offline-queued",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:06:00.000Z",
+        healthStatus: "none",
+      },
+    ]);
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 2_000,
+    });
+    fakeDriver.setOnStart(async (container) => {
+      if (container.binId !== "bin-sleep-queued") return;
+      const conn = db.connections.get("bin-sleep-queued")!;
+      conn.disconnected = false;
+      conn.ownerState = "confirmed";
+      await coordinator.onRuntimeHeartbeat({
+        binId: "bin-sleep-queued",
+        runtimeId: conn.runtimeId,
+        ownerState: "confirmed",
+        executionStatus: "online",
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+        idleTimeoutSeconds: 300,
+      });
+    });
+
+    try {
+      await coordinator.reconcileOnStartup();
+      await new Promise((r) => setTimeout(r, 50));
+
+      assert.deepEqual(fakeDriver.startCalls, ["cid-sleep-queued"]);
+      assert.equal(
+        db.containers.get("bin-sleep-queued")?.lifecyclePhase,
+        "running",
+      );
+      assert.equal(
+        db.containers.get("bin-sleep-idle")?.lifecyclePhase,
+        "sleeping",
+      );
+      assert.equal(
+        db.containers.get("bin-offline-queued")?.lifecyclePhase,
+        "offline",
+      );
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("retries transient start failures with backoff while keeping sleeping state and lastWakeError until recovery", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-retry", 300)],
+      connections: [
+        { ...makeOnlineConnection("bin-retry"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-retry",
+          composeProject: "binny",
+          composeService: "s-retry",
+          containerId: "cid-retry",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [
+        {
+          runId: "run-retry",
+          binId: "bin-retry",
+          status: "queued",
+          stopConfirmedAt: null,
+          failure: null,
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-retry",
+        composeProject: "binny",
+        composeService: "s-retry",
+        binId: "bin-retry",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+    ]);
+
+    let startAttempts = 0;
+    fakeDriver.setBeforeStart(() => {
+      startAttempts += 1;
+      if (startAttempts <= 2) {
+        throw new Error("Docker socket ECONNREFUSED");
+      }
+    });
+
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 2_000,
+      wakeRetryBaseDelayMs: 30,
+      wakeRetryMaxDelayMs: 60,
+    });
+    fakeDriver.setOnStart(async () => {
+      const conn = db.connections.get("bin-retry")!;
+      conn.disconnected = false;
+      conn.ownerState = "confirmed";
+      await coordinator.onRuntimeHeartbeat({
+        binId: "bin-retry",
+        runtimeId: conn.runtimeId,
+        ownerState: "confirmed",
+        executionStatus: "online",
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+        idleTimeoutSeconds: 300,
+      });
+    });
+
+    try {
+      coordinator.requestWake("bin-retry");
+      // Wait for first failed attempt while backoff is active.
+      await new Promise((r) => setTimeout(r, 15));
+      assert.equal(db.containers.get("bin-retry")?.lifecyclePhase, "sleeping");
+      const retryError = db.containers.get("bin-retry")?.lastWakeError as
+        | { code: string; message: string }
+        | undefined;
+      assert.equal(retryError?.code, "runtime_wake_start_failed");
+      assert.match(retryError?.message ?? "", /ECONNREFUSED/u);
+
+      // Wait for retries to succeed on attempt 3.
+      const deadline = Date.now() + 2_000;
+      while (
+        db.containers.get("bin-retry")?.lifecyclePhase !== "running" &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(db.containers.get("bin-retry")?.lifecyclePhase, "running");
+      assert.equal(db.containers.get("bin-retry")?.lastWakeError, null);
+      assert.equal(startAttempts, 3);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("stops wake backoff retries immediately when queued work is cancelled", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-cancel", 300)],
+      connections: [
+        { ...makeOnlineConnection("bin-cancel"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-cancel",
+          composeProject: "binny",
+          composeService: "s-cancel",
+          containerId: "cid-cancel",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [
+        {
+          runId: "run-cancel",
+          binId: "bin-cancel",
+          status: "queued",
+          stopConfirmedAt: null,
+          failure: null,
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-cancel",
+        composeProject: "binny",
+        composeService: "s-cancel",
+        binId: "bin-cancel",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+    ]);
+    fakeDriver.setBeforeStart(() => {
+      throw new Error("transient docker outage");
+    });
+
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 2_000,
+      wakeRetryBaseDelayMs: 60,
+      wakeRetryMaxDelayMs: 60,
+    });
+
+    try {
+      coordinator.requestWake("bin-cancel");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(fakeDriver.startCalls.length, 1);
+
+      // Simulate run cancel marking the queued run cancelled and notifying coordinator.
+      db.runs.get("run-cancel")!.status = "cancelled";
+      await coordinator.markWorkCompleted("bin-cancel");
+
+      // Wait longer than retry delay and verify no second start attempt occurs.
+      await new Promise((r) => setTimeout(r, 120));
+      assert.equal(fakeDriver.startCalls.length, 1);
+      assert.equal(db.containers.get("bin-cancel")?.lifecyclePhase, "sleeping");
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("preserves waking state on reconnect timeout and completes wake once heartbeats arrive", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-timeout", 300)],
+      connections: [
+        { ...makeOnlineConnection("bin-timeout"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-timeout",
+          composeProject: "binny",
+          composeService: "s-timeout",
+          containerId: "cid-timeout",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [
+        {
+          runId: "run-timeout",
+          binId: "bin-timeout",
+          status: "queued",
+          stopConfirmedAt: null,
+          failure: null,
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-timeout",
+        composeProject: "binny",
+        composeService: "s-timeout",
+        binId: "bin-timeout",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+    ]);
+
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 60,
+      wakeRetryBaseDelayMs: 40,
+      wakeRetryMaxDelayMs: 80,
+    });
+
+    try {
+      coordinator.requestWake("bin-timeout");
+      // Wait for initial wake timeout without heartbeat.
+      const waitDeadline = Date.now() + 1_500;
+      while (
+        db.containers.get("bin-timeout")?.lastWakeError === null &&
+        Date.now() < waitDeadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      assert.equal(db.containers.get("bin-timeout")?.lifecyclePhase, "waking");
+      const timeoutError = db.containers.get("bin-timeout")?.lastWakeError as
+        | { code: string }
+        | undefined;
+      assert.equal(timeoutError?.code, "runtime_wake_timeout");
+
+      // Deliver heartbeat now; retry or heartbeat handler completes wake and clears lastWakeError.
+      const conn = db.connections.get("bin-timeout")!;
+      conn.disconnected = false;
+      conn.ownerState = "confirmed";
+      await coordinator.onRuntimeHeartbeat({
+        binId: "bin-timeout",
+        runtimeId: conn.runtimeId,
+        ownerState: "confirmed",
+        executionStatus: "online",
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+        idleTimeoutSeconds: 300,
+      });
+
+      assert.equal(db.containers.get("bin-timeout")?.lifecyclePhase, "running");
+      assert.equal(db.containers.get("bin-timeout")?.lastWakeError, null);
+      assert.equal(fakeDriver.startCalls.length, 1);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("sweepIdleContainers does not mark paused containers offline", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-paused", 0)],
+      connections: [makeOnlineConnection("bin-paused")],
+      containers: [
+        {
+          binId: "bin-paused",
+          composeProject: "binny",
+          composeService: "s-paused",
+          containerId: "cid-paused",
+          lifecyclePhase: "running",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: new Date(Date.now() - 10_000),
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-paused",
+        composeProject: "binny",
+        composeService: "s-paused",
+        binId: "bin-paused",
+        status: "paused",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: null,
+        healthStatus: "none",
+      },
+    ]);
+
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+    });
+
+    try {
+      await coordinator.sweepIdleContainers();
+      assert.equal(db.containers.get("bin-paused")?.lifecyclePhase, "running");
+      assert.equal(db.connections.get("bin-paused")?.disconnected, false);
+      assert.deepEqual(fakeDriver.stopCalls, []);
     } finally {
       await coordinator.close();
     }

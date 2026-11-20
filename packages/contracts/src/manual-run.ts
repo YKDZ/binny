@@ -6,6 +6,7 @@ import {
   sourceAdapterActionNameSchema,
   identityIdSchema,
   jsonObjectSchema,
+  runtimeWakeErrorSchema,
 } from "./bin-configuration.ts";
 import {
   postgresTextSchema,
@@ -39,6 +40,8 @@ export const manualRunTriggerSchema = z.discriminatedUnion("kind", [
 
 export const manualRunQueueReasonSchema = z.enum([
   "runtime_offline",
+  "runtime_sleeping",
+  "runtime_waking",
   "earlier_run_active",
   "earlier_run_queued",
   "previous_execution_unconfirmed",
@@ -160,6 +163,7 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
       status: manualRunStatusSchema,
       trigger: manualRunTriggerSchema,
       queueReason: manualRunQueueReasonSchema.optional(),
+      lastWakeError: runtimeWakeErrorSchema.optional(),
       cancellationRequestedAt: z.iso.datetime().optional(),
       stopConfirmedAt: z.iso.datetime().optional(),
       createdAt: z.iso.datetime(),

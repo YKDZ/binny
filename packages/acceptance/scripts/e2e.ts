@@ -78,6 +78,8 @@ type HeartbeatDelayProxy = {
     runtimeId: string,
   ) => Promise<string | undefined>;
   readonly release: () => Promise<void>;
+  readonly rejectRuntime: (binId?: string, status?: number) => Promise<void>;
+  readonly allowRuntime: (binId?: string) => Promise<void>;
 };
 
 type HeartbeatDelayProxyStatus = {
@@ -343,6 +345,24 @@ function createHeartbeatDelayProxy(
       const response = await fetch(controlUrl + "/control/release", {
         method: "POST",
         signal: AbortSignal.timeout(30_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async rejectRuntime(binId = "binny-runs-one", status = 503) {
+      const response = await fetch(controlUrl + "/control/reject-runtime", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ binId, status }),
+        signal: AbortSignal.timeout(3_000),
+      });
+      assert.equal(response.status, 200);
+    },
+    async allowRuntime(binId = "binny-runs-one") {
+      const response = await fetch(controlUrl + "/control/allow-runtime", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ binId }),
+        signal: AbortSignal.timeout(3_000),
       });
       assert.equal(response.status, 200);
     },
@@ -6431,9 +6451,16 @@ type ManualRunCliState = {
   readonly status: string;
   readonly queueReason?:
     | "runtime_offline"
+    | "runtime_sleeping"
+    | "runtime_waking"
     | "earlier_run_active"
     | "earlier_run_queued"
     | "previous_execution_unconfirmed";
+  readonly lastWakeError?: {
+    readonly code: string;
+    readonly message: string;
+    readonly at?: string;
+  };
   readonly cancellationRequestedAt?: string;
   readonly stopConfirmedAt?: string;
   readonly result?: {
@@ -9248,10 +9275,621 @@ async function scheduledRunsStep(
   composePort = await publishedPort("server", 3000);
   baseUrl = apiBaseUrl();
   await verifyScheduleOverlapPolicy(baseUrl);
+  baseUrl = await verifyScheduledSleepWakeupJourney(baseUrl, heartbeatProxy);
   process.stdout.write(
     "计划的跨重启合并触发、并发扫描去重、同 bin 串行、来源保留与正式 runner 结果通过。\n",
   );
   return baseUrl;
+}
+
+async function verifyScheduledSleepWakeupJourney(
+  initialBaseUrl: string,
+  heartbeatProxy: HeartbeatDelayProxy,
+): Promise<string> {
+  let baseUrl = initialBaseUrl;
+  const binId = "binny-runs-one";
+  const sourceUrl = manualRunSourceRuntimeUrl();
+  const sourceControlUrl = manualRunSourceControlUrl();
+  const createdScheduleIds: string[] = [];
+
+  const serviceContainerId = async (service: string): Promise<string> => {
+    const result = await compose(["ps", "--all", "--quiet", service]);
+    const cid = result.stdout.trim().split("\n")[0];
+    assert.ok(cid, `Compose service ${service} has no container ID.`);
+    return cid;
+  };
+
+  const inspectContainer = async (containerId: string) => {
+    const result = await run(
+      "docker",
+      [
+        "inspect",
+        "--format",
+        "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.StartedAt}}\t{{.State.FinishedAt}}",
+        containerId,
+      ],
+      { env: composeEnvironment() },
+    );
+    assert.equal(result.code, 0, result.stderr);
+    const [status = "", exitCodeText = "0", startedAt = "", finishedAt = ""] =
+      result.stdout.trim().split("\t");
+    return { status, exitCode: Number(exitCodeText), startedAt, finishedAt };
+  };
+
+  const waitForSleeping = async (): Promise<string> => {
+    const cid = await serviceContainerId("runtime-fifteen-one");
+    await waitFor(
+      async () => {
+        const bin = cliData<{
+          readonly execution: {
+            readonly status: string;
+            readonly phase?: string;
+          };
+        }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+        const dockerState = await inspectContainer(cid);
+        return { bin, dockerState };
+      },
+      ({ bin, dockerState }) =>
+        bin.execution.status === "sleeping" &&
+        bin.execution.phase === "sleeping" &&
+        dockerState.status === "exited" &&
+        dockerState.exitCode === 0,
+      `${binId} 进入策略休眠 (exited 0)`,
+    );
+    return cid;
+  };
+
+  const waitForDueLeadWindow = async (
+    periodMs: number,
+    minLeadMs: number,
+  ): Promise<void> => {
+    const remaining = periodMs - (Date.now() % periodMs);
+    if (remaining < minLeadMs) {
+      await wait(remaining + 250);
+    }
+  };
+
+  try {
+    cliData(
+      await cli(baseUrl, [
+        "bin",
+        "update",
+        binId,
+        "--idle-timeout-seconds",
+        "0",
+      ]),
+      "updated",
+    );
+    await waitForSleeping();
+
+    // 1. Normal scheduled wakeup from policy sleep -> executes run -> returns to sleep.
+    const normalGateKey = "schedule-sleep-normal-" + randomUUID();
+    const normalCreated = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: normalGateKey,
+          sourceKey: normalGateKey,
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    createdScheduleIds.push(normalCreated.scheduleId);
+    await waitForSleeping();
+    await waitForDueLeadWindow(20_000, 6_000);
+    const normalEnabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        normalCreated.scheduleId,
+      ]),
+      "enabled",
+    );
+    await releaseSource(sourceControlUrl, normalGateKey, "material");
+    const normalTriggered = await waitFor(
+      async () =>
+        cliData<{ readonly lastRunId?: string }>(
+          await cli(baseUrl, [
+            "schedule",
+            "get",
+            binId,
+            normalCreated.scheduleId,
+          ]),
+          "found",
+        ),
+      (s) => s.lastRunId !== undefined,
+      "休眠容器上的正常到期计划创建运行并唤醒容器",
+    );
+    const normalRunId = normalTriggered.lastRunId!;
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        normalCreated.scheduleId,
+      ]),
+      "disabled",
+    );
+    const normalDone = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      normalRunId,
+      ["completed", "failed"],
+    );
+    assert.equal(normalDone.status, "completed");
+    assert.equal(normalDone.referenceTime, normalEnabled.nextDueAt);
+    assert.equal(normalDone.result?.commits.length, 1);
+    await waitForSleeping();
+
+    // 2. Transient wake failure -> preserves runId/params/referenceTime, surfaces queueReason & lastWakeError in run get & run list, recovers via backoff.
+    const retryGateKey = "schedule-sleep-retry-" + randomUUID();
+    const retryCreated = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: retryGateKey,
+          sourceKey: retryGateKey,
+          actionLabel: "sleep-wake-retry-snapshot",
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    createdScheduleIds.push(retryCreated.scheduleId);
+    await waitForSleeping();
+    await waitForDueLeadWindow(20_000, 6_000);
+    const retryEnabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        retryCreated.scheduleId,
+      ]),
+      "enabled",
+    );
+    await heartbeatProxy.rejectRuntime(binId, 503);
+
+    const retryTriggered = await waitFor(
+      async () =>
+        cliData<{ readonly lastRunId?: string }>(
+          await cli(baseUrl, [
+            "schedule",
+            "get",
+            binId,
+            retryCreated.scheduleId,
+          ]),
+          "found",
+        ),
+      (s) => s.lastRunId !== undefined,
+      "暂时性唤醒失败场景创建计划运行",
+    );
+    const retryRunId = retryTriggered.lastRunId!;
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        retryCreated.scheduleId,
+      ]),
+      "disabled",
+    );
+
+    const queuedWithWakeError = await waitFor(
+      async () =>
+        cliData<ManualRunCliState>(
+          await cli(baseUrl, ["run", "get", binId, retryRunId]),
+          "found",
+        ),
+      (r) =>
+        r.status === "queued" &&
+        r.queueReason === "runtime_waking" &&
+        r.lastWakeError?.code === "runtime_wake_timeout",
+      "暂时性唤醒失败保留原 queued 运行并暴露 queueReason 与 lastWakeError",
+    );
+    assert.equal(queuedWithWakeError.runId, retryRunId);
+    assert.equal(queuedWithWakeError.referenceTime, retryEnabled.nextDueAt);
+
+    const runGetText = await cli(baseUrl, [
+      "run",
+      "get",
+      binId,
+      retryRunId,
+      "--output",
+      "text",
+    ]);
+    assert.equal(runGetText.code, 0, runGetText.stderr);
+    assert.match(runGetText.stdout, /^Queue reason: runtime_waking$/mu);
+    assert.match(
+      runGetText.stdout,
+      /^Last wake error: runtime_wake_timeout:/mu,
+    );
+
+    const runListStructured = cliData<{
+      readonly runs: readonly {
+        readonly runId: string;
+        readonly queueReason?: string;
+        readonly lastWakeError?: { readonly code: string };
+      }[];
+    }>(
+      await cli(baseUrl, [
+        "run",
+        "list",
+        "--bin-id",
+        binId,
+        "--status",
+        "queued",
+      ]),
+      "listed",
+    );
+    const listedRetryRun = runListStructured.runs.find(
+      (r) => r.runId === retryRunId,
+    );
+    assert.equal(listedRetryRun?.queueReason, "runtime_waking");
+    assert.equal(listedRetryRun?.lastWakeError?.code, "runtime_wake_timeout");
+
+    const runListText = await cli(baseUrl, [
+      "run",
+      "list",
+      "--bin-id",
+      binId,
+      "--status",
+      "queued",
+      "--output",
+      "text",
+    ]);
+    assert.equal(runListText.code, 0, runListText.stderr);
+    assert.match(runListText.stdout, /queueReason=runtime_waking/u);
+    assert.match(runListText.stdout, /lastWakeError=runtime_wake_timeout/u);
+    assert.equal(
+      await countSourceArrivals(sourceControlUrl, retryGateKey, binId),
+      0,
+    );
+
+    await releaseSource(sourceControlUrl, retryGateKey, "material");
+    await heartbeatProxy.allowRuntime(binId);
+    const retryCompleted = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      retryRunId,
+      ["completed", "failed"],
+    );
+    assert.equal(retryCompleted.status, "completed");
+    assert.equal(retryCompleted.runId, retryRunId);
+    assert.equal(retryCompleted.referenceTime, retryEnabled.nextDueAt);
+    assert.equal(retryCompleted.result?.commits.length, 1);
+    const retryItemId = retryCompleted.result?.commits[0]?.items[0]?.itemId;
+    assert.ok(retryItemId !== undefined);
+    const retryArchivedItem = cliData<{
+      readonly views: readonly {
+        readonly state: {
+          readonly extensions: {
+            readonly actionLabel?: unknown;
+            readonly referenceTime?: unknown;
+          };
+        };
+      }[];
+    }>(await cli(baseUrl, ["archive", "item", retryItemId]), "found");
+    assert.equal(
+      retryArchivedItem.views[0]?.state.extensions.actionLabel,
+      "sleep-wake-retry-snapshot!",
+    );
+    assert.equal(
+      retryArchivedItem.views[0]?.state.extensions.referenceTime,
+      retryEnabled.nextDueAt,
+    );
+    assert.equal(
+      await countSourceArrivals(sourceControlUrl, retryGateKey, binId),
+      1,
+    );
+    await waitForSleeping();
+
+    // 3. Cancellation while waiting/backing off on wake.
+    const cancelGateKey = "schedule-sleep-cancel-" + randomUUID();
+    const cancelCreated = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: cancelGateKey,
+          sourceKey: cancelGateKey,
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    createdScheduleIds.push(cancelCreated.scheduleId);
+    await waitForSleeping();
+    await waitForDueLeadWindow(20_000, 6_000);
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        cancelCreated.scheduleId,
+      ]),
+      "enabled",
+    );
+    await heartbeatProxy.rejectRuntime(binId, 503);
+    const cancelTriggered = await waitFor(
+      async () =>
+        cliData<{ readonly lastRunId?: string }>(
+          await cli(baseUrl, [
+            "schedule",
+            "get",
+            binId,
+            cancelCreated.scheduleId,
+          ]),
+          "found",
+        ),
+      (s) => s.lastRunId !== undefined,
+      "等待唤醒取消测试创建计划运行",
+    );
+    const cancelRunId = cancelTriggered.lastRunId!;
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        cancelCreated.scheduleId,
+      ]),
+      "disabled",
+    );
+    await waitFor(
+      async () =>
+        cliData<ManualRunCliState>(
+          await cli(baseUrl, ["run", "get", binId, cancelRunId]),
+          "found",
+        ),
+      (r) =>
+        r.status === "queued" &&
+        r.lastWakeError?.code === "runtime_wake_timeout",
+      "运行进入唤醒退避等待期",
+    );
+    const cancelledDuringWake = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "cancel", binId, cancelRunId]),
+      "cancellation",
+    );
+    assert.equal(cancelledDuringWake.status, "cancelled");
+    assert.equal(
+      cancelledDuringWake.result?.stopReason.code,
+      "cancelled_before_execution",
+    );
+    assert.equal(cancelledDuringWake.queueReason, undefined);
+    assert.equal(cancelledDuringWake.lastWakeError, undefined);
+    await heartbeatProxy.allowRuntime(binId);
+    await waitForSleeping();
+    assert.equal(
+      await countSourceArrivals(sourceControlUrl, cancelGateKey, binId),
+      0,
+    );
+
+    // 4. Server restart recovery: resumes queued run with preserved runId/params/referenceTime and skips unqueued overdue schedule without waking.
+    const restartQueuedGateKey =
+      "schedule-sleep-restart-queued-" + randomUUID();
+    const restartOverdueGateKey =
+      "schedule-sleep-restart-overdue-" + randomUUID();
+    const restartQueuedCreated = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: restartQueuedGateKey,
+          sourceKey: restartQueuedGateKey,
+          actionLabel: "restart-queued-snapshot",
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    createdScheduleIds.push(restartQueuedCreated.scheduleId);
+    const restartOverdueCreated = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/10 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: restartOverdueGateKey,
+          sourceKey: restartOverdueGateKey,
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    createdScheduleIds.push(restartOverdueCreated.scheduleId);
+    await waitForSleeping();
+    await waitForDueLeadWindow(20_000, 6_000);
+    const restartQueuedEnabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        restartQueuedCreated.scheduleId,
+      ]),
+      "enabled",
+    );
+    await heartbeatProxy.rejectRuntime(binId, 503);
+    const restartQueuedTriggered = await waitFor(
+      async () =>
+        cliData<{ readonly lastRunId?: string }>(
+          await cli(baseUrl, [
+            "schedule",
+            "get",
+            binId,
+            restartQueuedCreated.scheduleId,
+          ]),
+          "found",
+        ),
+      (s) => s.lastRunId !== undefined,
+      "中心重启恢复测试入队已创建计划运行",
+    );
+    const restartQueuedRunId = restartQueuedTriggered.lastRunId!;
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        restartQueuedCreated.scheduleId,
+      ]),
+      "disabled",
+    );
+
+    const overdueEnabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        restartOverdueCreated.scheduleId,
+      ]),
+      "enabled",
+    );
+    const overdueAt = Date.parse(overdueEnabled.nextDueAt);
+    await compose(["stop", "server"]);
+    const waitPastOverdue = Math.max(2_000, overdueAt - Date.now() + 1_500);
+    await wait(waitPastOverdue);
+    await compose(["start", "server"]);
+    composePort = await publishedPort("server", 3000);
+    baseUrl = apiBaseUrl();
+    await waitForApiAndDatabase(baseUrl);
+
+    const overdueAfterRestart = cliData<{
+      readonly lastRunId?: string;
+      readonly nextDueAt: string;
+    }>(
+      await cli(baseUrl, [
+        "schedule",
+        "get",
+        binId,
+        restartOverdueCreated.scheduleId,
+      ]),
+      "found",
+    );
+    assert.equal(overdueAfterRestart.lastRunId, undefined);
+    assert.ok(Date.parse(overdueAfterRestart.nextDueAt) > Date.now());
+    assert.equal(
+      await countSourceArrivals(sourceControlUrl, restartOverdueGateKey, binId),
+      0,
+    );
+
+    const queuedAfterRestart = cliData<ManualRunCliState>(
+      await cli(baseUrl, ["run", "get", binId, restartQueuedRunId]),
+      "found",
+    );
+    assert.equal(queuedAfterRestart.status, "queued");
+    assert.equal(queuedAfterRestart.runId, restartQueuedRunId);
+    assert.equal(
+      queuedAfterRestart.referenceTime,
+      restartQueuedEnabled.nextDueAt,
+    );
+
+    await heartbeatProxy.allowRuntime(binId);
+    await releaseSource(sourceControlUrl, restartQueuedGateKey, "material");
+    const resumedRun = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      restartQueuedRunId,
+      ["completed", "failed"],
+    );
+    assert.equal(resumedRun.status, "completed");
+    assert.equal(resumedRun.runId, restartQueuedRunId);
+    assert.equal(resumedRun.referenceTime, restartQueuedEnabled.nextDueAt);
+    assert.equal(resumedRun.result?.commits.length, 1);
+    const resumedItemId = resumedRun.result?.commits[0]?.items[0]?.itemId;
+    assert.ok(resumedItemId !== undefined);
+    const resumedArchivedItem = cliData<{
+      readonly views: readonly {
+        readonly state: {
+          readonly extensions: {
+            readonly actionLabel?: unknown;
+            readonly referenceTime?: unknown;
+          };
+        };
+      }[];
+    }>(await cli(baseUrl, ["archive", "item", resumedItemId]), "found");
+    assert.equal(
+      resumedArchivedItem.views[0]?.state.extensions.actionLabel,
+      "restart-queued-snapshot!",
+    );
+    assert.equal(
+      resumedArchivedItem.views[0]?.state.extensions.referenceTime,
+      restartQueuedEnabled.nextDueAt,
+    );
+
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        restartOverdueCreated.scheduleId,
+      ]),
+      "disabled",
+    );
+    await waitForSleeping();
+    return baseUrl;
+  } finally {
+    await heartbeatProxy.allowRuntime(binId).catch(() => undefined);
+    for (const scheduleId of createdScheduleIds) {
+      await cli(baseUrl, ["schedule", "remove", binId, scheduleId]).catch(
+        () => undefined,
+      );
+    }
+    await cli(baseUrl, [
+      "bin",
+      "update",
+      binId,
+      "--idle-timeout-seconds",
+      "300",
+    ]).catch(() => undefined);
+    await compose(["start", "runtime-fifteen-one"]).catch(() => undefined);
+    await waitForRuntime(baseUrl, binId).catch(() => undefined);
+  }
 }
 
 async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
@@ -9266,6 +9904,9 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
   let skipScheduleId: string | undefined;
   let otherScheduleId: string | undefined;
   let unconfirmedScheduleId: string | undefined;
+  let sleepOverlapScheduleId: string | undefined;
+  let disabledSleepScheduleId: string | undefined;
+  let sleepPolicyModified = false;
   let runtimeStopped = false;
   let runtimePaused = false;
 
@@ -9764,6 +10405,226 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
     ]);
     runtimeStopped = false;
     await waitForRuntime(baseUrl, binId);
+
+    // Verify overlap skip and disabled bin never wake or restart a policy-sleeping container.
+    const sleepOverlapGateKey = "schedule-overlap-sleeping-" + randomUUID();
+    const disabledSleepGateKey = "schedule-overlap-disabled-" + randomUUID();
+    const inspectRunner = async () => {
+      const cid = (
+        await compose(["ps", "--all", "--quiet", "runtime-fifteen-one"])
+      ).stdout
+        .trim()
+        .split("\n")[0];
+      assert.ok(cid);
+      const inspected = await run(
+        "docker",
+        [
+          "inspect",
+          "--format",
+          "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.StartedAt}}\t{{.State.FinishedAt}}",
+          cid,
+        ],
+        { env: composeEnvironment() },
+      );
+      assert.equal(inspected.code, 0, inspected.stderr);
+      const [status = "", exitCodeText = "0", startedAt = "", finishedAt = ""] =
+        inspected.stdout.trim().split("\t");
+      return { status, exitCode: Number(exitCodeText), startedAt, finishedAt };
+    };
+    const waitRunnerSleeping = async () =>
+      await waitFor(
+        async () => {
+          const bin = cliData<{
+            readonly execution: {
+              readonly status: string;
+              readonly phase?: string;
+            };
+          }>(await cli(baseUrl, ["bin", "get", binId]), "found");
+          const dockerState = await inspectRunner();
+          return { bin, dockerState };
+        },
+        ({ bin, dockerState }) =>
+          bin.execution.status === "sleeping" &&
+          bin.execution.phase === "sleeping" &&
+          dockerState.status === "exited" &&
+          dockerState.exitCode === 0,
+        "overlap 验收等待运行器进入休眠",
+      );
+
+    sleepPolicyModified = true;
+    cliData(
+      await cli(baseUrl, [
+        "bin",
+        "update",
+        binId,
+        "--idle-timeout-seconds",
+        "0",
+      ]),
+      "updated",
+    );
+    await waitRunnerSleeping();
+
+    const sleepOverlapSchedule = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/20 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: sleepOverlapGateKey,
+          sourceKey: sleepOverlapGateKey,
+          waitAfterCommitMs: 25_000,
+        }),
+        "--overlap-policy",
+        "skip",
+        "--disabled",
+      ]),
+      "created",
+    );
+    sleepOverlapScheduleId = sleepOverlapSchedule.scheduleId;
+    const disabledSleepSchedule = cliData<{ readonly scheduleId: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "create",
+        binId,
+        "--expression",
+        "*/10 * * * * *",
+        "--time-zone",
+        "UTC",
+        "--action",
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: disabledSleepGateKey,
+          sourceKey: disabledSleepGateKey,
+        }),
+        "--disabled",
+      ]),
+      "created",
+    );
+    disabledSleepScheduleId = disabledSleepSchedule.scheduleId;
+    await waitRunnerSleeping();
+
+    const remaining20 = 20_000 - (Date.now() % 20_000);
+    if (remaining20 < 6_000) await wait(remaining20 + 250);
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        sleepOverlapSchedule.scheduleId,
+      ]),
+      "enabled",
+    );
+    const triggeredSleepRun = await waitFor(
+      () => readSchedule(sleepOverlapSchedule.scheduleId),
+      (s) => s.lastRunId !== undefined,
+      "休眠容器上的 overlap=skip 计划首个到期触发唤醒执行",
+    );
+    const firstSleepRunId = triggeredSleepRun.lastRunId!;
+    await waitForSourceArrival(
+      sourceControlUrl,
+      sleepOverlapGateKey,
+      firstSleepRunId,
+      binId,
+    );
+    const dockerDuringSleepExec = await inspectRunner();
+    assert.equal(dockerDuringSleepExec.status, "running");
+    await releaseSource(sourceControlUrl, sleepOverlapGateKey, "slow");
+    await waitForSourceMarker(
+      sourceControlUrl,
+      firstSleepRunId,
+      sleepOverlapGateKey,
+      "committed",
+    );
+    const skippedWhileActive = await waitFor(
+      () => readSchedule(sleepOverlapSchedule.scheduleId),
+      (s) => s.lastSkip?.reason === "overlap",
+      "休眠唤醒运行执行中跳过重叠触发",
+    );
+    assert.equal(skippedWhileActive.lastRunId, firstSleepRunId);
+    assert.equal(
+      (await inspectRunner()).startedAt,
+      dockerDuringSleepExec.startedAt,
+    );
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "disable",
+        binId,
+        sleepOverlapSchedule.scheduleId,
+      ]),
+      "disabled",
+    );
+    await waitForCliManualRunState(baseUrl, binId, firstSleepRunId, [
+      "completed",
+    ]);
+    await waitRunnerSleeping();
+
+    const remaining10 = 10_000 - (Date.now() % 10_000);
+    if (remaining10 < 4_000) await wait(remaining10 + 250);
+    const disabledEnabled = cliData<{ readonly nextDueAt: string }>(
+      await cli(baseUrl, [
+        "schedule",
+        "enable",
+        binId,
+        disabledSleepSchedule.scheduleId,
+      ]),
+      "enabled",
+    );
+    const dockerBeforeDisabledDue = (await waitRunnerSleeping()).dockerState;
+    cliData(await cli(baseUrl, ["bin", "disable", binId]), "disabled");
+    await wait(
+      Math.max(0, Date.parse(disabledEnabled.nextDueAt) - Date.now() + 2_000),
+    );
+    const dockerAfterDisabledDue = await inspectRunner();
+    assert.equal(dockerAfterDisabledDue.status, "exited");
+    assert.equal(
+      dockerAfterDisabledDue.finishedAt,
+      dockerBeforeDisabledDue.finishedAt,
+    );
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "remove",
+        binId,
+        sleepOverlapSchedule.scheduleId,
+      ]),
+      "removed",
+    );
+    sleepOverlapScheduleId = undefined;
+    cliData(
+      await cli(baseUrl, [
+        "schedule",
+        "remove",
+        binId,
+        disabledSleepSchedule.scheduleId,
+      ]),
+      "removed",
+    );
+    disabledSleepScheduleId = undefined;
+    cliData(await cli(baseUrl, ["bin", "enable", binId]), "enabled");
+    cliData(
+      await cli(baseUrl, [
+        "bin",
+        "update",
+        binId,
+        "--idle-timeout-seconds",
+        "300",
+      ]),
+      "updated",
+    );
+    sleepPolicyModified = false;
+    await compose(["start", "runtime-fifteen-one"]);
+    await waitForRuntime(baseUrl, binId);
   } finally {
     if (runtimePaused) {
       try {
@@ -9790,6 +10651,8 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
       skipScheduleId,
       otherScheduleId,
       unconfirmedScheduleId,
+      sleepOverlapScheduleId,
+      disabledSleepScheduleId,
     ]) {
       if (scheduleId === undefined) continue;
       const removed = await cli(baseUrl, [
@@ -9799,6 +10662,17 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
         scheduleId,
       ]);
       if (removed.code !== 0) process.stderr.write(removed.stderr);
+    }
+    if (sleepPolicyModified) {
+      await cli(baseUrl, ["bin", "enable", binId]);
+      await cli(baseUrl, [
+        "bin",
+        "update",
+        binId,
+        "--idle-timeout-seconds",
+        "300",
+      ]);
+      await compose(["start", "runtime-fifteen-one"]).catch(() => undefined);
     }
     if (runtimeStopped) await compose(["start", "runtime-fifteen-one"]);
   }
@@ -12792,6 +13666,10 @@ async function main(): Promise<void> {
       "  server:",
       '    cpus: "1.0"',
       '    mem_limit: "2g"',
+      "    environment:",
+      `      BINNY_RUNTIME_WAKE_TIMEOUT_MS: "${scheduledRunsOnly ? "3000" : "20000"}"`,
+      '      BINNY_RUNTIME_WAKE_RETRY_BASE_DELAY_MS: "1000"',
+      '      BINNY_RUNTIME_WAKE_RETRY_MAX_DELAY_MS: "2000"',
       "    ports: !override",
       '      - "3000"',
       "    networks: !override",

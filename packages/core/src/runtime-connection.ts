@@ -13,6 +13,7 @@ import {
   runtimeStateUpdateInputSchema,
   runtimeSourceStateSnapshotSchema,
   runtimeProtocolVersion,
+  runtimeWakeErrorSchema,
   type SourceStateSnapshot,
   type BinError,
   type BinOperation,
@@ -23,6 +24,7 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatResult,
   type RuntimeHeartbeatInput,
+  type RuntimeWakeError,
 } from "@binny/contracts";
 import {
   binConfigurations,
@@ -63,6 +65,7 @@ const runtimeSelection = {
   runtimeControlUrl: runtimeConnections.runtimeControlUrl,
   sourceStateSnapshot: runtimeConnections.sourceStateSnapshot,
   containerLifecyclePhase: runtimeContainers.lifecyclePhase,
+  containerLastWakeError: runtimeContainers.lastWakeError,
 };
 
 type RuntimeCompatibilityError = {
@@ -210,6 +213,12 @@ function compatibilityError(
   return undefined;
 }
 
+function parseContainerWakeError(raw: unknown): RuntimeWakeError | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const parsed = runtimeWakeErrorSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
 function offline(
   reason:
     | "runtime_not_connected"
@@ -217,6 +226,7 @@ function offline(
     | "runtime_protocol_outdated",
   row?: RuntimeConnectionRow,
 ): RuntimeExecution {
+  const lastWakeError = parseContainerWakeError(row?.containerLastWakeError);
   return {
     status: "offline",
     reason,
@@ -227,6 +237,7 @@ function offline(
     ...(row?.lastHeartbeatAt === null || row?.lastHeartbeatAt === undefined
       ? {}
       : { lastHeartbeatAt: row.lastHeartbeatAt.toISOString() }),
+    ...(lastWakeError === undefined ? {} : { lastWakeError }),
   };
 }
 
@@ -354,11 +365,13 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     row.containerLifecyclePhase === "sleeping" ||
     (row.containerLifecyclePhase === "waking" && !heartbeatFresh)
   ) {
+    const lastWakeError = parseContainerWakeError(row.containerLastWakeError);
     return {
       status: "sleeping",
       phase: row.containerLifecyclePhase,
       runtimeId: row.runtimeId,
       lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+      ...(lastWakeError === undefined ? {} : { lastWakeError }),
       sourceStateSnapshot: projectSourceStateSnapshot(row),
     };
   }

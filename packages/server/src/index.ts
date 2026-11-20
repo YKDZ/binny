@@ -88,6 +88,16 @@ export async function createServerRuntime(options: {
       30_000,
       1_000,
     ),
+    wakeRetryBaseDelayMs: environmentMilliseconds(
+      "BINNY_RUNTIME_WAKE_RETRY_BASE_DELAY_MS",
+      2_000,
+      50,
+    ),
+    wakeRetryMaxDelayMs: environmentMilliseconds(
+      "BINNY_RUNTIME_WAKE_RETRY_MAX_DELAY_MS",
+      60_000,
+      50,
+    ),
   });
   const runtime = createRuntimeConnectionStore(database, {
     containerCoordinator,

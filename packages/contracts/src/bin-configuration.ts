@@ -214,6 +214,16 @@ export const runtimeSleepPhaseSchema = z.enum([
   "waking",
 ]);
 
+export const runtimeWakeErrorSchema = z
+  .object({
+    code: postgresTextSchema.min(1),
+    message: postgresTextSchema.min(1),
+    at: z.iso.datetime().optional(),
+  })
+  .strict();
+
+export type RuntimeWakeError = z.infer<typeof runtimeWakeErrorSchema>;
+
 export const browserIdleTimeoutSecondsSchema = z
   .number()
   .int("浏览器空闲关闭时长必须是整数秒。")
@@ -529,6 +539,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
     phase: runtimeSleepPhaseSchema,
     runtimeId: postgresTextSchema.optional(),
     lastHeartbeatAt: z.iso.datetime().optional(),
+    lastWakeError: runtimeWakeErrorSchema.optional(),
     sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
   z.object({
@@ -540,6 +551,7 @@ export const runtimeExecutionSchema = z.discriminatedUnion("status", [
     ]),
     runtimeId: postgresTextSchema.optional(),
     lastHeartbeatAt: z.iso.datetime().optional(),
+    lastWakeError: runtimeWakeErrorSchema.optional(),
     sourceStateSnapshot: sourceStateSnapshotSchema,
   }),
   z.object({
@@ -614,6 +626,7 @@ const binExecutionSummarySchema = z.discriminatedUnion("status", [
       phase: runtimeSleepPhaseSchema,
       runtimeId: postgresTextSchema.optional(),
       lastHeartbeatAt: z.iso.datetime().optional(),
+      lastWakeError: runtimeWakeErrorSchema.optional(),
     })
     .strict(),
   z
@@ -626,6 +639,7 @@ const binExecutionSummarySchema = z.discriminatedUnion("status", [
       ]),
       runtimeId: postgresTextSchema.optional(),
       lastHeartbeatAt: z.iso.datetime().optional(),
+      lastWakeError: runtimeWakeErrorSchema.optional(),
     })
     .strict(),
   z

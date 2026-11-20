@@ -670,35 +670,41 @@ export function createBinConfigurationStore(
     },
 
     async setBinStatus(id, status) {
-      return await database.transaction(async (transaction) => {
-        // 保留原来的 PostgreSQL now() 语义；Drizzle 只提供 INSERT 默认值 helper。
-        const [bin] = await transaction
-          .update(binConfigurations)
-          .set({ status, updatedAt: sql`now()` })
-          .where(eq(binConfigurations.id, id))
-          .returning(binSelection);
-        if (bin === undefined) return notFound(id);
-        if (status === "disabled") {
-          // 已在执行的运行继续使用快照；排队运行在停用时明确失败。
-          await transaction
-            .update(manualRuns)
-            .set({
-              status: "failed",
-              failure: {
-                code: "bin_disabled",
-                message: "bin 已停用，排队中的运行没有执行。",
-                impact: "排队中的运行已结束。",
-                suggestion: "重新启用后可创建新的运行。",
-                requiresHuman: false,
-              },
-              finishedAt: sql`clock_timestamp()`,
-            })
-            .where(
-              and(eq(manualRuns.binId, id), eq(manualRuns.status, "queued")),
-            );
-        }
-        return { ok: true, value: rowToConfiguration(bin) };
-      });
+      const result = await database.transaction<BinOperation<BinConfiguration>>(
+        async (transaction) => {
+          // 保留原来的 PostgreSQL now() 语义；Drizzle 只提供 INSERT 默认值 helper。
+          const [bin] = await transaction
+            .update(binConfigurations)
+            .set({ status, updatedAt: sql`now()` })
+            .where(eq(binConfigurations.id, id))
+            .returning(binSelection);
+          if (bin === undefined) return notFound(id);
+          if (status === "disabled") {
+            // 已在执行的运行继续使用快照；排队运行在停用时明确失败。
+            await transaction
+              .update(manualRuns)
+              .set({
+                status: "failed",
+                failure: {
+                  code: "bin_disabled",
+                  message: "bin 已停用，排队中的运行没有执行。",
+                  impact: "排队中的运行已结束。",
+                  suggestion: "重新启用后可创建新的运行。",
+                  requiresHuman: false,
+                },
+                finishedAt: sql`clock_timestamp()`,
+              })
+              .where(
+                and(eq(manualRuns.binId, id), eq(manualRuns.status, "queued")),
+              );
+          }
+          return { ok: true, value: rowToConfiguration(bin) };
+        },
+      );
+      if (result.ok && status === "disabled") {
+        await containerCoordinator?.markWorkCompleted(id);
+      }
+      return result;
     },
 
     async removeBin(id) {

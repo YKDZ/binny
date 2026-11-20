@@ -100,12 +100,31 @@ export type RuntimeContainerCoordinatorOptions = {
   readonly now?: (() => number) | undefined;
   readonly wakeTimeoutMs?: number | undefined;
   readonly stopGraceSeconds?: number | undefined;
+  readonly wakeRetryBaseDelayMs?: number | undefined;
+  readonly wakeRetryMaxDelayMs?: number | undefined;
 };
 
 const defaultWakeTimeoutMs = 30_000;
 const defaultStopGraceSeconds = 30;
+const defaultWakeRetryBaseDelayMs = 2_000;
+const defaultWakeRetryMaxDelayMs = 60_000;
 const healthStartingRetryDelayMs = 1_000;
 const wakePollIntervalMs = 100;
+
+type InternalWakeResult =
+  | { readonly ok: true; readonly value: void }
+  | {
+      readonly ok: false;
+      readonly code: "wake_failed" | "runtime_offline";
+      readonly message: string;
+      readonly retryable: boolean;
+    };
+
+type WakeErrorPayload = {
+  readonly code: string;
+  readonly message: string;
+  readonly at: string;
+};
 
 function readEffectiveIdleTimeoutSeconds(bin: {
   readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
@@ -183,6 +202,27 @@ async function hasBlockingDatabaseWork(
   return activeSessions.length > 0;
 }
 
+async function hasWakeablePendingWork(
+  executor: Database | Transaction,
+  binId: string,
+): Promise<boolean> {
+  const queuedRuns = await executor
+    .select({ runId: manualRuns.runId })
+    .from(manualRuns)
+    .where(and(eq(manualRuns.binId, binId), eq(manualRuns.status, "queued")))
+    .limit(1);
+  if (queuedRuns.length > 0) return true;
+
+  const pendingSessions = await executor
+    .select({ sessionId: humanSessions.sessionId })
+    .from(humanSessions)
+    .where(
+      and(eq(humanSessions.binId, binId), eq(humanSessions.status, "pending")),
+    )
+    .limit(1);
+  return pendingSessions.length > 0;
+}
+
 export function createRuntimeContainerCoordinator(
   options: RuntimeContainerCoordinatorOptions,
 ): RuntimeContainerCoordinator {
@@ -190,11 +230,19 @@ export function createRuntimeContainerCoordinator(
   const now = options.now ?? (() => Date.now());
   const wakeTimeoutMs = options.wakeTimeoutMs ?? defaultWakeTimeoutMs;
   const stopGraceSeconds = options.stopGraceSeconds ?? defaultStopGraceSeconds;
+  const wakeRetryBaseDelayMs =
+    options.wakeRetryBaseDelayMs ?? defaultWakeRetryBaseDelayMs;
+  const wakeRetryMaxDelayMs = Math.max(
+    wakeRetryBaseDelayMs,
+    options.wakeRetryMaxDelayMs ?? defaultWakeRetryMaxDelayMs,
+  );
 
   const activeLeases = new Map<string, number>();
   const idleTimers = new Map<string, NodeJS.Timeout>();
+  const wakeRetryTimers = new Map<string, NodeJS.Timeout>();
+  const wakeRetryAttempts = new Map<string, number>();
   const inFlightStops = new Map<string, Promise<void>>();
-  const inFlightWakes = new Map<string, Promise<RuntimeWakeResult<void>>>();
+  const inFlightWakes = new Map<string, Promise<InternalWakeResult>>();
   const heartbeatWaiters = new Map<string, Set<() => void>>();
   const knownRuntimeIdByBin = new Map<string, string>();
   const trackedOperations = new Set<Promise<unknown>>();
@@ -213,6 +261,86 @@ export function createRuntimeContainerCoordinator(
     if (existing !== undefined) {
       clearTimeout(existing);
       idleTimers.delete(binId);
+    }
+  }
+
+  function clearWakeRetryTimer(binId: string): void {
+    const existing = wakeRetryTimers.get(binId);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+      wakeRetryTimers.delete(binId);
+    }
+  }
+
+  function resetWakeRetryState(binId: string): void {
+    clearWakeRetryTimer(binId);
+    wakeRetryAttempts.delete(binId);
+  }
+
+  function wakeErrorPayload(code: string, message: string): WakeErrorPayload {
+    return {
+      code,
+      message,
+      at: new Date(now()).toISOString(),
+    };
+  }
+
+  async function recordTransientWakeFailure(
+    binId: string,
+    lifecyclePhase: "sleeping" | "waking" | "running",
+    errorPayload: WakeErrorPayload,
+  ): Promise<void> {
+    await database
+      .update(runtimeContainers)
+      .set({
+        lifecyclePhase,
+        idleSince: null,
+        lastWakeError: errorPayload,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(runtimeContainers.binId, binId));
+  }
+
+  function scheduleWakeRetry(binId: string): void {
+    if (closing || driver === undefined || wakeRetryTimers.has(binId)) return;
+    const attempt = wakeRetryAttempts.get(binId) ?? 0;
+    wakeRetryAttempts.set(binId, attempt + 1);
+    const delayMs = Math.min(
+      wakeRetryMaxDelayMs,
+      Math.max(0, wakeRetryBaseDelayMs * 2 ** Math.min(attempt, 20)),
+    );
+    const timer = setTimeout(() => {
+      if (wakeRetryTimers.get(binId) === timer) wakeRetryTimers.delete(binId);
+      if (closing) return;
+      void track(runBackgroundWakeAttempt(binId)).catch((error: unknown) => {
+        process.stderr.write(
+          `Background container wake retry failed for bin=${binId}: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      });
+    }, delayMs);
+    timer.unref();
+    wakeRetryTimers.set(binId, timer);
+  }
+
+  async function runBackgroundWakeAttempt(binId: string): Promise<void> {
+    if (closing || driver === undefined) return;
+    if (!(await hasWakeablePendingWork(database, binId))) {
+      resetWakeRetryState(binId);
+      return;
+    }
+    const result = await ensureContainerReady(binId);
+    if (result.ok) {
+      resetWakeRetryState(binId);
+      return;
+    }
+    if (closing || !result.retryable) {
+      if (!result.retryable) resetWakeRetryState(binId);
+      return;
+    }
+    if (await hasWakeablePendingWork(database, binId)) {
+      scheduleWakeRetry(binId);
+    } else {
+      resetWakeRetryState(binId);
     }
   }
 
@@ -274,12 +402,10 @@ export function createRuntimeContainerCoordinator(
 
   async function markContainerOffline(
     binId: string,
-    lastWakeError: {
-      readonly code: string;
-      readonly message: string;
-    } | null = null,
+    lastWakeError: WakeErrorPayload | null = null,
   ): Promise<void> {
     clearIdleTimer(binId);
+    resetWakeRetryState(binId);
     await database.transaction(async (transaction) => {
       await transaction
         .update(runtimeContainers)
@@ -493,7 +619,8 @@ export function createRuntimeContainerCoordinator(
   async function waitForContainerReady(
     binId: string,
     containerId: string,
-  ): Promise<RuntimeWakeResult<void>> {
+    fallbackPhase: "waking" | "sleeping" | "running",
+  ): Promise<InternalWakeResult> {
     if (driver === undefined) return { ok: true, value: undefined };
     const deadline = now() + wakeTimeoutMs;
     while (now() < deadline) {
@@ -503,6 +630,7 @@ export function createRuntimeContainerCoordinator(
           code: "wake_failed",
           message:
             "Server is shutting down while waking the runtime container.",
+          retryable: false,
         };
       }
       const [conn] = await database
@@ -530,22 +658,33 @@ export function createRuntimeContainerCoordinator(
         return { ok: true, value: undefined };
       }
 
-      const inspected = await driver.inspectContainer(containerId);
+      let inspected: ManagedContainerInspectResult | null | undefined;
+      try {
+        inspected = await driver.inspectContainer(containerId);
+      } catch {
+        inspected = undefined;
+      }
       if (
-        inspected === null ||
-        inspected.status === "exited" ||
-        inspected.status === "dead" ||
-        inspected.status === "removing"
+        inspected !== undefined &&
+        (inspected === null ||
+          inspected.status === "exited" ||
+          inspected.status === "dead" ||
+          inspected.status === "removing")
       ) {
         const reason =
           inspected === null
             ? "Runtime container was removed while waking."
             : `Runtime container exited prematurely while waking (exitCode=${inspected.exitCode}).`;
-        await markContainerOffline(binId, {
-          code: "runtime_wake_exited",
+        await markContainerOffline(
+          binId,
+          wakeErrorPayload("runtime_wake_exited", reason),
+        );
+        return {
+          ok: false,
+          code: "wake_failed",
           message: reason,
-        });
-        return { ok: false, code: "wake_failed", message: reason };
+          retryable: false,
+        };
       }
 
       await waitForHeartbeatSignal(binId, wakePollIntervalMs);
@@ -553,20 +692,49 @@ export function createRuntimeContainerCoordinator(
 
     const timeoutMessage =
       "Timed out waiting for the woken runtime container to reconnect and confirm ownership.";
-    await markContainerOffline(binId, {
-      code: "runtime_wake_timeout",
-      message: timeoutMessage,
-    });
+    let finalInspect: ManagedContainerInspectResult | null | undefined;
+    try {
+      finalInspect = await driver.inspectContainer(containerId);
+    } catch {
+      finalInspect = undefined;
+    }
+    if (
+      finalInspect !== undefined &&
+      (finalInspect === null ||
+        finalInspect.status === "exited" ||
+        finalInspect.status === "dead" ||
+        finalInspect.status === "removing")
+    ) {
+      const reason =
+        finalInspect === null
+          ? "Runtime container was removed while waking."
+          : `Runtime container exited while waking (exitCode=${finalInspect.exitCode}).`;
+      await markContainerOffline(
+        binId,
+        wakeErrorPayload("runtime_wake_exited", reason),
+      );
+      return {
+        ok: false,
+        code: "wake_failed",
+        message: reason,
+        retryable: false,
+      };
+    }
+
+    await recordTransientWakeFailure(
+      binId,
+      finalInspect?.status === "running" ? "waking" : fallbackPhase,
+      wakeErrorPayload("runtime_wake_timeout", timeoutMessage),
+    );
     return {
       ok: false,
       code: "wake_failed",
       message: timeoutMessage,
+      retryable: true,
     };
   }
 
-  async function runEnsureReady(
-    binId: string,
-  ): Promise<RuntimeWakeResult<void>> {
+  async function runEnsureReady(binId: string): Promise<InternalWakeResult> {
     if (driver === undefined) return { ok: true, value: undefined };
 
     const pendingStop = inFlightStops.get(binId);
@@ -580,7 +748,21 @@ export function createRuntimeContainerCoordinator(
       .where(eq(runtimeContainers.binId, binId));
 
     if (row === undefined) {
-      const discovered = await discoverManagedContainerForBin(binId);
+      let discovered: ManagedContainerInspectResult | undefined;
+      try {
+        discovered = await discoverManagedContainerForBin(binId);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Docker Engine failed while discovering runtime container.";
+        return {
+          ok: false,
+          code: "wake_failed",
+          message,
+          retryable: true,
+        };
+      }
       if (discovered === undefined) {
         return { ok: true, value: undefined };
       }
@@ -590,6 +772,7 @@ export function createRuntimeContainerCoordinator(
           code: "runtime_offline",
           message:
             "Managed runtime container is stopped outside sleep policy and cannot auto-wake.",
+          retryable: false,
         };
       }
       await database
@@ -615,7 +798,11 @@ export function createRuntimeContainerCoordinator(
             updatedAt: sql`clock_timestamp()`,
           },
         });
-      return await waitForContainerReady(binId, discovered.containerId);
+      return await waitForContainerReady(
+        binId,
+        discovered.containerId,
+        "waking",
+      );
     }
 
     if (row.lifecyclePhase === "running") {
@@ -634,66 +821,222 @@ export function createRuntimeContainerCoordinator(
       ) {
         return { ok: true, value: undefined };
       }
-      const inspected = await driver.inspectContainer(row.containerId);
-      if (inspected?.status === "running") {
-        return await waitForContainerReady(binId, inspected.containerId);
+      let inspected: ManagedContainerInspectResult | null;
+      try {
+        inspected = await driver.inspectContainer(row.containerId);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Docker Engine failed to inspect runtime container.";
+        await recordTransientWakeFailure(
+          binId,
+          "running",
+          wakeErrorPayload("runtime_wake_driver_unavailable", message),
+        );
+        return {
+          ok: false,
+          code: "wake_failed",
+          message,
+          retryable: true,
+        };
       }
-      const replacement = await discoverManagedContainerForBin(binId);
+      if (inspected?.status === "running") {
+        await database
+          .update(runtimeContainers)
+          .set({
+            lifecyclePhase: "waking",
+            idleSince: null,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(runtimeContainers.binId, binId));
+        return await waitForContainerReady(
+          binId,
+          inspected.containerId,
+          "waking",
+        );
+      }
+      let replacement: ManagedContainerInspectResult | undefined;
+      try {
+        replacement = await discoverManagedContainerForBin(binId);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Docker Engine failed while discovering replacement container.";
+        await recordTransientWakeFailure(
+          binId,
+          "running",
+          wakeErrorPayload("runtime_wake_driver_unavailable", message),
+        );
+        return {
+          ok: false,
+          code: "wake_failed",
+          message,
+          retryable: true,
+        };
+      }
       if (replacement !== undefined && replacement.status === "running") {
-        return await waitForContainerReady(binId, replacement.containerId);
+        await database
+          .update(runtimeContainers)
+          .set({
+            composeProject: replacement.composeProject,
+            composeService: replacement.composeService,
+            containerId: replacement.containerId,
+            lifecyclePhase: "waking",
+            containerStartedAt: replacement.startedAt,
+            stoppedContainerFinishedAt: null,
+            idleSince: null,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(runtimeContainers.binId, binId));
+        return await waitForContainerReady(
+          binId,
+          replacement.containerId,
+          "waking",
+        );
       }
       await markContainerOffline(binId);
       return {
         ok: false,
         code: "runtime_offline",
         message: "Runtime container is offline and cannot auto-wake.",
+        retryable: false,
       };
     }
 
     if (row.lifecyclePhase === "offline") {
-      const inspected = await driver.inspectContainer(row.containerId);
-      if (inspected?.status === "running") {
-        return await waitForContainerReady(binId, inspected.containerId);
+      let inspected: ManagedContainerInspectResult | null = null;
+      let replacement: ManagedContainerInspectResult | undefined;
+      try {
+        inspected = await driver.inspectContainer(row.containerId);
+        if (inspected?.status !== "running") {
+          replacement = await discoverManagedContainerForBin(binId);
+        }
+      } catch {
+        return {
+          ok: false,
+          code: "runtime_offline",
+          message:
+            "Runtime container is offline (not policy-sleeping) and will not auto-start.",
+          retryable: false,
+        };
       }
-      const replacement = await discoverManagedContainerForBin(binId);
+      if (inspected?.status === "running") {
+        return await waitForContainerReady(
+          binId,
+          inspected.containerId,
+          "waking",
+        );
+      }
       if (replacement !== undefined && replacement.status === "running") {
-        return await waitForContainerReady(binId, replacement.containerId);
+        return await waitForContainerReady(
+          binId,
+          replacement.containerId,
+          "waking",
+        );
       }
       return {
         ok: false,
         code: "runtime_offline",
         message:
           "Runtime container is offline (not policy-sleeping) and will not auto-start.",
+        retryable: false,
       };
     }
 
     if (row.lifecyclePhase === "waking") {
-      const inspected = await driver.inspectContainer(row.containerId);
-      if (inspected?.status === "running") {
-        return await waitForContainerReady(binId, inspected.containerId);
+      let inspected: ManagedContainerInspectResult | null;
+      try {
+        inspected = await driver.inspectContainer(row.containerId);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Docker Engine failed to inspect waking runtime container.";
+        await recordTransientWakeFailure(
+          binId,
+          "waking",
+          wakeErrorPayload("runtime_wake_driver_unavailable", message),
+        );
+        return {
+          ok: false,
+          code: "wake_failed",
+          message,
+          retryable: true,
+        };
       }
-      await markContainerOffline(binId, {
-        code: "runtime_wake_exited",
-        message: "Runtime container is no longer running while waking.",
-      });
-      return {
-        ok: false,
-        code: "wake_failed",
-        message: "Runtime container is no longer running while waking.",
-      };
+      if (
+        inspected !== null &&
+        (inspected.status === "running" ||
+          inspected.status === "created" ||
+          inspected.status === "restarting")
+      ) {
+        return await waitForContainerReady(
+          binId,
+          inspected.containerId,
+          "waking",
+        );
+      }
+      const unstartedPolicySleep =
+        inspected !== null &&
+        inspected.status === "exited" &&
+        inspected.exitCode === 0 &&
+        !inspected.oomKilled &&
+        row.containerStartedAt !== null &&
+        inspected.startedAt === row.containerStartedAt &&
+        (row.stoppedContainerFinishedAt === null ||
+          inspected.finishedAt === row.stoppedContainerFinishedAt);
+      if (!unstartedPolicySleep) {
+        const reason = "Runtime container is no longer running while waking.";
+        await markContainerOffline(
+          binId,
+          wakeErrorPayload("runtime_wake_exited", reason),
+        );
+        return {
+          ok: false,
+          code: "wake_failed",
+          message: reason,
+          retryable: false,
+        };
+      }
+      // Fall through to sleeping wake if the container never started before interruption.
     }
 
-    // lifecyclePhase === "sleeping" or leftover "stopping"
-    const inspected = await driver.inspectContainer(row.containerId);
+    // lifecyclePhase === "sleeping" or leftover "stopping" (or pre-start "waking")
+    let inspected: ManagedContainerInspectResult | null;
+    try {
+      inspected = await driver.inspectContainer(row.containerId);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Docker Engine failed to inspect sleeping runtime container.";
+      await recordTransientWakeFailure(
+        binId,
+        "sleeping",
+        wakeErrorPayload("runtime_wake_driver_unavailable", message),
+      );
+      return {
+        ok: false,
+        code: "wake_failed",
+        message,
+        retryable: true,
+      };
+    }
     if (inspected === null) {
-      await markContainerOffline(binId, {
-        code: "runtime_container_missing",
-        message: "Sleeping runtime container no longer exists.",
-      });
+      await markContainerOffline(
+        binId,
+        wakeErrorPayload(
+          "runtime_container_missing",
+          "Sleeping runtime container no longer exists.",
+        ),
+      );
       return {
         ok: false,
         code: "wake_failed",
         message: "Sleeping runtime container no longer exists.",
+        retryable: false,
       };
     }
 
@@ -706,7 +1049,11 @@ export function createRuntimeContainerCoordinator(
           updatedAt: sql`clock_timestamp()`,
         })
         .where(eq(runtimeContainers.binId, binId));
-      return await waitForContainerReady(binId, inspected.containerId);
+      return await waitForContainerReady(
+        binId,
+        inspected.containerId,
+        "waking",
+      );
     }
 
     if (
@@ -714,14 +1061,18 @@ export function createRuntimeContainerCoordinator(
       inspected.exitCode !== 0 ||
       inspected.oomKilled
     ) {
-      await markContainerOffline(binId, {
-        code: "runtime_unexpected_exit",
-        message: `Runtime container exited unexpectedly (status=${inspected.status}, exitCode=${inspected.exitCode}).`,
-      });
+      await markContainerOffline(
+        binId,
+        wakeErrorPayload(
+          "runtime_unexpected_exit",
+          `Runtime container exited unexpectedly (status=${inspected.status}, exitCode=${inspected.exitCode}).`,
+        ),
+      );
       return {
         ok: false,
         code: "wake_failed",
         message: `Runtime container exited unexpectedly (exitCode=${inspected.exitCode}).`,
+        retryable: false,
       };
     }
 
@@ -731,7 +1082,6 @@ export function createRuntimeContainerCoordinator(
         .set({
           lifecyclePhase: "waking",
           idleSince: null,
-          lastWakeError: null,
           updatedAt: sql`clock_timestamp()`,
         })
         .where(eq(runtimeContainers.binId, binId));
@@ -744,14 +1094,18 @@ export function createRuntimeContainerCoordinator(
     try {
       const startResult = await driver.startContainer(row.containerId);
       if (startResult === "not_found") {
-        await markContainerOffline(binId, {
-          code: "runtime_container_missing",
-          message: "Sleeping runtime container was not found when starting.",
-        });
+        await markContainerOffline(
+          binId,
+          wakeErrorPayload(
+            "runtime_container_missing",
+            "Sleeping runtime container was not found when starting.",
+          ),
+        );
         return {
           ok: false,
           code: "wake_failed",
           message: "Sleeping runtime container was not found when starting.",
+          retryable: false,
         };
       }
     } catch (error) {
@@ -759,19 +1113,21 @@ export function createRuntimeContainerCoordinator(
         error instanceof Error
           ? error.message
           : "Docker Engine failed to start sleeping runtime container.";
-      await markContainerOffline(binId, {
-        code: "runtime_wake_start_failed",
-        message,
-      });
-      return { ok: false, code: "wake_failed", message };
+      // Revert to sleeping (not offline) so transient Docker Engine errors retry cleanly.
+      await recordTransientWakeFailure(
+        binId,
+        "sleeping",
+        wakeErrorPayload("runtime_wake_start_failed", message),
+      );
+      return { ok: false, code: "wake_failed", message, retryable: true };
     }
 
-    return await waitForContainerReady(binId, row.containerId);
+    return await waitForContainerReady(binId, row.containerId, "waking");
   }
 
   async function ensureContainerReady(
     binId: string,
-  ): Promise<RuntimeWakeResult<void>> {
+  ): Promise<InternalWakeResult> {
     const existing = inFlightWakes.get(binId);
     if (existing !== undefined) return await existing;
     const task = runEnsureReady(binId).finally(() => {
@@ -907,32 +1263,60 @@ export function createRuntimeContainerCoordinator(
             })
             .from(binConfigurations)
             .where(eq(binConfigurations.id, row.binId));
+          const [conn] = await database
+            .select({
+              disconnected: runtimeConnections.disconnected,
+              ownerState: runtimeConnections.ownerState,
+            })
+            .from(runtimeConnections)
+            .where(eq(runtimeConnections.binId, row.binId));
+          const connectionActive =
+            conn !== undefined &&
+            !conn.disconnected &&
+            conn.ownerState === "confirmed";
           const idleTimeoutSeconds =
             bin === undefined ? null : readEffectiveIdleTimeoutSeconds(bin);
           await database
             .update(runtimeContainers)
             .set({
-              lifecyclePhase: "running",
+              lifecyclePhase: connectionActive ? "running" : "waking",
               containerStartedAt: inspected.startedAt,
               stoppedContainerFinishedAt: null,
               updatedAt: sql`clock_timestamp()`,
             })
             .where(eq(runtimeContainers.binId, row.binId));
-          if (idleTimeoutSeconds !== null) {
+          if (connectionActive && idleTimeoutSeconds !== null) {
             await refreshIdleScheduling(row.binId, idleTimeoutSeconds, false);
           }
+          continue;
+        }
+
+        if (
+          inspected.status === "paused" ||
+          inspected.status === "restarting"
+        ) {
+          await database
+            .update(runtimeContainers)
+            .set({
+              lifecyclePhase: "waking",
+              containerStartedAt: inspected.startedAt,
+              stoppedContainerFinishedAt: null,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(eq(runtimeContainers.binId, row.binId));
           continue;
         }
 
         if (inspected.status === "exited") {
           const stoppedByPolicy =
             (row.lifecyclePhase === "sleeping" ||
-              row.lifecyclePhase === "stopping") &&
+              row.lifecyclePhase === "stopping" ||
+              row.lifecyclePhase === "waking") &&
             inspected.exitCode === 0 &&
             !inspected.oomKilled &&
             (row.containerStartedAt === null ||
               inspected.startedAt === row.containerStartedAt) &&
-            (row.lifecyclePhase !== "sleeping" ||
+            (row.lifecyclePhase === "stopping" ||
               row.stoppedContainerFinishedAt === null ||
               inspected.finishedAt === row.stoppedContainerFinishedAt);
 
@@ -995,10 +1379,29 @@ export function createRuntimeContainerCoordinator(
           await refreshIdleScheduling(binId, idleTimeoutSeconds, false);
         }
       }
+
+      // Resume wakeups for already-queued runs or pending human sessions on wakeable containers.
+      const reconciledContainers = await database
+        .select({
+          binId: runtimeContainers.binId,
+          lifecyclePhase: runtimeContainers.lifecyclePhase,
+        })
+        .from(runtimeContainers);
+      for (const container of reconciledContainers) {
+        if (
+          container.lifecyclePhase === "sleeping" ||
+          container.lifecyclePhase === "waking"
+        ) {
+          if (await hasWakeablePendingWork(database, container.binId)) {
+            this.requestWake(container.binId);
+          }
+        }
+      }
     },
 
     async onRuntimeHeartbeat(input) {
       if (closing || driver === undefined) return;
+      resetWakeRetryState(input.binId);
       const [existing] = await database
         .select()
         .from(runtimeContainers)
@@ -1132,7 +1535,16 @@ export function createRuntimeContainerCoordinator(
       clearIdleTimer(binId);
       try {
         const ready = await ensureContainerReady(binId);
-        if (!ready.ok) return ready;
+        if (!ready.ok) {
+          if (
+            ready.retryable &&
+            (await hasWakeablePendingWork(database, binId))
+          ) {
+            scheduleWakeRetry(binId);
+          }
+          return { ok: false, code: ready.code, message: ready.message };
+        }
+        resetWakeRetryState(binId);
         return { ok: true, value: await work() };
       } finally {
         const remaining = (activeLeases.get(binId) ?? 1) - 1;
@@ -1147,7 +1559,11 @@ export function createRuntimeContainerCoordinator(
 
     requestWake(binId) {
       if (closing || driver === undefined) return;
-      void ensureContainerReady(binId).catch((error: unknown) => {
+      if (wakeRetryTimers.has(binId) && !inFlightWakes.has(binId)) {
+        // Respect active backoff timer instead of hammering Docker on repeated triggers.
+        return;
+      }
+      void track(runBackgroundWakeAttempt(binId)).catch((error: unknown) => {
         process.stderr.write(
           `Background container wake failed for bin=${binId}: ${error instanceof Error ? error.message : String(error)}\n`,
         );
@@ -1161,6 +1577,9 @@ export function createRuntimeContainerCoordinator(
 
     async markWorkCompleted(binId) {
       if (closing || driver === undefined) return;
+      if (!(await hasWakeablePendingWork(database, binId))) {
+        resetWakeRetryState(binId);
+      }
       const [bin] = await database
         .select({
           sourceAdapter: binConfigurations.sourceAdapter,
@@ -1178,6 +1597,7 @@ export function createRuntimeContainerCoordinator(
 
     onBinRemoved(binId) {
       clearIdleTimer(binId);
+      resetWakeRetryState(binId);
       knownRuntimeIdByBin.delete(binId);
     },
 
@@ -1187,8 +1607,24 @@ export function createRuntimeContainerCoordinator(
       for (const row of rows) {
         if (row.lifecyclePhase !== "running") continue;
         if ((activeLeases.get(row.binId) ?? 0) > 0) continue;
-        const inspected = await driver.inspectContainer(row.containerId);
-        if (inspected === null || inspected.status !== "running") {
+        let inspected: ManagedContainerInspectResult | null;
+        try {
+          inspected = await driver.inspectContainer(row.containerId);
+        } catch {
+          continue;
+        }
+        if (inspected === null) {
+          await markContainerOffline(row.binId);
+          continue;
+        }
+        if (
+          inspected.status === "paused" ||
+          inspected.status === "restarting"
+        ) {
+          // A paused or restarting container is still alive; let heartbeat timeout govern liveness.
+          continue;
+        }
+        if (inspected.status !== "running") {
           await markContainerOffline(row.binId);
           continue;
         }
@@ -1218,6 +1654,9 @@ export function createRuntimeContainerCoordinator(
       closing = true;
       for (const timer of idleTimers.values()) clearTimeout(timer);
       idleTimers.clear();
+      for (const timer of wakeRetryTimers.values()) clearTimeout(timer);
+      wakeRetryTimers.clear();
+      wakeRetryAttempts.clear();
       for (const waiters of heartbeatWaiters.values()) {
         for (const wake of waiters) wake();
       }
