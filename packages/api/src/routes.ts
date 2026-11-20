@@ -118,6 +118,11 @@ function makeApp(operations: ApiOperations, productVersion: string) {
                 : {
                     lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
                   }),
+              ...(configuration.execution.lastWakeError === undefined
+                ? {}
+                : {
+                    lastWakeError: configuration.execution.lastWakeError,
+                  }),
             }
           : configuration.execution.status === "sleeping"
             ? {
@@ -130,6 +135,11 @@ function makeApp(operations: ApiOperations, productVersion: string) {
                   ? {}
                   : {
                       lastHeartbeatAt: configuration.execution.lastHeartbeatAt,
+                    }),
+                ...(configuration.execution.lastWakeError === undefined
+                  ? {}
+                  : {
+                      lastWakeError: configuration.execution.lastWakeError,
                     }),
               }
             : configuration.execution.status === "incompatible"

@@ -11,7 +11,10 @@ import {
 import { manualRuns, type Database } from "@binny/db";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 
-import { deriveManualRunStopReasonCode } from "./manual-run.ts";
+import {
+  deriveManualRunStopReasonCode,
+  resolveQueuedRunDetails,
+} from "./manual-run.ts";
 
 function invalidCursor(): ManualRunListOperation<never> {
   return {
@@ -155,6 +158,7 @@ export function createManualRunListStore(
           action: manualRuns.action,
           triggerType: manualRuns.triggerType,
           status: manualRuns.status,
+          sourceAdapterSnapshot: manualRuns.sourceAdapterSnapshot,
           startedAt: manualRuns.startedAt,
           finishedAt: manualRuns.finishedAt,
           failure: manualRuns.failure,
@@ -172,12 +176,23 @@ export function createManualRunListStore(
 
       const hasMore = rows.length > limit;
       const pageRows = rows.slice(0, limit);
+      const queuedRows = pageRows
+        .filter((row) => row.status === "queued")
+        .map((row) => ({
+          runId: row.runId,
+          binId: row.binId,
+          createdAtIso: row.createdAt,
+          sourceAdapterSnapshot: row.sourceAdapterSnapshot,
+        }));
+      const queuedDetails = await resolveQueuedRunDetails(database, queuedRows);
       const runs = pageRows.map((row) => {
         const stopReasonCode = deriveManualRunStopReasonCode({
           status: row.status,
           startedAt: row.startedAt,
           failure: row.failure,
         });
+        const queuedInfo =
+          row.status === "queued" ? queuedDetails.get(row.runId) : undefined;
         return manualRunListSummarySchema.parse({
           runId: row.runId,
           binId: row.binId,
@@ -185,6 +200,12 @@ export function createManualRunListStore(
           triggerType: row.triggerType,
           status: row.status,
           ...(stopReasonCode === undefined ? {} : { stopReasonCode }),
+          ...(queuedInfo?.queueReason === undefined
+            ? {}
+            : { queueReason: queuedInfo.queueReason }),
+          ...(queuedInfo?.lastWakeError === undefined
+            ? {}
+            : { lastWakeError: queuedInfo.lastWakeError }),
           createdAt: row.createdAt,
           ...(row.startedAt === null
             ? {}

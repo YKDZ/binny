@@ -56,6 +56,8 @@ const manualRunListSummaryFieldsSchema = manualRunSchema
     binId: true,
     action: true,
     status: true,
+    queueReason: true,
+    lastWakeError: true,
     createdAt: true,
     startedAt: true,
     finishedAt: true,
@@ -84,6 +86,22 @@ const manualRunListSummaryCheckedSchema =
         path: ["stopReasonCode"],
         message: "Non-terminal runs must not include a stopReasonCode.",
       });
+    }
+    if (summary.status !== "queued") {
+      if (summary.queueReason !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["queueReason"],
+          message: "Non-queued runs must not include a queueReason.",
+        });
+      }
+      if (summary.lastWakeError !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["lastWakeError"],
+          message: "Non-queued runs must not include a lastWakeError.",
+        });
+      }
     }
   });
 

@@ -837,6 +837,7 @@ export function createScheduleStore(
         .orderBy(schedules.nextDueAt, schedules.binId, schedules.scheduleId);
 
       for (const due of dueRows) {
+        let enqueuedBinId: string | undefined;
         await database.transaction(async (transaction) => {
           // 所有计划路径都遵守 bin → schedule → run 的锁序，避免配置与到期处理互锁。
           const [bin] = await readBinForRun(transaction, due.binId);
@@ -930,7 +931,11 @@ export function createScheduleStore(
               updatedAt: sql`clock_timestamp()`,
             })
             .where(eq(schedules.scheduleId, current.scheduleId));
+          if (run.ok) enqueuedBinId = current.binId;
         });
+        if (enqueuedBinId !== undefined) {
+          containerCoordinator?.requestWake(enqueuedBinId);
+        }
       }
     },
   };

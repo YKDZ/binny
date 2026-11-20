@@ -640,4 +640,168 @@ void describe("run and schedule list commands", () => {
     );
     assert.match(cancelledText, /^Abort cause: user_cancelled$/mu);
   });
+
+  void it("renders queueReason and lastWakeError in run get, run list, and bin get outputs", async () => {
+    const queuedRunId = "c5e41230-1111-4222-8333-444455556666";
+    const wakeError = {
+      code: "runtime_wake_start_failed",
+      message: "Docker socket unavailable",
+      at: "2026-11-20T10:00:05.000Z",
+    };
+    const wakeFetch: typeof globalThis.fetch = async (input, init) => {
+      const url = new URL(new Request(input, init).url);
+      if (url.pathname === "/meta") {
+        return Response.json({
+          product: { name: "Binny", version: "1.2.3" },
+          protocols: { httpApi: publicApiProtocolVersion },
+          capabilities: ["archives.search", "archive.query-contract"],
+          contracts: {
+            archiveQuery: {
+              version: archiveQueryContractVersion,
+              path: "/meta/query",
+            },
+          },
+        });
+      }
+      if (url.pathname === "/runs") {
+        return Response.json({
+          runs: [
+            {
+              runId: queuedRunId,
+              binId: "binny-sleep",
+              action: "collect",
+              triggerType: "schedule",
+              status: "queued",
+              queueReason: "runtime_sleeping",
+              lastWakeError: wakeError,
+              createdAt: "2026-11-20T10:00:00.000Z",
+            },
+          ],
+        });
+      }
+      if (url.pathname === `/bins/binny-sleep/runs/${queuedRunId}`) {
+        return Response.json({
+          runId: queuedRunId,
+          binId: "binny-sleep",
+          action: "collect",
+          sourceAdapterId: "rss-atom",
+          sourceAdapterVersion: "1.0.0",
+          status: "queued",
+          trigger: {
+            kind: "schedule",
+            scheduleId,
+            scheduledFor: "2026-11-20T10:00:00.000Z",
+          },
+          queueReason: "runtime_sleeping",
+          lastWakeError: wakeError,
+          createdAt: "2026-11-20T10:00:00.000Z",
+          referenceTime: "2026-11-20T10:00:00.000Z",
+        });
+      }
+      if (url.pathname === "/bins/binny-sleep") {
+        return Response.json({
+          id: "binny-sleep",
+          sourceAdapterId: "rss-atom",
+          identityId: "binny-sleep",
+          config: {},
+          runtimeSleep: { idleTimeoutSeconds: 0 },
+          browserIdleTimeoutSeconds: 0,
+          status: "active",
+          execution: {
+            status: "sleeping",
+            phase: "sleeping",
+            lastWakeError: wakeError,
+          },
+          sourceStateSnapshot: { freshness: "unknown" },
+          createdAt: "2026-11-20T09:00:00.000Z",
+          updatedAt: "2026-11-20T10:00:05.000Z",
+        });
+      }
+      return new Response("Not found", { status: 404 });
+    };
+
+    let runGetOutput = "";
+    const runGetText = await runCli({
+      argv: [
+        "node",
+        "binny",
+        "run",
+        "get",
+        "binny-sleep",
+        queuedRunId,
+        "--output",
+        "text",
+      ],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch: wakeFetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        runGetOutput += chunk;
+      },
+    });
+    assert.equal(runGetText, 0, runGetOutput);
+    assert.match(runGetOutput, /^Queue reason: runtime_sleeping$/mu);
+    assert.match(
+      runGetOutput,
+      /^Last wake error: runtime_wake_start_failed: Docker socket unavailable \(2026-11-20T10:00:05\.000Z\)$/mu,
+    );
+
+    let runListOutput = "";
+    const runListText = await runCli({
+      argv: ["node", "binny", "run", "list", "--output", "text"],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch: wakeFetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        runListOutput += chunk;
+      },
+    });
+    assert.equal(runListText, 0, runListOutput);
+    assert.match(runListOutput, /queueReason=runtime_sleeping/u);
+    assert.match(
+      runListOutput,
+      /lastWakeError=runtime_wake_start_failed \(Docker socket unavailable\)/u,
+    );
+
+    let runListStructured = "";
+    const runListJsonExit = await runCli({
+      argv: ["node", "binny", "run", "list"],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch: wakeFetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        runListStructured += chunk;
+      },
+    });
+    assert.equal(runListJsonExit, 0, runListStructured);
+    const parsedList = JSON.parse(runListStructured) as {
+      readonly data: {
+        readonly runs: readonly {
+          readonly queueReason?: string;
+          readonly lastWakeError?: { readonly code: string };
+        }[];
+      };
+    };
+    assert.equal(parsedList.data.runs[0]?.queueReason, "runtime_sleeping");
+    assert.equal(
+      parsedList.data.runs[0]?.lastWakeError?.code,
+      "runtime_wake_start_failed",
+    );
+
+    let binGetOutput = "";
+    const binGetText = await runCli({
+      argv: ["node", "binny", "bin", "get", "binny-sleep", "--output", "text"],
+      identity: { commandName: "binny", version: "9.8.7" },
+      fetch: wakeFetch,
+      apiUrl: "http://service.test",
+      write: async ({ chunk }) => {
+        binGetOutput += chunk;
+      },
+    });
+    assert.equal(binGetText, 0, binGetOutput);
+    assert.match(
+      binGetOutput,
+      /^Last wake error: runtime_wake_start_failed: Docker socket unavailable/mu,
+    );
+  });
 });

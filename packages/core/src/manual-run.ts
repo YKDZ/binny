@@ -14,6 +14,7 @@ import {
   manualRunTriggerSchema,
   runtimeHeartbeatTimeoutMs,
   runtimeProtocolVersion,
+  runtimeWakeErrorSchema,
   type ManualRunCommitLocator,
   type ManualRun,
   type ManualRunCompletion,
@@ -24,6 +25,7 @@ import {
   type ManualRunResult,
   type ManualRunTrigger,
   type ManualRunTriggerInput,
+  type RuntimeWakeError,
 } from "@binny/contracts";
 import {
   archiveCommits,
@@ -281,20 +283,30 @@ async function readRun(
     .where(and(eq(manualRuns.binId, binId), eq(manualRuns.runId, runId)));
   if (row === undefined) return undefined;
 
-  let queueReason =
-    row.status !== "queued"
-      ? null
-      : row.previousExecutionUnconfirmed
-        ? "previous_execution_unconfirmed"
-        : !row.runtimeOnline
-          ? "runtime_offline"
-          : row.humanSessionActive
-            ? "human_session_active"
-            : row.earlierRunActive
-              ? "earlier_run_active"
-              : row.earlierRunQueued
-                ? "earlier_run_queued"
-                : null;
+  if (row.status !== "queued") {
+    return {
+      ...row,
+      queueReason: null,
+      lastWakeError: undefined,
+    };
+  }
+
+  const [container] = await database
+    .select({
+      lifecyclePhase: runtimeContainers.lifecyclePhase,
+      lastWakeError: runtimeContainers.lastWakeError,
+    })
+    .from(runtimeContainers)
+    .where(eq(runtimeContainers.binId, binId));
+
+  let queueReason = deriveQueueReason({
+    previousExecutionUnconfirmed: Boolean(row.previousExecutionUnconfirmed),
+    runtimeOnline: Boolean(row.runtimeOnline),
+    containerLifecyclePhase: container?.lifecyclePhase,
+    humanSessionActive: Boolean(row.humanSessionActive),
+    earlierRunActive: Boolean(row.earlierRunActive),
+    earlierRunQueued: Boolean(row.earlierRunQueued),
+  });
   if (
     queueReason === null &&
     sourceAdapterManifestStoredSchema.parse(row.sourceAdapterSnapshot)
@@ -315,12 +327,198 @@ async function readRun(
       }
     }
   }
-  return { ...row, queueReason };
+  const lastWakeError = !row.runtimeOnline
+    ? parseWakeError(container?.lastWakeError)
+    : undefined;
+  return { ...row, queueReason, lastWakeError };
+}
+
+type QueueReason = ManualRun["queueReason"];
+
+function parseWakeError(raw: unknown): RuntimeWakeError | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const parsed = runtimeWakeErrorSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function deriveQueueReason(input: {
+  readonly previousExecutionUnconfirmed: boolean;
+  readonly runtimeOnline: boolean;
+  readonly containerLifecyclePhase:
+    | "running"
+    | "waking"
+    | "stopping"
+    | "sleeping"
+    | "offline"
+    | undefined;
+  readonly humanSessionActive: boolean;
+  readonly earlierRunActive: boolean;
+  readonly earlierRunQueued: boolean;
+}): NonNullable<QueueReason> | null {
+  if (input.previousExecutionUnconfirmed) {
+    return "previous_execution_unconfirmed";
+  }
+  if (!input.runtimeOnline) {
+    if (input.containerLifecyclePhase === "waking") return "runtime_waking";
+    if (
+      input.containerLifecyclePhase === "sleeping" ||
+      input.containerLifecyclePhase === "stopping"
+    ) {
+      return "runtime_sleeping";
+    }
+    return "runtime_offline";
+  }
+  if (input.humanSessionActive) return "human_session_active";
+  if (input.earlierRunActive) return "earlier_run_active";
+  if (input.earlierRunQueued) return "earlier_run_queued";
+  return null;
+}
+
+/** Resolves queue reasons and wake errors for queued rows in `run list`. */
+export async function resolveQueuedRunDetails(
+  database: Database,
+  queuedRuns: readonly {
+    readonly runId: string;
+    readonly binId: string;
+    readonly createdAtIso: string;
+    readonly sourceAdapterSnapshot: unknown;
+  }[],
+): Promise<
+  ReadonlyMap<
+    string,
+    {
+      readonly queueReason?: NonNullable<QueueReason>;
+      readonly lastWakeError?: RuntimeWakeError;
+    }
+  >
+> {
+  const result = new Map<
+    string,
+    {
+      readonly queueReason?: NonNullable<QueueReason>;
+      readonly lastWakeError?: RuntimeWakeError;
+    }
+  >();
+  if (queuedRuns.length === 0) return result;
+
+  const binIds = [...new Set(queuedRuns.map((run) => run.binId))];
+  const [connections, containers, sessions, binRuns] = await Promise.all([
+    database
+      .select({
+        binId: runtimeConnections.binId,
+        disconnected: runtimeConnections.disconnected,
+        ownerState: runtimeConnections.ownerState,
+        protocolVersion: runtimeConnections.protocolVersion,
+        environment: runtimeConnections.environment,
+        heartbeatFresh: gt(
+          runtimeConnections.lastHeartbeatAt,
+          sql`now() - ${runtimeHeartbeatTimeoutMs} * interval '1 millisecond'`,
+        ),
+      })
+      .from(runtimeConnections)
+      .where(inArray(runtimeConnections.binId, binIds)),
+    database
+      .select({
+        binId: runtimeContainers.binId,
+        lifecyclePhase: runtimeContainers.lifecyclePhase,
+        lastWakeError: runtimeContainers.lastWakeError,
+      })
+      .from(runtimeContainers)
+      .where(inArray(runtimeContainers.binId, binIds)),
+    database
+      .select({ binId: humanSessions.binId })
+      .from(humanSessions)
+      .where(
+        and(
+          inArray(humanSessions.binId, binIds),
+          inArray(humanSessions.status, [
+            "pending",
+            "opening",
+            "ready",
+            "closing",
+          ]),
+        ),
+      ),
+    database
+      .select({
+        runId: manualRuns.runId,
+        binId: manualRuns.binId,
+        status: manualRuns.status,
+        createdAtIso: sql<string>`to_char(${manualRuns.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(manualRuns)
+      .where(
+        and(
+          inArray(manualRuns.binId, binIds),
+          inArray(manualRuns.status, ["queued", "executing", "cancelling"]),
+        ),
+      ),
+  ]);
+
+  const connectionByBin = new Map(connections.map((c) => [c.binId, c]));
+  const containerByBin = new Map(containers.map((c) => [c.binId, c]));
+  const activeSessionBins = new Set(sessions.map((s) => s.binId));
+  const activeRunBins = new Set<string>();
+  const queuedRunsByBin = new Map<
+    string,
+    { readonly runId: string; readonly createdAtIso: string }[]
+  >();
+  for (const r of binRuns) {
+    if (r.status === "executing" || r.status === "cancelling") {
+      activeRunBins.add(r.binId);
+    } else if (r.status === "queued") {
+      const list = queuedRunsByBin.get(r.binId) ?? [];
+      list.push({ runId: r.runId, createdAtIso: r.createdAtIso });
+      queuedRunsByBin.set(r.binId, list);
+    }
+  }
+
+  for (const row of queuedRuns) {
+    const conn = connectionByBin.get(row.binId);
+    const container = containerByBin.get(row.binId);
+    const runtimeOnline =
+      conn !== undefined && !conn.disconnected && Boolean(conn.heartbeatFresh);
+    const binQueued = queuedRunsByBin.get(row.binId) ?? [];
+    const earlierRunQueued = binQueued.some(
+      (other) =>
+        other.createdAtIso < row.createdAtIso ||
+        (other.createdAtIso === row.createdAtIso && other.runId < row.runId),
+    );
+    let queueReason = deriveQueueReason({
+      previousExecutionUnconfirmed: conn?.ownerState === "unconfirmed",
+      runtimeOnline,
+      containerLifecyclePhase: container?.lifecyclePhase,
+      humanSessionActive: activeSessionBins.has(row.binId),
+      earlierRunActive: activeRunBins.has(row.binId),
+      earlierRunQueued,
+    });
+    if (
+      queueReason === null &&
+      conn !== undefined &&
+      sourceAdapterManifestStoredSchema.parse(row.sourceAdapterSnapshot)
+        .environment.browser.required
+    ) {
+      if (conn.protocolVersion < runtimeProtocolVersion) {
+        queueReason = "runtime_protocol_outdated";
+      } else if (isRuntimeBrowserBusy(conn.environment)) {
+        queueReason = "bin_busy";
+      }
+    }
+    const lastWakeError = !runtimeOnline
+      ? parseWakeError(container?.lastWakeError)
+      : undefined;
+    result.set(row.runId, {
+      ...(queueReason === null ? {} : { queueReason }),
+      ...(lastWakeError === undefined ? {} : { lastWakeError }),
+    });
+  }
+  return result;
 }
 
 type RunRow = NonNullable<Awaited<ReturnType<typeof readRun>>>;
 type RunOutputRow = Pick<RunRow, keyof typeof runSelection> & {
   readonly queueReason: RunRow["queueReason"];
+  readonly lastWakeError?: RuntimeWakeError | undefined;
 };
 
 function runTrigger(row: RunOutputRow): ManualRunTrigger {
@@ -355,6 +553,9 @@ async function rowToRun(
     sourceAdapterVersion: row.sourceAdapterVersion,
     status: row.status,
     ...(row.queueReason === null ? {} : { queueReason: row.queueReason }),
+    ...(row.lastWakeError === undefined
+      ? {}
+      : { lastWakeError: row.lastWakeError }),
     ...(row.cancelRequestedAt === null
       ? {}
       : { cancellationRequestedAt: row.cancelRequestedAt.toISOString() }),

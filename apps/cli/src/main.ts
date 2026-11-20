@@ -951,6 +951,15 @@ function createCliContract(identity: CliCommandIdentity) {
       ...(run.queueReason === undefined
         ? []
         : [`Queue reason: ${run.queueReason}`]),
+      ...(run.lastWakeError === undefined
+        ? []
+        : [
+            `Last wake error: ${run.lastWakeError.code}: ${run.lastWakeError.message}${
+              run.lastWakeError.at === undefined
+                ? ""
+                : ` (${run.lastWakeError.at})`
+            }`,
+          ]),
       `Created at: ${run.createdAt}`,
       `Reference time: ${run.referenceTime}`,
       ...(run.startedAt === undefined ? [] : [`Started at: ${run.startedAt}`]),
@@ -1080,6 +1089,16 @@ function createCliContract(identity: CliCommandIdentity) {
       `Source adapter: ${bin.sourceAdapterId}`,
       `Status: ${bin.status}`,
       `Runtime connection: ${runtimeConnectionLabel(bin.execution)}`,
+      ...("lastWakeError" in bin.execution &&
+      bin.execution.lastWakeError !== undefined
+        ? [
+            `Last wake error: ${bin.execution.lastWakeError.code}: ${bin.execution.lastWakeError.message}${
+              bin.execution.lastWakeError.at === undefined
+                ? ""
+                : ` (${bin.execution.lastWakeError.at})`
+            }`,
+          ]
+        : []),
       `Runtime sleep: ${runtimeSleepPolicyLabel(bin.runtimeSleep)}`,
       `Browser: ${browserWorkStateLabel(bin.execution)}`,
       `Source state: ${bin.sourceStateSnapshot.freshness}${
@@ -2067,10 +2086,23 @@ function createCliContract(identity: CliCommandIdentity) {
   const runListText = (page: z.infer<typeof manualRunListPageSchema>) =>
     text.lines([
       "Runs",
-      ...page.runs.map(
-        (run) =>
-          `${run.createdAt}  ${run.binId}  ${run.action}  ${run.triggerType}  ${run.status}  ${run.stopReasonCode ?? "-"}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`,
-      ),
+      ...page.runs.flatMap((run) => {
+        const line = `${run.createdAt}  ${run.binId}  ${run.action}  ${run.triggerType}  ${run.status}  ${run.stopReasonCode ?? "-"}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`;
+        if (run.queueReason === undefined && run.lastWakeError === undefined) {
+          return [line];
+        }
+        const details = [
+          ...(run.queueReason === undefined
+            ? []
+            : [`queueReason=${run.queueReason}`]),
+          ...(run.lastWakeError === undefined
+            ? []
+            : [
+                `lastWakeError=${run.lastWakeError.code} (${run.lastWakeError.message})`,
+              ]),
+        ];
+        return [`${line}  ${details.join("  ")}`];
+      }),
       ...(page.nextCursor === undefined
         ? []
         : [

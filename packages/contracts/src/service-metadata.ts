@@ -4,10 +4,11 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 8 adds unified `runtimeSleep` configuration and the `"sleeping"`
- * runtime execution status on bin details and listings.
+ * Version 9 adds `"runtime_sleeping"` / `"runtime_waking"` run queue reasons
+ * and optional `lastWakeError` details on queued runs, run summaries, and bin
+ * execution summaries.
  */
-export const publicApiProtocolVersion = 8;
+export const publicApiProtocolVersion = 9;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 4;

@@ -31,6 +31,7 @@ let forwardedOwnerGeneration: string | undefined;
 let forwardedAt: number | undefined;
 let forwardedStatusCode: number | undefined;
 let forwardedBrowserIdleTimeoutSeconds: number | null | undefined;
+const rejectedRuntimeBins = new Map<string, number>();
 
 function readPort(name: string, fallback: number): number {
   const port = Number(process.env[name] ?? String(fallback));
@@ -267,6 +268,19 @@ async function handleRuntimeRequest(
   response: ServerResponse,
 ): Promise<void> {
   const body = await readBody(request);
+  const runtimeBinMatch = /^\/bins\/([^/]+)\/runtime\//u.exec(
+    request.url ?? "",
+  );
+  if (
+    runtimeBinMatch?.[1] !== undefined &&
+    rejectedRuntimeBins.has(runtimeBinMatch[1])
+  ) {
+    const status = rejectedRuntimeBins.get(runtimeBinMatch[1]) ?? 503;
+    sendJson(response, status, {
+      error: "Simulated transient runtime rejection.",
+    });
+    return;
+  }
   let decoded: unknown;
   const requestBinId = /^\/bins\/([^/]+)\/runtime\/heartbeat(?:\?|$)/u.exec(
     request.url ?? "",
@@ -499,7 +513,50 @@ const control = createServer((request, response) => {
         ...(forwardedBrowserIdleTimeoutSeconds === undefined
           ? {}
           : { forwardedBrowserIdleTimeoutSeconds }),
+        rejectedRuntimeBins: [...rejectedRuntimeBins.keys()],
       });
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      request.url === "/control/reject-runtime"
+    ) {
+      const body = await readBody(request);
+      let binId = "binny-runs-one";
+      let status = 503;
+      try {
+        const parsed = JSON.parse(body.toString("utf8")) as {
+          readonly binId?: unknown;
+          readonly status?: unknown;
+        };
+        if (typeof parsed.binId === "string" && parsed.binId.length > 0) {
+          binId = parsed.binId;
+        }
+        if (
+          typeof parsed.status === "number" &&
+          Number.isInteger(parsed.status) &&
+          parsed.status >= 400
+        ) {
+          status = parsed.status;
+        }
+      } catch {}
+      rejectedRuntimeBins.set(binId, status);
+      sendJson(response, 200, { rejected: true, binId, status });
+      return;
+    }
+    if (request.method === "POST" && request.url === "/control/allow-runtime") {
+      const body = await readBody(request);
+      let binId = "binny-runs-one";
+      try {
+        const parsed = JSON.parse(body.toString("utf8")) as {
+          readonly binId?: unknown;
+        };
+        if (typeof parsed.binId === "string" && parsed.binId.length > 0) {
+          binId = parsed.binId;
+        }
+      } catch {}
+      rejectedRuntimeBins.delete(binId);
+      sendJson(response, 200, { rejected: false, binId });
       return;
     }
     if (request.method === "POST" && request.url === "/control/arm") {
