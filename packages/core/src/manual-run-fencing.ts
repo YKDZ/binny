@@ -1,4 +1,5 @@
 import {
+  runtimeEnvironmentStoredSchema,
   runtimeHeartbeatTimeoutMs,
   manualRunFailureSchema,
 } from "@binny/contracts";
@@ -15,6 +16,13 @@ const interruptedFailure = {
   suggestion: "检查运行器后重新触发新的运行。",
   requiresHuman: false,
 } as const;
+
+/** Returns true while a single bin's browser is stopping or in an unknown power state. */
+export function isRuntimeBrowserBusy(environment: unknown): boolean {
+  const parsed = runtimeEnvironmentStoredSchema.safeParse(environment);
+  const status = parsed.success ? parsed.data.browser.power?.status : undefined;
+  return status === "stopping" || status === "unknown";
+}
 
 const activeRunOwner = alias(runtimeConnections, "active_run_owner");
 

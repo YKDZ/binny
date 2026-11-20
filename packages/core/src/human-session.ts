@@ -39,7 +39,7 @@ import {
   sql,
 } from "drizzle-orm";
 
-import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
+import { isRuntimeBrowserBusy } from "./manual-run-fencing.ts";
 
 const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
 
@@ -84,7 +84,6 @@ function tokenHash(token: string): string {
 async function rowToSession(
   database: Database | Transaction,
   row: SessionRow,
-  browserCapacity: BrowserCapacityCoordinator,
 ): Promise<HumanSession> {
   const failure =
     row.failure === null
@@ -113,9 +112,8 @@ async function rowToSession(
     } else {
       const [owner] = await database
         .select({
-          runtimeId: runtimeConnections.runtimeId,
-          ownerGeneration: runtimeConnections.ownerGeneration,
           protocolVersion: runtimeConnections.protocolVersion,
+          environment: runtimeConnections.environment,
           online: exists(
             database
               .select({ binId: runtimeConnections.binId })
@@ -137,16 +135,10 @@ async function rowToSession(
         .where(eq(runtimeConnections.binId, row.binId));
       if (owner === undefined || !owner.online) {
         queueReason = "runtime_offline";
-      } else {
-        queueReason = await browserCapacity.queueReason(
-          database,
-          {
-            binId: row.binId,
-            runtimeId: owner.runtimeId,
-            ownerGeneration: owner.ownerGeneration,
-          },
-          owner.protocolVersion >= runtimeProtocolVersion,
-        );
+      } else if (owner.protocolVersion < runtimeProtocolVersion) {
+        queueReason = "runtime_protocol_outdated";
+      } else if (isRuntimeBrowserBusy(owner.environment)) {
+        queueReason = "bin_busy";
       }
     }
   }
@@ -203,10 +195,9 @@ export async function applyRuntimeHumanSessionHeartbeat(
     readonly runtimeId: string;
     readonly ownerGeneration: string;
     readonly ownerConfirmed: boolean;
-    readonly supportsReservationId: boolean;
+    readonly runtimeEnvironment: unknown;
     readonly event?: RuntimeHumanSessionEvent;
   },
-  browserCapacity: BrowserCapacityCoordinator,
 ): Promise<RuntimeHumanSessionControl | undefined> {
   let session = await readActiveSession(transaction, options.binId);
   if (session === undefined) return undefined;
@@ -341,48 +332,29 @@ export async function applyRuntimeHumanSessionHeartbeat(
         ),
       )
       .limit(1);
-    if (activeRun === undefined) {
-      const reservation = await browserCapacity.reserve(
-        transaction,
-        {
-          binId: options.binId,
+    if (
+      activeRun === undefined &&
+      !isRuntimeBrowserBusy(options.runtimeEnvironment)
+    ) {
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: "opening",
           runtimeId: options.runtimeId,
           ownerGeneration: generation,
-        },
-        options.supportsReservationId,
-      );
-      if (reservation.kind === "reserved") {
-        await transaction
-          .update(humanSessions)
-          .set({
-            status: "opening",
-            runtimeId: options.runtimeId,
-            ownerGeneration: generation,
-            gatewayClosed: false,
-            runtimeClosed: false,
-            failure: null,
-            updatedAt: sql`clock_timestamp()`,
-          })
-          .where(eq(humanSessions.sessionId, session.sessionId));
-        session =
-          (await readActiveSession(transaction, options.binId)) ?? session;
-      }
+          gatewayClosed: false,
+          runtimeClosed: false,
+          failure: null,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+      session =
+        (await readActiveSession(transaction, options.binId)) ?? session;
     }
   }
 
   if (session.status === "opening" && options.ownerConfirmed) {
-    const reservation = await browserCapacity.reservation(transaction, {
-      binId: options.binId,
-      runtimeId: options.runtimeId,
-      ownerGeneration: generation,
-    });
-    if (
-      reservation === undefined ||
-      reservation.status === "stopping" ||
-      reservation.status === "unknown" ||
-      !options.supportsReservationId
-    )
-      return undefined;
+    if (isRuntimeBrowserBusy(options.runtimeEnvironment)) return undefined;
     const tunnelToken = randomBytes(32).toString("base64url");
     await transaction
       .update(humanSessions)
@@ -395,35 +367,18 @@ export async function applyRuntimeHumanSessionHeartbeat(
       sessionId: session.sessionId,
       action: "open",
       tunnelToken,
-      ...(options.supportsReservationId
-        ? { browserReservationId: reservation.reservationId }
-        : {}),
     };
   }
   if (session.status === "closing") {
-    const reservation =
-      ownsSession && options.supportsReservationId
-        ? await browserCapacity.reservation(transaction, {
-            binId: options.binId,
-            runtimeId: options.runtimeId,
-            ownerGeneration: generation,
-          })
-        : undefined;
     return {
       sessionId: session.sessionId,
       action: "close",
-      ...(reservation === undefined
-        ? {}
-        : { browserReservationId: reservation.reservationId }),
     };
   }
   return undefined;
 }
 
-export function createHumanSessionStore(
-  database: Database,
-  browserCapacity: BrowserCapacityCoordinator,
-): HumanSessionStore {
+export function createHumanSessionStore(database: Database): HumanSessionStore {
   return {
     async requestHumanSession(binId) {
       return await database.transaction(async (transaction) => {
@@ -472,7 +427,7 @@ export function createHumanSessionStore(
         return {
           ok: true,
           value: {
-            ...(await rowToSession(transaction, row, browserCapacity)),
+            ...(await rowToSession(transaction, row)),
             viewerPath:
               "/human-sessions/" +
               sessionId +
@@ -502,7 +457,7 @@ export function createHumanSessionStore(
           )
         : {
             ok: true,
-            value: await rowToSession(database, row, browserCapacity),
+            value: await rowToSession(database, row),
           };
     },
 
@@ -549,7 +504,7 @@ export function createHumanSessionStore(
             throw new Error("待处理的浏览器人工会话没有关闭记录。");
           return {
             ok: true,
-            value: await rowToSession(transaction, closed, browserCapacity),
+            value: await rowToSession(transaction, closed),
           };
         }
         const [updated] = await transaction
@@ -568,7 +523,7 @@ export function createHumanSessionStore(
           throw new Error("浏览器人工会话关闭请求没有返回记录。");
         return {
           ok: true,
-          value: await rowToSession(transaction, updated, browserCapacity),
+          value: await rowToSession(transaction, updated),
         };
       });
     },

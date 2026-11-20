@@ -285,7 +285,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 7;
+export const runtimeProtocolVersion = 8;
 
 const sourceAccessSnapshotGroupSchema = z
   .object({
@@ -457,20 +457,6 @@ export const runtimeEnvironmentSchema = z.object({
   }),
 });
 
-export const runtimeBrowserPowerEventSchema = z
-  .object({
-    reservationId: z.string().uuid(),
-    event: z.enum([
-      "starting",
-      "ready",
-      "stopping",
-      "stopped",
-      "unknown",
-      "not_started",
-    ]),
-  })
-  .strict();
-
 const runtimeOwnerGenerationSchema = postgresTextSchema
   .regex(/^[1-9][0-9]*$/u, "运行器所有权代际必须是正十进制整数。")
   .refine(
@@ -493,25 +479,10 @@ const runtimeHeartbeatFieldsSchema = z.object({
   sourceStateSnapshot: runtimeSourceStateSnapshotSchema.optional(),
 });
 
-const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema
-  .extend({
-    protocolVersion: z.literal(runtimeProtocolVersion),
-    runtimeControlUrl: runtimeControlUrlSchema,
-    browserPowerEvent: runtimeBrowserPowerEventSchema.optional(),
-  })
-  .superRefine((input, context) => {
-    const event = input.browserPowerEvent;
-    if (
-      event?.event === "not_started" &&
-      input.environment.browser.power.status !== "stopped"
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["environment", "browser", "power", "status"],
-        message: "未启动确认只能伴随已停止的真实电源状态。",
-      });
-    }
-  });
+const runtimeHeartbeatCurrentSchema = runtimeHeartbeatFieldsSchema.extend({
+  protocolVersion: z.literal(runtimeProtocolVersion),
+  runtimeControlUrl: runtimeControlUrlSchema,
+});
 
 export const runtimeHeartbeatInputSchema = withPostgresJsonSchemaProjection(
   runtimeHeartbeatCurrentSchema,
@@ -685,8 +656,6 @@ export const binErrorSchema = z.object({
       "runtime_owner_active",
       "runtime_configuration_validation_unavailable",
       "configuration_changed",
-      "browser_capacity_active",
-      "browser_reservation_mismatch",
     ]),
     message: postgresTextSchema,
     path: z.array(z.union([z.string(), z.number()])).optional(),

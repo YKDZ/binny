@@ -34,7 +34,6 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateSourceAdapterConfiguration } from "./bin-configuration.ts";
-import type { BrowserCapacityCoordinator } from "./browser-capacity.ts";
 import { applyRuntimeHumanSessionHeartbeat } from "./human-session.ts";
 import {
   confirmManualRunOwnerStopped,
@@ -385,7 +384,6 @@ export async function readRuntimeExecution(
 
 export function createRuntimeConnectionStore(
   database: Database,
-  browserCapacity: BrowserCapacityCoordinator,
 ): RuntimeConnectionOperations {
   return {
     async getExecution(binId) {
@@ -666,15 +664,6 @@ export function createRuntimeConnectionStore(
               path: ["activeRunId"],
             });
           }
-          if (current.ownerGeneration !== undefined) {
-            // 更高代际只有在取得同卷 flock 后才能首个心跳；正式镜像以此进程作为 PID1，
-            // 旧容器进程树已退出，故可回收旧 owner 的浏览器容量占位。
-            await browserCapacity.releaseReplacedOwner(transaction, {
-              binId,
-              runtimeId: current.runtimeId,
-              ownerGeneration: current.ownerGeneration,
-            });
-          }
           await interruptReplacedManualRuns(
             transaction,
             binId,
@@ -774,55 +763,20 @@ export function createRuntimeConnectionStore(
         const row = await selectRuntimeConnection(transaction, binId);
         if (row === undefined) throw new Error("心跳写入后 bin 配置意外消失。");
         const execution = rowExecution(row);
-        if (
-          execution.status === "online" &&
-          checked.data.browserPowerEvent !== undefined
-        ) {
-          const owner = {
+        const humanSession = await applyRuntimeHumanSessionHeartbeat(
+          transaction,
+          {
             binId,
             runtimeId: checked.data.runtimeId,
             ownerGeneration: checked.data.ownerGeneration,
-          };
-          const event = checked.data.browserPowerEvent;
-          const accepted =
-            event.event === "not_started"
-              ? await browserCapacity.confirmNotStarted(
-                  transaction,
-                  owner,
-                  event.reservationId,
-                )
-              : await browserCapacity.reportPower(
-                  transaction,
-                  owner,
-                  event.reservationId,
-                  event.event,
-                );
-          if (!accepted) {
-            return failure(409, {
-              code: "browser_reservation_mismatch",
-              message: "浏览器预约阶段已改变；运行器必须先确认当前尝试。",
-              path: ["browserPowerEvent"],
-            });
-          }
-        }
-        const humanSession =
-          checked.data.browserPowerEvent !== undefined
-            ? undefined
-            : await applyRuntimeHumanSessionHeartbeat(
-                transaction,
-                {
-                  binId,
-                  runtimeId: checked.data.runtimeId,
-                  ownerGeneration: checked.data.ownerGeneration,
-                  ownerConfirmed:
-                    ownerState === "confirmed" && execution.status === "online",
-                  supportsReservationId: true,
-                  ...(checked.data.humanSessionEvent === undefined
-                    ? {}
-                    : { event: checked.data.humanSessionEvent }),
-                },
-                browserCapacity,
-              );
+            ownerConfirmed:
+              ownerState === "confirmed" && execution.status === "online",
+            runtimeEnvironment: checked.data.environment,
+            ...(checked.data.humanSessionEvent === undefined
+              ? {}
+              : { event: checked.data.humanSessionEvent }),
+          },
+        );
         return execution.status === "incompatible"
           ? { ok: false, status: 409, error: execution.error }
           : {
