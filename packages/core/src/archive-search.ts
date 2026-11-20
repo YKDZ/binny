@@ -50,7 +50,7 @@ import {
   ArchiveRequestCancelled,
   assertArchiveQueryActive,
   executeCancellableArchiveQuery,
-} from "./archive-query-budget.ts";
+} from "./archive-query-cancellation.ts";
 import {
   canonicalizeArchiveTimeZone,
   archiveTimeZoneAliases,

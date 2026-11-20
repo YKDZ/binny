@@ -62,14 +62,33 @@ const checkOutputSchema = z
   })
   .strict();
 
+const incompleteScopeSchema = z
+  .object({
+    scope: z.string().min(1),
+    reasonCode: z.string().min(1),
+    message: z.string().min(1),
+    remainingCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
 const collectOutputSchema = z
-  .object({ completedScopes: z.array(z.string()).readonly() })
+  .object({
+    completedScopes: z.array(z.string()).readonly(),
+    collectionCompleteness: z.enum(["complete", "partial"]),
+    incompleteScopes: z.array(incompleteScopeSchema).readonly(),
+    processedItems: z.number().int().nonnegative().optional(),
+    remainingItems: z.number().int().nonnegative().optional(),
+  })
   .strict();
 
 const syncOutputSchema = z
   .object({
     completedScopes: z.array(z.string()).readonly(),
     initializedScopes: z.array(z.string()).readonly().optional(),
+    collectionCompleteness: z.enum(["complete", "partial"]),
+    incompleteScopes: z.array(incompleteScopeSchema).readonly(),
+    processedChangedItems: z.number().int().nonnegative().optional(),
+    remainingChangedItems: z.number().int().nonnegative().optional(),
   })
   .strict();
 
@@ -393,7 +412,7 @@ export function extractArticleMetadata(html: string): ExtractedArticleMetadata {
         a !== null &&
         typeof a === "object" &&
         "name" in a &&
-        typeof (a as { name: unknown }).name === "string"
+        typeof a.name === "string"
       ) {
         const name = (a as { name: string }).name;
         if (!authors.includes(name)) authors.push(name);
@@ -596,6 +615,7 @@ export async function requestFeed(
   } catch (error) {
     throw new Error(
       `Failed to parse RSS XML feed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 
@@ -876,6 +896,18 @@ async function checkMistralNews(
   };
 }
 
+function buildIncompleteNewsScope(
+  remainingCount: number,
+  message: string,
+): z.infer<typeof incompleteScopeSchema> {
+  return {
+    scope: "news",
+    reasonCode: "max_items_reached",
+    message,
+    remainingCount,
+  };
+}
+
 async function syncMistralNews(
   context: SourceAdapterContext<MistralConfig, never, MistralExtensions>,
   params: MistralParams,
@@ -907,12 +939,18 @@ async function syncMistralNews(
   }
 
   if (feedResult.status === "not-modified") {
-    return { completedScopes: ["news"] };
+    return {
+      completedScopes: ["news"],
+      collectionCompleteness: "complete",
+      incompleteScopes: [],
+      processedChangedItems: 0,
+      remainingChangedItems: 0,
+    };
   }
 
   const items = feedResult.items;
 
-  // 1. Initial sync: establish baseline without fetching historical article HTML pages
+  // 1. Initial sync: establish baseline across the full feed without fetching article HTML pages
   if (!isInitialized) {
     const entries: Record<string, IncrementalEntryRecord> = {};
     for (const item of items) {
@@ -940,17 +978,22 @@ async function syncMistralNews(
     return {
       completedScopes: ["news"],
       initializedScopes: ["news"],
+      collectionCompleteness: "complete",
+      incompleteScopes: [],
+      processedChangedItems: 0,
+      remainingChangedItems: 0,
     };
   }
 
-  // 2. Subsequent sync: fetch and archive only new or modified items
-  const problems: { key?: string; message: string }[] = [];
-  let candidateItems = items;
-  if (params.maxItems !== undefined && params.maxItems > 0) {
-    candidateItems = candidateItems.slice(0, params.maxItems);
-  }
+  // 2. Subsequent sync: filter out unchanged items first, then apply maxItems to changed items only
+  const changedItems: {
+    readonly item: ParsedMistralFeedItem;
+    readonly itemUrl: string;
+    readonly key: string;
+    readonly fingerprint: string;
+  }[] = [];
 
-  for (const item of candidateItems) {
+  for (const item of items) {
     const itemUrl = item.url || item.id;
     if (!itemUrl) continue;
     const key = extractSlugOrGuid(itemUrl, item.id);
@@ -963,30 +1006,42 @@ async function syncMistralNews(
       item.updated ?? undefined,
     );
 
-    if (!hasChanged) {
-      continue;
+    if (hasChanged) {
+      changedItems.push({ item, itemUrl, key, fingerprint });
     }
+  }
 
+  const itemsToProcess =
+    params.maxItems !== undefined && params.maxItems > 0
+      ? changedItems.slice(0, params.maxItems)
+      : changedItems;
+  const remainingChangedItems = changedItems.length - itemsToProcess.length;
+
+  const problems: { key?: string; message: string }[] = [];
+  let processedChangedItems = 0;
+
+  for (const entry of itemsToProcess) {
     try {
       const { submitResult } = await processAndSubmitArticle(
         context,
-        itemUrl,
-        item,
+        entry.itemUrl,
+        entry.item,
       );
 
-      upsertIncrementalScopeEntry(state, "news", key, {
-        fingerprint,
-        ...(item.published ? { publishedAt: item.published } : {}),
-        ...(item.updated ? { updatedAt: item.updated } : {}),
+      upsertIncrementalScopeEntry(state, "news", entry.key, {
+        fingerprint: entry.fingerprint,
+        ...(entry.item.published ? { publishedAt: entry.item.published } : {}),
+        ...(entry.item.updated ? { updatedAt: entry.item.updated } : {}),
         archivedCompleteness: submitResult.hasMediaFailures
           ? "partial"
           : "complete",
       });
       await saveIncrementalSyncState(context, state);
+      processedChangedItems += 1;
     } catch (error) {
       if (context.signal.aborted) throw error;
       problems.push({
-        key,
+        key: entry.key,
         message: error instanceof Error ? error.message : String(error),
       });
     }
@@ -996,13 +1051,35 @@ async function syncMistralNews(
     throw failureFromProblems("sync", problems);
   }
 
+  // Defer validator updates while changed items remain so the next run gets 200 instead of 304.
+  if (remainingChangedItems > 0) {
+    return {
+      completedScopes: [],
+      collectionCompleteness: "partial",
+      incompleteScopes: [
+        buildIncompleteNewsScope(
+          remainingChangedItems,
+          `Processed ${processedChangedItems} changed item(s); ${remainingChangedItems} changed item(s) remain in the feed for subsequent sync runs.`,
+        ),
+      ],
+      processedChangedItems,
+      remainingChangedItems,
+    };
+  }
+
   updateIncrementalScopeValidators(state, "news", {
     etag: feedResult.etag,
     lastModified: feedResult.lastModified,
   });
   await saveIncrementalSyncState(context, state);
 
-  return { completedScopes: ["news"] };
+  return {
+    completedScopes: ["news"],
+    collectionCompleteness: "complete",
+    incompleteScopes: [],
+    processedChangedItems,
+    remainingChangedItems: 0,
+  };
 }
 
 async function collectMistralNews(
@@ -1013,6 +1090,7 @@ async function collectMistralNews(
     url: string;
     feedItem?: ParsedMistralFeedItem;
   }[] = [];
+  let remainingItems = 0;
 
   if (params.itemUrls !== undefined && params.itemUrls.length > 0) {
     let feedItems: readonly ParsedMistralFeedItem[] = [];
@@ -1056,6 +1134,7 @@ async function collectMistralNews(
     if (params.maxItems !== undefined && params.maxItems > 0) {
       items = items.slice(0, params.maxItems);
     }
+    remainingItems = feedResult.items.length - items.length;
 
     targetItems = items.map((item) => ({
       url: item.url || item.id,
@@ -1064,6 +1143,7 @@ async function collectMistralNews(
   }
 
   const problems: { key?: string; message: string }[] = [];
+  let processedItems = 0;
   let state: IncrementalSyncState | undefined;
   try {
     if (context.persistentState !== undefined) {
@@ -1102,6 +1182,7 @@ async function collectMistralNews(
         });
         await saveIncrementalSyncState(context, state);
       }
+      processedItems += 1;
     } catch (error) {
       if (context.signal.aborted) throw error;
       problems.push({
@@ -1115,7 +1196,28 @@ async function collectMistralNews(
     throw failureFromProblems("collect", problems);
   }
 
-  return { completedScopes: ["news"] };
+  if (remainingItems > 0) {
+    return {
+      completedScopes: [],
+      collectionCompleteness: "partial",
+      incompleteScopes: [
+        buildIncompleteNewsScope(
+          remainingItems,
+          `Collected ${processedItems} item(s); ${remainingItems} item(s) in the feed exceeded maxItems.`,
+        ),
+      ],
+      processedItems,
+      remainingItems,
+    };
+  }
+
+  return {
+    completedScopes: ["news"],
+    collectionCompleteness: "complete",
+    incompleteScopes: [],
+    processedItems,
+    remainingItems: 0,
+  };
 }
 
 export const sourceAdapter = defineSourceAdapter({

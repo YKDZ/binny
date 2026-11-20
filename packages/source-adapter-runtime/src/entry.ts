@@ -674,7 +674,34 @@ function startActionWorker(
             ...(isSourceAccessUnavailableError(error)
               ? { code: "source_access_state_unavailable" }
               : errorCode === "source_access_deadline_exceeded"
-                ? { code: "source_access_deadline_exceeded" }
+                ? {
+                    code: "source_access_deadline_exceeded",
+                    ...(typeof error === "object" &&
+                    error !== null &&
+                    "waitReason" in error &&
+                    typeof error.waitReason === "string"
+                      ? { waitReason: error.waitReason }
+                      : {}),
+                    ...(typeof error === "object" &&
+                    error !== null &&
+                    "notBeforeEpochMs" in error &&
+                    typeof error.notBeforeEpochMs === "number"
+                      ? { notBeforeEpochMs: error.notBeforeEpochMs }
+                      : {}),
+                    ...(typeof error === "object" &&
+                    error !== null &&
+                    "cooldownStatus" in error &&
+                    (error.cooldownStatus === 429 ||
+                      error.cooldownStatus === 503)
+                      ? { cooldownStatus: error.cooldownStatus }
+                      : {}),
+                    ...(typeof error === "object" &&
+                    error !== null &&
+                    "retryAfter" in error &&
+                    typeof error.retryAfter === "string"
+                      ? { retryAfter: error.retryAfter }
+                      : {}),
+                  }
                 : errorCode === "runtime_owner_mismatch"
                   ? { code: "runtime_owner_mismatch" }
                   : {}),

@@ -153,6 +153,20 @@ function fakeService(options: {
         },
       });
     if (url.pathname === "/bins") return Response.json({ bins: [] });
+    if (
+      url.pathname ===
+      "/archives/items/11111111-1111-4111-8111-111111111111/relations"
+    ) {
+      return Response.json(
+        {
+          error: {
+            code: "resource_storage_unavailable",
+            message: "Archive relations read temporarily unavailable.",
+          },
+        },
+        { status: 503 },
+      );
+    }
     return new Response("Not found", { status: 404 });
   };
   return { fetch, requests };
@@ -1279,5 +1293,27 @@ void describe("查询服务发现", () => {
       diagnostic: { allowedValues: ["certain", "undetermined"] },
     });
     assert.deepEqual(service.requests, []);
+  });
+
+  void it("reports declared 503 API errors for archive relations", async () => {
+    const service = fakeService({});
+    const result = await run(
+      [
+        "archive",
+        "relations",
+        "11111111-1111-4111-8111-111111111111",
+        "--bin",
+        "rss-main",
+        "--direction",
+        "outgoing",
+      ],
+      service.fetch,
+    );
+
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(failureData(result.output), {
+      code: "resource_storage_unavailable",
+      message: "Archive relations read temporarily unavailable.",
+    });
   });
 });
