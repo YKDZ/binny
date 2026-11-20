@@ -24,7 +24,7 @@ import type { ArchiveTransaction } from "./archive-lock.ts";
 import {
   assertArchiveQueryActive,
   executeCancellableArchiveQuery,
-} from "./archive-query-budget.ts";
+} from "./archive-query-cancellation.ts";
 
 type ResourceRow = typeof archiveResources.$inferSelect;
 type ResourceAvailabilityRow = Pick<

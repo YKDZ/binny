@@ -639,7 +639,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/batch-read",
       description:
-        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; complete responses are limited to 16 MiB and callers may wait for completion or disconnect to cancel.",
+        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; requests accept 1 to 50 references and complete responses are limited to 16 MiB. Split larger batches into smaller requests, or read a single oversized revision with GET /archives/revisions/:revisionId (CLI: archive revision <revision-id>). Callers may wait for completion or disconnect to cancel.",
       requestSchema: archiveApiSchemas.batchReadInput,
       responseSchema: archiveApiSchemas.batchReadResponse,
     },

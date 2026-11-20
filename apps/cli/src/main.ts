@@ -2741,7 +2741,8 @@ function createCliContract(identity: CliCommandIdentity) {
     if (
       response.status === 400 ||
       response.status === 404 ||
-      response.status === 409
+      response.status === 409 ||
+      response.status === 503
     )
       return outcome.failure.apiError((await response.json()).error);
     throw new Error("服务返回了未声明的关系读取状态。");
@@ -3216,7 +3217,7 @@ function createCliContract(identity: CliCommandIdentity) {
           "Read exact revisions selected from search results without resolving the current view.",
         helpSupplement: text.lines([
           "Run archive search first, then pass the result itemId with that result's match binId, revisionId, and archiveSeq in one JSON array with --references.",
-          "A request accepts 1 to 50 references and returns every result in input order, including duplicates and unreadable references. Complete responses are limited to 16 MiB; split the request into smaller batches if it exceeds the limit.",
+          "A request accepts 1 to 50 references and returns every result in input order, including duplicates and unreadable references. Complete responses are limited to 16 MiB; split the request into smaller batches if it exceeds the limit, or read an oversized single revision directly with archive revision <revision-id>.",
           "Stored body representations are returned in full. Missing media is reported per resource and does not prevent an available body from being read.",
         ]),
         fields: {
@@ -3776,6 +3777,9 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "revision",
         description: "读取一个不可变内容版本。",
+        helpSupplement: text.lines([
+          "Reads one complete immutable content revision without the 16 MiB batch-read response limit; use this fallback when archive batch-read rejects a single oversized revision.",
+        ]),
         fields: {
           revisionId: { kind: "positional", description: "内容版本 ID" },
         },
