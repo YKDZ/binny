@@ -38,7 +38,6 @@ const binSelection = {
   identityId: binConfigurations.identityId,
   config: binConfigurations.config,
   configNativeValid: binConfigurations.configNativeValid,
-  browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeSleepIdleTimeoutSeconds:
     binConfigurations.runtimeSleepIdleTimeoutSeconds,
   status: binConfigurations.status,
@@ -282,20 +281,23 @@ export function validateSourceAdapterConfiguration(
   };
 }
 
+function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
+  return (
+    !sourceAdapter.environment.browser.required ||
+    sourceAdapter.environment.browser.profileReuseAfterRestart
+  );
+}
+
 function validateRuntimeSleepIdlePolicy(
   sourceAdapter: SourceAdapterManifest,
   idleTimeoutSeconds: number | null,
   errorPath: (string | number)[],
 ): BinError | undefined {
-  const browser = sourceAdapter.environment.browser;
-  if (
-    idleTimeoutSeconds === null ||
-    !browser.required ||
-    browser.profileReuseAfterRestart
-  )
+  if (idleTimeoutSeconds === null || canAdapterAutoSleep(sourceAdapter))
     return undefined;
 
-  const reason = browser.profileReuseUnavailableReason;
+  const reason =
+    sourceAdapter.environment.browser.profileReuseUnavailableReason;
   return {
     code: "invalid_configuration",
     message:
@@ -395,12 +397,15 @@ async function selectConfigurationValidationSnapshot(
 type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
 
 function effectiveIdleTimeoutSeconds(row: {
-  readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
-  readonly browserIdleTimeoutSeconds: number | null;
+  readonly runtimeSleepIdleTimeoutSeconds: number | null;
+  readonly sourceAdapter: unknown;
 }): number | null {
-  return row.runtimeSleepIdleTimeoutSeconds !== undefined
-    ? row.runtimeSleepIdleTimeoutSeconds
-    : row.browserIdleTimeoutSeconds;
+  if (row.runtimeSleepIdleTimeoutSeconds === null) return null;
+  const parsed = sourceAdapterManifestStoredSchema.safeParse(row.sourceAdapter);
+  if (parsed.success && !canAdapterAutoSleep(parsed.data)) {
+    return null;
+  }
+  return row.runtimeSleepIdleTimeoutSeconds;
 }
 
 function rowToConfiguration(row: BinRow): BinConfiguration {
@@ -411,7 +416,6 @@ function rowToConfiguration(row: BinRow): BinConfiguration {
     identityId: row.identityId,
     config: row.config,
     runtimeSleep: { idleTimeoutSeconds },
-    browserIdleTimeoutSeconds: idleTimeoutSeconds,
     status: row.status,
     execution: {
       status: "offline",
@@ -463,28 +467,9 @@ export function createBinConfigurationStore(
         );
       }
 
-      if (
-        checked.data.runtimeSleep !== undefined &&
-        checked.data.browserIdleTimeoutSeconds !== undefined &&
-        checked.data.runtimeSleep.idleTimeoutSeconds !==
-          checked.data.browserIdleTimeoutSeconds
-      ) {
-        return failure(
-          400,
-          "invalid_input",
-          "runtimeSleep.idleTimeoutSeconds and browserIdleTimeoutSeconds must match when both are provided.",
-          ["runtimeSleep", "idleTimeoutSeconds"],
-        );
-      }
-
       const requestedIdleTimeout =
-        checked.data.runtimeSleep !== undefined
-          ? checked.data.runtimeSleep.idleTimeoutSeconds
-          : checked.data.browserIdleTimeoutSeconds;
-      const idlePolicyPath =
-        checked.data.runtimeSleep !== undefined
-          ? ["runtimeSleep", "idleTimeoutSeconds"]
-          : ["browserIdleTimeoutSeconds"];
+        checked.data.runtimeSleep?.idleTimeoutSeconds;
+      const idlePolicyPath = ["runtimeSleep", "idleTimeoutSeconds"];
 
       const applyUpdate = async (): Promise<BinOperation<BinConfiguration>> => {
         const validationSnapshot =
@@ -626,7 +611,6 @@ export function createBinConfigurationStore(
               ...(checked.data.config === undefined
                 ? {}
                 : { configNativeValid: true }),
-              browserIdleTimeoutSeconds: idleTimeoutSeconds,
               runtimeSleepIdleTimeoutSeconds: idleTimeoutSeconds,
               updatedAt: sql`now()`,
             })

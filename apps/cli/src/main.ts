@@ -37,7 +37,7 @@ import {
   sourceAdapterActionListSchema,
   binErrorSchema,
   binIdSchema,
-  browserIdleTimeoutSecondsSchema,
+  runtimeSleepIdleTimeoutSecondsSchema,
   sourceAdapterActionNameSchema,
   identityIdSchema,
   humanSessionCreatedSchema,
@@ -164,9 +164,9 @@ const cliArchiveSearchInputSchema = z
     queryStdin: z.boolean().optional(),
   })
   .strict();
-const browserIdleTimeoutOptionSchema = z.string();
+const runtimeSleepIdleTimeoutOptionSchema = z.string();
 
-function parseBrowserIdleTimeoutOption(
+function parseIdleTimeoutOption(
   value: string,
 ):
   | { readonly value: number | null }
@@ -177,20 +177,21 @@ function parseBrowserIdleTimeoutOption(
       error: {
         code: "invalid_input",
         message:
-          "浏览器空闲关闭时长必须是 0 到 2147483 之间的整数秒，或 disabled。",
-        path: ["browserIdleTimeoutSeconds"],
+          "Idle timeout must be an integer number of seconds between 0 and 2147483, or disabled.",
+        path: ["runtimeSleep", "idleTimeoutSeconds"],
       },
     };
   }
-  const parsed = browserIdleTimeoutSecondsSchema.safeParse(Number(value));
+  const parsed = runtimeSleepIdleTimeoutSecondsSchema.safeParse(Number(value));
   return parsed.success
     ? { value: parsed.data }
     : {
         error: {
           code: "invalid_input",
           message:
-            parsed.error.issues[0]?.message ?? "浏览器空闲关闭时长无效。",
-          path: ["browserIdleTimeoutSeconds"],
+            parsed.error.issues[0]?.message ??
+            "Runtime sleep idle timeout is invalid.",
+          path: ["runtimeSleep", "idleTimeoutSeconds"],
         },
       };
 }
@@ -1375,8 +1376,7 @@ function createCliContract(identity: CliCommandIdentity) {
       id: binIdSchema,
       identityId: identityIdSchema.optional(),
       config: jsonObjectTextSchema.optional(),
-      browserIdleTimeoutSeconds: browserIdleTimeoutOptionSchema.optional(),
-      idleTimeoutSeconds: browserIdleTimeoutOptionSchema.optional(),
+      idleTimeoutSeconds: runtimeSleepIdleTimeoutOptionSchema.optional(),
     }),
   );
   const runTriggerInputSchema = withPostgresJsonSchemaProjection(
@@ -1865,40 +1865,18 @@ function createCliContract(identity: CliCommandIdentity) {
     typeof binUpdateSuccess,
     typeof failureSchemas
   > = async ({ input, dependencies, outcome }) => {
-    const { id, browserIdleTimeoutSeconds, idleTimeoutSeconds, ...fields } =
-      input;
-    const browserIdleTimeout =
-      browserIdleTimeoutSeconds === undefined
-        ? undefined
-        : parseBrowserIdleTimeoutOption(browserIdleTimeoutSeconds);
-    if (browserIdleTimeout !== undefined && "error" in browserIdleTimeout)
-      return outcome.failure.apiError(browserIdleTimeout.error);
+    const { id, idleTimeoutSeconds, ...fields } = input;
     const runtimeSleepIdleTimeout =
       idleTimeoutSeconds === undefined
         ? undefined
-        : parseBrowserIdleTimeoutOption(idleTimeoutSeconds);
+        : parseIdleTimeoutOption(idleTimeoutSeconds);
     if (
       runtimeSleepIdleTimeout !== undefined &&
       "error" in runtimeSleepIdleTimeout
     )
       return outcome.failure.apiError(runtimeSleepIdleTimeout.error);
-    if (
-      browserIdleTimeout !== undefined &&
-      runtimeSleepIdleTimeout !== undefined &&
-      browserIdleTimeout.value !== runtimeSleepIdleTimeout.value
-    ) {
-      return outcome.failure.apiError({
-        code: "invalid_input",
-        message:
-          "--idle-timeout-seconds and --browser-idle-timeout-seconds must match when both are provided.",
-        path: ["runtimeSleep", "idleTimeoutSeconds"],
-      });
-    }
     const patch = {
       ...fields,
-      ...(browserIdleTimeout === undefined
-        ? {}
-        : { browserIdleTimeoutSeconds: browserIdleTimeout.value }),
       ...(runtimeSleepIdleTimeout === undefined
         ? {}
         : {
@@ -3377,7 +3355,8 @@ function createCliContract(identity: CliCommandIdentity) {
         kind: "command",
         parent: "bin",
         name: "update",
-        description: "修改访问身份、配置或浏览器空闲策略。",
+        description:
+          "Update access identity, persistent configuration, or runtime sleep policy.",
         fields: {
           id: { kind: "positional", description: "bin 标识" },
           identityId: {
@@ -3391,12 +3370,6 @@ function createCliContract(identity: CliCommandIdentity) {
             description:
               "Persistent configuration JSON; see bin config-schema <bin-id> for its schema.",
           },
-          browserIdleTimeoutSeconds: {
-            kind: "valueOption",
-            longOption: "--browser-idle-timeout-seconds",
-            description:
-              "浏览器闲置关闭秒数；0 表示立即关闭，disabled 表示禁用",
-          },
           idleTimeoutSeconds: {
             kind: "valueOption",
             longOption: "--idle-timeout-seconds",
@@ -3407,12 +3380,7 @@ function createCliContract(identity: CliCommandIdentity) {
         usageConstraints: [
           {
             kind: "count",
-            fields: [
-              "identityId",
-              "config",
-              "browserIdleTimeoutSeconds",
-              "idleTimeoutSeconds",
-            ],
+            fields: ["identityId", "config", "idleTimeoutSeconds"],
             min: 1,
           },
         ],

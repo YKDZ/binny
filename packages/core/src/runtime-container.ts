@@ -127,15 +127,10 @@ type WakeErrorPayload = {
 };
 
 function readEffectiveIdleTimeoutSeconds(bin: {
-  readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
-  readonly browserIdleTimeoutSeconds: number | null;
+  readonly runtimeSleepIdleTimeoutSeconds: number | null;
   readonly sourceAdapter?: unknown;
 }): number | null {
-  const configured =
-    bin.runtimeSleepIdleTimeoutSeconds !== undefined
-      ? bin.runtimeSleepIdleTimeoutSeconds
-      : bin.browserIdleTimeoutSeconds;
-  if (configured === null) return null;
+  if (bin.runtimeSleepIdleTimeoutSeconds === null) return null;
   if (bin.sourceAdapter !== undefined) {
     const parsed = sourceAdapterManifestStoredSchema.safeParse(
       bin.sourceAdapter,
@@ -144,7 +139,7 @@ function readEffectiveIdleTimeoutSeconds(bin: {
       return null;
     }
   }
-  return configured;
+  return bin.runtimeSleepIdleTimeoutSeconds;
 }
 
 function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
@@ -465,8 +460,6 @@ export function createRuntimeContainerCoordinator(
         .select({
           id: binConfigurations.id,
           sourceAdapter: binConfigurations.sourceAdapter,
-          browserIdleTimeoutSeconds:
-            binConfigurations.browserIdleTimeoutSeconds,
           runtimeSleepIdleTimeoutSeconds:
             binConfigurations.runtimeSleepIdleTimeoutSeconds,
         })
@@ -1256,8 +1249,6 @@ export function createRuntimeContainerCoordinator(
           const [bin] = await database
             .select({
               sourceAdapter: binConfigurations.sourceAdapter,
-              browserIdleTimeoutSeconds:
-                binConfigurations.browserIdleTimeoutSeconds,
               runtimeSleepIdleTimeoutSeconds:
                 binConfigurations.runtimeSleepIdleTimeoutSeconds,
             })
@@ -1350,8 +1341,6 @@ export function createRuntimeContainerCoordinator(
           .select({
             id: binConfigurations.id,
             sourceAdapter: binConfigurations.sourceAdapter,
-            browserIdleTimeoutSeconds:
-              binConfigurations.browserIdleTimeoutSeconds,
             runtimeSleepIdleTimeoutSeconds:
               binConfigurations.runtimeSleepIdleTimeoutSeconds,
           })
@@ -1583,8 +1572,6 @@ export function createRuntimeContainerCoordinator(
       const [bin] = await database
         .select({
           sourceAdapter: binConfigurations.sourceAdapter,
-          browserIdleTimeoutSeconds:
-            binConfigurations.browserIdleTimeoutSeconds,
           runtimeSleepIdleTimeoutSeconds:
             binConfigurations.runtimeSleepIdleTimeoutSeconds,
         })
@@ -1631,8 +1618,6 @@ export function createRuntimeContainerCoordinator(
         const [bin] = await database
           .select({
             sourceAdapter: binConfigurations.sourceAdapter,
-            browserIdleTimeoutSeconds:
-              binConfigurations.browserIdleTimeoutSeconds,
             runtimeSleepIdleTimeoutSeconds:
               binConfigurations.runtimeSleepIdleTimeoutSeconds,
           })

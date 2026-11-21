@@ -1859,7 +1859,7 @@ type PublicSourceStateSnapshot =
     };
 
 type PublicBinRuntime = {
-  readonly execution: { readonly status: string };
+  readonly execution: { readonly status: string; readonly phase?: string };
   readonly sourceStateSnapshot: PublicSourceStateSnapshot;
 };
 
@@ -2120,6 +2120,127 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
     sourceAccessSummary(dateLimitedFollowUp).rateLimitResponses.length,
     0,
   );
+
+  // Cooldown recorded before container sleep must still bind the next run after real container sleep and wake.
+  await updateFixtureState({
+    rateLimitPath: "/session/current.json",
+    rateLimitStatus: 429,
+    retryAfterHeader: "30",
+    rateLimitRemaining: 1,
+  });
+  const sleepLimited = await trigger("check", { topicId: 2401 });
+  assert.equal(sleepLimited.status, "completed", JSON.stringify(sleepLimited));
+  const sleepLimitedAccess = sourceAccessSummary(sleepLimited);
+  assert.deepEqual(
+    sleepLimitedAccess.rateLimitResponses.map(({ status, outcome }) => ({
+      status,
+      outcome,
+    })),
+    [{ status: 429, outcome: "cooled" }],
+    JSON.stringify(sleepLimitedAccess),
+  );
+  const sleepCooldownUntil =
+    sleepLimitedAccess.rateLimitResponses[0]?.cooldownUntil;
+  assert.ok(sleepCooldownUntil !== undefined);
+
+  cliData(
+    await cli([
+      "bin",
+      "update",
+      "binny-discovery-topic",
+      "--idle-timeout-seconds",
+      "0",
+    ]),
+    "updated",
+  );
+  const runtimeCid = (
+    await compose(["ps", "--all", "--quiet", "runtime-linuxdo"])
+  ).stdout
+    .trim()
+    .split("\n")[0];
+  assert.ok(runtimeCid, "Compose service runtime-linuxdo has no container ID.");
+  await waitFor(
+    async () => {
+      const [bin, inspected] = await Promise.all([
+        readBinRuntime("binny-discovery-topic"),
+        run("docker", [
+          "inspect",
+          "--format",
+          "{{.State.Status}}\t{{.State.ExitCode}}",
+          runtimeCid,
+        ]),
+      ]);
+      assert.equal(inspected.code, 0, inspected.stderr);
+      const [status = "", exitCodeText = "1"] = inspected.stdout
+        .trim()
+        .split("\t");
+      return {
+        bin,
+        dockerStatus: status,
+        dockerExitCode: Number(exitCodeText),
+      };
+    },
+    ({ bin, dockerStatus, dockerExitCode }) =>
+      bin.execution.status === "sleeping" &&
+      bin.execution.phase === "sleeping" &&
+      dockerStatus === "exited" &&
+      dockerExitCode === 0,
+    "runtime-linuxdo 进入真实容器休眠 (exited 0)",
+  );
+
+  await updateFixtureState({
+    rateLimitPath: null,
+    rateLimitRemaining: 0,
+  });
+  cliData(
+    await cli([
+      "bin",
+      "update",
+      "binny-discovery-topic",
+      "--idle-timeout-seconds",
+      "300",
+    ]),
+    "updated",
+  );
+  assert.equal(
+    (await readBinRuntime("binny-discovery-topic")).execution.status,
+    "sleeping",
+  );
+
+  const eventsBeforeSleepWake = await sourceState();
+  const sleepResumed = await trigger("check", { topicId: 2401 });
+  assert.equal(sleepResumed.status, "completed", JSON.stringify(sleepResumed));
+  const sleepResumedAccess = sourceAccessSummary(sleepResumed);
+  assert.ok(sleepResumed.startedAt !== undefined, JSON.stringify(sleepResumed));
+  assert.ok(
+    Date.parse(sleepCooldownUntil) - Date.parse(sleepResumed.startedAt) > 0,
+    JSON.stringify({
+      sleepCooldownUntil,
+      sleepResumedStartedAt: sleepResumed.startedAt,
+    }),
+  );
+  const sleepResumedEvents = (await sourceState()).events.slice(
+    eventsBeforeSleepWake.events.length,
+  );
+  const sleepResumedSession = sleepResumedEvents.find(
+    ({ action }) => action === "session-current",
+  );
+  assert.ok(sleepResumedSession !== undefined);
+  assert.ok(
+    sleepResumedSession.at >= Date.parse(sleepCooldownUntil),
+    JSON.stringify({
+      sleepCooldownUntil,
+      sleepResumedSession,
+      sleepResumedAccess,
+    }),
+  );
+  assert.ok(
+    sleepResumedAccess.waitedMs > 0,
+    JSON.stringify(sleepResumedAccess),
+  );
+  assert.equal(sleepResumedAccess.rateLimitResponses.length, 0);
+  await waitForRuntimeHealth();
+  await waitForRuntime();
 }
 
 async function verifyCorruptSourceStateVisibility(): Promise<void> {

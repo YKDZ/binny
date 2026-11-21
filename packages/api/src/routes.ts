@@ -103,7 +103,6 @@ function makeApp(operations: ApiOperations, productVersion: string) {
       identityId: configuration.identityId,
       config: configuration.config,
       runtimeSleep: configuration.runtimeSleep,
-      browserIdleTimeoutSeconds: configuration.browserIdleTimeoutSeconds,
       status: configuration.status,
       execution:
         configuration.execution.status === "offline"

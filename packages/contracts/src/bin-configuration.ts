@@ -224,12 +224,6 @@ export const runtimeWakeErrorSchema = z
 
 export type RuntimeWakeError = z.infer<typeof runtimeWakeErrorSchema>;
 
-export const browserIdleTimeoutSecondsSchema = z
-  .number()
-  .int("浏览器空闲关闭时长必须是整数秒。")
-  .min(0, "浏览器空闲关闭时长不能为负数。")
-  .max(2_147_483, "浏览器空闲关闭时长不能超过 2147483 秒。");
-
 export const browserPowerStatusSchema = z.enum([
   "unavailable",
   "stopped",
@@ -302,9 +296,6 @@ export const binUpdateInputSchema = withPostgresJsonSchemaProjection(
       identityId: identityIdSchema.optional(),
       config: jsonObjectSchema.optional(),
       runtimeSleep: runtimeSleepPolicySchema.optional(),
-      browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema
-        .nullable()
-        .optional(),
     })
     .strict()
     .refine((value) => Object.keys(value).length > 0, {
@@ -316,7 +307,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 8;
+export const runtimeProtocolVersion = 9;
 
 const sourceAccessSnapshotGroupSchema = z
   .object({
@@ -579,7 +570,6 @@ export const binConfigurationSchema = withPostgresJsonSchemaProjection(
     identityId: identityIdSchema,
     config: jsonObjectSchema,
     runtimeSleep: runtimeSleepPolicySchema,
-    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
     status: binStatusSchema,
     execution: runtimeExecutionSchema,
     createdAt: z.iso.datetime(),
@@ -688,7 +678,6 @@ export const binDetailsSchema = withPostgresJsonSchemaProjection(
       identityId: identityIdSchema,
       config: jsonObjectSchema,
       runtimeSleep: runtimeSleepPolicySchema,
-      browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
       status: binStatusSchema,
       execution: binExecutionSummarySchema,
       sourceStateSnapshot: binSourceStateFreshnessSchema,
@@ -844,7 +833,6 @@ export type RuntimeConnectionOperations = {
 
 export const runtimeHeartbeatResultSchema = runtimeExecutionSchema.and(
   z.object({
-    browserIdleTimeoutSeconds: browserIdleTimeoutSecondsSchema.nullable(),
     humanSession: runtimeHumanSessionControlSchema.optional(),
   }),
 );

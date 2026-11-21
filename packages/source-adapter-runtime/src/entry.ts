@@ -220,11 +220,7 @@ async function ensureStateCoordinators(generation: string): Promise<void> {
 let browserPower: BrowserPower = {
   status: environmentKind === "browser" ? "stopped" : "unavailable",
 };
-let browserIdleTimeoutSeconds: number | null | undefined;
-let browserIdleSince: number | undefined;
-let browserIdleTimer: NodeJS.Timeout | undefined;
-let browserIdleProbeInFlight = false;
-let browserIdleCloseInFlight: Promise<void> | undefined;
+let browserStartupCompleted = environmentKind !== "browser";
 const runtimeId = randomUUID();
 const browserLifecycle =
   environmentKind === "browser"
@@ -238,8 +234,9 @@ const browserLifecycle =
           "/var/lib/binny/browser-profile",
         onPowerChange(power) {
           browserPower = power;
-          refreshBrowserIdle();
-          startHeartbeat();
+          if (browserStartupCompleted && stopping === undefined) {
+            startHeartbeat();
+          }
         },
       })
     : undefined;
@@ -256,7 +253,18 @@ function runtimeEnvironment(): RuntimeEnvironment {
   };
 }
 
-const server = createRuntimeServer({ sourceAdapter: activeSourceAdapter });
+const server = createRuntimeServer({
+  sourceAdapter: activeSourceAdapter,
+  isReady: () => {
+    if (stopping !== undefined) {
+      return { ready: false, reason: "runtime_stopping" };
+    }
+    if (browserLifecycle !== undefined && !browserLifecycle.isReady) {
+      return { ready: false, reason: "browser_not_ready" };
+    }
+    return { ready: true };
+  },
+});
 const client = createApiClient(apiUrl, {
   fetch: (input, init) => {
     const timeout = AbortSignal.timeout(3_000);
@@ -1243,144 +1251,6 @@ async function closeHumanSessionAfterHeartbeatFailure(): Promise<void> {
   }
 }
 
-function clearBrowserIdleTimer(): void {
-  if (browserIdleTimer !== undefined) clearTimeout(browserIdleTimer);
-  browserIdleTimer = undefined;
-}
-
-function browserHasActiveUse(): boolean {
-  return (
-    runInFlight !== undefined ||
-    activeRunId !== null ||
-    pendingStoppedRunId !== undefined ||
-    activeHumanSessionId !== undefined ||
-    openingHumanSessionId !== undefined ||
-    pendingHumanSessionEvent !== undefined ||
-    stopping !== undefined
-  );
-}
-
-function browserIdleCloseIsDue(): boolean {
-  if (
-    browserIdleSince === undefined ||
-    browserIdleTimeoutSeconds === undefined ||
-    browserIdleTimeoutSeconds === null
-  )
-    return false;
-  return Date.now() >= browserIdleSince + browserIdleTimeoutSeconds * 1_000;
-}
-
-function scheduleBrowserIdleClose(waitMs: number): void {
-  clearBrowserIdleTimer();
-  const timer = setTimeout(
-    () => {
-      if (browserIdleTimer === timer) browserIdleTimer = undefined;
-      void closeBrowserWhenIdle();
-    },
-    Math.max(0, waitMs),
-  );
-  browserIdleTimer = timer;
-}
-
-function refreshBrowserIdle(): void {
-  if (browserLifecycle === undefined) return;
-  if (browserHasActiveUse()) {
-    clearBrowserIdleTimer();
-    browserIdleSince = undefined;
-    return;
-  }
-  if (browserPower.status === "stopped") {
-    clearBrowserIdleTimer();
-    browserIdleSince = undefined;
-    return;
-  }
-  if (browserPower.status !== "ready") {
-    clearBrowserIdleTimer();
-    return;
-  }
-  if (browserIdleProbeInFlight) return;
-  if (browserIdleSince === undefined) browserIdleSince = Date.now();
-  if (browserIdleTimeoutSeconds === undefined) return;
-  if (browserIdleTimeoutSeconds === null) {
-    clearBrowserIdleTimer();
-    return;
-  }
-  if (browserIdleTimer !== undefined) return;
-  scheduleBrowserIdleClose(
-    browserIdleSince + browserIdleTimeoutSeconds * 1_000 - Date.now(),
-  );
-}
-
-function acceptBrowserIdleTimeout(value: number | null): void {
-  if (browserIdleTimeoutSeconds !== value) {
-    browserIdleTimeoutSeconds = value;
-    if (browserIdleSince !== undefined) browserIdleSince = Date.now();
-    clearBrowserIdleTimer();
-  }
-  refreshBrowserIdle();
-}
-
-function closeBrowserWhenIdle(): Promise<void> {
-  if (browserIdleCloseInFlight !== undefined) return browserIdleCloseInFlight;
-  const closing = runBrowserIdleClose();
-  browserIdleCloseInFlight = closing;
-  void closing.finally(() => {
-    if (browserIdleCloseInFlight === closing)
-      browserIdleCloseInFlight = undefined;
-  });
-  return closing;
-}
-
-async function runBrowserIdleClose(): Promise<void> {
-  if (
-    browserLifecycle === undefined ||
-    browserHasActiveUse() ||
-    browserPower.status !== "ready" ||
-    !browserIdleCloseIsDue()
-  ) {
-    refreshBrowserIdle();
-    return;
-  }
-  if (claimInFlight) {
-    scheduleBrowserIdleClose(50);
-    return;
-  }
-
-  browserIdleProbeInFlight = true;
-  try {
-    await sendHeartbeatNow(false, false);
-    if (!browserHasActiveUse() && browserPower.status === "ready")
-      await pollRun();
-  } finally {
-    browserIdleProbeInFlight = false;
-  }
-  if (
-    browserHasActiveUse() ||
-    browserPower.status !== "ready" ||
-    claimInFlight
-  ) {
-    if (!browserHasActiveUse() && claimInFlight) scheduleBrowserIdleClose(50);
-    else refreshBrowserIdle();
-    return;
-  }
-
-  // heartbeat 与领取探测会让出事件循环，期间策略及空闲起点都可能改变。
-  if (!browserIdleCloseIsDue()) {
-    refreshBrowserIdle();
-    return;
-  }
-
-  // 关闭开始后新 run／人工请求沿同一生命周期等待真实退出再唤醒。
-  browserIdleSince = undefined;
-  try {
-    await browserLifecycle.closeWhenIdle();
-  } catch (error) {
-    process.stderr.write(
-      `浏览器空闲关闭未确认：${error instanceof Error ? error.message : String(error)}\n`,
-    );
-  }
-}
-
 async function heartbeat(
   allowStopping = false,
   pollRuns = true,
@@ -1425,7 +1295,6 @@ async function heartbeat(
     if (response.status === 200) {
       const execution = await response.json();
       heartbeatAccepted = true;
-      acceptBrowserIdleTimeout(execution.browserIdleTimeoutSeconds);
       if (stoppedRunId !== undefined && pendingStoppedRunId === stoppedRunId)
         pendingStoppedRunId = undefined;
       if (
@@ -1436,7 +1305,6 @@ async function heartbeat(
       if (execution.humanSession !== undefined)
         await applyHumanSessionControl(execution.humanSession);
       logStatus(execution.status);
-      refreshBrowserIdle();
       if (
         execution.status === "online" &&
         stopping === undefined &&
@@ -1515,8 +1383,6 @@ async function applyHumanSessionControl(
       };
       return;
     }
-    clearBrowserIdleTimer();
-    browserIdleSince = undefined;
     openingHumanSessionId = control.sessionId;
     try {
       const { ended } = await browserLifecycle.openHumanSession(
@@ -1602,8 +1468,6 @@ async function pollRun(): Promise<void> {
       case 200: {
         const result = await response.json();
         if (result.run === null) return;
-        clearBrowserIdleTimer();
-        browserIdleSince = undefined;
         activeRunId = result.run.runId;
         const current = executeRun(result.run);
         runInFlight = current;
@@ -1613,7 +1477,6 @@ async function pollRun(): Promise<void> {
             if (activeRunId === result.run?.runId) activeRunId = null;
             if (stopping === undefined) {
               startHeartbeat();
-              refreshBrowserIdle();
             }
           },
           (error: unknown) => {
@@ -1640,7 +1503,6 @@ async function pollRun(): Promise<void> {
     );
   } finally {
     claimInFlight = false;
-    if (!browserIdleProbeInFlight) refreshBrowserIdle();
   }
 }
 
@@ -1686,14 +1548,12 @@ function closeServer(): Promise<void> {
 function shutdown(): Promise<void> {
   if (stopping !== undefined) return stopping;
   stopping = (async () => {
-    clearBrowserIdleTimer();
     if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
     heartbeatTimer = undefined;
     if (heartbeatInFlight !== undefined) await heartbeatInFlight;
     while (claimInFlight) await delay(25);
     if (activeWorker !== undefined) await stopActionWorker(activeWorker);
     if (runInFlight !== undefined) await runInFlight;
-    if (browserIdleCloseInFlight !== undefined) await browserIdleCloseInFlight;
     await closeBrowserRuntime();
     await disconnect();
     await closeServer();
@@ -1701,22 +1561,47 @@ function shutdown(): Promise<void> {
   return stopping;
 }
 
+if (browserLifecycle !== undefined) {
+  try {
+    await browserLifecycle.acquireOwnerLock();
+  } catch (error) {
+    process.stderr.write(
+      `浏览器独占锁获取失败，退出：${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exit(1);
+  }
+}
+
 server.listen(runtimePort, "0.0.0.0", () => {
   process.stdout.write(
     `运行器已启动：bin=${binId} sourceAdapter=${sourceAdapter.id} port=${runtimePort}\n`,
   );
-  startHeartbeat();
+  if (browserLifecycle === undefined) {
+    startHeartbeat();
+    return;
+  }
+  void browserLifecycle.ensureReady().then(
+    () => {
+      browserStartupCompleted = true;
+      if (stopping === undefined) startHeartbeat();
+    },
+    (error: unknown) => {
+      process.stderr.write(
+        `浏览器启动失败，运行器保持未就绪：${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    },
+  );
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     void shutdown().then(
       () => {
-        process.exitCode = 0;
+        process.exit(0);
       },
       (error: unknown) => {
         process.stderr.write(`${String(error)}\n`);
-        process.exitCode = 1;
+        process.exit(1);
       },
     );
   });

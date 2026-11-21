@@ -51,7 +51,6 @@ type BinRow = {
   identityId: string;
   config: Record<string, unknown>;
   configNativeValid: boolean;
-  browserIdleTimeoutSeconds: number | null;
   runtimeSleepIdleTimeoutSeconds: number | null;
   status: "active" | "disabled";
   persistentState: unknown;
@@ -507,7 +506,6 @@ function makeLightweightBin(
     identityId: binId,
     config: {},
     configNativeValid: true,
-    browserIdleTimeoutSeconds: idleTimeoutSeconds,
     runtimeSleepIdleTimeoutSeconds: idleTimeoutSeconds,
     status: "active",
     persistentState: null,

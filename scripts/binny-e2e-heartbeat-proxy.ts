@@ -28,9 +28,7 @@ let heldOwnerGeneration: string | undefined;
 let heldStoppedRunId: string | undefined;
 let forwardedRuntimeId: string | undefined;
 let forwardedOwnerGeneration: string | undefined;
-let forwardedAt: number | undefined;
 let forwardedStatusCode: number | undefined;
-let forwardedBrowserIdleTimeoutSeconds: number | null | undefined;
 const rejectedRuntimeBins = new Map<string, number>();
 
 function readPort(name: string, fallback: number): number {
@@ -427,24 +425,6 @@ async function handleRuntimeRequest(
     return;
   }
   forwarded.deliver();
-  if (requestBinId !== undefined && decoded !== undefined) {
-    try {
-      const forwardedBody = JSON.parse(
-        forwarded.body.toString("utf8"),
-      ) as unknown;
-      if (
-        typeof forwardedBody === "object" &&
-        forwardedBody !== null &&
-        "browserIdleTimeoutSeconds" in forwardedBody &&
-        (typeof forwardedBody.browserIdleTimeoutSeconds === "number" ||
-          forwardedBody.browserIdleTimeoutSeconds === null)
-      ) {
-        forwardedBrowserIdleTimeoutSeconds =
-          forwardedBody.browserIdleTimeoutSeconds;
-        forwardedAt = Date.now();
-      }
-    } catch {}
-  }
 }
 
 const runtimeProxy = createServer((request, response) => {
@@ -509,10 +489,6 @@ const control = createServer((request, response) => {
           ? {}
           : { forwardedOwnerGeneration }),
         ...(forwardedStatusCode === undefined ? {} : { forwardedStatusCode }),
-        ...(forwardedAt === undefined ? {} : { forwardedAt }),
-        ...(forwardedBrowserIdleTimeoutSeconds === undefined
-          ? {}
-          : { forwardedBrowserIdleTimeoutSeconds }),
         rejectedRuntimeBins: [...rejectedRuntimeBins.keys()],
       });
       return;

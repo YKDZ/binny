@@ -100,6 +100,16 @@ void describe("native offline CLI contract discovery", () => {
     assert.equal(onlyApiUrl.exitCode, 2);
     assert.equal(onlyApiUrl.requestCount, 0);
 
+    const legacyFlagRejected = await run([
+      "bin",
+      "update",
+      "rss-main",
+      "--browser-idle-timeout-seconds",
+      "0",
+    ]);
+    assert.equal(legacyFlagRejected.exitCode, 2);
+    assert.equal(legacyFlagRejected.requestCount, 0);
+
     const requests: Request[] = [];
     const validChange = await run(
       [
@@ -110,7 +120,7 @@ void describe("native offline CLI contract discovery", () => {
         "account-primary",
         "--config",
         JSON.stringify({ userAgent: "Binny E2E updated", key: "aaz" }),
-        "--browser-idle-timeout-seconds",
+        "--idle-timeout-seconds",
         "0",
       ],
       async (inputRequest, init) => {
@@ -135,7 +145,6 @@ void describe("native offline CLI contract discovery", () => {
           identityId: "account-primary",
           config: { userAgent: "Binny E2E updated", key: "aaz" },
           runtimeSleep: { idleTimeoutSeconds: 0 },
-          browserIdleTimeoutSeconds: 0,
           status: "active",
           execution: { status: "offline", reason: "runtime_not_connected" },
           sourceStateSnapshot: { freshness: "unknown" },
@@ -153,7 +162,7 @@ void describe("native offline CLI contract discovery", () => {
     assert.deepEqual(await requests[1]?.clone().json(), {
       identityId: "account-primary",
       config: { userAgent: "Binny E2E updated", key: "aaz" },
-      browserIdleTimeoutSeconds: 0,
+      runtimeSleep: { idleTimeoutSeconds: 0 },
     });
 
     const sleepPolicyChange = await run(
@@ -182,7 +191,6 @@ void describe("native offline CLI contract discovery", () => {
           identityId: "account-primary",
           config: { userAgent: "Binny E2E updated", key: "aaz" },
           runtimeSleep: { idleTimeoutSeconds: 300 },
-          browserIdleTimeoutSeconds: 300,
           status: "active",
           execution: { status: "offline", reason: "runtime_not_connected" },
           sourceStateSnapshot: { freshness: "unknown" },
@@ -459,8 +467,9 @@ void describe("native offline CLI contract discovery", () => {
     assert.match(updateHelp.stdout, /bin config-schema/u);
     assert.match(
       updateHelp.stdout,
-      /Provide at least 1 of: identityId, config, browserIdleTimeoutSeconds/u,
+      /Provide at least 1 of: identityId, config, idleTimeoutSeconds/u,
     );
+    assert.doesNotMatch(updateHelp.stdout, /--browser-idle-timeout-seconds/u);
 
     const contractHelp = await run(["contract", "--help"]);
     assert.equal(contractHelp.exitCode, 0);

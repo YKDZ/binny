@@ -1,0 +1,49 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "319df593-6d36-4e1d-8b5d-daba63154071",
+  "prevIds": ["3decea6e-b123-47a4-9ccf-9b38a0d65a55"],
+  "footprints": [
+    {
+      "statementType": "drop_check",
+      "statementTarget": ["table", "public", "bin_configurations"],
+      "writes": [
+        "s|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "n|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "e|ck|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check",
+        "n|con|public.bin_configurations.bin_configurations_browser_idle_timeout_seconds_check"
+      ],
+      "reads": [
+        "n|tbl|public.bin_configurations",
+        "n|sch|public",
+        "e|col|public.bin_configurations.browser_idle_timeout_seconds"
+      ]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "bin_configurations",
+        "browser_idle_timeout_seconds"
+      ],
+      "writes": [
+        "s|col|public.bin_configurations.browser_idle_timeout_seconds",
+        "n|col|public.bin_configurations.browser_idle_timeout_seconds",
+        "e|col|public.bin_configurations.browser_idle_timeout_seconds"
+      ],
+      "reads": ["n|tbl|public.bin_configurations", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"bin_configurations\",\"browser_idle_timeout_seconds\"]"
+    },
+    {
+      "op": "drop",
+      "key": "checks\u0000[\"public\",\"bin_configurations\",\"bin_configurations_browser_idle_timeout_seconds_check\"]"
+    }
+  ]
+}

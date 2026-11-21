@@ -20,8 +20,13 @@ import {
 
 export type { RuntimeEnvironmentKind } from "@binny/contracts";
 
+export type RuntimeReadiness =
+  | { readonly ready: true }
+  | { readonly ready: false; readonly reason?: string };
+
 export interface RuntimeServerOptions {
   readonly sourceAdapter: SourceAdapterDefinition;
+  readonly isReady?: () => RuntimeReadiness;
 }
 
 function sendJson(
@@ -53,6 +58,8 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
     sourceAdapter: sourceAdapterManifest(options.sourceAdapter),
   };
 
+  const checkReady = options.isReady ?? (() => ({ ready: true }) as const);
+
   return createServer(
     async (request: IncomingMessage, response: ServerResponse) => {
       if (request.method === "GET" && request.url === "/manifest") {
@@ -61,6 +68,16 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
       }
 
       if (request.method === "GET" && request.url === "/health") {
+        const readiness = checkReady();
+        if (!readiness.ready) {
+          sendJson(response, 503, {
+            process: "not_ready",
+            ...(readiness.reason === undefined
+              ? {}
+              : { reason: readiness.reason }),
+          });
+          return;
+        }
         sendJson(response, 200, { process: "ready" });
         return;
       }
@@ -70,6 +87,16 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
         new URL(request.url ?? "/", "http://runtime.internal").pathname ===
           runtimeConfigurationValidationPath
       ) {
+        const readiness = checkReady();
+        if (!readiness.ready) {
+          sendJson(response, 503, {
+            error: {
+              code: "runtime_not_ready",
+              message: readiness.reason ?? "运行器尚未就绪。",
+            },
+          });
+          return;
+        }
         let body: unknown;
         try {
           body = await readJson(request);
@@ -137,6 +164,16 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
         new URL(request.url ?? "/", "http://runtime.internal").pathname ===
           runtimeActionParametersValidationPath
       ) {
+        const readiness = checkReady();
+        if (!readiness.ready) {
+          sendJson(response, 503, {
+            error: {
+              code: "runtime_not_ready",
+              message: readiness.reason ?? "运行器尚未就绪。",
+            },
+          });
+          return;
+        }
         let body: unknown;
         try {
           body = await readJson(request);

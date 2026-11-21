@@ -251,5 +251,7 @@ services:
         target: /var/lib/binny/browser-profile
         bind:
           create_host_path: false
+    labels:
+      io.binny.managed-runtime: "true"
     stop_grace_period: 30s
     restart: unless-stopped

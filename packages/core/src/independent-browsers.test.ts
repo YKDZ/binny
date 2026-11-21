@@ -2,12 +2,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  binConfigurationSchema,
+  binDetailsSchema,
   binErrorSchema,
+  binUpdateInputSchema,
   humanSessionQueueReasonSchema,
   manualRunExecutionSchema,
   manualRunQueueReasonSchema,
   publicApiProtocolVersion,
   runtimeHeartbeatInputSchema,
+  runtimeHeartbeatResultSchema,
   runtimeHumanSessionControlSchema,
   runtimeProtocolVersion,
 } from "@binny/contracts";
@@ -17,6 +21,7 @@ import {
   humanSessions,
   manualRuns,
   runtimeConnections,
+  runtimeContainers,
   type Database,
 } from "@binny/db";
 import type { SQL } from "drizzle-orm";
@@ -58,12 +63,25 @@ type BinRow = {
   identityId: string;
   config: Record<string, unknown>;
   configNativeValid: boolean;
-  browserIdleTimeoutSeconds: number | null;
+  runtimeSleepIdleTimeoutSeconds: number | null;
   status: "active" | "disabled";
   persistentState: unknown;
   sourceAccessState: unknown;
   lastIssuedOwnerGeneration: string;
   createdAt: Date;
+  updatedAt: Date;
+};
+
+type ContainerRow = {
+  binId: string;
+  composeProject: string;
+  composeService: string;
+  containerId: string;
+  lifecyclePhase: "running" | "waking" | "stopping" | "sleeping" | "offline";
+  containerStartedAt: string | null;
+  stoppedContainerFinishedAt: string | null;
+  idleSince: Date | null;
+  lastWakeError: unknown;
   updatedAt: Date;
 };
 
@@ -144,12 +162,16 @@ function compileWhere(clause: unknown): {
 function createInMemoryDatabase(initial: {
   bins: BinRow[];
   connections: ConnectionRow[];
+  containers?: ContainerRow[];
   runs: RunRow[];
   humanSessions: HumanSessionRow[];
 }) {
   const bins = new Map(initial.bins.map((b) => [b.id, { ...b }]));
   const connections = new Map(
     initial.connections.map((c) => [c.binId, { ...c }]),
+  );
+  const containers = new Map(
+    (initial.containers ?? []).map((c) => [c.binId, { ...c }]),
   );
   const runs = new Map(initial.runs.map((r) => [r.runId, { ...r }]));
   const sessions = new Map(
@@ -184,13 +206,14 @@ function createInMemoryDatabase(initial: {
       if (bin === undefined) return [];
       const conn = connections.get(bin.id);
       if (keys.includes("configuredSourceAdapter")) {
+        const container = containers.get(bin.id);
         return [
           {
             binId: bin.id,
             configuredSourceAdapter: bin.sourceAdapter,
             config: bin.config,
             configNativeValid: bin.configNativeValid,
-            browserIdleTimeoutSeconds: bin.browserIdleTimeoutSeconds,
+            runtimeSleepIdleTimeoutSeconds: bin.runtimeSleepIdleTimeoutSeconds,
             runtimeId: conn?.runtimeId ?? null,
             runtimeSourceAdapter: conn?.sourceAdapter ?? null,
             environment: conn?.environment ?? null,
@@ -201,10 +224,18 @@ function createInMemoryDatabase(initial: {
             protocolVersion: conn?.protocolVersion ?? null,
             runtimeControlUrl: conn?.runtimeControlUrl ?? null,
             sourceStateSnapshot: conn?.sourceStateSnapshot ?? null,
+            containerLifecyclePhase: container?.lifecyclePhase ?? null,
+            containerLastWakeError: container?.lastWakeError ?? null,
           },
         ];
       }
       return [{ ...bin }];
+    }
+
+    if (table === runtimeContainers) {
+      const binId = findBinId(compiled.params);
+      const container = binId === undefined ? undefined : containers.get(binId);
+      return container === undefined ? [] : [{ ...container }];
     }
 
     if (table === runtimeConnections) {
@@ -426,6 +457,10 @@ function createInMemoryDatabase(initial: {
           values.lastIssuedOwnerGeneration,
         );
       }
+      if ("runtimeSleepIdleTimeoutSeconds" in values) {
+        bin.runtimeSleepIdleTimeoutSeconds =
+          (values.runtimeSleepIdleTimeoutSeconds as number | null) ?? null;
+      }
       return [{ ...bin }];
     }
     if (table === runtimeConnections) {
@@ -443,6 +478,27 @@ function createInMemoryDatabase(initial: {
   }
 
   function applyInsert(table: unknown, values: Record<string, unknown>) {
+    if (table === humanSessions) {
+      const now = new Date();
+      const created: HumanSessionRow = {
+        sessionId: values.sessionId as string,
+        binId: values.binId as string,
+        accessTokenHash: values.accessTokenHash as string,
+        status: (values.status as HumanSessionRow["status"]) ?? "pending",
+        runtimeId: null,
+        ownerGeneration: null,
+        runtimeTokenHash: null,
+        gatewayClosed: false,
+        runtimeClosed: false,
+        failure: null,
+        requestedAt: now,
+        updatedAt: now,
+        readyAt: null,
+        closedAt: null,
+      };
+      sessions.set(created.sessionId, created);
+      return [{ ...created }];
+    }
     if (table === runtimeConnections) {
       const binId = values.binId as string;
       const existing = connections.get(binId);
@@ -462,6 +518,7 @@ function createInMemoryDatabase(initial: {
       };
       connections.set(binId, existing ? { ...existing, ...next } : next);
     }
+    return [];
   }
 
   function applyDelete(table: unknown, clause: unknown): unknown[] {
@@ -507,6 +564,9 @@ function createInMemoryDatabase(initial: {
         values(values: Record<string, unknown>) {
           const runInsert = () => applyInsert(table, values);
           return {
+            returning() {
+              return Promise.resolve(runInsert() ?? []);
+            },
             onConflictDoUpdate(_opts: unknown) {
               runInsert();
               return Promise.resolve();
@@ -548,6 +608,7 @@ function createInMemoryDatabase(initial: {
     database: executor as unknown as Database,
     bins,
     connections,
+    containers,
     runs,
     sessions,
   };
@@ -561,7 +622,7 @@ function makeBin(id: string): BinRow {
     identityId: id,
     config: {},
     configNativeValid: true,
-    browserIdleTimeoutSeconds: 300,
+    runtimeSleepIdleTimeoutSeconds: 300,
     status: "active",
     persistentState: null,
     sourceAccessState: null,
@@ -668,9 +729,52 @@ function makeHumanSession(
 }
 
 void describe("independent browser bins without cross-bin capacity", () => {
-  void it("removes cross-bin browser capacity protocol fields and bumps protocol versions", () => {
-    assert.equal(runtimeProtocolVersion, 8);
-    assert.ok(publicApiProtocolVersion >= 7);
+  void it("removes legacy browser idle fields and bumps protocol versions", () => {
+    assert.equal(runtimeProtocolVersion, 9);
+    assert.ok(publicApiProtocolVersion >= 10);
+
+    assert.equal(
+      binUpdateInputSchema.safeParse({ browserIdleTimeoutSeconds: 0 }).success,
+      false,
+    );
+    assert.equal(
+      binUpdateInputSchema.safeParse({
+        runtimeSleep: { idleTimeoutSeconds: 0 },
+      }).success,
+      true,
+    );
+    assert.equal(
+      "browserIdleTimeoutSeconds" in binConfigurationSchema.shape,
+      false,
+    );
+    assert.equal("browserIdleTimeoutSeconds" in binDetailsSchema.shape, false);
+    const parsedHbResult = runtimeHeartbeatResultSchema.parse({
+      status: "online",
+      runtimeId: "rt-1",
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+      lastHeartbeatAt: new Date().toISOString(),
+      sourceStateSnapshot: {
+        freshness: "unknown",
+        sourceAccess: { status: "unknown" },
+      },
+      browserIdleTimeoutSeconds: 300,
+    });
+    assert.equal("browserIdleTimeoutSeconds" in parsedHbResult, false);
+    assert.equal(
+      humanSessionQueueReasonSchema.safeParse("runtime_sleeping").success,
+      true,
+    );
+    assert.equal(
+      humanSessionQueueReasonSchema.safeParse("runtime_waking").success,
+      true,
+    );
 
     assert.equal(
       manualRunQueueReasonSchema.safeParse("browser_capacity_exhausted")
@@ -718,7 +822,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
     assert.equal(parsedControl.success, false);
 
     const oldProtocolHeartbeat = runtimeHeartbeatInputSchema.safeParse({
-      protocolVersion: 7,
+      protocolVersion: 8,
       runtimeId: "rt-1",
       ownerGeneration: "1",
       ownerLockAcquired: true,
@@ -798,7 +902,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
 
     const runtimeStore = createRuntimeConnectionStore(mock.database);
     const heartbeatPayload = (runtimeId: string, binId: string) => ({
-      protocolVersion: runtimeProtocolVersion as 8,
+      protocolVersion: runtimeProtocolVersion as 9,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true as const,
@@ -952,5 +1056,280 @@ void describe("independent browser bins without cross-bin capacity", () => {
     // 5. removeBin succeeds without browser_capacity_active.
     const removed = await binStore.removeBin("bin-a");
     assert.deepEqual(removed, { ok: true, value: { id: "bin-a" } });
+  });
+
+  void it("enforces resident policy for non-reusable browser profiles and rejects enabling sleep", async () => {
+    const nonReusableAdapter = {
+      ...browserAdapter,
+      id: "test.browser-ephemeral",
+      environment: {
+        browser: {
+          required: true,
+          profileReuseAfterRestart: false,
+          profileReuseUnavailableReason:
+            "Session tokens are stored in volatile memory.",
+        },
+      },
+    };
+    const mock = createInMemoryDatabase({
+      bins: [
+        {
+          ...makeBin("bin-ephemeral"),
+          sourceAdapter: nonReusableAdapter,
+          runtimeSleepIdleTimeoutSeconds: null,
+        },
+        {
+          ...makeBin("bin-upgraded"),
+          sourceAdapter: nonReusableAdapter,
+          runtimeSleepIdleTimeoutSeconds: 300,
+        },
+      ],
+      connections: [],
+      runs: [],
+      humanSessions: [],
+    });
+
+    const binStore = createBinConfigurationStore(mock.database);
+    const ephemeral = await binStore.getBin("bin-ephemeral");
+    assert.equal(ephemeral.ok, true);
+    if (ephemeral.ok) {
+      assert.equal(ephemeral.value.runtimeSleep.idleTimeoutSeconds, null);
+    }
+
+    const upgraded = await binStore.getBin("bin-upgraded");
+    assert.equal(upgraded.ok, true);
+    if (upgraded.ok) {
+      assert.equal(upgraded.value.runtimeSleep.idleTimeoutSeconds, null);
+    }
+
+    const rejected = await binStore.updateBin("bin-ephemeral", {
+      runtimeSleep: { idleTimeoutSeconds: 60 },
+    });
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) {
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.error.code, "invalid_configuration");
+      assert.deepEqual(rejected.error.path, [
+        "runtimeSleep",
+        "idleTimeoutSeconds",
+      ]);
+      assert.match(
+        rejected.error.message,
+        /Session tokens are stored in volatile memory\./u,
+      );
+    }
+
+    const residentAccepted = await binStore.updateBin("bin-ephemeral", {
+      runtimeSleep: { idleTimeoutSeconds: null },
+    });
+    assert.equal(residentAccepted.ok, true);
+  });
+
+  void it("wakes sleeping containers on human open and waits for double close confirmation before marking work completed", async () => {
+    const mock = createInMemoryDatabase({
+      bins: [makeBin("bin-human")],
+      connections: [
+        {
+          ...makeConnection("bin-human", "rt-old", "ready"),
+          disconnected: true,
+        },
+      ],
+      containers: [
+        {
+          binId: "bin-human",
+          composeProject: "binny",
+          composeService: "browser-one",
+          containerId: "cid-human",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [],
+      humanSessions: [],
+    });
+
+    const wakeCalls: string[] = [];
+    const workCompletedCalls: string[] = [];
+    const coordinatorStub = {
+      requestWake(binId: string) {
+        wakeCalls.push(binId);
+      },
+      async onRuntimeHeartbeat() {},
+      async markWorkCompleted(binId: string) {
+        workCompletedCalls.push(binId);
+      },
+    };
+
+    const humanStore = createHumanSessionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createHumanSessionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+    const runtimeStore = createRuntimeConnectionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createRuntimeConnectionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+
+    const opened = await humanStore.requestHumanSession("bin-human");
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    assert.equal(opened.value.status, "pending");
+    assert.equal(opened.value.queueReason, "runtime_sleeping");
+    assert.deepEqual(wakeCalls, ["bin-human"]);
+
+    mock.containers.get("bin-human")!.lifecyclePhase = "waking";
+    const whileWaking = await humanStore.getHumanSession(
+      "bin-human",
+      opened.value.sessionId,
+    );
+    assert.equal(whileWaking.ok, true);
+    if (whileWaking.ok) {
+      assert.equal(whileWaking.value.status, "pending");
+      assert.equal(whileWaking.value.queueReason, "runtime_waking");
+    }
+
+    // Woken runtime reconnects with a new runtimeId + generation and promotes pending -> opening.
+    mock.containers.get("bin-human")!.lifecyclePhase = "running";
+    const hbOpen = await runtimeStore.heartbeat("bin-human", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-new",
+      ownerGeneration: "2",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      runtimeControlUrl: "http://bin-human:8080",
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbOpen.ok, true);
+    if (!hbOpen.ok) return;
+    assert.equal(hbOpen.value.humanSession?.action, "open");
+    assert.equal(hbOpen.value.humanSession?.sessionId, opened.value.sessionId);
+
+    // Runtime reports ready.
+    const hbReady = await runtimeStore.heartbeat("bin-human", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-new",
+      ownerGeneration: "2",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      runtimeControlUrl: "http://bin-human:8080",
+      humanSessionEvent: {
+        sessionId: opened.value.sessionId,
+        event: "ready",
+      },
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbReady.ok, true);
+    assert.deepEqual(workCompletedCalls, []);
+
+    // Close requested: gateway closes first -> runtimeClosed is still false, so work is NOT completed yet.
+    const closing = await humanStore.closeHumanSession(
+      "bin-human",
+      opened.value.sessionId,
+    );
+    assert.equal(closing.ok, true);
+    await humanStore.markHumanGatewayClosed(opened.value.sessionId);
+    assert.deepEqual(workCompletedCalls, []);
+
+    // Runtime confirms closed -> both gatewayClosed and runtimeClosed are true -> markWorkCompleted fires once.
+    const hbClosed = await runtimeStore.heartbeat("bin-human", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-new",
+      ownerGeneration: "2",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      runtimeControlUrl: "http://bin-human:8080",
+      humanSessionEvent: {
+        sessionId: opened.value.sessionId,
+        event: "closed",
+      },
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbClosed.ok, true);
+    assert.deepEqual(workCompletedCalls, ["bin-human"]);
+  });
+
+  void it("reports runtime_sleeping when human open arrives while container is stopping before disconnect", async () => {
+    const mock = createInMemoryDatabase({
+      bins: [makeBin("bin-stopping")],
+      connections: [makeConnection("bin-stopping", "rt-1", "stopping")],
+      containers: [
+        {
+          binId: "bin-stopping",
+          composeProject: "binny",
+          composeService: "browser-one",
+          containerId: "cid-stopping",
+          lifecyclePhase: "stopping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      runs: [],
+      humanSessions: [],
+    });
+
+    const wakeCalls: string[] = [];
+    const humanStore = createHumanSessionStore(mock.database, {
+      containerCoordinator: {
+        requestWake(binId: string) {
+          wakeCalls.push(binId);
+        },
+      } as unknown as Parameters<
+        typeof createHumanSessionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+
+    const opened = await humanStore.requestHumanSession("bin-stopping");
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    assert.equal(opened.value.status, "pending");
+    assert.equal(opened.value.queueReason, "runtime_sleeping");
+    assert.deepEqual(wakeCalls, ["bin-stopping"]);
   });
 });

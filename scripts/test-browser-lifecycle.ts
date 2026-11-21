@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -40,6 +40,8 @@ type BrowserRuntimeContainer = {
   readonly id: string;
   readonly imageId: string;
   readonly status: string;
+  readonly exitCode: number;
+  readonly startedAt: string;
   readonly ownerVolume: string;
 };
 
@@ -101,9 +103,11 @@ type Bin = {
   readonly sourceAdapterId: string;
   readonly identityId: string;
   readonly config: Record<string, unknown>;
-  readonly browserIdleTimeoutSeconds: number | null;
+  readonly runtimeSleep: { readonly idleTimeoutSeconds: number | null };
   readonly execution: {
     readonly status: string;
+    readonly phase?: string;
+    readonly reason?: string;
     readonly error?: { readonly code: string };
     readonly environment?: {
       readonly kind?: string;
@@ -163,6 +167,7 @@ const projectName = `binny-browser-${suffix}`;
 const serverImage = `binny-browser-server-${suffix}:local`;
 const browserImage = `binny-browser-browser-${suffix}:local`;
 const browserBaselineImage = `binny-browser-browser-${suffix}-image-a:local`;
+const browserNonReusableImage = `binny-browser-browser-${suffix}-non-reusable:local`;
 const browserFixturePackage = "@binny/source-adapter-browser-session-fixture";
 const outerBrowserContainer = `${projectName}-outer-browser`;
 const outerBrowserWsPath = `/binny-browser-${randomUUID()}`;
@@ -402,20 +407,6 @@ async function createComposeOverlay(): Promise<void> {
   );
 }
 
-async function armIdleHeartbeatGate(binId: string): Promise<void> {
-  assert.ok(heartbeatProxyControlPort !== undefined);
-  const response = await fetch(
-    `http://${publishedHost}:${String(heartbeatProxyControlPort)}/control/arm`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ binId, idleHeartbeat: true }),
-      signal: AbortSignal.timeout(3_000),
-    },
-  );
-  assert.equal(response.status, 200, await response.text());
-}
-
 async function armHumanOpenResponseGate(binId: string): Promise<void> {
   assert.ok(heartbeatProxyControlPort !== undefined);
   const response = await fetch(
@@ -473,76 +464,6 @@ async function waitForHeldHeartbeatClientClosed(): Promise<void> {
   throw new Error("运行器没有因超时放弃已拦截的人工 open 响应。");
 }
 
-async function waitForHeartbeatForwardedAfter(
-  after: number,
-  browserIdleTimeoutSeconds: number,
-): Promise<number> {
-  assert.ok(heartbeatProxyControlPort !== undefined);
-  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    const response = await fetch(`${controlUrl}/control/status`, {
-      signal: AbortSignal.timeout(3_000),
-    });
-    assert.equal(response.status, 200);
-    const state = (await response.json()) as {
-      readonly forwardedAt?: number;
-      readonly forwardedRuntimeId?: string;
-      readonly forwardedBrowserIdleTimeoutSeconds?: number | null;
-    };
-    if (
-      typeof state.forwardedAt === "number" &&
-      state.forwardedAt > after &&
-      state.forwardedRuntimeId !== undefined &&
-      state.forwardedBrowserIdleTimeoutSeconds === browserIdleTimeoutSeconds
-    )
-      return state.forwardedAt;
-    await delay(50);
-  }
-  throw new Error("更新空闲策略后没有观察到运行器完成的真实心跳。");
-}
-
-async function waitForIdleHeartbeatGate(binId: string): Promise<void> {
-  assert.ok(heartbeatProxyControlPort !== undefined);
-  const controlUrl = `http://${publishedHost}:${String(heartbeatProxyControlPort)}`;
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const response = await fetch(`${controlUrl}/control/status`, {
-      signal: AbortSignal.timeout(3_000),
-    });
-    assert.equal(response.status, 200);
-    const state = (await response.json()) as {
-      readonly held: boolean;
-      readonly armedForBinId?: string;
-      readonly heldAt?: number;
-    };
-    if (state.held && typeof state.heldAt === "number") return;
-    assert.equal(
-      state.armedForBinId,
-      binId,
-      "代理没有等待指定 bin 的空闲心跳。",
-    );
-    await delay(100);
-  }
-  throw new Error(`运行器没有发出 ${binId} 的空闲探测心跳。`);
-}
-
-async function holdIdleProbeAtDeadline(
-  binId: string,
-  timeoutSeconds: number,
-): Promise<void> {
-  const updateStartedAt = Date.now();
-  await updateBin(binId, timeoutSeconds);
-  const acceptedAt = await waitForHeartbeatForwardedAfter(
-    updateStartedAt,
-    timeoutSeconds,
-  );
-  const remainingMs = timeoutSeconds * 1_000 - (Date.now() - acceptedAt) - 750;
-  if (remainingMs > 0) await delay(remainingMs);
-  await armIdleHeartbeatGate(binId);
-  await waitForIdleHeartbeatGate(binId);
-}
-
 async function releaseHeartbeatGate(): Promise<void> {
   assert.ok(heartbeatProxyControlPort !== undefined);
   const response = await fetch(
@@ -550,10 +471,6 @@ async function releaseHeartbeatGate(): Promise<void> {
     { method: "POST", signal: AbortSignal.timeout(30_000) },
   );
   assert.equal(response.status, 200, await response.text());
-}
-
-async function releaseIdleHeartbeatGate(): Promise<void> {
-  await releaseHeartbeatGate();
 }
 
 async function waitForApi(): Promise<void> {
@@ -632,7 +549,11 @@ async function browserRuntimeContainerInfo(
   const [container] = JSON.parse(result.stdout) as {
     readonly Id: string;
     readonly Image: string;
-    readonly State?: { readonly Status?: string };
+    readonly State?: {
+      readonly Status?: string;
+      readonly ExitCode?: number;
+      readonly StartedAt?: string;
+    };
     readonly Mounts?: readonly {
       readonly Type?: string;
       readonly Name?: string;
@@ -649,6 +570,8 @@ async function browserRuntimeContainerInfo(
     id: container.Id,
     imageId: container.Image,
     status: container.State?.Status ?? "unknown",
+    exitCode: container.State?.ExitCode ?? 0,
+    startedAt: container.State?.StartedAt ?? "",
     ownerVolume,
   };
 }
@@ -742,6 +665,52 @@ async function buildBrowserImageUpdate(
     baselineImageId,
     candidateImageId,
   };
+}
+
+async function buildNonReusableBrowserImage(
+  buildContextDirectory: string,
+): Promise<string> {
+  await copyImageBuildContext(repositoryRoot, buildContextDirectory);
+  const adapterPath = path.join(
+    buildContextDirectory,
+    "source-adapters/browser-session-fixture/src/index.ts",
+  );
+  const original = await readFile(adapterPath, "utf8");
+  const updated = original.replace(
+    "profileReuseAfterRestart: true",
+    'profileReuseAfterRestart: false, profileReuseUnavailableReason: "Test fixture marks profile non-reusable across restarts."',
+  );
+  assert.notEqual(
+    updated,
+    original,
+    "未能将浏览器夹具适配器改写为 profileReuseAfterRestart: false。",
+  );
+  await writeFile(adapterPath, updated, "utf8");
+
+  const previousBrowserImage = activeBrowserImage;
+  try {
+    activeBrowserImage = browserNonReusableImage;
+    const build = await run(
+      "pnpm",
+      [
+        "--workspace-root",
+        "exec",
+        "turbo",
+        "run",
+        `${browserFixturePackage}#image:build`,
+      ],
+      { BINNY_IMAGE_BUILD_CONTEXT: buildContextDirectory },
+    );
+    assert.equal(
+      build.code,
+      0,
+      `Non-reusable browser image build failed:\n${(build.stdout + build.stderr).slice(-12_000)}`,
+    );
+    builtImages.add(browserNonReusableImage);
+    return await imageId(browserNonReusableImage);
+  } finally {
+    activeBrowserImage = previousBrowserImage;
+  }
 }
 
 async function publishedPort(
@@ -1007,7 +976,7 @@ async function configureRegisteredBin(
       `identity-${binId}`,
       "--config",
       JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
-      "--browser-idle-timeout-seconds",
+      "--idle-timeout-seconds",
       String(idleTimeout),
     ]),
     "updated",
@@ -1023,7 +992,7 @@ async function updateBin(
       "bin",
       "update",
       binId,
-      "--browser-idle-timeout-seconds",
+      "--idle-timeout-seconds",
       String(idleTimeout),
     ]),
     "updated",
@@ -1034,7 +1003,10 @@ async function readBin(binId: string): Promise<Bin> {
   return cliData(await cli(["bin", "get", binId]), "found");
 }
 
-async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
+async function waitForRuntime(
+  binId: string,
+  expectedProfileReuse = true,
+): Promise<Record<string, unknown>> {
   const deadline = Date.now() + 60_000;
   let lastState = "尚未查询。";
   while (Date.now() < deadline) {
@@ -1058,7 +1030,7 @@ async function waitForRuntime(binId: string): Promise<Record<string, unknown>> {
         assert.equal(bin.execution.environment?.kind, "browser");
         assert.equal(
           bin.execution.environment?.browser?.profileReuseAfterRestart,
-          true,
+          expectedProfileReuse,
         );
         return bin;
       }
@@ -1091,39 +1063,49 @@ async function waitForBrowserPower(
   throw new Error(`等待 ${binId} 浏览器状态 ${expected} 超时：${lastState}`);
 }
 
-function dockerMemoryBytes(value: string): number {
-  const match = /^\s*([\d.]+)\s*(B|kB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*\//u.exec(
-    value,
-  );
-  assert.ok(match !== null, `Docker 没有返回可识别的内存用量：${value}`);
-  const scale = match[2]!.startsWith("Ki")
-    ? 1024
-    : match[2]!.startsWith("Mi")
-      ? 1024 ** 2
-      : match[2]!.startsWith("Gi")
-        ? 1024 ** 3
-        : match[2]!.startsWith("Ti")
-          ? 1024 ** 4
-          : match[2] === "B"
-            ? 1
-            : 1000 ** (["kB", "MB", "GB", "TB"].indexOf(match[2]!) + 1);
-  return Number(match[1]) * scale;
+async function waitForContainerSleeping(
+  binId: string,
+  service: BrowserService,
+  timeoutMs = 60_000,
+): Promise<{
+  readonly bin: Bin;
+  readonly container: BrowserRuntimeContainer;
+}> {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const [bin, container] = await Promise.all([
+      readBin(binId),
+      browserRuntimeContainerInfo(service),
+    ]);
+    lastState = JSON.stringify({ execution: bin.execution, container });
+    if (
+      bin.execution.status === "sleeping" &&
+      bin.execution.phase === "sleeping" &&
+      container.status === "exited" &&
+      container.exitCode === 0
+    ) {
+      return { bin, container };
+    }
+    await delay(150);
+  }
+  throw new Error(`等待 ${binId} 进入整桶容器休眠超时：${lastState}`);
 }
 
-async function browserContainerMemoryBytes(service: string): Promise<number> {
-  const samples: number[] = [];
-  for (let index = 0; index < 3; index += 1) {
-    const result = await compose([
-      "stats",
-      "--no-stream",
-      "--format",
-      "{{.MemUsage}}",
-      service,
-    ]);
-    samples.push(dockerMemoryBytes(result.stdout.trim()));
-    if (index < 2) await delay(250);
+async function waitForContainerPhase(
+  binId: string,
+  expectedPhase: string,
+  timeoutMs = 30_000,
+): Promise<Bin> {
+  const deadline = Date.now() + timeoutMs;
+  let lastState = "尚未查询。";
+  while (Date.now() < deadline) {
+    const bin = await readBin(binId);
+    lastState = JSON.stringify(bin.execution);
+    if (bin.execution.phase === expectedPhase) return bin;
+    await delay(100);
   }
-  return samples.toSorted((left, right) => left - right)[1]!;
+  throw new Error(`等待 ${binId} 容器阶段 ${expectedPhase} 超时：${lastState}`);
 }
 
 async function waitForBrowserProcessesStopped(
@@ -1561,15 +1543,18 @@ async function browserPortBindings(
 async function browserProcesses(
   service: BrowserService = "browser-one",
 ): Promise<readonly ContainerProcess[]> {
-  const containers = await compose(["ps", "--all", "--quiet", service]);
-  const containerId = containers.stdout.trim();
-  assert.ok(containerId.length > 0, `没有找到 ${service} 容器。`);
+  const info = await browserRuntimeContainerInfo(service);
+  if (info.status !== "running") return [];
   const result = await run("docker", [
     "top",
-    containerId,
+    info.id,
     "-eo",
     "pid,ppid,stat,comm,args",
   ]);
+  if (result.code !== 0) {
+    const refreshed = await browserRuntimeContainerInfo(service);
+    if (refreshed.status !== "running") return [];
+  }
   assert.equal(result.code, 0, result.stderr);
   return result.stdout.split("\n").flatMap((line) => {
     const columns = /^(\s*\d+)\s+\d+\s+(\S+)\s+\S+(?:\s+(.*))?$/u.exec(line);
@@ -1690,7 +1675,7 @@ async function assertVncLoopbackOnly(): Promise<void> {
   const outsideContainer = await compose([
     "exec",
     "--no-TTY",
-    "browser-two",
+    "server",
     "node",
     "-e",
     'const socket = require("node:net").connect({ host: "browser-one", port: 5900 }); const timeout = setTimeout(() => process.exit(2), 3000); socket.once("connect", () => { clearTimeout(timeout); process.exit(1); }); socket.once("error", error => { clearTimeout(timeout); process.exit(error.code === "ECONNREFUSED" ? 0 : 3); });',
@@ -1957,9 +1942,26 @@ async function main(): Promise<void> {
     waitForBinRegistration("binny-browser-one", manifest),
     waitForBinRegistration("binny-browser-two", candidateManifest),
   ]);
+  assert.equal(
+    (await readBin("binny-browser-one")).runtimeSleep.idleTimeoutSeconds,
+    300,
+  );
+  assert.equal(
+    (await readBin("binny-browser-two")).runtimeSleep.idleTimeoutSeconds,
+    300,
+  );
   await Promise.all([
-    configureRegisteredBin("binny-browser-one", 4),
+    configureRegisteredBin("binny-browser-one", 30),
     configureRegisteredBin("binny-browser-two", "disabled"),
+  ]);
+  await Promise.all([
+    waitForBrowserPower("binny-browser-one", "ready"),
+    waitForBrowserPower("binny-browser-two", "ready"),
+  ]);
+  assert.equal(await activeBrowserMainProcessCount(), 2);
+  await Promise.all([
+    verifyPatchrightDeploys("browser-one"),
+    verifyPatchrightDeploys("browser-two"),
   ]);
 
   const originalConfig = (await readBin("binny-browser-one")).config;
@@ -1980,50 +1982,39 @@ async function main(): Promise<void> {
   assert.deepEqual((await readBin("binny-browser-one")).config, originalConfig);
 
   assert.equal(
-    (await updateBin("binny-browser-one", "disabled"))
-      .browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-one", "disabled")).runtimeSleep
+      .idleTimeoutSeconds,
     null,
   );
   assert.equal(
-    (await updateBin("binny-browser-one", 0)).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-one", 0)).runtimeSleep.idleTimeoutSeconds,
     0,
   );
   assert.equal(
-    (await updateBin("binny-browser-one", 4)).browserIdleTimeoutSeconds,
-    4,
-  );
-  assert.equal(
-    (await updateBin("binny-browser-two", 0)).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-two", 0)).runtimeSleep.idleTimeoutSeconds,
     0,
   );
-  assert.equal(
-    (await updateBin("binny-browser-two", "disabled"))
-      .browserIdleTimeoutSeconds,
-    null,
-  );
   await Promise.all([
-    waitForRuntime("binny-browser-one"),
-    waitForRuntime("binny-browser-two"),
+    waitForContainerSleeping("binny-browser-one", "browser-one"),
+    waitForContainerSleeping("binny-browser-two", "browser-two"),
   ]);
   assert.equal(
-    (await readBin("binny-browser-one")).browserIdleTimeoutSeconds,
-    4,
+    (await updateBin("binny-browser-one", 30)).runtimeSleep.idleTimeoutSeconds,
+    30,
   );
   assert.equal(
-    (await readBin("binny-browser-two")).browserIdleTimeoutSeconds,
+    (await updateBin("binny-browser-two", "disabled")).runtimeSleep
+      .idleTimeoutSeconds,
     null,
   );
-  await updateBin("binny-browser-one", 30);
-  await delay(2_500);
   assert.equal(
-    (await waitForBrowserPower("binny-browser-one", "stopped")).execution
-      .status,
-    "online",
+    (await readBin("binny-browser-one")).runtimeSleep.idleTimeoutSeconds,
+    30,
   );
-  await Promise.all([
-    verifyPatchrightDeploys("browser-one"),
-    verifyPatchrightDeploys("browser-two"),
-  ]);
+  assert.equal(
+    (await readBin("binny-browser-two")).runtimeSleep.idleTimeoutSeconds,
+    null,
+  );
 
   const oneBindings = await browserPortBindings("browser-one");
   assert.equal(oneBindings["5900/tcp"], undefined);
@@ -2078,8 +2069,8 @@ async function main(): Promise<void> {
     updateBin("binny-browser-two", 0),
   ]);
   await Promise.all([
-    waitForBrowserPower("binny-browser-one", "stopped"),
-    waitForBrowserPower("binny-browser-two", "stopped"),
+    waitForContainerSleeping("binny-browser-one", "browser-one"),
+    waitForContainerSleeping("binny-browser-two", "browser-two"),
   ]);
   await Promise.all([
     waitForBrowserProcessesStopped("browser-one"),
@@ -2119,7 +2110,7 @@ async function main(): Promise<void> {
   assert.equal(concurrentDuringLostOpen.status, "completed");
   await waitForBrowserPower("binny-browser-two", "ready");
   const lostOpenBrowserSamples = [await activeBrowserMainProcessCount()];
-  assert.equal(lostOpenBrowserSamples.at(-1), 1);
+  assert.equal(lostOpenBrowserSamples.at(-1), 2);
 
   const lostOpenCloseRequest = await requestHumanSessionClose(
     "binny-browser-one",
@@ -2139,10 +2130,10 @@ async function main(): Promise<void> {
     "closed",
   );
   await updateBin("binny-browser-two", 0);
-  await waitForBrowserPower("binny-browser-two", "stopped");
+  await waitForContainerSleeping("binny-browser-two", "browser-two");
   await waitForBrowserProcessesStopped("browser-two");
   lostOpenBrowserSamples.push(await activeBrowserMainProcessCount());
-  assert.equal(lostOpenBrowserSamples.at(-1), 0);
+  assert.equal(lostOpenBrowserSamples.at(-1), 1);
   await updateBin("binny-browser-two", "disabled");
   process.stdout.write(
     `人工 open 回包丢失实测：${JSON.stringify({
@@ -2174,43 +2165,45 @@ async function main(): Promise<void> {
   assert.equal(readyBinText.code, 0, readyBinText.stderr);
   assert.match(readyBinText.stdout, /^Runtime connection: online$/mu);
   assert.match(readyBinText.stdout, /^Browser: ready$/mu);
-  const awakeMemory = await browserContainerMemoryBytes("browser-one");
   const initialBrowserProcess = await browserMainProcess("browser-one");
-  await holdIdleProbeAtDeadline("binny-browser-one", 4);
+  await updateBin("binny-browser-one", 4);
+  await delay(1_500);
   await updateBin("binny-browser-one", "disabled");
-  await releaseIdleHeartbeatGate();
-  await delay(4_500);
+  await delay(4_000);
   assert.equal(
-    (await readBin("binny-browser-one")).execution.environment?.browser?.power
-      ?.status,
-    "ready",
-    "关闭尚未开始时禁用空闲关闭，探测完成后仍关闭了浏览器。",
+    (await readBin("binny-browser-one")).execution.status,
+    "online",
+    "关闭尚未开始时禁用空闲休眠，仍触发了整桶休眠。",
+  );
+  assert.equal(
+    (await browserRuntimeContainerInfo("browser-one")).status,
+    "running",
   );
   await updateBin("binny-browser-one", 4);
-  const stoppedBin = await waitForBrowserPower("binny-browser-one", "stopped");
-  assert.equal(stoppedBin.execution.status, "online");
-  const stoppedBinText = await cli([
+  const { bin: sleepingBin, container: sleepingContainer } =
+    await waitForContainerSleeping("binny-browser-one", "browser-one");
+  assert.equal(sleepingBin.execution.status, "sleeping");
+  assert.equal(sleepingContainer.status, "exited");
+  const sleepingBinText = await cli([
     "bin",
     "get",
     "binny-browser-one",
     "--output",
     "text",
   ]);
-  assert.equal(stoppedBinText.code, 0, stoppedBinText.stderr);
-  assert.match(stoppedBinText.stdout, /^Runtime connection: online$/mu);
-  assert.match(stoppedBinText.stdout, /^Browser: stopped$/mu);
-  await waitForBrowserProcessesStopped("browser-one");
-  const stoppedMemory = await browserContainerMemoryBytes("browser-one");
-  assert.ok(
-    stoppedMemory < awakeMemory,
-    `浏览器真实退出后容器内存没有下降：ready=${String(awakeMemory)} stopped=${String(stoppedMemory)}`,
+  assert.equal(sleepingBinText.code, 0, sleepingBinText.stderr);
+  assert.match(
+    sleepingBinText.stdout,
+    /^Runtime connection: sleeping \(idle_policy\)$/mu,
   );
+  await waitForBrowserProcessesStopped("browser-one");
+  assert.equal(await activeBrowserMainProcessCount("browser-one"), 0);
   process.stdout.write(
-    `空闲资源实测：${JSON.stringify({
+    `整桶休眠实测：${JSON.stringify({
       browserHostPid: initialBrowserProcess.pid,
       browserStartTime: initialBrowserProcess.startTime,
-      readyMemoryBytes: awakeMemory,
-      stoppedMemoryBytes: stoppedMemory,
+      sleepingContainerStatus: sleepingContainer.status,
+      sleepingExitCode: sleepingContainer.exitCode,
     })}\n`,
   );
 
@@ -2218,6 +2211,11 @@ async function main(): Promise<void> {
   const outerBrowser = playwrightBrowser;
   const loginSession = await startHumanSession("binny-browser-one");
   assert.equal(loginSession.status, "pending");
+  assert.ok(
+    loginSession.queueReason === "runtime_sleeping" ||
+      loginSession.queueReason === "runtime_waking",
+    `期望休眠唤醒排队原因，实际：${String(loginSession.queueReason)}`,
+  );
   const readyLogin = await waitForHuman(
     "binny-browser-one",
     loginSession.sessionId,
@@ -2227,19 +2225,23 @@ async function main(): Promise<void> {
   assert.notEqual(
     humanWakeProcess.startTime,
     initialBrowserProcess.startTime,
-    "人工访问没有从已停止状态启动新的浏览器进程。",
+    "人工访问没有从休眠状态唤醒并启动新的浏览器进程。",
   );
   const loginViewerUrl = new URL(loginSession.viewerUrl);
   loginViewerUrl.hostname = publishedHost;
   loginViewerUrl.port = String(serverPort);
   const loginViewer = await openViewer(outerBrowser, loginViewerUrl.href);
   await enterLoginThroughCanvas(loginViewer.page, 3_600, 0, loginViewer.frames);
-  await delay(4_500);
+  await delay(5_000);
+  assert.equal(
+    (await readBin("binny-browser-one")).execution.status,
+    "online",
+    "人工操作期间容器休眠误停了浏览器。",
+  );
   assert.equal(
     (await readBin("binny-browser-one")).execution.environment?.browser?.power
       ?.status,
     "ready",
-    "人工操作期间空闲计时关闭了浏览器。",
   );
   await closeHumanSession("binny-browser-one", loginSession.sessionId);
   await waitForViewerClosed(loginViewer.closed);
@@ -2251,7 +2253,7 @@ async function main(): Promise<void> {
   await assertVncStopped("browser-one");
   await loginViewer.page.close();
   assert.ok(readyLogin.readyAt !== undefined);
-  await waitForBrowserPower("binny-browser-one", "stopped");
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
 
@@ -2268,7 +2270,7 @@ async function main(): Promise<void> {
   assert.notEqual(
     checkWakeProcess.startTime,
     humanWakeProcess.startTime,
-    "check 没有从已停止状态重新启动浏览器。",
+    "check 没有从休眠状态唤醒并重新启动浏览器。",
   );
 
   const adjacentCollect = await triggerRun("binny-browser-one", "collect");
@@ -2280,7 +2282,7 @@ async function main(): Promise<void> {
   assert.equal(adjacentCollectResult.status, "completed");
   assert.ok((adjacentCollectResult.result?.commits.length ?? 0) > 0);
   assert.deepEqual(await browserMainProcess("browser-one"), checkWakeProcess);
-  await waitForBrowserPower("binny-browser-one", "stopped");
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
 
@@ -2390,7 +2392,7 @@ async function main(): Promise<void> {
     archivedBeforeImageUpdate,
     "浏览器镜像替换不能丢失已归档资料。",
   );
-  await waitForBrowserPower("binny-browser-one", "stopped");
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   process.stdout.write(
@@ -2421,7 +2423,6 @@ async function main(): Promise<void> {
   );
 
   await updateBin("binny-browser-one", 30);
-  await delay(2_500);
   const collectWake = await triggerRun("binny-browser-one", "collect");
   const collectWakeResult = await waitForRun(
     "binny-browser-one",
@@ -2434,21 +2435,20 @@ async function main(): Promise<void> {
   assert.notEqual(
     collectWakeProcess.startTime,
     checkWakeProcess.startTime,
-    "collect 没有从已停止状态重新启动浏览器。",
+    "collect 没有从休眠状态唤醒并重新启动浏览器。",
   );
 
-  await holdIdleProbeAtDeadline("binny-browser-one", 4);
+  await updateBin("binny-browser-one", 4);
+  await delay(1_500);
   await updateBin("binny-browser-one", 30);
-  await releaseIdleHeartbeatGate();
-  await delay(5_000);
+  await delay(3_500);
   assert.equal(
-    (await readBin("binny-browser-one")).execution.environment?.browser?.power
-      ?.status,
-    "ready",
-    "关闭尚未开始时延长空闲时限，旧截止时间仍关闭了浏览器。",
+    (await readBin("binny-browser-one")).execution.status,
+    "online",
+    "关闭尚未开始时延长空闲时限，旧截止时间仍休眠了浏览器。",
   );
   await updateBin("binny-browser-one", 4);
-  await waitForBrowserPower("binny-browser-one", "stopped");
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   const browserFixtureRunsBeforeSchedule =
@@ -2536,10 +2536,24 @@ async function main(): Promise<void> {
   assert.ok((scheduledRun.result?.commits.length ?? 0) > 0);
   await waitForGateUnload(scheduleGateId, scheduleGate);
 
+  // Keep browser-two warm before freezing browser-one so cross-bin verification
+  // finishes well inside browser-one's 30s Docker stop grace period.
+  const warmTwo = await triggerRun("binny-browser-two", "check");
+  assert.equal(
+    (
+      await waitForRun(
+        "binny-browser-two",
+        warmTwo.runId,
+        (run) => run.status === "completed" || run.status === "failed",
+      )
+    ).status,
+    "completed",
+  );
+  const stoppingContainerBefore =
+    await browserRuntimeContainerInfo("browser-one");
   const stoppingProcess = await browserMainProcess("browser-one");
   const stoppingContainerPid = await browserContainerProcessId(stoppingProcess);
   const signalBrowser = async (signal: "SIGSTOP" | "SIGCONT") => {
-    assert.deepEqual(await browserMainProcess("browser-one"), stoppingProcess);
     await compose([
       "exec",
       "--no-TTY",
@@ -2550,13 +2564,18 @@ async function main(): Promise<void> {
     ]);
   };
   await signalBrowser("SIGSTOP");
-  let pendingWake: Run | undefined;
+  let pendingWakePromise: Promise<Run> | undefined;
+  let pendingHumanDuringStop: HumanSessionCreated | undefined;
   try {
     await updateBin("binny-browser-one", 0);
-    await waitForBrowserPower("binny-browser-one", "stopping");
-    pendingWake = await triggerRun("binny-browser-one", "collect");
-    assert.equal(pendingWake.status, "queued");
-    assert.equal(pendingWake.queueReason, "bin_busy");
+    await waitForContainerPhase("binny-browser-one", "stopping");
+    pendingHumanDuringStop = await startHumanSession("binny-browser-one");
+    assert.equal(pendingHumanDuringStop.status, "pending");
+    assert.equal(pendingHumanDuringStop.queueReason, "runtime_sleeping");
+    // Parameter validation in triggerRun awaits ensureAwakeAndRun, which waits
+    // for the in-flight stop; start it concurrently while SIGSTOP holds the stop.
+    pendingWakePromise = triggerRun("binny-browser-one", "collect");
+    await delay(300);
     const crossBinWake = await triggerRun("binny-browser-two", "check");
     const completedCrossBinWake = await waitForRun(
       "binny-browser-two",
@@ -2564,28 +2583,35 @@ async function main(): Promise<void> {
       (run) => run.status === "completed" || run.status === "failed",
     );
     assert.equal(completedCrossBinWake.status, "completed");
-    await updateBin("binny-browser-two", 0);
-    await waitForBrowserPower("binny-browser-two", "stopped");
-    await waitForBrowserProcessesStopped("browser-two");
-    await updateBin("binny-browser-two", "disabled");
-    const waitingWake = await readRun("binny-browser-one", pendingWake.runId);
-    assert.equal(waitingWake.queueReason, "bin_busy");
     assert.equal(
-      (await readBin("binny-browser-one")).execution.environment?.browser?.power
-        ?.status,
+      (await readBin("binny-browser-one")).execution.phase,
       "stopping",
     );
     assert.deepEqual(
       await browserMainProcess("browser-one"),
       stoppingProcess,
-      "旧浏览器退出前运行器启动了第二个 profile 使用者。",
+      "旧容器退出前运行器启动了第二个 profile 使用者。",
     );
     await updateBin("binny-browser-one", 30);
-    await delay(2_500);
   } finally {
-    await signalBrowser("SIGCONT");
+    await signalBrowser("SIGCONT").catch(() => undefined);
   }
-  assert.ok(pendingWake !== undefined);
+  await updateBin("binny-browser-two", 0);
+  await waitForContainerSleeping("binny-browser-two", "browser-two");
+  await waitForBrowserProcessesStopped("browser-two");
+  await updateBin("binny-browser-two", "disabled");
+  assert.ok(pendingWakePromise !== undefined);
+  const pendingWake = await pendingWakePromise;
+  assert.ok(pendingHumanDuringStop !== undefined);
+  await waitForHuman(
+    "binny-browser-one",
+    pendingHumanDuringStop.sessionId,
+    "ready",
+  );
+  await closeHumanSession(
+    "binny-browser-one",
+    pendingHumanDuringStop.sessionId,
+  );
   const wakeAfterStop = await waitForRun(
     "binny-browser-one",
     pendingWake.runId,
@@ -2593,12 +2619,17 @@ async function main(): Promise<void> {
   );
   assert.equal(wakeAfterStop.status, "completed");
   await waitForBrowserPower("binny-browser-one", "ready");
+  assert.notEqual(
+    (await browserRuntimeContainerInfo("browser-one")).startedAt,
+    stoppingContainerBefore.startedAt,
+    "关闭中的需求没有等旧容器退出后重新启动容器。",
+  );
   assert.notDeepEqual(
     await browserMainProcess("browser-one"),
     stoppingProcess,
     "关闭中的需求没有等旧 profile 退出后重新启动浏览器。",
   );
-  await updateBin("binny-browser-one", 4);
+  await updateBin("binny-browser-one", 30);
 
   const disconnectedSession = await startHumanSession("binny-browser-one");
   await waitForHuman(
@@ -2650,9 +2681,10 @@ async function main(): Promise<void> {
     "unavailable",
   );
   await updateBin("binny-browser-two", 0);
-  await waitForBrowserPower("binny-browser-two", "stopped");
+  await waitForContainerSleeping("binny-browser-two", "browser-two");
   await waitForBrowserProcessesStopped("browser-two");
 
+  await updateBin("binny-browser-one", 4);
   const gateId = randomUUID();
   const gate = await createGate(gateId);
   const gatedRun = await triggerRun("binny-browser-one", "collect", { gateId });
@@ -2717,6 +2749,7 @@ async function main(): Promise<void> {
   );
   await closeHumanSession("binny-browser-one", pendingSession.sessionId);
   await assertVncStopped("browser-one");
+  await updateBin("binny-browser-one", 30);
 
   const beforeRestartSession = await startHumanSession("binny-browser-one");
   const readyBeforeRestart = await waitForHuman(
@@ -2823,12 +2856,12 @@ async function main(): Promise<void> {
   await shortViewer.page.close();
   await delay(11_000);
   const disabledIdleBin = await readBin("binny-browser-two");
-  assert.equal(disabledIdleBin.browserIdleTimeoutSeconds, null);
+  assert.equal(disabledIdleBin.runtimeSleep.idleTimeoutSeconds, null);
   assert.equal(disabledIdleBin.execution.status, "online");
   assert.equal(
     disabledIdleBin.execution.environment?.browser?.power?.status,
     "ready",
-    "禁用空闲关闭后浏览器仍被自动停掉。",
+    "禁用空闲休眠后浏览器仍被自动停掉。",
   );
 
   const expiredCheck = await triggerRun("binny-browser-two", "check");
@@ -2855,7 +2888,7 @@ async function main(): Promise<void> {
   assert.equal(expiredCollectResult.result?.error?.requiresHuman, true);
 
   await updateBin("binny-browser-one", 0);
-  await waitForBrowserPower("binny-browser-one", "stopped");
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
   assert.deepEqual(await zombieBrowserProcesses("browser-one"), []);
   await updateBin("binny-browser-one", 30);
@@ -2910,8 +2943,8 @@ async function main(): Promise<void> {
     updateBin("binny-browser-two", 0),
   ]);
   await Promise.all([
-    waitForBrowserPower("binny-browser-one", "stopped"),
-    waitForBrowserPower("binny-browser-two", "stopped"),
+    waitForContainerSleeping("binny-browser-one", "browser-one"),
+    waitForContainerSleeping("binny-browser-two", "browser-two"),
   ]);
   await Promise.all([
     waitForBrowserProcessesStopped("browser-one"),
@@ -2934,6 +2967,114 @@ async function main(): Promise<void> {
     await cli(["bin", "remove", "binny-browser-two"]),
     "removed",
   );
+
+  const nonReusableContextDirectory = path.join(
+    testDirectory,
+    "browser-image-non-reusable",
+  );
+  const nonReusableImageId = await buildNonReusableBrowserImage(
+    nonReusableContextDirectory,
+  );
+  await compose(["stop", "browser-two"]);
+  activeBrowserImage = browserNonReusableImage;
+  try {
+    await compose([
+      "up",
+      "--detach",
+      "--no-deps",
+      "--force-recreate",
+      "--no-build",
+      "browser-two",
+    ]);
+    const nonReusableContainer =
+      await browserRuntimeContainerInfo("browser-two");
+    assert.equal(nonReusableContainer.imageId, nonReusableImageId);
+    const nonReusableManifest = await runtimeManifest("browser-two");
+    await waitForBinRegistration("binny-browser-two", nonReusableManifest);
+    const nonReusableDefaultBin = await readBin("binny-browser-two");
+    assert.equal(nonReusableDefaultBin.runtimeSleep.idleTimeoutSeconds, null);
+
+    const configuredResidentBin = cliData<Bin>(
+      await cli([
+        "bin",
+        "update",
+        "binny-browser-two",
+        "--config",
+        JSON.stringify({ baseUrl: "http://browser-session-source:8081/" }),
+      ]),
+      "updated",
+    );
+    assert.equal(configuredResidentBin.runtimeSleep.idleTimeoutSeconds, null);
+    await waitForRuntime("binny-browser-two");
+
+    const rejectedCliUpdate = cliFailure<{
+      readonly code: string;
+      readonly message: string;
+      readonly path?: readonly (string | number)[];
+    }>(
+      await cli([
+        "bin",
+        "update",
+        "binny-browser-two",
+        "--idle-timeout-seconds",
+        "60",
+      ]),
+      "invalid_configuration",
+    );
+    assert.deepEqual(rejectedCliUpdate.path, [
+      "runtimeSleep",
+      "idleTimeoutSeconds",
+    ]);
+    assert.match(
+      rejectedCliUpdate.message,
+      /Test fixture marks profile non-reusable across restarts\./u,
+    );
+
+    assert.ok(serverPort !== undefined);
+    const rejectedHttpUpdate = await fetch(
+      `http://${publishedHost}:${String(serverPort)}/bins/binny-browser-two`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeSleep: { idleTimeoutSeconds: 0 },
+        }),
+        signal: AbortSignal.timeout(5_000),
+      },
+    );
+    assert.equal(rejectedHttpUpdate.status, 400);
+    const rejectedHttpBody = (await rejectedHttpUpdate.json()) as {
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+        readonly path?: readonly (string | number)[];
+      };
+    };
+    assert.equal(rejectedHttpBody.error.code, "invalid_configuration");
+    assert.deepEqual(rejectedHttpBody.error.path, [
+      "runtimeSleep",
+      "idleTimeoutSeconds",
+    ]);
+    assert.match(
+      rejectedHttpBody.error.message,
+      /Test fixture marks profile non-reusable across restarts\./u,
+    );
+
+    assert.equal(
+      (await readBin("binny-browser-two")).runtimeSleep.idleTimeoutSeconds,
+      null,
+    );
+    assert.equal(
+      (await browserRuntimeContainerInfo("browser-two")).status,
+      "running",
+    );
+    cliData<{ readonly removed: true; readonly id: string }>(
+      await cli(["bin", "remove", "binny-browser-two"]),
+      "removed",
+    );
+  } finally {
+    activeBrowserImage = browserImage;
+  }
 }
 
 try {
