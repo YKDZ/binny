@@ -225,8 +225,6 @@ function failureFromProblems(
       message: `Qoder CN announcements and events synchronization incomplete: ${examples}`,
       impact:
         "Affected announcements or events were not archived or their ongoing document progress was not advanced.",
-      suggestion:
-        "Check Qoder CN documentation index and detail markdown page availability.",
       requiresHuman: false,
     },
     completedScopes,
@@ -266,7 +264,6 @@ export async function checkCnAnnouncementsEvents(
             message:
               "Documentation index does not contain recognized headings.",
             impact: "Cannot discover Qoder CN announcements or events.",
-            suggestion: "Verify that the index URL points to a valid llms.txt.",
             requiresHuman: false,
           },
         ],
@@ -289,7 +286,6 @@ export async function checkCnAnnouncementsEvents(
           code: "qoder_cn_docs_index_unreachable",
           message: error instanceof Error ? error.message : "Index unreachable",
           impact: "Cannot discover Qoder CN announcements and events.",
-          suggestion: "Verify network connectivity and URL configuration.",
           requiresHuman: false,
         },
       ],

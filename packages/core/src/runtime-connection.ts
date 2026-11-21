@@ -141,7 +141,7 @@ function compatibilityError(
   if (!configNativeValid) {
     return {
       code: "runtime_configuration_incompatible",
-      message: "首次原生配置不完整；请先在核心中填写并验证长期配置。",
+      message: "首次原生配置尚未在核心完成有效长期配置校验。",
       path: ["config"],
     };
   }
@@ -572,7 +572,7 @@ export function createRuntimeConnectionStore(
             if (registration?.kind !== "create") {
               return failure(409, {
                 code: "configuration_changed",
-                message: "bin 在心跳准备期间发生变化，请重试。",
+                message: "bin 在心跳准备期间发生变化，本次心跳未生效。",
                 path: ["binId"],
               });
             }
@@ -648,7 +648,7 @@ export function createRuntimeConnectionStore(
             ) {
               return failure(409, {
                 code: "configuration_changed",
-                message: "源码声明在原生校验期间发生变化，请重试。",
+                message: "源码声明在原生校验期间发生变化，本次心跳未生效。",
                 path: ["sourceAdapter"],
               });
             }
@@ -661,7 +661,8 @@ export function createRuntimeConnectionStore(
             ) {
               return failure(409, {
                 code: "configuration_changed",
-                message: "配置或源码声明在原生校验期间发生变化，请重试。",
+                message:
+                  "配置或源码声明在原生校验期间发生变化，本次心跳未生效。",
                 path: ["config"],
               });
             }
@@ -771,7 +772,7 @@ export function createRuntimeConnectionStore(
             if (!runtimeUnchanged) {
               return failure(409, {
                 code: "configuration_changed",
-                message: "运行器所有者在原生校验期间发生变化，请重试。",
+                message: "运行器所有者在原生校验期间发生变化，本次心跳未生效。",
                 path: ["runtimeId"],
               });
             }

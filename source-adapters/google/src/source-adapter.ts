@@ -104,7 +104,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -189,7 +188,6 @@ interface ActionProblem {
   readonly sourceId: string;
   readonly message: string;
   readonly path?: readonly (string | number)[] | undefined;
-  readonly suggestion?: string | undefined;
   readonly stage?: string | undefined;
   readonly target?: string | undefined;
   readonly abortCause?: ManualRunAbortCause | undefined;
@@ -199,7 +197,6 @@ interface CheckProblem {
   readonly code: string;
   readonly message: string;
   readonly impact: string;
-  readonly suggestion: string;
   readonly requiresHuman: boolean;
   readonly path?: (string | number)[] | undefined;
 }
@@ -399,9 +396,6 @@ function failureFromProblems(
       code: "google_collection_incomplete",
       message: `Google AI / DeepMind collection incomplete: ${examples.join("; ")}${more}`,
       impact: `${completed}Archived data will not roll back; affected source sync state was not advanced.`,
-      suggestion:
-        first?.suggestion ??
-        "Check failing article URLs or media sources and re-run. Already archived items will be deduplicated by source key.",
       requiresHuman: false,
       ...(first?.stage === undefined ? {} : { stage: first.stage }),
       ...(first?.target === undefined ? {} : { target: first.target }),
@@ -422,7 +416,6 @@ async function check(
     code: "google_source_not_configured",
     message: `Requested source "${id}" is not configured.`,
     impact: "The requested source scope cannot be checked.",
-    suggestion: "Check the sourceIds parameter or adapter configuration.",
     requiresHuman: false,
     path: ["sourceIds", id],
   }));
@@ -437,7 +430,6 @@ async function check(
           code: "google_feed_empty",
           message: `Source "${source.id}" returned 304 on unconditional check request.`,
           impact: "Cannot verify sample article extraction.",
-          suggestion: "Verify source URL and feed availability.",
           requiresHuman: false,
           path: ["sources", source.id],
         });
@@ -448,7 +440,6 @@ async function check(
           code: "google_feed_empty",
           message: `Source "${source.id}" feed contains no items.`,
           impact: "Cannot verify sample article extraction.",
-          suggestion: "Verify that the feed is publishing items.",
           requiresHuman: false,
           path: ["sources", source.id],
         });
@@ -461,7 +452,6 @@ async function check(
           code: "google_sample_missing_url",
           message: `Sample item in source "${source.id}" has no article URL.`,
           impact: "Cannot verify article page extraction.",
-          suggestion: "Verify feed format and article link elements.",
           requiresHuman: false,
           path: ["sources", source.id, "items", 0],
         });
@@ -477,7 +467,6 @@ async function check(
           code: "google_sample_article_unavailable",
           message: `Sample article "${sampleItem.articleUrl}" returned HTTP ${articleRes.status}.`,
           impact: "Full-text extraction cannot be verified.",
-          suggestion: "Verify article URL reachability and network connection.",
           requiresHuman: false,
           path: ["sources", source.id, "items", 0],
         });
@@ -498,7 +487,6 @@ async function check(
           code: "google_sample_article_extraction_failed",
           message: `Sample article "${sampleItem.articleUrl}" yielded no extractable article body.`,
           impact: "Full-text extraction cannot be verified.",
-          suggestion: "Verify article HTML structure and selectors.",
           requiresHuman: false,
           path: ["sources", source.id, "items", 0],
         });
@@ -510,7 +498,6 @@ async function check(
         code: "google_source_unavailable",
         message: `Failed to check source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
         impact: "Source availability could not be verified.",
-        suggestion: "Check network connectivity and source URL.",
         requiresHuman: false,
         path: ["sources", source.id],
       });

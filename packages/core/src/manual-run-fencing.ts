@@ -2,6 +2,7 @@ import {
   runtimeEnvironmentStoredSchema,
   runtimeHeartbeatTimeoutMs,
   manualRunFailureSchema,
+  type ManualRunFailure,
 } from "@binny/contracts";
 import { manualRuns, runtimeConnections, type Transaction } from "@binny/db";
 import { and, eq, exists, gt, inArray, isNull, not, sql } from "drizzle-orm";
@@ -13,9 +14,33 @@ const interruptedFailure = {
   code: "runtime_interrupted",
   message: "运行器失联或被替换，本次运行未恢复执行。",
   impact: "本次运行已终结；确认旧执行者停止前，同一 bin 不会开始新运行。",
-  suggestion: "检查运行器后重新触发新的运行。",
   requiresHuman: false,
 } as const;
+
+function stripLegacyManualRunFailureFields(raw: unknown): unknown {
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    !Array.isArray(raw) &&
+    "suggestion" in raw
+  ) {
+    const { suggestion: _removed, ...rest } = raw as Record<string, unknown>;
+    return rest;
+  }
+  return raw;
+}
+
+/** Parses persisted `manual_runs.failure` JSONB while stripping legacy `suggestion` keys. */
+export function parseStoredManualRunFailure(raw: unknown): ManualRunFailure {
+  return manualRunFailureSchema.parse(stripLegacyManualRunFailureFields(raw));
+}
+
+/** Safely parses persisted `manual_runs.failure` JSONB while stripping legacy `suggestion` keys. */
+export function safeParseStoredManualRunFailure(raw: unknown) {
+  return manualRunFailureSchema.safeParse(
+    stripLegacyManualRunFailureFields(raw),
+  );
+}
 
 /** Returns true while a single bin's browser is stopping or in an unknown power state. */
 export function isRuntimeBrowserBusy(environment: unknown): boolean {
@@ -125,7 +150,7 @@ export async function interruptReplacedManualRuns(
       ),
     );
   for (const run of interruptedRuns) {
-    const checkedFailure = manualRunFailureSchema.safeParse(run.failure);
+    const checkedFailure = safeParseStoredManualRunFailure(run.failure);
     if (
       !checkedFailure.success ||
       checkedFailure.data.code !== "runtime_interrupted"
@@ -248,7 +273,7 @@ export async function confirmManualRunOwnerStopped(
       .where(eq(manualRuns.runId, runId));
     confirmed = true;
   } else if (run.status === "failed" && run.stopConfirmedAt === null) {
-    const checkedFailure = manualRunFailureSchema.safeParse(run.failure);
+    const checkedFailure = safeParseStoredManualRunFailure(run.failure);
     if (
       checkedFailure.success &&
       checkedFailure.data.code === "runtime_interrupted"
@@ -284,7 +309,7 @@ export async function confirmManualRunOwnerStopped(
       return true;
     if (candidate.status !== "failed" || candidate.stopConfirmedAt !== null)
       return false;
-    const checkedFailure = manualRunFailureSchema.safeParse(candidate.failure);
+    const checkedFailure = safeParseStoredManualRunFailure(candidate.failure);
     return (
       checkedFailure.success &&
       checkedFailure.data.code === "runtime_interrupted"

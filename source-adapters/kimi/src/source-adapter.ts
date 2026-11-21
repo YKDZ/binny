@@ -46,8 +46,6 @@ export async function executeKimiCheck(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be checked.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -89,8 +87,6 @@ export async function executeKimiCollect(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be collected.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -152,8 +148,6 @@ export async function executeKimiSync(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be synchronized.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }

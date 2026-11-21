@@ -15,7 +15,8 @@ import {
 } from "./manual-runs-source.ts";
 
 const baseUrl = process.env.BINNY_E2E_BASE_URL;
-const sourceRuntimeUrl = "http://manual-runs-source:8081";
+const sourceRuntimeUrl =
+  process.env.BINNY_RUNS_SOURCE_RUNTIME_URL ?? "http://manual-runs-source:8081";
 const runtimeControlUrl = process.env.BINNY_RUNS_RUNTIME_CONTROL_URL;
 const sourceControlUrl = (() => {
   const url = process.env.BINNY_RUNS_SOURCE_CONTROL_URL;
@@ -647,7 +648,6 @@ async function verifyAvailabilityChecks(): Promise<void> {
           readonly scope: readonly string[];
           readonly basis: string;
           readonly problems: readonly {
-            readonly suggestion: string;
             readonly requiresHuman: boolean;
           }[];
         }
@@ -662,7 +662,7 @@ async function verifyAvailabilityChecks(): Promise<void> {
       assert.ok(diagnostic.problems.length > 0);
       const problem = diagnostic.problems[0];
       assert.ok(problem !== undefined);
-      assert.ok(problem.suggestion.length > 0);
+      assert.equal("suggestion" in problem, false);
       assert.equal(problem.requiresHuman, true);
     }
   }
@@ -1598,7 +1598,8 @@ async function verifyActionFailures(
   assert.ok(
     failedManual.result?.error?.impact.includes("manual-existing-item"),
   );
-  assert.ok(failedManual.result?.error?.suggestion);
+  assert.equal("suggestion" in (failedManual.result?.error ?? {}), false);
+  assert.deepEqual(failedManual.humanSession, { status: "none" });
 
   const before = await client.archives.items[":itemId"].$get({
     param: { itemId: existingItemId },

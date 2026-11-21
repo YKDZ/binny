@@ -66,17 +66,31 @@ export const manualRunAbortCauseSchema = z.enum([
   "unknown",
 ]);
 
+export const manualRunSessionStateSchema = z.enum([
+  "authenticated",
+  "unauthenticated",
+  "challenge_required",
+  "unknown",
+]);
+
 export const manualRunFailureSchema = z
   .object({
     code: postgresTextSchema.min(1).max(128),
     message: postgresTextSchema.min(1),
     impact: postgresTextSchema.min(1),
     path: failurePathSchema.optional(),
-    suggestion: postgresTextSchema.min(1).optional(),
     requiresHuman: z.boolean(),
+    sessionState: manualRunSessionStateSchema.optional(),
     stage: postgresTextSchema.min(1).optional(),
     target: postgresTextSchema.min(1).optional(),
     abortCause: manualRunAbortCauseSchema.optional(),
+  })
+  .strict();
+
+export const manualRunHumanSessionSchema = z
+  .object({
+    status: z.enum(["none", "pending", "opening", "ready", "closing"]),
+    sessionId: z.string().uuid().optional(),
   })
   .strict();
 
@@ -164,6 +178,7 @@ export const manualRunSchema = withPostgresJsonSchemaProjection(
       trigger: manualRunTriggerSchema,
       queueReason: manualRunQueueReasonSchema.optional(),
       lastWakeError: runtimeWakeErrorSchema.optional(),
+      humanSession: manualRunHumanSessionSchema.optional(),
       cancellationRequestedAt: z.iso.datetime().optional(),
       stopConfirmedAt: z.iso.datetime().optional(),
       createdAt: z.iso.datetime(),
@@ -230,6 +245,8 @@ export const manualRunErrorSchema = withPostgresJsonSchemaProjection(
 
 export type ManualRunTriggerInput = z.infer<typeof manualRunTriggerInputSchema>;
 export type ManualRunAbortCause = z.infer<typeof manualRunAbortCauseSchema>;
+export type ManualRunSessionState = z.infer<typeof manualRunSessionStateSchema>;
+export type ManualRunHumanSession = z.infer<typeof manualRunHumanSessionSchema>;
 export type ManualRunFailure = z.infer<typeof manualRunFailureSchema>;
 export type ManualRunCompletion = z.infer<typeof manualRunCompletionSchema>;
 export type ManualRun = z.infer<typeof manualRunSchema>;

@@ -630,8 +630,6 @@ function failureFromProblems(
       message: `Qoder ${scopeId} synchronization incomplete: ${examples}`,
       impact:
         "Affected changelog documents were not archived or their ongoing document progress was not advanced.",
-      suggestion:
-        "Check Qoder changelog index and detail markdown page availability.",
       requiresHuman: false,
     },
     completedScopes,
@@ -664,7 +662,6 @@ export async function checkCnChangelogs(
             code: "qoder_cn_changelogs_empty",
             message: "No product changelog documents discovered in index.",
             impact: "Cannot synchronize Qoder CN product changelogs.",
-            suggestion: "Verify that the index contains a changelog section.",
             requiresHuman: false,
           },
         ],
@@ -691,7 +688,6 @@ export async function checkCnChangelogs(
             code: "qoder_cn_changelog_sample_empty",
             message: `Sample document ${sampleDoc.docKey} yielded empty clean content.`,
             impact: "Cannot synchronize Qoder CN product changelogs.",
-            suggestion: "Verify document markup and MDX structure.",
             requiresHuman: false,
           },
         ],
@@ -714,7 +710,6 @@ export async function checkCnChangelogs(
           code: "qoder_cn_changelogs_unreachable",
           message: error instanceof Error ? error.message : "Index unreachable",
           impact: "Cannot synchronize Qoder CN product changelogs.",
-          suggestion: "Verify network connectivity and URL configuration.",
           requiresHuman: false,
         },
       ],
@@ -750,7 +745,6 @@ export async function checkInternationalChangelogs(
             message: "No product changelog documents discovered in index.",
             impact:
               "Cannot synchronize Qoder International product changelogs.",
-            suggestion: "Verify that the index contains changelog entries.",
             requiresHuman: false,
           },
         ],
@@ -778,7 +772,6 @@ export async function checkInternationalChangelogs(
             message: `Sample document ${sampleDoc.docKey} yielded empty clean content.`,
             impact:
               "Cannot synchronize Qoder International product changelogs.",
-            suggestion: "Verify document markup and MDX structure.",
             requiresHuman: false,
           },
         ],
@@ -801,7 +794,6 @@ export async function checkInternationalChangelogs(
           code: "qoder_int_changelogs_unreachable",
           message: error instanceof Error ? error.message : "Index unreachable",
           impact: "Cannot synchronize Qoder International product changelogs.",
-          suggestion: "Verify network connectivity and URL configuration.",
           requiresHuman: false,
         },
       ],
@@ -1061,8 +1053,6 @@ async function collectRegionalChangelogs(
               code: "qoder_navigation_page_not_archivable",
               message: `Navigation overview page ${docKey} cannot be archived as a changelog document`,
               impact: "Collection rejected navigation page.",
-              suggestion:
-                "Specify a product changelog URL instead of a navigation overview.",
               requiresHuman: false,
             },
             [],

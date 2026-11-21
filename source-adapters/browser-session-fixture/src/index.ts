@@ -17,12 +17,12 @@ const diagnosticOutputSchema = z.object({
   availability: z.enum(["available", "unavailable", "unknown"]),
   scope: z.array(z.string()),
   basis: z.string(),
+  sessionState: z.enum(["authenticated", "unauthenticated"]).optional(),
   problems: z.array(
     z.object({
       code: z.string(),
       message: z.string(),
       impact: z.string(),
-      suggestion: z.string(),
       requiresHuman: z.boolean(),
     }),
   ),
@@ -102,6 +102,7 @@ export const sourceAdapter = defineSourceAdapter({
             availability: "available" as const,
             scope: ["受控保护页面"],
             basis: "持久浏览器已读取受控保护页面。",
+            sessionState: "authenticated" as const,
             problems: [],
           };
         }
@@ -109,12 +110,12 @@ export const sourceAdapter = defineSourceAdapter({
           availability: "unavailable" as const,
           scope: ["受控保护页面"],
           basis: `受控登录页返回 HTTP ${String(pageResult.status)}。`,
+          sessionState: "unauthenticated" as const,
           problems: [
             {
               code: "login_required",
-              message: "受控站点需要登录。",
+              message: "受控站点尚未登录，持久浏览器会话未认证。",
               impact: "无法读取受控保护页面。",
-              suggestion: "使用 human open 完成登录后重新运行 check。",
               requiresHuman: true,
             },
           ],
@@ -139,10 +140,12 @@ export const sourceAdapter = defineSourceAdapter({
             if (!(await isAuthenticated(page))) {
               throw sourceAdapterActionError({
                 code: "login_required",
-                message: "受控站点需要重新登录。",
+                message: "受控站点需要登录，当前持久浏览器会话未认证。",
                 impact: "本次采集没有读取受控资料。",
-                suggestion: "使用 human open 完成登录后启动新的采集运行。",
                 requiresHuman: true,
+                sessionState: "unauthenticated",
+                stage: "checking-session",
+                target: url.href,
               });
             }
             if (params.gateId !== undefined) {

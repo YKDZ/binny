@@ -51,7 +51,6 @@ const checkProblemSchema = z
     message: z.string().min(1),
     impact: z.string().min(1),
     path: z.array(z.union([z.string(), z.number()])).optional(),
-    suggestion: z.string().min(1),
     requiresHuman: z.boolean(),
   })
   .strict();
@@ -785,8 +784,6 @@ function failureFromProblems(
       message: `Mistral News ${actionName} failed: ${examples.join("; ")}${more}`,
       impact:
         "One or more articles failed to fetch or extract; items were not archived.",
-      suggestion:
-        "Check network connectivity and article HTML structure, then retry.",
       requiresHuman: false,
       ...(first?.stage === undefined ? {} : { stage: first.stage }),
       ...(first?.target === undefined ? {} : { target: first.target }),
@@ -817,8 +814,6 @@ async function checkMistralNews(
           message: error instanceof Error ? error.message : String(error),
           impact: "Cannot discover articles from Mistral News RSS feed.",
           path: ["rssUrl"],
-          suggestion:
-            "Verify network access to mistral.ai and valid RSS XML response.",
           requiresHuman: false,
         },
       ],
@@ -836,8 +831,6 @@ async function checkMistralNews(
           message: "RSS feed contains zero items.",
           impact: "No articles to discover or check.",
           path: ["rssUrl"],
-          suggestion:
-            "Check if the feed URL is active and contains news items.",
           requiresHuman: false,
         },
       ],
@@ -857,8 +850,6 @@ async function checkMistralNews(
           code: "mistral_no_sample",
           message: "Could not find a valid article URL to check.",
           impact: "Cannot validate article body extraction.",
-          suggestion:
-            "Provide an itemUrl in params or ensure feed items have valid URLs.",
           requiresHuman: false,
         },
       ],
@@ -885,8 +876,6 @@ async function checkMistralNews(
             message: `Article at ${targetUrl} yielded no substantial text.`,
             impact: "Article extraction would fail during collection.",
             path: ["items", targetUrl],
-            suggestion:
-              "Verify that mistral.ai article page structure matches selectors.",
             requiresHuman: false,
           },
         ],
@@ -904,7 +893,6 @@ async function checkMistralNews(
           message: error instanceof Error ? error.message : String(error),
           impact: "Cannot read full article text from sample page.",
           path: ["items", targetUrl],
-          suggestion: "Check article URL reachability and HTTP status.",
           requiresHuman: false,
         },
       ],

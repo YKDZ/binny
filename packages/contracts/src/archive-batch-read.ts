@@ -1,49 +1,28 @@
 import * as z from "zod";
 
 import {
-  archiveIdentifierSchema,
+  archiveBatchReadMaxReferences,
+  archiveBatchReadReferenceSchema,
+  archiveErrorDiagnosticSchema,
   archiveResourceAvailabilitySchema,
   archiveRevisionReadSchema,
-  archiveSequenceSchema,
   withArchiveJsonSchemaProjection,
   type ArchiveError,
+  type ArchiveErrorDiagnostic,
 } from "./archive.ts";
-import { binIdSchema } from "./bin-configuration.ts";
 
-const archiveBatchReadArchiveSequenceSchema = archiveSequenceSchema.refine(
-  (value) =>
-    value.length < 19 ||
-    (value.length === 19 && value <= "9223372036854775807"),
-  "Archive sequence must be between 1 and 9223372036854775807. Copy the archiveSeq from the selected search match.",
-);
-
-/** Maximum number of selected archive views accepted by one batch request. */
-export const archiveBatchReadMaxReferences = 50;
-
-/** Maximum serialized success response size; larger batches must be split. */
-export const archiveBatchReadMaxResponseBytes = 16 * 1024 * 1024;
-
-/** One exact content version as observed by one bin in one archive commit. */
-export const archiveBatchReadReferenceSchema = withArchiveJsonSchemaProjection(
-  z
-    .object({
-      itemId: archiveIdentifierSchema,
-      binId: binIdSchema,
-      revisionId: archiveIdentifierSchema,
-      archiveSeq: archiveBatchReadArchiveSequenceSchema,
-    })
-    .strict(),
-);
-
-export type ArchiveBatchReadReference = z.infer<
-  typeof archiveBatchReadReferenceSchema
->;
+export {
+  archiveBatchReadMaxReferences,
+  archiveBatchReadMaxResponseBytes,
+  archiveBatchReadReferenceSchema,
+  type ArchiveBatchReadReference,
+} from "./archive.ts";
 
 /**
  * Read selected immutable versions by their complete search reference. A
  * repeated reference remains a separate result at its original zero-based
  * index. Requests accept up to 50 references; complete responses are limited
- * to 16 MiB and must be split when that limit is exceeded.
+ * to 16 MiB.
  */
 export const archiveBatchReadInputSchema = withArchiveJsonSchemaProjection(
   z
@@ -53,11 +32,36 @@ export const archiveBatchReadInputSchema = withArchiveJsonSchemaProjection(
         .min(1, "Provide at least one archive reference.")
         .max(
           archiveBatchReadMaxReferences,
-          `Read at most ${String(archiveBatchReadMaxReferences)} references per request; split the remaining references into another request.`,
+          `Batch read accepts at most ${String(archiveBatchReadMaxReferences)} references per request.`,
         ),
     })
     .strict(),
 );
+
+/**
+ * Extract structured limit facts when a batch-read request exceeds the maximum
+ * number of references per request.
+ */
+export function archiveBatchReadInputDiagnostic(
+  input: unknown,
+  issue: z.core.$ZodIssue | undefined,
+): ArchiveErrorDiagnostic | undefined {
+  if (issue === undefined || issue.path[0] !== "references") return undefined;
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return undefined;
+  }
+  const references = (input as { readonly references?: unknown }).references;
+  if (
+    !Array.isArray(references) ||
+    references.length <= archiveBatchReadMaxReferences
+  ) {
+    return undefined;
+  }
+  return archiveErrorDiagnosticSchema.parse({
+    maxReferences: archiveBatchReadMaxReferences,
+    requestedReferences: references.length,
+  });
+}
 
 export type ArchiveBatchReadInput = z.infer<typeof archiveBatchReadInputSchema>;
 export type ArchiveBatchReadRequest = z.input<

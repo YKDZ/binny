@@ -112,12 +112,14 @@ const fetch: typeof globalThis.fetch = async (input, init) => {
           code: "linuxdo_source_unreachable",
           message: "Source request timed out after 30000ms.",
           impact: "Topic was not collected.",
-          requiresHuman: false,
+          requiresHuman: true,
+          sessionState: "challenge_required",
           stage: "reading-topic",
           target: "https://example.test/t/2401.json",
           abortCause: "source_request_timeout",
         },
       },
+      humanSession: { status: "none" },
     });
   }
   if (url.pathname === `/bins/binny-one/runs/${cancelledRunId}`) {
@@ -419,6 +421,7 @@ void describe("run and schedule list commands", () => {
       /rss-main\s+collect\s+manual\s+cancelled\s+cancelled_before_execution/u,
     );
     assert.match(textOutput, /rss-main\s+collect\s+manual\s+executing\s+-/u);
+    assert.doesNotMatch(textOutput, /binny run get/u);
 
     assert.equal(
       manualRunListSummarySchema.safeParse({
@@ -583,6 +586,10 @@ void describe("run and schedule list commands", () => {
       /^Target: https:\/\/example\.test\/t\/2401\.json$/mu,
     );
     assert.match(textOutput, /^Abort cause: source_request_timeout$/mu);
+    assert.match(textOutput, /^Requires human: true$/mu);
+    assert.match(textOutput, /^Session state: challenge_required$/mu);
+    assert.match(textOutput, /^Human session: none$/mu);
+    assert.doesNotMatch(textOutput, /human open/u);
 
     let structuredOutput = "";
     const structuredExitCode = await runCli({
@@ -612,6 +619,15 @@ void describe("run and schedule list commands", () => {
       "https://example.test/t/2401.json",
     );
     assert.equal(wire.data.result?.error?.abortCause, "source_request_timeout");
+    assert.equal(
+      (wire.data.result?.error as { readonly sessionState?: string })
+        ?.sessionState,
+      "challenge_required",
+    );
+    assert.deepEqual(
+      (wire.data as { readonly humanSession?: unknown }).humanSession,
+      { status: "none" },
+    );
 
     let cancelledText = "";
     const cancelledExitCode = await runCli({

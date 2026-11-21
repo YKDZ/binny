@@ -11,6 +11,7 @@ import {
   createSourceAccessCoordinator,
   parseSourceAdapterInput,
   sourceAccessConfigSchema,
+  sourceAdapterManifest,
   type JsonObject,
   type SourceAccessPersistentState,
   type SourceAccessTransport,
@@ -572,7 +573,15 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
         from: "2026-10-28T02:00:00.000Z",
         to: "2026-10-28T02:30:00.000Z",
       });
-      assert.ok(incomplete.backfillCollectParams !== undefined);
+      assert.deepEqual(incomplete.target, {
+        kind: "targets",
+        targets: [{ ...target, id: "category-42" }],
+      });
+      assert.equal("backfillCollectParams" in incomplete, false);
+      assert.doesNotMatch(
+        String(incomplete.message),
+        /Run collect|suggest at least/iu,
+      );
 
       // Must NOT forge/update confirmedPostIdLowerBound when headVerified is false!
       const state = harness.getAdapterState() as {
@@ -584,10 +593,29 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
       assert.equal(state.scopes[0]?.position, "2026-10-28T02:30:00.000Z");
       assert.equal(state.scopes[0]?.confirmedPostIdLowerBound, undefined);
 
-      // Explicit backfill using backfillCollectParams from output completes and archives missing post 202
-      const backfill = await harness.runCollect(
-        incomplete.backfillCollectParams as Record<string, unknown>,
-      );
+      // Caller discovers collect params from action declaration and constructs backfill from factual coverage
+      const collectParamsSchema = sourceAdapterManifest(sourceAdapter).actions
+        .collect.params as {
+        readonly properties?: Readonly<Record<string, unknown>>;
+      };
+      assert.ok(collectParamsSchema.properties?.targets !== undefined);
+      assert.ok(collectParamsSchema.properties?.postCreatedRange !== undefined);
+      const incompleteTarget = incomplete.target as {
+        readonly kind: string;
+        readonly targets: readonly Record<string, unknown>[];
+      };
+      const incompleteRange = incomplete.range as {
+        readonly from: string;
+        readonly to: string;
+      };
+      const backfill = await harness.runCollect({
+        targets: incompleteTarget.targets,
+        postCreatedRange: {
+          from: incompleteRange.from,
+          to: incompleteRange.to,
+          maxPages: Number(incomplete.maxPages) * 4,
+        },
+      });
       assert.equal(backfill.output.collectionCompleteness, "complete");
       assert.equal(backfill.latestReport?.phase, "completed");
       const backfilledKeys = new Set(
@@ -654,6 +682,11 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
           kind: "targets",
           targets: [{ ...target, id: "category-42" }],
         });
+        assert.equal("backfillCollectParams" in partialIncomplete, false);
+        assert.doesNotMatch(
+          String(partialIncomplete.message),
+          /Run collect|suggest at least/iu,
+        );
 
         // Position moved to 03:00, confirmedPostIdLowerBound must remain undefined!
         const stateAfterPartial = harness.getAdapterState() as {
@@ -671,17 +704,36 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
           undefined,
         );
 
-        // Step 3: Explicit collect using backfillCollectParams recovers missing posts in [02:00, 03:00)
-        const backfillParams = partialIncomplete.backfillCollectParams as {
-          readonly targets?: unknown;
-          readonly postCreatedRange: {
-            readonly from: string;
-            readonly to: string;
-            readonly maxPages: number;
-          };
+        // Step 3: Caller discovers collect params from action declaration and constructs explicit collect from coverage facts
+        const collectSchema = sourceAdapterManifest(sourceAdapter).actions
+          .collect.params as {
+          readonly properties?: Readonly<
+            Record<
+              string,
+              { readonly properties?: Readonly<Record<string, unknown>> }
+            >
+          >;
         };
-        assert.ok(backfillParams.postCreatedRange.maxPages > 2);
-        const backfill = await harness.runCollect(backfillParams);
+        assert.ok(collectSchema.properties?.targets !== undefined);
+        const rangeSchema = collectSchema.properties?.postCreatedRange;
+        assert.ok(rangeSchema?.properties?.from !== undefined);
+        assert.ok(rangeSchema?.properties?.to !== undefined);
+        assert.ok(rangeSchema?.properties?.maxPages !== undefined);
+        const partialTarget = partialIncomplete.target as {
+          readonly targets: readonly Record<string, unknown>[];
+        };
+        const partialRange = partialIncomplete.range as {
+          readonly from: string;
+          readonly to: string;
+        };
+        const backfill = await harness.runCollect({
+          targets: partialTarget.targets,
+          postCreatedRange: {
+            from: partialRange.from,
+            to: partialRange.to,
+            maxPages: Number(partialIncomplete.maxPages) * 10,
+          },
+        });
         assert.equal(backfill.output.collectionCompleteness, "complete");
         assert.equal(backfill.latestReport?.phase, "completed");
         const backfilledKeys = new Set(
@@ -709,7 +761,7 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
           to: "2026-10-28T03:30:00.000Z",
         });
 
-        // Step 5: Sync > 1 hour later (at 05:00) produces skippedBefore + sync_skipped_before_window gap with backfillCollectParams
+        // Step 5: Sync > 1 hour later (at 05:00) produces skippedBefore + sync_skipped_before_window gap without backfillCollectParams
         fakeNow = Date.parse("2026-10-28T05:00:00.000Z");
         const truncatedSync = await harness.runSync({
           targets: [target],
@@ -720,10 +772,22 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
         assert.equal(truncatedSync.latestReport?.discovery, "partial");
         const truncatedReportScope = (
           truncatedSync.latestReport as {
-            readonly scopes?: readonly { readonly status?: string }[];
+            readonly scopes?: readonly {
+              readonly status?: string;
+              readonly skippedGap?: Record<string, unknown>;
+            }[];
           }
         ).scopes?.[0];
         assert.equal(truncatedReportScope?.status, "partial");
+        assert.ok(truncatedReportScope?.skippedGap !== undefined);
+        assert.equal(
+          "backfillCollectParams" in truncatedReportScope.skippedGap,
+          false,
+        );
+        assert.doesNotMatch(
+          String(truncatedReportScope.skippedGap.message),
+          /Use collect|backfill explicitly/iu,
+        );
         const skippedGapEntry = (
           truncatedSync.output.incompleteScopes as readonly Record<
             string,
@@ -735,11 +799,25 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
           from: "2026-10-28T03:30:00.000Z",
           to: "2026-10-28T04:00:00.000Z",
         });
-        assert.ok(skippedGapEntry.backfillCollectParams !== undefined);
+        assert.equal("backfillCollectParams" in skippedGapEntry, false);
 
-        // Passing skippedGapEntry.backfillCollectParams directly into collect works and recovers post:240011 (created at 03:45)
+        // Caller uses skippedGapEntry.target + skippedGapEntry.range + collect schema to backfill post:240011 (created at 03:45)
+        const skippedTarget = skippedGapEntry.target as {
+          readonly targets: readonly Record<string, unknown>[];
+        };
+        const skippedRange = skippedGapEntry.range as {
+          readonly from: string;
+          readonly to: string;
+        };
         const skippedBackfill = await harness.runCollect(
-          skippedGapEntry.backfillCollectParams as Record<string, unknown>,
+          {
+            targets: skippedTarget.targets,
+            postCreatedRange: {
+              from: skippedRange.from,
+              to: skippedRange.to,
+              maxPages: 20,
+            },
+          },
           "2026-10-28T05:00:00.000Z",
         );
         assert.equal(skippedBackfill.output.collectionCompleteness, "complete");

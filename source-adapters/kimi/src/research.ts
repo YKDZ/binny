@@ -574,8 +574,6 @@ export async function checkResearchSource(
           : `Failed to access list page for source "${source.id}".`,
       impact: `Kimi research source "${source.id}" is currently unreachable or returned an invalid response.`,
       path: ["sources", source.id],
-      suggestion:
-        "Check whether the source URL is reachable and verify network connectivity.",
       requiresHuman: false,
     });
     return;
@@ -593,8 +591,6 @@ export async function checkResearchSource(
           : `Failed to parse blog list for source "${source.id}".`,
       impact: `Failed to extract any blog cards from "${source.id}".`,
       path: ["sources", source.id],
-      suggestion:
-        "Check the HTML structure of the Kimi research blog list page.",
       requiresHuman: false,
     });
     return;
@@ -606,8 +602,6 @@ export async function checkResearchSource(
       message: `No in-site research articles discovered on source "${source.id}" list page.`,
       impact: `Source "${source.id}" has no available articles.`,
       path: ["sources", source.id],
-      suggestion:
-        "Verify that the page contains recognizable in-site article cards.",
       requiresHuman: false,
     });
     return;
@@ -648,7 +642,6 @@ export async function checkResearchSource(
           : `Failed to parse sample article for source "${source.id}".`,
       impact: `Could not extract valid content from article "${sampleArticle.url}".`,
       path: ["sources", source.id, sampleArticle.slug],
-      suggestion: "Check the article page HTML structure and extraction rules.",
       requiresHuman: false,
     });
   }
@@ -686,7 +679,6 @@ export async function syncResearchSource(
       message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
       impact: `Failed to fetch list page for source "${source.id}"; incremental state was not advanced.`,
       path: ["sources", source.id],
-      suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -804,8 +796,6 @@ export async function syncResearchSource(
         message: `Sync collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Article "${item.slug}" failed to be archived; state was not updated.`,
         path: ["sources", source.id, item.slug],
-        suggestion:
-          "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),
         ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -851,7 +841,6 @@ export async function collectResearchSource(
       message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
       impact: `Failed to fetch list page for source "${source.id}".`,
       path: ["sources", source.id],
-      suggestion: "Verify network connectivity and retry.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -948,8 +937,6 @@ export async function collectResearchSource(
         message: `Collection failed for article "${item.url}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Article "${item.slug}" failed to be archived.`,
         path: ["sources", source.id, item.slug],
-        suggestion:
-          "Verify whether the article page is reachable and contains substantial content.",
         requiresHuman: false,
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),
         ...(diag.target === undefined ? {} : { target: diag.target }),
