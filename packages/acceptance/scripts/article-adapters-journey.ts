@@ -491,6 +491,14 @@ export async function runArticleAdaptersJourney(options: {
   readonly waitForRuntime: (baseUrl: string, binId: string) => Promise<void>;
   readonly waitForRuntimeHealth: (service: string) => Promise<void>;
 }): Promise<void> {
+  // Start these runtimes with their journey so earlier checks cannot idle them out.
+  await options.compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--no-build",
+    ...adapters.map(({ runtimeService }) => runtimeService),
+  ]);
   for (const adapter of adapters) {
     const registered = await waitForRegistration(
       options.baseUrl,

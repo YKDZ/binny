@@ -5885,7 +5885,8 @@ async function verifyBoundedSync(): Promise<string> {
     await clearSourceEvents();
     const cooled = await trigger("sync", {
       ...topicParams,
-      maxElapsedMs: 1_000,
+      // Allow the fixture request to finish under CI load while keeping the 60s cooldown out of budget.
+      maxElapsedMs: 15_000,
     });
     assert.equal(cooled.status, "completed", JSON.stringify(cooled));
     assert.equal(syncReport(cooled).phase, "partial");

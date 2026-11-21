@@ -195,13 +195,6 @@ const articleAdapterRuntimeImageNames = {
   huggingface: projectName + "-article-huggingface:local",
   mistral: projectName + "-article-mistral:local",
 } as const;
-const articleAdapterRuntimeServices = [
-  "runtime-article-openai",
-  "runtime-article-anthropic",
-  "runtime-article-google",
-  "runtime-article-huggingface",
-  "runtime-article-mistral",
-] as const;
 const documentAdapterRuntimeImageNames = {
   deepseek: projectName + "-document-deepseek:local",
   qwen: projectName + "-document-qwen:local",
@@ -209,14 +202,6 @@ const documentAdapterRuntimeImageNames = {
   minimax: projectName + "-document-minimax:local",
   qoder: projectName + "-document-qoder:local",
 } as const;
-const qoderAdapterRuntimeService = "runtime-document-qoder";
-const documentAdapterRuntimeServices = [
-  "runtime-document-deepseek",
-  "runtime-document-qwen",
-  "runtime-document-kimi",
-  "runtime-document-minimax",
-  qoderAdapterRuntimeService,
-] as const;
 let activeServerImage = imageName;
 let activeRssRuntimeImage = rssRuntimeImageName;
 let activeLinuxdoRuntimeImage = linuxdoRuntimeImageName;
@@ -14071,71 +14056,55 @@ async function main(): Promise<void> {
 
     const e2eServices = capacityPhaseOnly
       ? ["postgres", "server"]
-      : articleAdaptersOnly
-        ? [
-            "postgres",
-            "server",
-            "rss-e2e-source",
-            ...articleAdapterRuntimeServices,
-          ]
-        : qoderAdapterOnly
-          ? ["postgres", "server", "rss-e2e-source", qoderAdapterRuntimeService]
-          : documentAdaptersOnly
+      : articleAdaptersOnly || qoderAdapterOnly || documentAdaptersOnly
+        ? ["postgres", "server", "rss-e2e-source"]
+        : manualRunsOnly
+          ? [
+              "postgres",
+              "server",
+              "manual-runs-source",
+              "runtime-fifteen-one",
+              ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
+              ...(archiveModelJourney
+                ? [
+                    "runtime-fifteen-two",
+                    "runtime-fifteen-schema-two",
+                    "runtime-rss",
+                  ]
+                : []),
+            ]
+          : rssLinuxdoOnly
             ? [
                 "postgres",
                 "server",
                 "rss-e2e-source",
-                ...documentAdapterRuntimeServices,
+                "runtime-rss",
+                "runtime-rss-two",
               ]
-            : manualRunsOnly
+            : rssAdapterOnly
               ? [
                   "postgres",
                   "server",
-                  "manual-runs-source",
-                  "runtime-fifteen-one",
-                  ...(scheduledRunsOnly ? ["heartbeat-proxy"] : []),
-                  ...(archiveModelJourney
-                    ? [
-                        "runtime-fifteen-two",
-                        "runtime-fifteen-schema-two",
-                        "runtime-rss",
-                      ]
-                    : []),
+                  "rss-e2e-source",
+                  "runtime-rss",
+                  "runtime-rss-two",
                 ]
-              : rssLinuxdoOnly
-                ? [
-                    "postgres",
-                    "server",
-                    "rss-e2e-source",
-                    "runtime-rss",
-                    "runtime-rss-two",
-                  ]
-                : rssAdapterOnly
-                  ? [
-                      "postgres",
-                      "server",
-                      "rss-e2e-source",
-                      "runtime-rss",
-                      "runtime-rss-two",
-                    ]
-                  : [
-                      "postgres",
-                      "server",
-                      "manual-runs-source",
-                      "rss-e2e-source",
-                      "runtime-fifteen-one",
-                      "runtime-fifteen-two",
-                      "runtime-rss",
-                      "runtime-rss-two",
-                      "heartbeat-proxy",
-                    ];
+              : [
+                  "postgres",
+                  "server",
+                  "manual-runs-source",
+                  "rss-e2e-source",
+                  "runtime-fifteen-one",
+                  "runtime-fifteen-two",
+                  "runtime-rss",
+                  "runtime-rss-two",
+                  "heartbeat-proxy",
+                ];
     if (runFunctionalJourney && !rssLinuxdoOnly) {
       e2eServices.push(
         "runtime-linuxdo",
         "runtime-linuxdo-two",
         "linuxdo-e2e-source",
-        ...articleAdapterRuntimeServices,
-        ...documentAdapterRuntimeServices,
       );
     }
     if (runFunctionalJourney && rssLinuxdoOnly) {

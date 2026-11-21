@@ -721,6 +721,14 @@ export async function runDocumentAdaptersJourney(options: {
           options.adapterIds!.includes(adapter.adapterId),
         );
 
+  // Start these runtimes with their journey so earlier checks cannot idle them out.
+  await options.compose([
+    "up",
+    "--detach",
+    "--no-deps",
+    "--no-build",
+    ...selectedAdapters.map(({ runtimeService }) => runtimeService),
+  ]);
   for (const adapter of selectedAdapters) {
     const registered = await options.fetchRegisteredBin(
       options.baseUrl,
