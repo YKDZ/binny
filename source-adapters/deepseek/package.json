@@ -29,7 +29,7 @@
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "test": "node --conditions=source --test 'test/**/*.test.ts'",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
-    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/deepseek/Dockerfile\" --tag \"${BINNY_DOCUMENT_DEEPSEEK_IMAGE:-binny/deepseek:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+    "image:build": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl adapter-deepseek"
   },
   "dependencies": {
     "@binny/source-adapter-sdk": "workspace:*",

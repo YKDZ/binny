@@ -28,6 +28,7 @@
         "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/resources/**",
         "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/src/**",
         "$TURBO_ROOT$/source-adapters/lightweight-resource-fixture/tsconfig.build.json",
+        "$TURBO_ROOT$/docker-bake.hcl",
         "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/pnpm-lock.yaml",
         "$TURBO_ROOT$/pnpm-workspace.yaml",

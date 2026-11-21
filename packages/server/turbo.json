@@ -9,6 +9,29 @@
       "cache": false,
       "tags": ["work:preparation"]
     },
+    "image:build": {
+      "passThroughEnv": ["BINNY_IMAGE", "BINNY_IMAGE_BUILD_CONTEXT"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/Dockerfile",
+        "$TURBO_ROOT$/docker-bake.hcl",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/patches/**",
+        "$TURBO_ROOT$/apps/cli/**",
+        "$TURBO_ROOT$/packages/api/**",
+        "$TURBO_ROOT$/packages/contracts/**",
+        "$TURBO_ROOT$/packages/core/**",
+        "$TURBO_ROOT$/packages/db/**",
+        "$TURBO_ROOT$/packages/server/**",
+        "$TURBO_ROOT$/packages/tooling-config/**"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],

@@ -1,8 +1,13 @@
+x-binny-build-contexts: &binny-build-contexts
+  node-bookworm-slim: ${BINNY_NODE_IMAGE_CONTEXT:?Provide BINNY_NODE_IMAGE_CONTEXT via docker buildx bake --print}
+  pnpm-release: ${BINNY_PNPM_IMAGE_CONTEXT:?Provide BINNY_PNPM_IMAGE_CONTEXT via docker buildx bake --print}
+
 x-binny-image: &binny-image
   image: ${BINNY_IMAGE:-binny/server:local}
   build:
     context: .
     dockerfile: Dockerfile
+    additional_contexts: *binny-build-contexts
 
 x-binny-runtime-watch: &binny-runtime-watch
   - path: ./source-adapters/rss/src
@@ -26,6 +31,8 @@ x-binny-runtime-watch: &binny-runtime-watch
   - path: ./packages/contracts/package.json
     action: rebuild
   - path: ./packages/tooling-config
+    action: rebuild
+  - path: ./docker-bake.hcl
     action: rebuild
   - path: ./package.json
     action: rebuild
@@ -223,6 +230,7 @@ services:
     build:
       context: .
       dockerfile: source-adapters/rss/Dockerfile
+      additional_contexts: *binny-build-contexts
     depends_on:
       server:
         condition: service_started
