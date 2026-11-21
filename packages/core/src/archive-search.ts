@@ -9,8 +9,11 @@ import {
   archiveSearchDistributionPageSchema,
   archiveSnapshotSchema,
   discoverSourceAdapterExtensionFields,
+  extractArchiveSummaryExtensions,
   postgresTextSchema,
+  resolveSourceAdapterSummaryFields,
   sourceAdapterManifestStoredSchema,
+  type ArchiveExtensionSummaryFieldDiscovery,
   type ArchiveOperationContext,
   type ArchiveOperations,
   type ArchiveExtensionFieldFilter,
@@ -82,6 +85,7 @@ type SearchPageRow = {
   readonly snapshotMode: string;
   readonly invalidSnapshot: boolean;
   readonly results: unknown;
+  readonly matchedBinAdapters?: unknown;
   readonly extensionBins: unknown;
   readonly certainItems?: string;
   readonly undeterminedItems?: string;
@@ -1433,7 +1437,8 @@ function pageQuery(
             'recordedAt', ${selectedViews.recorded_at},
             'title', ${selectedViews.state_data}->'title',
             'sourcePublishedAt', ${selectedViews.state_data}->'sourcePublishedAt',
-            'sourceModifiedAt', ${selectedViews.state_data}->'sourceModifiedAt'
+            'sourceModifiedAt', ${selectedViews.state_data}->'sourceModifiedAt',
+            '__extensions', ${selectedViews.state_data}->'extensions'
           ) || CASE
             WHEN ${selectedViews.state_data} ? 'sourceRef'
             THEN jsonb_build_object('sourceRef', ${selectedViews.state_data}->'sourceRef')
@@ -1445,6 +1450,31 @@ function pageQuery(
       .from(selectedViews)
       .innerJoin(selected, eq(selected.item_id, selectedViews.item_id))
       .groupBy(selectedViews.item_id),
+  );
+  const matchedBinIds = database.$with("matched_bin_ids").as(
+    database
+      .selectDistinct({
+        bin_id: sql`${selectedViews.bin_id}`.as("bin_id"),
+      })
+      .from(selectedViews)
+      .innerJoin(selected, eq(selected.item_id, selectedViews.item_id)),
+  );
+  const matchedBinAdapters = database.$with("matched_bin_adapters").as(
+    database
+      .select({
+        adapters: sql`coalesce(
+          jsonb_object_agg(
+            ${matchedBinIds.bin_id},
+            ${binConfigurations.sourceAdapter}
+          ) FILTER (WHERE ${binConfigurations.sourceAdapter} IS NOT NULL),
+          '{}'::jsonb
+        )`.as("adapters"),
+      })
+      .from(matchedBinIds)
+      .leftJoin(
+        binConfigurations,
+        eq(binConfigurations.id, matchedBinIds.bin_id),
+      ),
   );
   const selectedAggregateOrder =
     input.timeWindow === undefined
@@ -1503,6 +1533,8 @@ function pageQuery(
       items,
       selected,
       selectedMatches,
+      matchedBinIds,
+      matchedBinAdapters,
       page,
       timeSummary,
       ...distributionCtes.queries,
@@ -1515,6 +1547,9 @@ function pageQuery(
       snapshotMode: sql`${fixedSnapshot.mode}`.as("snapshotMode"),
       invalidSnapshot: sql`${fixedSnapshot.invalid}`.as("invalidSnapshot"),
       results: sql`${page.results}`.as("results"),
+      matchedBinAdapters: sql`${matchedBinAdapters.adapters}`.as(
+        "matchedBinAdapters",
+      ),
       extensionBins: sql`${extensionScope.bins}`.as("extensionBins"),
       certainItems: sql`${timeSummary.certain_items}`.as("certainItems"),
       undeterminedItems: sql`${timeSummary.undetermined_items}`.as(
@@ -1529,6 +1564,7 @@ function pageQuery(
     })
     .from(fixedSnapshot)
     .crossJoin(page)
+    .crossJoin(matchedBinAdapters)
     .crossJoin(extensionScope)
     .crossJoin(timeSummary)
     .crossJoin(distributionResult);
@@ -1660,6 +1696,63 @@ function decodeSearchResults(value: unknown): unknown[] {
     throw new Error("Search query returned an invalid result page.");
   }
   return decoded;
+}
+
+function parseMatchedBinSummaryFields(
+  value: unknown,
+): ReadonlyMap<string, readonly ArchiveExtensionSummaryFieldDiscovery[]> {
+  if (value === undefined || value === null) return new Map();
+  const decoded = decodeJsonValue(value);
+  if (
+    typeof decoded !== "object" ||
+    decoded === null ||
+    Array.isArray(decoded)
+  ) {
+    return new Map();
+  }
+  const summaryFieldsByBin = new Map<
+    string,
+    readonly ArchiveExtensionSummaryFieldDiscovery[]
+  >();
+  for (const [binId, rawManifest] of Object.entries(decoded)) {
+    const parsed = sourceAdapterManifestStoredSchema.safeParse(rawManifest);
+    if (!parsed.success) continue;
+    summaryFieldsByBin.set(
+      binId,
+      resolveSourceAdapterSummaryFields(parsed.data),
+    );
+  }
+  return summaryFieldsByBin;
+}
+
+function projectSearchMatch(
+  rawMatch: unknown,
+  summaryFieldsByBin: ReadonlyMap<
+    string,
+    readonly ArchiveExtensionSummaryFieldDiscovery[]
+  >,
+): unknown {
+  if (
+    typeof rawMatch !== "object" ||
+    rawMatch === null ||
+    Array.isArray(rawMatch)
+  ) {
+    return rawMatch;
+  }
+  const { __extensions: extensionsData, ...publicMatch } = rawMatch as Record<
+    string,
+    unknown
+  >;
+  const binId = publicMatch.binId;
+  const summaryFields =
+    typeof binId === "string" ? summaryFieldsByBin.get(binId) : undefined;
+  const summaryExtensions =
+    summaryFields !== undefined && summaryFields.length > 0
+      ? extractArchiveSummaryExtensions(extensionsData, summaryFields)
+      : undefined;
+  return summaryExtensions === undefined
+    ? publicMatch
+    : { ...publicMatch, summaryExtensions };
 }
 
 /** Build the archive search operation with cancellable query execution. */
@@ -1858,6 +1951,9 @@ export function createArchiveSearchOperation(
                   ] as string)
                 : null
               : null;
+        const summaryFieldsByBin = parseMatchedBinSummaryFields(
+          row.matchedBinAdapters,
+        );
         const pageRows = selectedRows.map((result) => {
           if (
             typeof result !== "object" ||
@@ -1868,7 +1964,15 @@ export function createArchiveSearchOperation(
           }
           const { __searchTimeSortValue: _internalSortValue, ...publicResult } =
             result as Record<string, unknown>;
-          return publicResult;
+          const rawMatches = publicResult.matches;
+          return Array.isArray(rawMatches)
+            ? {
+                ...publicResult,
+                matches: rawMatches.map((match) =>
+                  projectSearchMatch(match, summaryFieldsByBin),
+                ),
+              }
+            : publicResult;
         });
         const page = archiveSearchPageSchema.parse({
           snapshot: resolvedSnapshot,

@@ -2,6 +2,10 @@
 import * as z from "zod";
 
 import {
+  archiveSearchSummaryFieldPathSchema,
+  validateSourceAdapterSummaryFields,
+} from "./archive-extensions.ts";
+import {
   postgresTextSchema,
   registerPostgresJsonSchemaProjection,
   toPostgresJsonSchema,
@@ -12,6 +16,9 @@ import {
   runtimeHumanSessionControlSchema,
   runtimeHumanSessionEventSchema,
 } from "./runtime-human-session.ts";
+import { sourceAdapterIdSchema } from "./source-adapter-id.ts";
+
+export { sourceAdapterIdSchema };
 
 export const binIdSchema = postgresTextSchema
   .min(1, "bin 标识不能为空。")
@@ -20,10 +27,6 @@ export const binIdSchema = postgresTextSchema
     /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u,
     "bin 标识只能包含字母、数字、点、下划线和连字符。",
   );
-
-export const sourceAdapterIdSchema = postgresTextSchema
-  .min(1, "信源适配器标识不能为空。")
-  .max(128, "信源适配器标识不能超过 128 个字符。");
 
 export const identityIdSchema = postgresTextSchema
   .min(1, "访问身份标识不能为空。")
@@ -129,6 +132,11 @@ const sourceAdapterManifestStoredFieldsSchema = z.object({
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
   extensionsSchema: jsonSchemaDocumentSchema,
+  searchSummaryFields: z
+    .array(archiveSearchSummaryFieldPathSchema)
+    .max(32)
+    .readonly()
+    .optional(),
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
@@ -147,6 +155,11 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
   description: postgresTextSchema.optional(),
   configSchema: jsonSchemaDocumentSchema,
   extensionsSchema: jsonSchemaDocumentSchema,
+  searchSummaryFields: z
+    .array(archiveSearchSummaryFieldPathSchema)
+    .max(32)
+    .readonly()
+    .optional(),
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
@@ -175,6 +188,18 @@ const sourceAdapterManifestCheckedSchema =
           path: ["environment", "browser", "profileReuseUnavailableReason"],
           message: "不支持关闭后复用浏览器配置文件时必须说明原因。",
         });
+      }
+      if (sourceAdapter.searchSummaryFields !== undefined) {
+        for (const issue of validateSourceAdapterSummaryFields(
+          sourceAdapter.extensionsSchema,
+          sourceAdapter.searchSummaryFields,
+        )) {
+          context.addIssue({
+            code: "custom",
+            path: ["searchSummaryFields", issue.index],
+            message: issue.message,
+          });
+        }
       }
     },
   );

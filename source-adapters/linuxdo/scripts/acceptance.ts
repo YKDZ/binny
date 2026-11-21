@@ -3138,6 +3138,7 @@ async function verifyTopicArchive(
   assert.deepEqual(topicMetadata, {
     slug: "controlled-linuxdo-topic",
     createdAt: "2026-10-28T00:00:00.000Z",
+    title: "受控主题标题版本 1",
   });
   assert.equal(rootState.extensions.authorUsername, "fixture-author");
   assert.equal(rootState.extensions.authorName, "Linux.do 示例作者");
@@ -3307,8 +3308,8 @@ async function verifyTopicArchive(
     value: "2026-10-28T00:00:02.000Z",
   });
   assert.equal(
-    "title" in (editedRootState.extensions.topic as Record<string, unknown>),
-    false,
+    (editedRootState.extensions.topic as Record<string, unknown>).title,
+    "受控主题标题版本 2",
   );
   const editedFirstReplyState = binState(editedFirstReply);
   assert.equal(editedFirstReplyState.title, null);

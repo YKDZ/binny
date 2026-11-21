@@ -780,6 +780,12 @@ function createCliContract(identity: CliCommandIdentity) {
       ? "Candidate order: observedAt desc (itemId asc)"
       : `Candidate order: ${field} desc (nulls last, itemId asc)`;
   };
+  const formatSummaryExtensionValue = (
+    value: string | number | boolean | readonly (string | number | boolean)[],
+  ) =>
+    typeof value === "string" || Array.isArray(value)
+      ? JSON.stringify(value)
+      : String(value);
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
   ) =>
@@ -794,28 +800,65 @@ function createCliContract(identity: CliCommandIdentity) {
             `Matches on this page: ${page.results.length}`,
             ...(page.results.length === 0
               ? ["No archived items matched."]
-              : page.results.flatMap((result) => [
-                  `- ${result.title ?? result.sourceKey.key}`,
-                  `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
-                  `  Observed: ${result.observedAt}`,
-                  `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
-                  `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
-                  ...(result.timeStatus === undefined
-                    ? []
-                    : [`  Time review: ${result.timeStatus}`]),
-                  `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
-                  ...result.matches.flatMap(({ binId, timeMatch }) =>
-                    timeMatch === undefined
+              : page.results.flatMap((result) => {
+                  const hasSummaryDetails = result.matches.some(
+                    (match) =>
+                      match.summaryExtensions !== undefined &&
+                      Object.keys(match.summaryExtensions).length > 0,
+                  );
+                  const hasDistinctViewTitles =
+                    result.matches.length > 1 &&
+                    result.matches.some(
+                      (match) =>
+                        match.title !== result.title ||
+                        result.matches.some(
+                          (other) => other.title !== match.title,
+                        ),
+                    );
+                  return [
+                    `- ${result.title ?? result.sourceKey.key}`,
+                    `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
+                    `  Observed: ${result.observedAt}`,
+                    `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+                    `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
+                    ...(result.timeStatus === undefined
                       ? []
-                      : [
-                          `  Time match ${binId}: ${timeMatch.status}${
-                            timeMatch.status === "undetermined"
-                              ? ` (${timeMatch.reason})`
-                              : ""
-                          }`,
-                        ],
-                  ),
-                ])),
+                      : [`  Time review: ${result.timeStatus}`]),
+                    `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+                    ...result.matches.flatMap((match) => {
+                      if (!hasSummaryDetails && !hasDistinctViewTitles) {
+                        return [];
+                      }
+                      const parts: string[] = [];
+                      if (match.title !== null) {
+                        parts.push(`title=${JSON.stringify(match.title)}`);
+                      }
+                      if (match.summaryExtensions !== undefined) {
+                        for (const [fieldPath, fieldValue] of Object.entries(
+                          match.summaryExtensions,
+                        )) {
+                          parts.push(
+                            `${fieldPath}=${formatSummaryExtensionValue(fieldValue)}`,
+                          );
+                        }
+                      }
+                      return parts.length === 0
+                        ? []
+                        : [`  View ${match.binId}: ${parts.join(", ")}`];
+                    }),
+                    ...result.matches.flatMap(({ binId, timeMatch }) =>
+                      timeMatch === undefined
+                        ? []
+                        : [
+                            `  Time match ${binId}: ${timeMatch.status}${
+                              timeMatch.status === "undetermined"
+                                ? ` (${timeMatch.reason})`
+                                : ""
+                            }`,
+                          ],
+                    ),
+                  ];
+                })),
           ]
         : ["Candidate results were not requested."]),
       ...(page.timeSummary === undefined
@@ -1164,6 +1207,11 @@ function createCliContract(identity: CliCommandIdentity) {
                     `  Allowed item values: ${JSON.stringify(field.allowedItemValues)}`,
                   ]),
             ]),
+          ]),
+      ...(discovery.summaryFields.length === 0
+        ? ["Summary fields: none"]
+        : [
+            `Summary fields: ${discovery.summaryFields.map(({ path }) => path).join(", ")}`,
           ]),
       "Missing and null extension values do not match filters.",
     ]);

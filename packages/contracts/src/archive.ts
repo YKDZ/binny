@@ -8,7 +8,9 @@ import type {
 import {
   archiveExtensionOperationSchema,
   archiveExtensionScalarSchema,
+  archiveExtensionSummaryValueSchema,
   archiveSearchExtensionsSchema,
+  archiveSearchSummaryFieldPathSchema,
   type ArchiveExtensionOperation,
   type ArchiveExtensionScalar,
 } from "./archive-extensions.ts";
@@ -1753,6 +1755,15 @@ const archiveSearchMatchSchema = z
     sourcePublishedAt: sourceTimeSchema.nullable(),
     sourceModifiedAt: sourceTimeSchema.nullable(),
     timeMatch: archiveSearchTimeMatchSchema.optional(),
+    summaryExtensions: z
+      .record(
+        archiveSearchSummaryFieldPathSchema,
+        archiveExtensionSummaryValueSchema,
+      )
+      .optional()
+      .describe(
+        "Adapter-declared summary extension values stored on this matched bin view's revision.",
+      ),
   })
   .strict();
 
