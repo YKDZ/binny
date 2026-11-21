@@ -211,8 +211,8 @@ export class SourceAccessDeadlineExceededError extends Error {
     super(
       details?.waitReason === "source_cooldown" &&
         details.notBeforeEpochMs !== undefined
-        ? `源站要求等待冷却至 ${new Date(details.notBeforeEpochMs).toISOString()}（HTTP ${String(details.cooldownStatus ?? 429)}），超出本轮剩余时间预算。`
-        : "本轮剩余时间不足以等待来源准入。",
+        ? `Source requested cooldown until ${new Date(details.notBeforeEpochMs).toISOString()} (HTTP ${String(details.cooldownStatus ?? 429)}), exceeding the remaining time budget for this run.`
+        : "Remaining time budget for this run is insufficient to wait for source admission.",
       { cause: undefined },
     );
     this.name = "SourceAccessDeadlineExceededError";

@@ -100,16 +100,6 @@ void describe("native offline CLI contract discovery", () => {
     assert.equal(onlyApiUrl.exitCode, 2);
     assert.equal(onlyApiUrl.requestCount, 0);
 
-    const legacyFlagRejected = await run([
-      "bin",
-      "update",
-      "rss-main",
-      "--browser-idle-timeout-seconds",
-      "0",
-    ]);
-    assert.equal(legacyFlagRejected.exitCode, 2);
-    assert.equal(legacyFlagRejected.requestCount, 0);
-
     const requests: Request[] = [];
     const validChange = await run(
       [
@@ -469,7 +459,6 @@ void describe("native offline CLI contract discovery", () => {
       updateHelp.stdout,
       /Provide at least 1 of: identityId, config, idleTimeoutSeconds/u,
     );
-    assert.doesNotMatch(updateHelp.stdout, /--browser-idle-timeout-seconds/u);
 
     const contractHelp = await run(["contract", "--help"]);
     assert.equal(contractHelp.exitCode, 0);

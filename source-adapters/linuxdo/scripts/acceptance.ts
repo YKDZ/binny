@@ -2185,7 +2185,7 @@ async function verifySourceCooldownAndSnapshots(): Promise<void> {
       bin.execution.phase === "sleeping" &&
       dockerStatus === "exited" &&
       dockerExitCode === 0,
-    "runtime-linuxdo 进入真实容器休眠 (exited 0)",
+    "runtime-linuxdo entered container sleep (exited 0)",
   );
 
   await updateFixtureState({
@@ -5764,6 +5764,10 @@ async function verifyBoundedSync(): Promise<string> {
       longUpperBound,
     );
     assert.equal(syncReport(afterLongQueue).scopes[0]?.mode, "truncated");
+    assert.equal(syncReport(afterLongQueue).phase, "partial");
+    assert.equal(syncReport(afterLongQueue).discovery, "partial");
+    assert.equal(syncReport(afterLongQueue).scopes[0]?.status, "partial");
+    assert.equal(syncOutput(afterLongQueue).outcome, "partial");
     const expectedLongRangeFrom = new Date(
       Math.max(
         Date.parse(resumedUpperBound),
@@ -6468,6 +6472,10 @@ async function verifySyncScopeTransitions(): Promise<void> {
     assert.ok(readdedCategory44);
     assert.equal(readdedCategory44.scope.id, 44);
     assert.equal(readdedCategory44.mode, "truncated");
+    assert.equal(syncReport(readdedScope).phase, "partial");
+    assert.equal(syncReport(readdedScope).discovery, "partial");
+    assert.equal(readdedCategory44.status, "partial");
+    assert.equal(syncOutput(readdedScope).outcome, "partial");
     assert.equal(readdedCategory44.skippedBefore, addedScopePosition);
     assert.deepEqual(readdedCategory44.range, {
       from: new Date(

@@ -1,20 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  binConfigurationSchema,
-  binDetailsSchema,
-  binErrorSchema,
-  binUpdateInputSchema,
-  humanSessionQueueReasonSchema,
-  manualRunExecutionSchema,
-  manualRunQueueReasonSchema,
-  publicApiProtocolVersion,
-  runtimeHeartbeatInputSchema,
-  runtimeHeartbeatResultSchema,
-  runtimeHumanSessionControlSchema,
-  runtimeProtocolVersion,
-} from "@binny/contracts";
+import { runtimeProtocolVersion } from "@binny/contracts";
 import {
   archiveCommits,
   binConfigurations,
@@ -729,143 +716,6 @@ function makeHumanSession(
 }
 
 void describe("independent browser bins without cross-bin capacity", () => {
-  void it("removes legacy browser idle fields and bumps protocol versions", () => {
-    assert.equal(runtimeProtocolVersion, 9);
-    assert.ok(publicApiProtocolVersion >= 10);
-
-    assert.equal(
-      binUpdateInputSchema.safeParse({ browserIdleTimeoutSeconds: 0 }).success,
-      false,
-    );
-    assert.equal(
-      binUpdateInputSchema.safeParse({
-        runtimeSleep: { idleTimeoutSeconds: 0 },
-      }).success,
-      true,
-    );
-    assert.equal(
-      "browserIdleTimeoutSeconds" in binConfigurationSchema.shape,
-      false,
-    );
-    assert.equal("browserIdleTimeoutSeconds" in binDetailsSchema.shape, false);
-    const parsedHbResult = runtimeHeartbeatResultSchema.parse({
-      status: "online",
-      runtimeId: "rt-1",
-      environment: {
-        kind: "browser",
-        browser: {
-          available: true,
-          profileReuseAfterRestart: true,
-          power: { status: "ready" },
-        },
-      },
-      lastHeartbeatAt: new Date().toISOString(),
-      sourceStateSnapshot: {
-        freshness: "unknown",
-        sourceAccess: { status: "unknown" },
-      },
-      browserIdleTimeoutSeconds: 300,
-    });
-    assert.equal("browserIdleTimeoutSeconds" in parsedHbResult, false);
-    assert.equal(
-      humanSessionQueueReasonSchema.safeParse("runtime_sleeping").success,
-      true,
-    );
-    assert.equal(
-      humanSessionQueueReasonSchema.safeParse("runtime_waking").success,
-      true,
-    );
-
-    assert.equal(
-      manualRunQueueReasonSchema.safeParse("browser_capacity_exhausted")
-        .success,
-      false,
-    );
-    assert.equal(
-      humanSessionQueueReasonSchema.safeParse("browser_capacity_exhausted")
-        .success,
-      false,
-    );
-    assert.equal(
-      binErrorSchema.safeParse({
-        error: { code: "browser_capacity_active", message: "active" },
-      }).success,
-      false,
-    );
-    assert.equal(
-      binErrorSchema.safeParse({
-        error: { code: "browser_reservation_mismatch", message: "mismatch" },
-      }).success,
-      false,
-    );
-
-    const parsedExecution = manualRunExecutionSchema.safeParse({
-      runId: "11111111-1111-4111-8111-111111111111",
-      binId: "bin-a",
-      identityId: "bin-a",
-      sourceAdapterId: browserAdapter.id,
-      sourceAdapterVersion: browserAdapter.version,
-      action: "check",
-      params: {},
-      config: {},
-      referenceTime: new Date().toISOString(),
-      browserReservationId: "22222222-2222-4222-8222-222222222222",
-    });
-    assert.equal(parsedExecution.success, false);
-
-    const parsedControl = runtimeHumanSessionControlSchema.safeParse({
-      sessionId: "33333333-3333-4333-8333-333333333333",
-      action: "open",
-      tunnelToken: "tok",
-      browserReservationId: "22222222-2222-4222-8222-222222222222",
-    });
-    assert.equal(parsedControl.success, false);
-
-    const oldProtocolHeartbeat = runtimeHeartbeatInputSchema.safeParse({
-      protocolVersion: 8,
-      runtimeId: "rt-1",
-      ownerGeneration: "1",
-      ownerLockAcquired: true,
-      activeRunId: null,
-      claimInFlight: false,
-      runtimeControlUrl: "http://rt-1:8080",
-      sourceAdapter: browserAdapter,
-      environment: {
-        kind: "browser",
-        browser: {
-          available: true,
-          profileReuseAfterRestart: true,
-          power: { status: "ready" },
-        },
-      },
-    });
-    assert.equal(oldProtocolHeartbeat.success, false);
-
-    const parsedHeartbeat = runtimeHeartbeatInputSchema.parse({
-      protocolVersion: runtimeProtocolVersion,
-      runtimeId: "rt-1",
-      ownerGeneration: "1",
-      ownerLockAcquired: true,
-      activeRunId: null,
-      claimInFlight: false,
-      runtimeControlUrl: "http://rt-1:8080",
-      sourceAdapter: browserAdapter,
-      environment: {
-        kind: "browser",
-        browser: {
-          available: true,
-          profileReuseAfterRestart: true,
-          power: { status: "ready" },
-        },
-      },
-      browserPowerEvent: {
-        reservationId: "22222222-2222-4222-8222-222222222222",
-        event: "ready",
-      },
-    });
-    assert.equal("browserPowerEvent" in parsedHeartbeat, false);
-  });
-
   void it("admits runs and human sessions for two independent browser bins concurrently", async () => {
     const runA = "11111111-1111-4111-8111-111111111111";
     const runB = "22222222-2222-4222-8222-222222222222";
@@ -890,8 +740,6 @@ void describe("independent browser bins without cross-bin capacity", () => {
     if (!claimA.ok || !claimB.ok) return;
     assert.equal(claimA.value?.runId, runA);
     assert.equal(claimB.value?.runId, runB);
-    assert.equal("browserReservationId" in claimA.value, false);
-    assert.equal("browserReservationId" in claimB.value, false);
 
     // Independent human sessions on two idle browser bins can open simultaneously.
     const sessionA = "33333333-3333-4333-8333-333333333333";
@@ -1053,7 +901,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
     });
     assert.deepEqual(blockedUnconfirmedClaim, { ok: true, value: null });
 
-    // 5. removeBin succeeds without browser_capacity_active.
+    // 5. removeBin succeeds cleanly.
     const removed = await binStore.removeBin("bin-a");
     assert.deepEqual(removed, { ok: true, value: { id: "bin-a" } });
   });

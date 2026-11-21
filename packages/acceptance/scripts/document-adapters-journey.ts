@@ -722,19 +722,12 @@ export async function runDocumentAdaptersJourney(options: {
         );
 
   for (const adapter of selectedAdapters) {
-    await options.waitForRuntimeHealth(adapter.runtimeService);
     const registered = await options.fetchRegisteredBin(
       options.baseUrl,
       adapter.binId,
     );
-    const manifest = await runtimeManifest(
-      options.compose,
-      adapter.runtimeService,
-    );
-    assertManifest(adapter, manifest);
     assert.equal(registered.id, adapter.binId);
     assert.equal(registered.sourceAdapterId, adapter.sourceAdapterId);
-    assert.equal(registered.sourceAdapterVersion, manifest.version);
 
     const configured = data<{ readonly id: string }>(
       await options.cli([
@@ -749,6 +742,13 @@ export async function runDocumentAdaptersJourney(options: {
       "updated",
     );
     assert.equal(configured.id, adapter.binId);
+    await options.waitForRuntimeHealth(adapter.runtimeService);
+    const manifest = await runtimeManifest(
+      options.compose,
+      adapter.runtimeService,
+    );
+    assertManifest(adapter, manifest);
+    assert.equal(registered.sourceAdapterVersion, manifest.version);
     await options.waitForRuntime(options.baseUrl, adapter.binId);
   }
 

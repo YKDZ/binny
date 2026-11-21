@@ -118,7 +118,7 @@ void describe("运行器动作参数校验 HTTP", () => {
     });
   });
 
-  void it("浏览器未就绪时 /health 与原生校验接口返回 503，就绪后恢复 200", async () => {
+  void it("returns 503 for /health and native validation endpoints until browser readiness completes", async () => {
     let ready = false;
     await withRuntimeServer(
       false,

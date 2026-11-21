@@ -1566,7 +1566,7 @@ if (browserLifecycle !== undefined) {
     await browserLifecycle.acquireOwnerLock();
   } catch (error) {
     process.stderr.write(
-      `浏览器独占锁获取失败，退出：${error instanceof Error ? error.message : String(error)}\n`,
+      `Failed to acquire browser owner lock; exiting: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     process.exit(1);
   }
@@ -1585,10 +1585,12 @@ server.listen(runtimePort, "0.0.0.0", () => {
       browserStartupCompleted = true;
       if (stopping === undefined) startHeartbeat();
     },
-    (error: unknown) => {
+    async (error: unknown) => {
       process.stderr.write(
-        `浏览器启动失败，运行器保持未就绪：${error instanceof Error ? error.message : String(error)}\n`,
+        `Browser startup failed; shutting down runtime: ${error instanceof Error ? error.message : String(error)}\n`,
       );
+      await shutdown().catch(() => undefined);
+      process.exit(1);
     },
   );
 });

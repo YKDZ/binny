@@ -14,6 +14,8 @@ import {
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
+import { createBinConfigurationStore } from "./bin-configuration.ts";
+import { createRuntimeConnectionStore } from "./runtime-connection.ts";
 import {
   createRuntimeContainerCoordinator,
   type ManagedContainerInspectResult,
@@ -233,15 +235,47 @@ function createFakeDatabase(initial: {
     return undefined;
   }
 
-  function executeSelect(table: unknown, clause: unknown): unknown[] {
+  function executeSelect(
+    fields: Record<string, unknown> | undefined,
+    table: unknown,
+    clause: unknown,
+  ): unknown[] {
     const compiled = compileWhere(clause);
+    const keys = fields === undefined ? [] : Object.keys(fields);
     if (table === binConfigurations) {
       const binId = findBinId(compiled.params);
-      if (binId !== undefined) {
-        const bin = bins.get(binId);
-        return bin === undefined ? [] : [{ ...bin }];
+      const selectedBins =
+        binId !== undefined
+          ? bins.has(binId)
+            ? [bins.get(binId)!]
+            : []
+          : [...bins.values()];
+      if (keys.includes("configuredSourceAdapter")) {
+        return selectedBins.map((bin) => {
+          const conn = connections.get(bin.id);
+          const container = containers.get(bin.id);
+          return {
+            binId: bin.id,
+            configuredSourceAdapter: bin.sourceAdapter,
+            config: bin.config,
+            configNativeValid: bin.configNativeValid,
+            runtimeSleepIdleTimeoutSeconds: bin.runtimeSleepIdleTimeoutSeconds,
+            runtimeId: conn?.runtimeId ?? null,
+            runtimeSourceAdapter: conn?.sourceAdapter ?? null,
+            environment: conn?.environment ?? null,
+            lastHeartbeatAt: conn?.lastHeartbeatAt ?? null,
+            disconnected: conn?.disconnected ?? null,
+            ownerState: conn?.ownerState ?? null,
+            ownerGeneration: conn?.ownerGeneration ?? null,
+            protocolVersion: conn?.protocolVersion ?? null,
+            runtimeControlUrl: conn?.runtimeControlUrl ?? null,
+            sourceStateSnapshot: conn?.sourceStateSnapshot ?? null,
+            containerLifecyclePhase: container?.lifecyclePhase ?? null,
+            containerLastWakeError: container?.lastWakeError ?? null,
+          };
+        });
       }
-      return [...bins.values()].map((b) => ({ ...b }));
+      return selectedBins.map((b) => ({ ...b }));
     }
     if (table === runtimeConnections) {
       const binId = findBinId(compiled.params);
@@ -303,10 +337,13 @@ function createFakeDatabase(initial: {
     return [];
   }
 
-  function createSelectBuilder(table: unknown) {
+  function createSelectBuilder(
+    fields: Record<string, unknown> | undefined,
+    table: unknown,
+  ) {
     let whereClause: unknown;
     const builder = Object.assign(
-      Promise.resolve().then(() => executeSelect(table, whereClause)),
+      Promise.resolve().then(() => executeSelect(fields, table, whereClause)),
       {
         leftJoin(_other: unknown, _on: unknown) {
           return builder;
@@ -323,7 +360,7 @@ function createFakeDatabase(initial: {
         },
         for(_mode: string) {
           return Promise.resolve().then(() =>
-            executeSelect(table, whereClause),
+            executeSelect(fields, table, whereClause),
           );
         },
       },
@@ -460,17 +497,17 @@ function createFakeDatabase(initial: {
   }
 
   const executor: {
-    select: (_fields?: unknown) => {
+    select: (fields?: Record<string, unknown>) => {
       from: (table: unknown) => ReturnType<typeof createSelectBuilder>;
     };
     insert: (table: unknown) => ReturnType<typeof createInsertBuilder>;
     update: (table: unknown) => ReturnType<typeof createUpdateBuilder>;
     transaction: <T>(cb: (tx: typeof executor) => Promise<T>) => Promise<T>;
   } = {
-    select(_fields?: unknown) {
+    select(fields?: Record<string, unknown>) {
       return {
         from(table: unknown) {
-          return createSelectBuilder(table);
+          return createSelectBuilder(fields, table);
         },
       };
     },
@@ -1014,6 +1051,7 @@ void describe("runtime container coordinator", () => {
     const coordinator = createRuntimeContainerCoordinator({
       database: db.database,
       driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
     });
 
     try {
@@ -1083,6 +1121,7 @@ void describe("runtime container coordinator", () => {
     const coordinator = createRuntimeContainerCoordinator({
       database: db.database,
       driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
     });
 
     try {
@@ -1574,6 +1613,7 @@ void describe("runtime container coordinator", () => {
     const coordinator = createRuntimeContainerCoordinator({
       database: db.database,
       driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
     });
 
     try {
@@ -1583,6 +1623,346 @@ void describe("runtime container coordinator", () => {
       assert.deepEqual(fakeDriver.stopCalls, []);
     } finally {
       await coordinator.close();
+    }
+  });
+
+  void it("refuses auto-wake and marks container offline when sleeping container was manually started and stopped", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-manual-cycle", 300)],
+      connections: [
+        { ...makeOnlineConnection("bin-manual-cycle"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-manual-cycle",
+          composeProject: "binny",
+          composeService: "s-manual-cycle",
+          containerId: "cid-manual-cycle",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-manual-cycle",
+        composeProject: "binny",
+        composeService: "s-manual-cycle",
+        binId: "bin-manual-cycle",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        // External docker start + docker stop before first heartbeat changed both timestamps.
+        startedAt: "2026-11-20T00:06:00.000Z",
+        finishedAt: "2026-11-20T00:06:10.000Z",
+        healthStatus: "none",
+      },
+    ]);
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
+    });
+
+    try {
+      const wakeResult = await coordinator.ensureAwakeAndRun(
+        "bin-manual-cycle",
+        async () => "should-not-run",
+      );
+      assert.equal(wakeResult.ok, false);
+      if (!wakeResult.ok) assert.equal(wakeResult.code, "runtime_offline");
+      assert.deepEqual(fakeDriver.startCalls, []);
+      assert.equal(
+        db.containers.get("bin-manual-cycle")?.lifecyclePhase,
+        "offline",
+      );
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("marks sleeping container offline on unexpected disconnect while ignoring disconnect during policy stop", async () => {
+    const db = createFakeDatabase({
+      bins: [
+        makeLightweightBin("bin-sleep-disconnect", 300),
+        makeLightweightBin("bin-stopping-disconnect", 300),
+      ],
+      connections: [
+        {
+          ...makeOnlineConnection("bin-sleep-disconnect"),
+          disconnected: true,
+        },
+        makeOnlineConnection("bin-stopping-disconnect"),
+      ],
+      containers: [
+        {
+          binId: "bin-sleep-disconnect",
+          composeProject: "binny",
+          composeService: "s-sleep-disconnect",
+          containerId: "cid-sleep-disconnect",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+        {
+          binId: "bin-stopping-disconnect",
+          composeProject: "binny",
+          composeService: "s-stopping-disconnect",
+          containerId: "cid-stopping-disconnect",
+          lifecyclePhase: "stopping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([]);
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
+    });
+
+    try {
+      await coordinator.onRuntimeDisconnected("bin-sleep-disconnect", "rt-1");
+      assert.equal(
+        db.containers.get("bin-sleep-disconnect")?.lifecyclePhase,
+        "offline",
+      );
+
+      await coordinator.onRuntimeDisconnected(
+        "bin-stopping-disconnect",
+        "rt-1",
+      );
+      assert.equal(
+        db.containers.get("bin-stopping-disconnect")?.lifecyclePhase,
+        "stopping",
+      );
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("reconciles exited waking container without stoppedContainerFinishedAt as offline on startup", async () => {
+    const db = createFakeDatabase({
+      bins: [
+        makeLightweightBin("bin-waking-started", 300),
+        makeLightweightBin("bin-waking-unstarted", 300),
+        makeLightweightBin("bin-stopping-clean", 300),
+      ],
+      connections: [
+        { ...makeOnlineConnection("bin-waking-started"), disconnected: true },
+        { ...makeOnlineConnection("bin-waking-unstarted"), disconnected: true },
+        { ...makeOnlineConnection("bin-stopping-clean"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-waking-started",
+          composeProject: "binny",
+          composeService: "s-waking-started",
+          containerId: "cid-waking-started",
+          lifecyclePhase: "waking",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+        {
+          binId: "bin-waking-unstarted",
+          composeProject: "binny",
+          composeService: "s-waking-unstarted",
+          containerId: "cid-waking-unstarted",
+          lifecyclePhase: "waking",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+        {
+          binId: "bin-stopping-clean",
+          composeProject: "binny",
+          composeService: "s-stopping-clean",
+          containerId: "cid-stopping-clean",
+          lifecyclePhase: "stopping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-waking-started",
+        composeProject: "binny",
+        composeService: "s-waking-started",
+        binId: "bin-waking-started",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:07:00.000Z",
+        healthStatus: "none",
+      },
+      {
+        containerId: "cid-waking-unstarted",
+        composeProject: "binny",
+        composeService: "s-waking-unstarted",
+        binId: "bin-waking-unstarted",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:05:00.000Z",
+        healthStatus: "none",
+      },
+      {
+        containerId: "cid-stopping-clean",
+        composeProject: "binny",
+        composeService: "s-stopping-clean",
+        binId: "bin-stopping-clean",
+        status: "exited",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T00:00:00.000Z",
+        finishedAt: "2026-11-20T00:06:00.000Z",
+        healthStatus: "none",
+      },
+    ]);
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+      wakeTimeoutMs: 100,
+    });
+
+    try {
+      await coordinator.reconcileOnStartup();
+      assert.equal(
+        db.containers.get("bin-waking-started")?.lifecyclePhase,
+        "offline",
+      );
+      assert.equal(
+        db.containers.get("bin-waking-unstarted")?.lifecyclePhase,
+        "sleeping",
+      );
+      assert.equal(
+        db.containers.get("bin-stopping-clean")?.lifecyclePhase,
+        "sleeping",
+      );
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  void it("preserves incompatible public execution status when an incompatible bin container is sleeping", async () => {
+    const db = createFakeDatabase({
+      bins: [
+        {
+          ...makeLightweightBin("bin-incompat-sleep", 300),
+          configNativeValid: false,
+        },
+      ],
+      connections: [
+        { ...makeOnlineConnection("bin-incompat-sleep"), disconnected: true },
+      ],
+      containers: [
+        {
+          binId: "bin-incompat-sleep",
+          composeProject: "binny",
+          composeService: "s-incompat-sleep",
+          containerId: "cid-incompat-sleep",
+          lifecyclePhase: "sleeping",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: "2026-11-20T00:05:00.000Z",
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+    });
+
+    const connectionStore = createRuntimeConnectionStore(db.database);
+    const execution = await connectionStore.getExecution("bin-incompat-sleep");
+    assert.equal(execution.ok, true);
+    if (execution.ok) {
+      assert.equal(execution.value.status, "incompatible");
+      assert.equal(
+        execution.value.error.code,
+        "runtime_configuration_incompatible",
+      );
+    }
+  });
+
+  void it("reads migrated runtimeSleep policies consistently for lightweight, custom/resident reusable browser, and non-reusable browser bins", async () => {
+    const reusableBrowserAdapter = {
+      ...lightweightAdapter,
+      id: "browser.reusable",
+      environment: {
+        browser: { required: true, profileReuseAfterRestart: true },
+      },
+    };
+    const nonReusableBrowserAdapter = {
+      ...lightweightAdapter,
+      id: "browser.ephemeral",
+      environment: {
+        browser: {
+          required: true,
+          profileReuseAfterRestart: false,
+          profileReuseUnavailableReason: "In-memory session only.",
+        },
+      },
+    };
+
+    const db = createFakeDatabase({
+      bins: [
+        makeLightweightBin("bin-mig-lightweight", 300),
+        {
+          ...makeLightweightBin("bin-mig-browser-custom", 45),
+          sourceAdapter: reusableBrowserAdapter,
+        },
+        {
+          ...makeLightweightBin("bin-mig-browser-resident", null),
+          sourceAdapter: reusableBrowserAdapter,
+        },
+        {
+          ...makeLightweightBin("bin-mig-browser-nonreusable", 300),
+          sourceAdapter: nonReusableBrowserAdapter,
+        },
+      ],
+    });
+
+    const binStore = createBinConfigurationStore(db.database);
+    const listed = await binStore.listBins();
+    const byId = new Map(listed.map((b) => [b.id, b.runtimeSleep]));
+    assert.deepEqual(byId.get("bin-mig-lightweight"), {
+      idleTimeoutSeconds: 300,
+    });
+    assert.deepEqual(byId.get("bin-mig-browser-custom"), {
+      idleTimeoutSeconds: 45,
+    });
+    assert.deepEqual(byId.get("bin-mig-browser-resident"), {
+      idleTimeoutSeconds: null,
+    });
+    assert.deepEqual(byId.get("bin-mig-browser-nonreusable"), {
+      idleTimeoutSeconds: null,
+    });
+
+    const single = await binStore.getBin("bin-mig-browser-nonreusable");
+    assert.equal(single.ok, true);
+    if (single.ok) {
+      assert.deepEqual(single.value.runtimeSleep, { idleTimeoutSeconds: null });
     }
   });
 });

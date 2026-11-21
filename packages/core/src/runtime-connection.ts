@@ -13,7 +13,6 @@ import {
   runtimeStateUpdateInputSchema,
   runtimeSourceStateSnapshotSchema,
   runtimeProtocolVersion,
-  runtimeWakeErrorSchema,
   type SourceStateSnapshot,
   type BinError,
   type BinOperation,
@@ -24,7 +23,6 @@ import {
   type RuntimeExecution,
   type RuntimeHeartbeatResult,
   type RuntimeHeartbeatInput,
-  type RuntimeWakeError,
 } from "@binny/contracts";
 import {
   binConfigurations,
@@ -44,7 +42,12 @@ import {
   interruptReplacedManualRuns,
 } from "./manual-run-fencing.ts";
 import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
-import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
+import {
+  canAdapterAutoSleep,
+  parseContainerWakeError,
+  readEffectiveIdleTimeoutSeconds,
+  type RuntimeContainerCoordinator,
+} from "./runtime-container.ts";
 
 const runtimeSelection = {
   binId: binConfigurations.id,
@@ -212,12 +215,6 @@ function compatibilityError(
   return undefined;
 }
 
-function parseContainerWakeError(raw: unknown): RuntimeWakeError | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const parsed = runtimeWakeErrorSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
-}
-
 function offline(
   reason:
     | "runtime_not_connected"
@@ -303,27 +300,10 @@ function projectSourceStateSnapshot(
   };
 }
 
-function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
-  return (
-    !sourceAdapter.environment.browser.required ||
-    sourceAdapter.environment.browser.profileReuseAfterRestart
-  );
-}
-
 function defaultIdleTimeoutSecondsForAdapter(
   sourceAdapter: SourceAdapterManifest,
 ): number | null {
   return canAdapterAutoSleep(sourceAdapter) ? 300 : null;
-}
-
-function effectiveIdleTimeoutSeconds(
-  row: {
-    readonly runtimeSleepIdleTimeoutSeconds: number | null;
-  },
-  sourceAdapter: SourceAdapterManifest,
-): number | null {
-  if (!canAdapterAutoSleep(sourceAdapter)) return null;
-  return row.runtimeSleepIdleTimeoutSeconds;
 }
 
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
@@ -357,6 +337,24 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
     return offline("runtime_protocol_outdated", row);
   }
 
+  const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
+  const error = compatibilityError(
+    configuredSourceAdapter,
+    config,
+    row.configNativeValid,
+    runtimeSourceAdapter,
+    environment,
+  );
+  if (error !== undefined) {
+    return {
+      status: "incompatible",
+      runtimeId: row.runtimeId,
+      lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+      sourceStateSnapshot: projectSourceStateSnapshot(row),
+      error,
+    };
+  }
+
   const heartbeatFresh =
     !row.disconnected &&
     Date.now() - row.lastHeartbeatAt.getTime() <= runtimeHeartbeatTimeoutMs;
@@ -374,24 +372,6 @@ function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
       lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
       ...(lastWakeError === undefined ? {} : { lastWakeError }),
       sourceStateSnapshot: projectSourceStateSnapshot(row),
-    };
-  }
-
-  const environment = runtimeEnvironmentSchema.parse(storedEnvironment);
-  const error = compatibilityError(
-    configuredSourceAdapter,
-    config,
-    row.configNativeValid,
-    runtimeSourceAdapter,
-    environment,
-  );
-  if (error !== undefined) {
-    return {
-      status: "incompatible",
-      runtimeId: row.runtimeId,
-      lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
-      sourceStateSnapshot: projectSourceStateSnapshot(row),
-      error,
     };
   }
   if (row.disconnected === true) return offline("runtime_not_connected", row);
@@ -880,10 +860,10 @@ export function createRuntimeConnectionStore(
           const configuredAdapter = sourceAdapterManifestStoredSchema.parse(
             row.configuredSourceAdapter,
           );
-          const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(
-            row,
-            configuredAdapter,
-          );
+          const idleTimeoutSeconds = readEffectiveIdleTimeoutSeconds({
+            runtimeSleepIdleTimeoutSeconds: row.runtimeSleepIdleTimeoutSeconds,
+            sourceAdapter: configuredAdapter,
+          });
           return execution.status === "incompatible"
             ? {
                 ok: false as const,

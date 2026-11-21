@@ -492,20 +492,13 @@ export async function runArticleAdaptersJourney(options: {
   readonly waitForRuntimeHealth: (service: string) => Promise<void>;
 }): Promise<void> {
   for (const adapter of adapters) {
-    await options.waitForRuntimeHealth(adapter.runtimeService);
     const registered = await waitForRegistration(
       options.baseUrl,
       adapter.binId,
       options.fetchRegisteredBin,
     );
-    const manifest = await runtimeManifest(
-      options.compose,
-      adapter.runtimeService,
-    );
-    assertManifest(adapter, manifest);
     assert.equal(registered.id, adapter.binId);
     assert.equal(registered.sourceAdapterId, adapter.sourceAdapterId);
-    assert.equal(registered.sourceAdapterVersion, manifest.version);
 
     const configured = data<{ readonly id: string }>(
       await options.cli([
@@ -520,6 +513,13 @@ export async function runArticleAdaptersJourney(options: {
       "updated",
     );
     assert.equal(configured.id, adapter.binId);
+    await options.waitForRuntimeHealth(adapter.runtimeService);
+    const manifest = await runtimeManifest(
+      options.compose,
+      adapter.runtimeService,
+    );
+    assertManifest(adapter, manifest);
+    assert.equal(registered.sourceAdapterVersion, manifest.version);
     await options.waitForRuntime(options.baseUrl, adapter.binId);
   }
 
@@ -642,16 +642,8 @@ export async function runArticleAdaptersJourney(options: {
       );
       assert.equal(initialRevision.itemId, itemId);
       assert.equal(updatedRevision.itemId, itemId);
-      assertState(
-        initialRevision.state as ArchiveItemRead["views"][number]["state"],
-        source,
-        1,
-      );
-      assertState(
-        updatedRevision.state as ArchiveItemRead["views"][number]["state"],
-        source,
-        2,
-      );
+      assertState(initialRevision.state, source, 1);
+      assertState(updatedRevision.state, source, 2);
 
       const diff = data<{
         readonly itemId: string;

@@ -3446,7 +3446,7 @@ async function imageId(image: string): Promise<string> {
 }
 
 async function containerImageId(service: string): Promise<string> {
-  const containerId = await runningContainerId(service);
+  const containerId = await serviceContainerId(service);
   const result = await run(
     "docker",
     ["inspect", "--format", "{{.Image}}", containerId],
@@ -3477,7 +3477,7 @@ async function containerVolume(
   service: string,
   destination: string,
 ): Promise<string> {
-  const containerId = await runningContainerId(service);
+  const containerId = await serviceContainerId(service);
   const result = await run(
     "docker",
     [
@@ -4529,11 +4529,6 @@ async function createLinuxdoBin(
   identityId = "binny-integration-profile",
 ): Promise<void> {
   const registered = await waitForBinRegistration(baseUrl, binId);
-  const runtimeManifest = await linuxdoRuntimeManifest(service);
-  assert.equal(
-    registered.sourceAdapterVersion,
-    manifestVersion(runtimeManifest),
-  );
   const configured = cliData<{ readonly id: string }>(
     await cli(baseUrl, [
       "bin",
@@ -4548,6 +4543,11 @@ async function createLinuxdoBin(
   );
   assert.equal(configured.id, binId);
   await waitForRuntime(baseUrl, binId);
+  const runtimeManifest = await linuxdoRuntimeManifest(service);
+  assert.equal(
+    registered.sourceAdapterVersion,
+    manifestVersion(runtimeManifest),
+  );
 
   const summaries = await fetch(`${baseUrl}/bins`);
   assert.equal(summaries.status, 200);
@@ -5485,7 +5485,7 @@ async function verifyLinuxdoImageUpgrade(
   const previousContainers = new Map<string, string>();
   const profileVolumes = new Map<string, string>();
   for (const service of services) {
-    const containerId = await runningContainerId(service);
+    const containerId = await serviceContainerId(service);
     previousContainers.set(service, containerId);
     assert.equal(await containerImageId(service), imageUpdate.baselineImageId);
     profileVolumes.set(
@@ -5667,7 +5667,7 @@ async function verifyLinuxdoIndependentBrowsersJourney(
           bin.execution.phase === "sleeping" &&
           dockerState.status === "exited" &&
           dockerState.exitCode === 0,
-        `${binId} 进入容器休眠 (exited 0)`,
+        `${binId} entered container sleep (exited 0)`,
       )
     ).bin;
   };
@@ -5819,7 +5819,7 @@ async function verifyLinuxdoIndependentBrowsersJourney(
   assert.equal((await browserProcesses()).length, 0);
 
   process.stdout.write(
-    "同项目 Linux.do 双桶独立浏览器实测：" +
+    "Same-project Linux.do dual-bin independent browsers: " +
       JSON.stringify({
         concurrentBrowsersObserved: 2,
         firstSleepingAfterHumanClose: firstStopped.execution.status,
@@ -5996,7 +5996,7 @@ async function rebuildRssRuntimeWithComposeWatch(
 }> {
   const previousProjectDirectory = composeProjectDirectory;
   const previousImageId = await containerImageId("runtime-rss");
-  const previousContainerId = await runningContainerId("runtime-rss");
+  const previousContainerId = await serviceContainerId("runtime-rss");
   let watcher: ManagedProcess | undefined;
   try {
     composeProjectDirectory = imageUpdate.buildContextDirectory;
@@ -9401,7 +9401,7 @@ async function verifyScheduledSleepWakeupJourney(
         bin.execution.phase === "sleeping" &&
         dockerState.status === "exited" &&
         dockerState.exitCode === 0,
-      `${binId} 进入策略休眠 (exited 0)`,
+      `${binId} entered policy sleep (exited 0)`,
     );
     return cid;
   };
@@ -9477,7 +9477,7 @@ async function verifyScheduledSleepWakeupJourney(
           "found",
         ),
       (s) => s.lastRunId !== undefined,
-      "休眠容器上的正常到期计划创建运行并唤醒容器",
+      "Due schedule on sleeping container creates run and wakes container",
     );
     const normalRunId = normalTriggered.lastRunId!;
     cliData(
@@ -9498,6 +9498,72 @@ async function verifyScheduledSleepWakeupJourney(
     assert.equal(normalDone.status, "completed");
     assert.equal(normalDone.referenceTime, normalEnabled.nextDueAt);
     assert.equal(normalDone.result?.commits.length, 1);
+    await waitForSleeping();
+
+    // 1b. Manual trigger wake failure returns failure reason without creating any run; subsequent trigger succeeds after recovery.
+    const runsBeforeManualWakeFail = cliData<{
+      readonly runs: readonly { readonly runId: string }[];
+    }>(await cli(baseUrl, ["run", "list", "--bin-id", binId]), "listed");
+    const manualFailGateKey = "manual-wake-fail-" + randomUUID();
+    await heartbeatProxy.rejectRuntime(binId, 503);
+    const manualWakeFailRes = await fetch(`${baseUrl}/bins/${binId}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        action: "collect",
+        params: {
+          sourceUrl,
+          gateKey: manualFailGateKey,
+          sourceKey: manualFailGateKey,
+        },
+      }),
+    });
+    assert.equal(manualWakeFailRes.status, 409);
+    const manualWakeFailBody = (await manualWakeFailRes.json()) as {
+      readonly error?: { readonly code?: string; readonly message?: string };
+    };
+    assert.equal(
+      manualWakeFailBody.error?.code,
+      "runtime_action_validation_unavailable",
+    );
+    assert.ok(
+      typeof manualWakeFailBody.error?.message === "string" &&
+        manualWakeFailBody.error.message.length > 0,
+    );
+    const runsAfterManualWakeFail = cliData<{
+      readonly runs: readonly { readonly runId: string }[];
+    }>(await cli(baseUrl, ["run", "list", "--bin-id", binId]), "listed");
+    assert.equal(
+      runsAfterManualWakeFail.runs.length,
+      runsBeforeManualWakeFail.runs.length,
+    );
+    await heartbeatProxy.allowRuntime(binId);
+    await waitForSleeping();
+
+    const manualRecoverGateKey = "manual-wake-recover-" + randomUUID();
+    await releaseSource(sourceControlUrl, manualRecoverGateKey, "material");
+    const manualRecovered = cliData<{ readonly runId: string }>(
+      await cli(baseUrl, [
+        "run",
+        "trigger",
+        binId,
+        "collect",
+        "--params",
+        JSON.stringify({
+          sourceUrl,
+          gateKey: manualRecoverGateKey,
+          sourceKey: manualRecoverGateKey,
+        }),
+      ]),
+      "triggered",
+    );
+    const manualRecoveredDone = await waitForCliManualRunState(
+      baseUrl,
+      binId,
+      manualRecovered.runId,
+      ["completed", "failed"],
+    );
+    assert.equal(manualRecoveredDone.status, "completed");
     await waitForSleeping();
 
     // 2. Transient wake failure -> preserves runId/params/referenceTime, surfaces queueReason & lastWakeError in run get & run list, recovers via backoff.
@@ -9550,7 +9616,7 @@ async function verifyScheduledSleepWakeupJourney(
           "found",
         ),
       (s) => s.lastRunId !== undefined,
-      "暂时性唤醒失败场景创建计划运行",
+      "Transient wake failure scenario creates scheduled run",
     );
     const retryRunId = retryTriggered.lastRunId!;
     cliData(
@@ -9573,7 +9639,7 @@ async function verifyScheduledSleepWakeupJourney(
         r.status === "queued" &&
         r.queueReason === "runtime_waking" &&
         r.lastWakeError?.code === "runtime_wake_timeout",
-      "暂时性唤醒失败保留原 queued 运行并暴露 queueReason 与 lastWakeError",
+      "Transient wake failure preserves queued run and exposes queueReason and lastWakeError",
     );
     assert.equal(queuedWithWakeError.runId, retryRunId);
     assert.equal(queuedWithWakeError.referenceTime, retryEnabled.nextDueAt);
@@ -9720,7 +9786,7 @@ async function verifyScheduledSleepWakeupJourney(
           "found",
         ),
       (s) => s.lastRunId !== undefined,
-      "等待唤醒取消测试创建计划运行",
+      "Wake-cancel test creates scheduled run",
     );
     const cancelRunId = cancelTriggered.lastRunId!;
     cliData(
@@ -9741,7 +9807,7 @@ async function verifyScheduledSleepWakeupJourney(
       (r) =>
         r.status === "queued" &&
         r.lastWakeError?.code === "runtime_wake_timeout",
-      "运行进入唤醒退避等待期",
+      "Run enters wake backoff wait",
     );
     const cancelledDuringWake = cliData<ManualRunCliState>(
       await cli(baseUrl, ["run", "cancel", binId, cancelRunId]),
@@ -9835,7 +9901,7 @@ async function verifyScheduledSleepWakeupJourney(
           "found",
         ),
       (s) => s.lastRunId !== undefined,
-      "中心重启恢复测试入队已创建计划运行",
+      "Server restart recovery test enqueues scheduled run",
     );
     const restartQueuedRunId = restartQueuedTriggered.lastRunId!;
     cliData(
@@ -10515,7 +10581,7 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
           bin.execution.phase === "sleeping" &&
           dockerState.status === "exited" &&
           dockerState.exitCode === 0,
-        "overlap 验收等待运行器进入休眠",
+        "Wait for runtime sleep in overlap acceptance",
       );
 
     sleepPolicyModified = true;
@@ -10594,7 +10660,7 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
     const triggeredSleepRun = await waitFor(
       () => readSchedule(sleepOverlapSchedule.scheduleId),
       (s) => s.lastRunId !== undefined,
-      "休眠容器上的 overlap=skip 计划首个到期触发唤醒执行",
+      "First due trigger on sleeping container wakes and executes overlap=skip schedule",
     );
     const firstSleepRunId = triggeredSleepRun.lastRunId!;
     await waitForSourceArrival(
@@ -10615,7 +10681,7 @@ async function verifyScheduleOverlapPolicy(baseUrl: string): Promise<void> {
     const skippedWhileActive = await waitFor(
       () => readSchedule(sleepOverlapSchedule.scheduleId),
       (s) => s.lastSkip?.reason === "overlap",
-      "休眠唤醒运行执行中跳过重叠触发",
+      "Overlapping trigger is skipped while woken run is executing",
     );
     assert.equal(skippedWhileActive.lastRunId, firstSleepRunId);
     assert.equal(
@@ -12832,7 +12898,7 @@ async function verifyRssRuntimeSleepJourney(
         bin.execution.phase === "sleeping" &&
         dockerState.status === "exited" &&
         dockerState.exitCode === 0,
-      `${binId} 进入容器休眠 (exited 0)`,
+      `${binId} entered container sleep (exited 0)`,
     );
     return cid;
   };
@@ -12849,16 +12915,29 @@ async function verifyRssRuntimeSleepJourney(
         ),
       (current) =>
         current.status === "completed" || current.status === "failed",
-      `运行 ${binId}/${runId} 结束`,
+      `Run ${binId}/${runId} finished`,
     );
 
-  // 1. Default lightweight idle timeout is 300s and both RSS bins are online.
+  // 1. Default lightweight idle timeout is 300s; wake binny-rss-one if it has already slept after earlier steps.
   const initialOne = await getBin("binny-rss-one");
   const initialTwo = await getBin("binny-rss-two");
   assert.equal(initialOne.runtimeSleep.idleTimeoutSeconds, 300);
   assert.equal(initialTwo.runtimeSleep.idleTimeoutSeconds, 300);
-  assert.equal(initialOne.execution.status, "online");
-  assert.equal(initialTwo.execution.status, "online");
+  assert.ok(
+    initialOne.execution.status === "online" ||
+      initialOne.execution.status === "sleeping",
+  );
+  assert.ok(
+    initialTwo.execution.status === "online" ||
+      initialTwo.execution.status === "sleeping",
+  );
+  if (initialOne.execution.status === "sleeping") {
+    const wokenOne = await triggerRssAction(baseUrl, "binny-rss-one", "check", {
+      feedIds: ["rss-main"],
+    });
+    assert.equal(wokenOne.status, "completed");
+  }
+  await waitForRuntime(baseUrl, "binny-rss-one");
 
   // 2. Updating idle timeout to 0 without changing config stops the container cleanly.
   const updatedPolicy = cliData<SleepBinDetails>(
@@ -13095,6 +13174,15 @@ async function verifyRssRuntimeSleepJourney(
   await waitForContainerSleeping("binny-rss-one", "runtime-rss");
 
   // 8. Server restart reconciliation: policy-sleeping stays sleeping; manual docker stop becomes offline and won't auto-wake.
+  if ((await getBin("binny-rss-two")).execution.status === "sleeping") {
+    const wokenRssTwo = await triggerRssAction(
+      baseUrl,
+      "binny-rss-two",
+      "check",
+      { feedIds: ["rss-main"] },
+    );
+    assert.equal(wokenRssTwo.status, "completed");
+  }
   await waitForRuntime(baseUrl, "binny-rss-two");
   await compose(["stop", "runtime-rss-two"]);
   await waitFor(
@@ -13102,7 +13190,7 @@ async function verifyRssRuntimeSleepJourney(
     (bin) =>
       bin.execution.status === "offline" &&
       bin.execution.reason === "runtime_not_connected",
-    "手工停止 runtime-rss-two 后公开状态为 offline",
+    "Manual stop of runtime-rss-two reports offline status",
   );
   const rssTwoCid = await serviceContainerId("runtime-rss-two");
 
@@ -13154,7 +13242,7 @@ async function verifyRssRuntimeSleepJourney(
   const replacedCid = await waitFor(
     () => serviceContainerId("runtime-rss"),
     (cid) => cid !== rssOneCid,
-    "runtime-rss 容器已替换",
+    "runtime-rss container replaced",
   );
   await waitForContainerSleeping("binny-rss-one", "runtime-rss");
   assert.equal((await inspectContainerState(replacedCid)).status, "exited");
