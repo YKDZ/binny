@@ -14757,7 +14757,6 @@ async function main(): Promise<void> {
         topicId: 2401,
         cli: (args) => cli(baseUrl, args),
         vncViewer: linuxdoViewerBrowser,
-        apiUrl: baseUrl,
         sourceOrigin: "http://linuxdo-e2e-source:8081",
         sourceControlUrl: linuxdoSourceControlUrl,
         username: "binny-discovery-user",

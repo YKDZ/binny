@@ -45,6 +45,7 @@ type SourceState = {
   readonly addedReply: boolean;
   readonly discoveryAddedReply: boolean;
   readonly syncScenarioStage: number;
+  readonly syncSkippedWindowReply: boolean;
   readonly omittedPostIds: readonly number[];
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
@@ -144,6 +145,7 @@ let activeState: SourceState = {
   addedReply: false,
   discoveryAddedReply: false,
   syncScenarioStage: 0,
+  syncSkippedWindowReply: false,
   omittedPostIds: [],
   unavailableTopicIds: [],
   unavailableMedia: [],
@@ -567,6 +569,21 @@ function postRangeFixtures(
           },
         ]
       : [];
+  const skippedWindowReply: Record<string, unknown>[] =
+    activeState.syncSkippedWindowReply
+      ? [
+          {
+            ...post(
+              250_100,
+              9,
+              "<p>被一小时窗口跳过的区间回复。</p>",
+              "2026-10-28T05:15:00.000Z",
+              1,
+            ),
+            created_at: "2026-10-28T05:15:00.000Z",
+          },
+        ]
+      : [];
   const dailyChildReply: Record<string, unknown>[] =
     activeState.dailyCollectionEnabled && activeState.syncScenarioStage >= 1
       ? [
@@ -590,6 +607,7 @@ function postRangeFixtures(
     ...syncTopic,
     ...syncReplies,
     ...oldSyncReply,
+    ...skippedWindowReply,
     ...values,
   ].toSorted((first, second) => Number(second.id) - Number(first.id));
 }
@@ -1008,6 +1026,7 @@ function updateState(value: unknown): boolean {
     "legacyTags",
     "addedReply",
     "discoveryAddedReply",
+    "syncSkippedWindowReply",
     "categoriesUnavailable",
     "categoriesInvalidResponse",
     "nativeCategoryTree",

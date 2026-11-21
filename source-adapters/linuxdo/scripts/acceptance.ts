@@ -99,6 +99,7 @@ type FixtureState = {
   readonly addedReply: boolean;
   readonly discoveryAddedReply: boolean;
   readonly syncScenarioStage: number;
+  readonly syncSkippedWindowReply: boolean;
   readonly omittedPostIds: readonly number[];
   readonly unavailableTopicIds: readonly number[];
   readonly unavailableMedia: readonly string[];
@@ -5570,6 +5571,7 @@ async function verifyBoundedSync(): Promise<string> {
     postRangePageSize: 2,
     postRangePause: null,
     syncScenarioStage: 0,
+    syncSkippedWindowReply: false,
     siteHomeDelayMs: 5_000,
   });
   await setTestClockAt("2026-10-28T02:05:00.000Z");
@@ -5811,6 +5813,7 @@ async function verifyBoundedSync(): Promise<string> {
       "triggered",
     );
     assert.equal(queuedSync.status, "queued");
+    await updateFixtureState({ syncSkippedWindowReply: true });
     await setTestClockAt("2026-10-28T06:30:00.000Z");
     await updateFixtureState({ topicListDelayMs: 0 });
     const blockerResult = await waitForManualRun(blocker.runId);
@@ -5882,6 +5885,11 @@ async function verifyBoundedSync(): Promise<string> {
       interruptedArchive.revisions.length,
       "长时间排队时不应为一小时窗口之外的旧回复创建新归档版本。",
     );
+    assert.equal(
+      await searchArchiveItem("被一小时窗口跳过的区间回复", true),
+      undefined,
+      "Sync truncated to 1 hour must skip the reply inside skippedGap.range.",
+    );
 
     const skippedWindowBackfill = await trigger("collect", {
       ...(skippedGap.target?.kind === "targets" &&
@@ -5902,12 +5910,17 @@ async function verifyBoundedSync(): Promise<string> {
       skippedWindowBackfill.result?.output?.collectionCompleteness,
       "complete",
     );
+    const backfilledSkippedItem = await searchArchiveItem(
+      "被一小时窗口跳过的区间回复",
+    );
+    assert.equal(backfilledSkippedItem.sourceKey.key, "post:250100");
     assert.ok(
       (skippedWindowBackfill.result?.commits ?? []).some(({ items }) =>
-        items.some(({ itemId }) => itemId === interruptedArchive.itemId),
+        items.some(({ itemId }) => itemId === backfilledSkippedItem.itemId),
       ),
       "Autonomous collect using skippedGap.range should backfill the item skipped by the 1-hour sync window.",
     );
+    await updateFixtureState({ syncSkippedWindowReply: false });
 
     await setTestClockAt(
       new Date(Date.parse(longUpperBound) + 60_000).toISOString(),
@@ -6052,6 +6065,7 @@ async function verifyBoundedSync(): Promise<string> {
       postRangeResponseStatus: null,
       postRangeRetryAfter: null,
       syncScenarioStage: 0,
+      syncSkippedWindowReply: false,
       siteHomeDelayMs: 0,
       postRangePause: null,
     });
