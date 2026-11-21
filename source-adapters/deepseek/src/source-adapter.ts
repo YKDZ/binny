@@ -198,14 +198,12 @@ export function createActionFailure(
   code: string,
   message: string,
   impact: string,
-  suggestion = "Check source network availability and content format.",
   path?: (string | number)[],
 ): ManualRunFailure {
   return {
     code,
     message,
     impact,
-    suggestion,
     path,
     requiresHuman: false,
   };
@@ -779,7 +777,6 @@ export async function executeDeepSeekCheck(
         "deepseek_source_not_found",
         `Configured source "${missingId}" was not found.`,
         `Source "${missingId}" cannot be checked.`,
-        "Check if the sourceIds in action parameters match the configuration.",
         ["sources", missingId],
       ),
     );
@@ -832,7 +829,6 @@ export async function executeDeepSeekCheck(
           "deepseek_check_failed",
           `Availability check failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
           `Source "${source.id}" is unavailable.`,
-          "Check network connectivity, URL configuration, and page content.",
           ["sources", source.id],
         ),
       );
@@ -868,7 +864,6 @@ export async function executeDeepSeekSync(
         "deepseek_source_not_found",
         `Configured source "${missingId}" was not found.`,
         `Source "${missingId}" cannot be synchronized.`,
-        "Check if the sourceIds in action parameters match the configuration.",
         ["sources", missingId],
       ),
     );
@@ -1028,7 +1023,6 @@ export async function executeDeepSeekSync(
                 "deepseek_article_sync_failed",
                 `Failed to fetch or archive news article "${article.slug}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
                 `News article "${article.slug}" could not be archived during sync.`,
-                "Verify news detail URL availability and content format.",
                 ["sources", source.id, "news", article.slug],
               ),
               ...(diag.stage === undefined ? {} : { stage: diag.stage }),
@@ -1056,7 +1050,6 @@ export async function executeDeepSeekSync(
           "deepseek_sync_failed",
           `Failed to synchronize source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
           `Scope "${source.id}" could not complete synchronization.`,
-          "Verify updatesUrl availability and content format.",
           ["sources", source.id],
         ),
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),
@@ -1093,7 +1086,6 @@ export async function executeDeepSeekCollect(
         "deepseek_source_not_found",
         `Configured source "${missingId}" was not found.`,
         `Source "${missingId}" cannot be collected.`,
-        "Check if the sourceIds in action parameters match the configuration.",
         ["sources", missingId],
       ),
     );
@@ -1235,7 +1227,6 @@ export async function executeDeepSeekCollect(
               "deepseek_article_collect_failed",
               `Failed to collect news article "${article.slug}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
               `News article "${article.slug}" could not be archived.`,
-              "Verify news detail URL and content format.",
               ["sources", source.id, "news", article.slug],
             ),
             ...(diag.stage === undefined ? {} : { stage: diag.stage }),
@@ -1258,7 +1249,6 @@ export async function executeDeepSeekCollect(
           "deepseek_collect_failed",
           `Failed to collect source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
           `Scope "${source.id}" could not be collected.`,
-          "Verify updatesUrl and network connectivity.",
           ["sources", source.id],
         ),
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),

@@ -48,7 +48,7 @@ export type MetadataFetchSpec<Document> = {
   readonly targetLabel: string;
   readonly endpointPath: string;
   readonly schema: z.ZodType<Document>;
-  readonly trailingHint: string;
+  readonly trailingHint?: string;
 };
 
 export type MetadataFetchResult<Document> =
@@ -105,17 +105,19 @@ function formatMetadataFailureMessage(
 ): string {
   const attemptNote =
     detail.attempts > 1 ? ` after ${String(detail.attempts)} attempts` : "";
+  const suffix =
+    spec.trailingHint === undefined ? "." : `; ${spec.trailingHint}.`;
   switch (detail.reason) {
     case "connection_error":
-      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: connection failed${attemptNote}; ${spec.trailingHint}.`;
+      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: connection failed${attemptNote}${suffix}`;
     case "timeout":
-      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: request timed out after ${String(detail.timeoutMs)}ms${attemptNote}; ${spec.trailingHint}.`;
+      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: request timed out after ${String(detail.timeoutMs)}ms${attemptNote}${suffix}`;
     case "http_status":
-      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: service returned HTTP ${String(detail.httpStatus)}${attemptNote}; ${spec.trailingHint}.`;
+      return `Cannot read ${spec.targetLabel} from ${spec.endpointPath}: service returned HTTP ${String(detail.httpStatus)}${attemptNote}${suffix}`;
     case "invalid_json":
-      return `The service returned invalid JSON for ${spec.targetLabel} from ${spec.endpointPath}; ${spec.trailingHint}.`;
+      return `The service returned invalid JSON for ${spec.targetLabel} from ${spec.endpointPath}${suffix}`;
     case "invalid_contract":
-      return `The service returned an invalid ${spec.targetLabel} contract from ${spec.endpointPath} (${detail.issueSummary}); ${spec.trailingHint}.`;
+      return `The service returned an invalid ${spec.targetLabel} contract from ${spec.endpointPath} (${detail.issueSummary})${suffix}`;
   }
 }
 

@@ -4,6 +4,7 @@ import {
   archiveIdentifierSchema,
   archiveItemReadSchema,
   archiveItemDeletionResultSchema,
+  archiveBatchReadInputDiagnostic,
   archiveBatchReadInputSchema,
   archiveBatchReadResponseSchema,
   archiveResourceMetadataSchema,
@@ -267,14 +268,24 @@ function makeArchiveRoutes(operations: ArchiveOperations) {
     )
     .post(
       "/archives/batch-read",
-      zValidator("json", archiveBatchReadInputSchema, (result, c) => {
-        if (!result.success)
+      zValidator("json", archiveBatchReadInputSchema, async (result, c) => {
+        if (!result.success) {
+          const input = await c.req.json().catch(() => undefined);
+          const firstIssue = result.error.issues[0];
+          const diagnostic = archiveBatchReadInputDiagnostic(input, firstIssue);
+          const failure = validationFailure(result.error.issues, {
+            preserveOriginalMessage: true,
+          });
           return c.json(
-            validationFailure(result.error.issues, {
-              preserveOriginalMessage: true,
-            }),
+            {
+              error: {
+                ...failure.error,
+                ...(diagnostic === undefined ? {} : { diagnostic }),
+              },
+            },
             400,
           );
+        }
         return undefined;
       }),
       async (c) => {
@@ -639,7 +650,7 @@ export const archiveQueryContract = {
       method: "POST",
       path: "/archives/batch-read",
       description:
-        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference has one result; requests accept 1 to 50 references and complete responses are limited to 16 MiB. Split larger batches into smaller requests, or read a single oversized revision with GET /archives/revisions/:revisionId (CLI: archive revision <revision-id>). Callers may wait for completion or disconnect to cancel.",
+        "Read the exact item, bin, revision, and observation references selected from archive search. Each input reference produces one result in input order; requests accept 1 to 50 references and complete responses are limited to 16 MiB (16777216 bytes). Individual revisions are also exposed at GET /archives/revisions/:revisionId. Callers may wait for completion or disconnect to cancel.",
       requestSchema: archiveApiSchemas.batchReadInput,
       responseSchema: archiveApiSchemas.batchReadResponse,
     },

@@ -21,6 +21,7 @@ import {
   type FailureDiagnosticContext,
   type JsonObject,
   type ManualRunAbortCause,
+  type ManualRunSessionState,
   type SourceAccessBudgetClient,
   type SourceAccessKind,
   type SourceAccessRequest,
@@ -647,21 +648,27 @@ type DiscourseProblem = {
   readonly code: string;
   readonly message: string;
   readonly impact: string;
-  readonly suggestion: string;
   readonly requiresHuman: boolean;
+  readonly sessionState?: ManualRunSessionState;
 };
+const sessionStateSchema = z.enum([
+  "authenticated",
+  "unauthenticated",
+  "challenge_required",
+  "unknown",
+]);
 const checkOutputSchema = z.strictObject({
   challengeRecovery: challengeRecoverySchema,
   availability: z.enum(["available", "unavailable", "unknown"]),
   scope: z.array(z.string().min(1)),
   basis: z.string().min(1),
+  sessionState: sessionStateSchema.optional(),
   problems: z.array(
     z.strictObject({
       code: z.string().min(1),
       message: z.string().min(1),
       impact: z.string().min(1),
       path: z.array(z.union([z.string(), z.number()])).optional(),
-      suggestion: z.string().min(1),
       requiresHuman: z.boolean(),
     }),
   ),
@@ -783,17 +790,11 @@ const collectionTargetSummarySchema = z.discriminatedUnion("kind", [
     targets: actionTargetsSchema,
   }),
 ]);
-const backfillCollectParamsSchema = z.strictObject({
-  topicId: topicIdSchema.optional(),
-  targets: actionTargetsSchema.optional(),
-  postCreatedRange: postCreatedRangeSchema,
-});
 const syncSkippedGapSchema = z.strictObject({
   range: syncRangeSchema.describe(
     "Half-open [from, to) window skipped by the 1-hour automatic sync cap.",
   ),
   message: z.string().min(1),
-  backfillCollectParams: backfillCollectParamsSchema,
 });
 type SyncSkippedGap = z.output<typeof syncSkippedGapSchema>;
 const collectionIncompleteScopeSchema = z.strictObject({
@@ -827,11 +828,6 @@ const collectionIncompleteScopeSchema = z.strictObject({
     .optional()
     .describe(
       "Whether the head re-check caught up with the starting point of this scan.",
-    ),
-  backfillCollectParams: backfillCollectParamsSchema
-    .optional()
-    .describe(
-      "Ready-to-use collect parameters for explicit backfill (increase maxPages if traffic requires).",
     ),
 });
 const collectOutputSchema = z.strictObject({
@@ -1600,7 +1596,7 @@ function rateLimitWaitDetail(
         : ` (Retry-After: ${rateLimit.retryAfter})`;
     return `Source returned HTTP ${String(status)} requiring cooldown until ${rateLimit.cooldownUntil}${retryAfterSuffix}.`;
   }
-  return `Source returned HTTP ${String(status)} rate-limit/unavailable response; wait before retrying.`;
+  return `Source returned HTTP ${String(status)} rate-limit/unavailable response without a Retry-After header.`;
 }
 
 async function ensurePageOrigin(
@@ -1945,17 +1941,31 @@ function topicScope(topicId: number): string {
   return `topic:${String(topicId)}`;
 }
 
+function toCheckProblems(problems: readonly DiscourseProblem[]) {
+  return problems.map(({ code, message, impact, requiresHuman }) => ({
+    code,
+    message,
+    impact,
+    requiresHuman,
+  }));
+}
+
 function checkResult(
   scope: string,
   availability: "available" | "unavailable" | "unknown",
   problems: readonly DiscourseProblem[],
   basis = checkBasis,
+  defaultSessionState?: ManualRunSessionState,
 ) {
+  const sessionState =
+    problems.find((problem) => problem.sessionState !== undefined)
+      ?.sessionState ?? defaultSessionState;
   return {
     availability,
     scope: [scope],
     basis,
-    problems: [...problems],
+    ...(sessionState === undefined ? {} : { sessionState }),
+    problems: toCheckProblems(problems),
   };
 }
 
@@ -1979,7 +1989,6 @@ function networkProblem(
       code: "linuxdo_source_unreachable",
       message: `无法读取 Linux.do 主题：${message}`,
       impact: "本次检查无法确认所选主题是否可用，未读取或归档主题内容。",
-      suggestion: "检查站点地址、网络连接后重新运行 check。",
       requiresHuman: false,
     },
     ...(diagnostic === undefined ? {} : { diagnostic }),
@@ -2027,7 +2036,6 @@ async function readSessionAccess(
         code: "linuxdo_source_unreachable",
         message: `无法读取 Linux.do 当前会话：${session.message}`,
         impact: "本次检查无法确认所选目标是否可用，未读取或归档主题内容。",
-        suggestion: "检查站点地址、网络连接后重新运行 check。",
         requiresHuman: false,
       },
       diagnostic: {
@@ -2045,11 +2053,11 @@ async function readSessionAccess(
       availability: "unavailable",
       problem: {
         code: "login_required",
-        message: "Linux.do 浏览器会话已经退出登录。",
-        impact: "本次检查或采集不能读取所选目标。",
-        suggestion:
-          "使用 human open 在持久浏览器中登录后重新触发 check 或 collect。",
+        message:
+          "Persistent browser profile is not authenticated on the target Discourse site.",
+        impact: "Protected targets and topics were not read in this run.",
         requiresHuman: true,
+        sessionState: "unauthenticated",
       },
       diagnostic: {
         stage: "checking-session",
@@ -2066,7 +2074,6 @@ async function readSessionAccess(
         message: `Linux.do session endpoint rate-limited: ${rateLimitWaitDetail(session.status, session.rateLimit)}`,
         impact:
           "Login state could not be confirmed for this check or collection.",
-        suggestion: "Wait for source cooldown to expire and retry the action.",
         requiresHuman: false,
       },
       diagnostic: {
@@ -2089,9 +2096,8 @@ async function readSessionAccess(
           "Linux.do 当前会话端点没有返回可识别的 JSON。",
         ),
         impact: "本次检查或采集没有确认登录状态。",
-        suggestion:
-          "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新触发动作。",
         requiresHuman: challenge,
+        ...(challenge ? { sessionState: "challenge_required" as const } : {}),
       },
       diagnostic: {
         stage: "checking-session",
@@ -2107,7 +2113,6 @@ async function readSessionAccess(
         code: "linuxdo_session_check_failed",
         message: `Linux.do 当前会话端点返回 HTTP ${String(session.status)}。`,
         impact: "本次检查或采集没有确认登录状态。",
-        suggestion: "检查站点响应后重新运行 check。",
         requiresHuman: false,
       },
       diagnostic: {
@@ -2125,9 +2130,8 @@ async function readSessionAccess(
         code: "discourse_session_response_invalid",
         message: "Linux.do 当前会话端点返回了无法识别的用户资料。",
         impact: "本次检查或采集没有确认登录状态。",
-        suggestion:
-          "使用 human open 查看站点响应，并在登录状态有效后重新触发动作。",
         requiresHuman: true,
+        sessionState: "unknown",
       },
       diagnostic: {
         stage: "checking-session",
@@ -2174,7 +2178,6 @@ async function readTopic(
       code: "discourse_topic_unavailable",
       message: `已登录账号不能读取主题 ${String(topicId)}。`,
       impact: "本次检查或采集没有读取该主题。",
-      suggestion: "确认主题 ID 和账号对该主题的访问权限后重新触发动作。",
       requiresHuman: false,
     });
   }
@@ -2184,7 +2187,6 @@ async function readTopic(
       message: `Linux.do topic request rate-limited: ${rateLimitWaitDetail(topicResponse.status, topicResponse.rateLimit)}`,
       impact:
         "Topic scope could not be confirmed for this check or collection.",
-      suggestion: "Wait for source cooldown to expire and retry.",
       requiresHuman: false,
     });
   }
@@ -2199,9 +2201,8 @@ async function readTopic(
         "Linux.do 主题端点没有返回可识别的 JSON。",
       ),
       impact: "本次检查或采集没有确认主题范围。",
-      suggestion:
-        "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
       requiresHuman: challenge,
+      ...(challenge ? { sessionState: "challenge_required" as const } : {}),
     });
   }
   if (topicResponse.status !== 200) {
@@ -2209,7 +2210,6 @@ async function readTopic(
       code: "discourse_topic_request_failed",
       message: `Linux.do 主题端点返回 HTTP ${String(topicResponse.status)}。`,
       impact: "本次检查或采集没有确认主题范围。",
-      suggestion: "检查站点响应后重新运行 check。",
       requiresHuman: false,
     });
   }
@@ -2220,7 +2220,6 @@ async function readTopic(
       code: "discourse_topic_response_invalid",
       message: "Linux.do 主题响应缺少有效主题身份或帖子流。",
       impact: "本次检查或采集没有确认主题范围。",
-      suggestion: "检查主题响应后重新运行 check。",
       requiresHuman: false,
     });
   }
@@ -2244,8 +2243,10 @@ function failureFromProblem(
     code: problem.code,
     message: problem.message,
     impact: problem.impact,
-    suggestion: problem.suggestion,
     requiresHuman: problem.requiresHuman,
+    ...(problem.sessionState === undefined
+      ? {}
+      : { sessionState: problem.sessionState }),
     ...(diagnostic?.stage === undefined ? {} : { stage: diagnostic.stage }),
     ...(diagnostic?.target === undefined ? {} : { target: diagnostic.target }),
     ...(diagnostic?.abortCause === undefined
@@ -2300,7 +2301,6 @@ function paginationUrl(
       code: "discourse_topic_list_pagination_invalid",
       message: "Linux.do 列表分页链接格式无效。",
       impact: "本次只处理了分页链接前的主题。",
-      suggestion: "检查受控目标的 Discourse 列表响应后重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -2336,7 +2336,6 @@ function paginationUrl(
       code: "discourse_topic_list_pagination_invalid",
       message: "Linux.do 列表分页链接超出了所选目标范围。",
       impact: "本次只处理了分页链接前的主题。",
-      suggestion: "检查受控目标的 Discourse 列表响应后重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -2351,8 +2350,6 @@ function paginationUrl(
       code: "discourse_topic_list_pagination_invalid",
       message: "Linux.do 日期采集分页链接改变了创建时间降序排序。",
       impact: "本次无法依据该分页顺序确认日期范围已穷尽。",
-      suggestion:
-        "检查列表分页是否保持 order=created&ascending=false 后，以相同固定日期重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -2387,7 +2384,6 @@ async function readTopicListPage(
       code: "linuxdo_source_unreachable",
       message: `无法读取 Linux.do 主题列表：${response.message}`,
       impact: "本次没有确认该目标的列表范围。",
-      suggestion: "检查站点地址、网络连接后重新运行 check 或 collect。",
       requiresHuman: false,
       stage: response.stage ?? "reading-topic-list",
       target: response.target ?? url.href,
@@ -2404,7 +2400,6 @@ async function readTopicListPage(
       code: "discourse_target_unavailable",
       message: "已登录账号不能读取所选 Linux.do 列表目标。",
       impact: "本次没有处理该目标的主题。",
-      suggestion: "确认分类路径、目标可见性与账号权限后重新运行。",
       requiresHuman: false,
       stage: "reading-topic-list",
       target: url.href,
@@ -2415,8 +2410,6 @@ async function readTopicListPage(
       code: "discourse_target_rate_limited",
       message: `Linux.do topic list request rate-limited: ${rateLimitWaitDetail(response.status, response.rateLimit)}`,
       impact: "Target list scope could not be confirmed.",
-      suggestion:
-        "Wait for source cooldown to expire and rerun check or collect.",
       requiresHuman: false,
       stage: "reading-topic-list",
       target: url.href,
@@ -2433,9 +2426,8 @@ async function readTopicListPage(
         "Linux.do 列表端点没有返回可识别的 JSON。",
       ),
       impact: "本次没有确认该目标的列表范围。",
-      suggestion:
-        "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
       requiresHuman: challenge,
+      ...(challenge ? { sessionState: "challenge_required" as const } : {}),
       stage: "reading-topic-list",
       target: url.href,
     });
@@ -2445,7 +2437,6 @@ async function readTopicListPage(
       code: "discourse_target_request_failed",
       message: `Linux.do 列表端点返回 HTTP ${String(response.status)}。`,
       impact: "本次没有确认该目标的列表范围。",
-      suggestion: "检查站点响应后重新运行 check 或 collect。",
       requiresHuman: false,
       stage: "reading-topic-list",
       target: url.href,
@@ -2457,7 +2448,6 @@ async function readTopicListPage(
       code: "discourse_topic_list_response_invalid",
       message: "Linux.do 列表响应缺少有效主题集合或分页信息。",
       impact: "本次没有确认该目标的完整列表范围。",
-      suggestion: "检查站点列表响应后重新运行 check 或 collect。",
       requiresHuman: false,
       stage: "reading-topic-list",
       target: url.href,
@@ -2470,13 +2460,18 @@ function targetCheckResult(
   scopes: readonly string[],
   availability: "available" | "unavailable" | "unknown",
   problems: readonly DiscourseProblem[],
+  defaultSessionState?: ManualRunSessionState,
 ) {
+  const sessionState =
+    problems.find((problem) => problem.sessionState !== undefined)
+      ?.sessionState ?? defaultSessionState;
   return {
     availability,
     scope: [...scopes],
     basis:
       "通过正式持久浏览器的共享身份读取 Discourse 当前会话及所选目标的第一列表页或主题 JSON；检查不下载媒体、不写入归档。",
-    problems: [...problems],
+    ...(sessionState === undefined ? {} : { sessionState }),
+    problems: toCheckProblems(problems),
   };
 }
 
@@ -2501,7 +2496,7 @@ function listCheckDiagnostic(
     discourse_topic_list_pagination_invalid: "unknown",
   };
   const availability = availabilityBySourceCode[failure.code];
-  if (availability === undefined || failure.suggestion === undefined) {
+  if (availability === undefined) {
     return undefined;
   }
   return {
@@ -2510,8 +2505,10 @@ function listCheckDiagnostic(
       code: failure.code,
       message: failure.message,
       impact: failure.impact,
-      suggestion: failure.suggestion,
       requiresHuman: failure.requiresHuman,
+      ...(failure.sessionState === undefined
+        ? {}
+        : { sessionState: failure.sessionState }),
     },
   };
 }
@@ -2653,7 +2650,12 @@ async function checkTopic(
               }
             }
           }
-          return targetCheckResult(scopes, availability, problems);
+          return targetCheckResult(
+            scopes,
+            availability,
+            problems,
+            "authenticated",
+          );
         },
         onAccess,
         onStep,
@@ -2687,10 +2689,8 @@ function categoryListFailure(
     code,
     message,
     impact: "本次没有确认当前账号可见的 Linux.do 板块，也没有提交归档。",
-    suggestion: requiresHuman
-      ? "使用 human open 检查登录状态或完成站点要求的人工挑战，再重新发现板块。"
-      : "检查当前账号的站点响应与板块访问权限后，重新运行 list-categories。",
     requiresHuman,
+    ...(requiresHuman ? { sessionState: "challenge_required" as const } : {}),
     ...(diagnostic?.stage === undefined ? {} : { stage: diagnostic.stage }),
     ...(diagnostic?.target === undefined ? {} : { target: diagnostic.target }),
     ...(diagnostic?.abortCause === undefined
@@ -2835,10 +2835,10 @@ async function listCategories(
             message: session.problem.message,
             impact:
               "本次没有确认当前登录账号可见的 Linux.do 板块，也没有提交归档。",
-            suggestion: session.problem.requiresHuman
-              ? "使用 human open 在持久浏览器中登录或完成人工挑战，再重新运行 list-categories。"
-              : "检查站点地址与当前会话后，重新运行 list-categories。",
             requiresHuman: session.problem.requiresHuman,
+            ...(session.problem.sessionState === undefined
+              ? {}
+              : { sessionState: session.problem.sessionState }),
             ...(session.diagnostic?.stage === undefined
               ? {}
               : { stage: session.diagnostic.stage }),
@@ -2998,8 +2998,6 @@ function collectTargets(
           code: "discourse_category_target_unavailable",
           message: "所选 Linux.do 板块已不在当前账号可见范围内。",
           impact: `采集范围 ${targetScope(target)} 未开始，板块树已变化。`,
-          suggestion:
-            "重新运行 list-categories 获取当前可见板块引用，再创建新的 collect 运行。",
           requiresHuman: false,
         });
       }
@@ -3244,7 +3242,6 @@ async function loadSyncPersistentState(
       code: "linuxdo_sync_state_unavailable",
       message: "当前运行器没有提供 Linux.do 持久接续状态。",
       impact: "本次同步没有访问来源，也没有改变接续位置。",
-      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
       requiresHuman: false,
     });
   }
@@ -3256,8 +3253,8 @@ async function loadSyncPersistentState(
       code: "linuxdo_sync_state_unavailable",
       message: "无法读取 Linux.do 持久接续状态。",
       impact: "本次同步没有访问来源，也没有重置或推进接续位置。",
-      suggestion: "检查运行器状态存储后重新触发；不要手动清空接续状态。",
       requiresHuman: true,
+      sessionState: "unknown",
     });
   }
   if (saved === undefined) return { version: 1, scopes: [] };
@@ -3267,8 +3264,8 @@ async function loadSyncPersistentState(
       code: "linuxdo_sync_state_invalid",
       message: "Linux.do 持久接续状态不符合当前适配器声明。",
       impact: "本次同步已停止，没有重置或推进任何范围。",
-      suggestion: "检查运行器状态存储并恢复有效备份后重新触发。",
       requiresHuman: true,
+      sessionState: "unknown",
     });
   }
   return checked.data;
@@ -3283,7 +3280,6 @@ async function saveSyncPersistentState(
       code: "linuxdo_sync_state_unavailable",
       message: "当前运行器没有提供 Linux.do 持久接续状态。",
       impact: "本次同步已停止，不能保证接续位置已保存。",
-      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
       requiresHuman: false,
     });
   }
@@ -3294,8 +3290,8 @@ async function saveSyncPersistentState(
       code: "linuxdo_sync_state_unavailable",
       message: "无法持久保存 Linux.do 接续状态。",
       impact: "本轮已停止，未继续访问来源；运行报告保留最后成功持久化的范围。",
-      suggestion: "检查运行器状态存储后重新触发；不要手动清空接续状态。",
       requiresHuman: true,
+      sessionState: "unknown",
     });
   }
 }
@@ -3378,14 +3374,7 @@ function buildSyncSkippedGap(plan: SyncScopePlan): SyncSkippedGap | undefined {
   const name = syncScopeName(syncScopeReference(plan.target));
   return {
     range: skippedRange,
-    message: `Scope ${name} previous position (${plan.skippedBefore}) is earlier than the 1-hour automatic sync start (${plan.range.from}); sync skipped [${skippedRange.from}, ${skippedRange.to}). Use collect with postCreatedRange and adjust maxPages for traffic to backfill explicitly.`,
-    backfillCollectParams: {
-      targets: [plan.target],
-      postCreatedRange: postCreatedRangeSchema.parse({
-        from: skippedRange.from,
-        to: skippedRange.to,
-      }),
-    },
+    message: `Scope ${name} previous position (${plan.skippedBefore}) is earlier than the 1-hour automatic sync start (${plan.range.from}); range [${skippedRange.from}, ${skippedRange.to}) preceded the active window and was not scanned.`,
   };
 }
 
@@ -3502,9 +3491,15 @@ async function checkOneTopic(
     async ({ page }) => {
       const access = await readTopicAccess(page, site, topicId, context.signal);
       if (access.kind === "unavailable") {
-        return checkResult(topicScope(topicId), access.availability, [
-          access.problem,
-        ]);
+        return checkResult(
+          topicScope(topicId),
+          access.availability,
+          [access.problem],
+          checkBasis,
+          access.problem.sessionState === undefined
+            ? "authenticated"
+            : undefined,
+        );
       }
       const posts = await readTopicPosts(
         page,
@@ -3516,7 +3511,13 @@ async function checkOneTopic(
         return checkResult(topicScope(topicId), "unknown", [posts.challenge]);
       }
       const problems = topicProblems(access, posts);
-      return checkResult(topicScope(topicId), "available", problems);
+      return checkResult(
+        topicScope(topicId),
+        "available",
+        problems,
+        checkBasis,
+        "authenticated",
+      );
     },
     publishSourceAccess,
     onStep,
@@ -3537,7 +3538,6 @@ function topicProblems(
       code: "discourse_topic_scope_partial",
       message: "主题可读，但本次没有取得主题声明的全部帖子正文。",
       impact: "采集可以保存已返回的帖子，未观察到的帖子和关系不会自动撤回。",
-      suggestion: "检查帖子端点响应与账号权限后重新运行 check 或 collect。",
       requiresHuman: false,
     });
   }
@@ -3551,7 +3551,6 @@ function topicProblems(
       code: "discourse_post_body_missing",
       message: "至少一条帖子没有返回可归档的正文 HTML。",
       impact: "本次采集会为受影响帖子保留缺失说明。",
-      suggestion: "检查站点返回与账号权限后重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -3665,9 +3664,8 @@ async function readTopicPosts(
             "Linux.do 帖子补取端点没有返回可识别的 JSON。",
           ),
           impact: "本次检查或采集不能确认主题的完整回复范围。",
-          suggestion:
-            "使用 human open 查看站点状态，完成必要的人工挑战后重新触发动作。",
           requiresHuman: true,
+          sessionState: "challenge_required",
         },
       };
     }
@@ -4301,8 +4299,6 @@ function postDiagnostics(
       code: "discourse_posts_missing",
       message: `主题 ${String(topicId)} 的帖子流声明了 ${String(missingPostIds.length)} 个帖子，但本次没有返回其正文。`,
       details: { topicId, postIds: [...missingPostIds] },
-      suggestion:
-        "检查主题访问权限与帖子端点响应后重新运行 collect；本次未观察到的旧关系不会自动撤回。",
     });
   }
   if (scopeIncomplete) {
@@ -4310,7 +4306,6 @@ function postDiagnostics(
       code: "discourse_topic_scope_incomplete",
       message: `主题 ${String(topicId)} 没有返回可枚举的完整帖子 ID 列表。`,
       details: { topicId },
-      suggestion: "本次只保存已返回的帖子，不会因有限观察撤回已有条目或关系。",
     });
   }
   return diagnostics;
@@ -4331,7 +4326,6 @@ export async function archivePost(
     readonly code: string;
     readonly message: string;
     readonly details?: Record<string, unknown>;
-    readonly suggestion?: string;
   }[] = post.post_number === 1 ? [...diagnostics] : [];
 
   const cleaned = cleanContent(post.cooked ?? "", {
@@ -4561,7 +4555,6 @@ export async function archivePost(
           path,
           reason: downloaded.reason,
         },
-        suggestion: "检查媒体端点响应后重新运行 collect。",
       });
     }
   }
@@ -4836,7 +4829,6 @@ async function collectTopicContent(
       code: "discourse_topic_root_missing",
       message: `主题 ${String(topicId)} 的主帖没有出现在可读取帖子中。`,
       impact: "本次没有提交主题帖子或关系，已有归档保持不变。",
-      suggestion: "检查当前账号对主帖的访问权限后重新运行 collect。",
       requiresHuman: false,
     });
   }
@@ -4986,7 +4978,6 @@ function collectionDateWindow(
       code: "linuxdo_reference_time_invalid",
       message: "本次运行没有有效的固定 referenceTime。",
       impact: "无法确定 Linux.do 的日期范围，因此没有访问信源。",
-      suggestion: "重新创建动作运行；如果问题持续，请检查运行快照。",
       requiresHuman: false,
     });
   }
@@ -5004,7 +4995,6 @@ function collectionDateWindow(
       code: "linuxdo_collection_date_in_future",
       message: "未来日期不能作为完整自然日采集。",
       impact: "本次未访问 Linux.do，也没有归档资料。",
-      suggestion: "选择当天、前一天或已经结束的指定日期。",
       requiresHuman: false,
     });
   }
@@ -5019,7 +5009,6 @@ function collectionDateWindow(
       code: "linuxdo_collection_date_unavailable",
       message: `日期 ${selectedDate} 在时区 ${params.timeZone} 中没有完整的自然日范围。`,
       impact: "本次未访问 Linux.do，也没有归档资料。",
-      suggestion: "选择该时区存在的自然日，或使用其他 IANA 时区。",
       requiresHuman: false,
     });
   }
@@ -5047,8 +5036,6 @@ function postCreatedWindow(
       message: "帖子创建时间区间的终点不能晚于本次动作实际开始时刻。",
       impact:
         "区间包含尚未发生的内容，无法完整取得；本次没有访问信源或归档资料。",
-      suggestion:
-        "等待区间终点到达后重新运行，或将 to 调整到本次动作开始时刻及之前。",
       requiresHuman: false,
     });
   }
@@ -5079,7 +5066,6 @@ function topicCreatedAt(
       code: "discourse_topic_created_at_invalid",
       message: `主题 ${String(topicId)} 没有有效的创建时间，无法应用日期范围。`,
       impact: "本次无法确认该主题是否位于所选时间范围。",
-      suggestion: "检查 Discourse 列表中的 created_at 后重新运行。",
       requiresHuman: false,
     });
   }
@@ -5116,7 +5102,6 @@ async function collectListTarget(
           code: "discourse_topic_list_pagination_loop",
           message: "Linux.do 列表分页重复返回了已读取页面。",
           impact: "本次只处理了分页循环前的主题。",
-          suggestion: "检查受控目标的 Discourse 分页响应后重新运行 collect。",
           requiresHuman: false,
         });
       }
@@ -5131,8 +5116,6 @@ async function collectListTarget(
           code: "discourse_topic_list_ended_early",
           message: "Linux.do 列表在仍声明下一页时提前返回空主题页。",
           impact: `采集范围 ${targetScope(target)} 未穷尽，无法确认空页后的主题。`,
-          suggestion:
-            "检查分页响应和账号权限后，以相同固定日期重新运行 collect。",
           requiresHuman: false,
         });
       }
@@ -5147,8 +5130,6 @@ async function collectListTarget(
             code: "discourse_topic_list_order_invalid",
             message: "Linux.do 创建时间排序在分页中发生倒退。",
             impact: "本次不能依据日期边界确认剩余主题已穷尽。",
-            suggestion:
-              "检查列表是否支持 order=created 并保持分页顺序后，重新运行 collect。",
             requiresHuman: false,
           });
         }
@@ -5261,7 +5242,6 @@ function failureWithProgress(
         code: "source_adapter_action_cancelled",
         message: "Linux.do 采集已取消。",
         impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
-        suggestion: "确认取消原因后，可重新运行尚未完成的发现范围。",
         requiresHuman: false,
         ...diagnosticFields,
         abortCause: "user_cancelled",
@@ -5278,7 +5258,6 @@ function failureWithProgress(
             ? error.message
             : "Linux.do source access budget exhausted.",
         impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
-        suggestion: "Increase run budget or retry the remaining scopes.",
         requiresHuman: false,
         ...diagnosticFields,
       },
@@ -5294,7 +5273,6 @@ function failureWithProgress(
             ? error.message
             : "Linux.do source request timed out.",
         impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
-        suggestion: "Check site availability and retry.",
         requiresHuman: false,
         ...diagnosticFields,
       },
@@ -5310,7 +5288,6 @@ function failureWithProgress(
             ? error.message
             : "Linux.do source request was aborted for an unknown reason.",
         impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
-        suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
         requiresHuman: false,
         ...diagnosticFields,
       },
@@ -5322,7 +5299,6 @@ function failureWithProgress(
       code: "linuxdo_collection_failed",
       message: "Linux.do 采集未能完成。",
       impact: `本次已提交 ${String(completedScopes.length)} 个范围；其余选中主题未完成。`,
-      suggestion: "稍后重试；如持续失败，请检查站点状态后重新运行。",
       requiresHuman: false,
       ...diagnosticFields,
     },
@@ -5403,41 +5379,22 @@ async function collectPostCreatedRange(
     headVerified: scan.headVerified,
   };
   if (scan.issue !== undefined) {
-    const suggestedMaxPages = Math.min(
-      1_000,
-      Math.max(scan.maxPages * 2, scan.pagesRead + 20),
-    );
     const targetLabel =
       params.topicId !== undefined
         ? `topic:${String(params.topicId)}`
         : params.targets === undefined
           ? "all-visible"
           : params.targets.map((target) => targetScope(target)).join(", ");
-    const backfillHint =
-      scan.issue.reasonCode === "post_range_page_limit_reached"
-        ? scan.maxPages >= 1_000
-          ? `Reached the collect.postCreatedRange.maxPages cap of 1000; narrow the [${range.from}, ${range.to}) window or run collect for specific topicIds to backfill explicitly.`
-          : `Run collect with postCreatedRange [${range.from}, ${range.to}) and a higher maxPages (suggest at least ${String(suggestedMaxPages)}, max 1000) to backfill explicitly.`
-        : `Run collect with postCreatedRange [${range.from}, ${range.to}) to retry backfilling this window explicitly.`;
     incompleteScopes.push({
       scope: rangeScope,
       reasonCode: scan.issue.reasonCode,
-      message: `${scan.issue.message} Affected scope: ${targetLabel} [${range.from}, ${range.to}), read ${String(scan.pagesRead)}/${String(scan.maxPages)} pages (lowerBoundConfirmed=${String(scan.lowerBoundConfirmed)}, headVerified=${String(scan.headVerified)}); confirmed archived items from this run were retained. ${backfillHint}`,
+      message: `${scan.issue.message} Scope ${targetLabel} [${range.from}, ${range.to}): read ${String(scan.pagesRead)}/${String(scan.maxPages)} pages (lowerBoundConfirmed=${String(scan.lowerBoundConfirmed)}, headVerified=${String(scan.headVerified)}); confirmed items from this run were retained.`,
       target: affectedTarget,
       range,
       pagesRead: scan.pagesRead,
       maxPages: scan.maxPages,
       lowerBoundConfirmed: scan.lowerBoundConfirmed,
       headVerified: scan.headVerified,
-      backfillCollectParams: {
-        ...(params.topicId === undefined ? {} : { topicId: params.topicId }),
-        ...(params.targets === undefined ? {} : { targets: params.targets }),
-        postCreatedRange: {
-          from: range.from,
-          to: range.to,
-          maxPages: suggestedMaxPages,
-        },
-      },
     });
   }
 
@@ -5971,7 +5928,6 @@ async function sync(
       code: "linuxdo_sync_source_access_unavailable",
       message: "当前运行器没有提供 Linux.do 来源访问预算。",
       impact: "本轮没有访问来源或推进接续位置。",
-      suggestion: "检查运行器版本与信源适配器部署状态后重新触发。",
       requiresHuman: false,
     });
   }
@@ -6288,7 +6244,6 @@ async function sync(
               message: skippedGap.message,
               target: { kind: "targets", targets: [plan.target] },
               range: skippedGap.range,
-              backfillCollectParams: skippedGap.backfillCollectParams,
             });
           }
           const scopeIncomplete = windowIncomplete || skippedGap !== undefined;
@@ -6386,7 +6341,6 @@ async function sync(
           message: skippedGap.message,
           target: { kind: "targets", targets: [activePlan.target] },
           range: skippedGap.range,
-          backfillCollectParams: skippedGap.backfillCollectParams,
         });
       }
       activePlan = undefined;

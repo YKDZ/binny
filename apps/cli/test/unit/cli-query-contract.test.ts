@@ -14,7 +14,11 @@ import { runCli } from "../../src/main.ts";
 const matchingMetadata = {
   product: { name: "Binny", version: "1.2.3" },
   protocols: { httpApi: publicApiProtocolVersion },
-  capabilities: ["archives.search", "archive.query-contract"],
+  capabilities: [
+    "archives.search",
+    "archives.batch-read",
+    "archive.query-contract",
+  ],
   contracts: {
     archiveQuery: {
       version: archiveQueryContractVersion,
@@ -29,6 +33,10 @@ function fakeService(options: {
   readonly productVersion?: string;
   readonly searchResponse?: unknown;
   readonly searchFailure?: {
+    readonly status: number;
+    readonly body: unknown;
+  };
+  readonly batchReadFailure?: {
     readonly status: number;
     readonly body: unknown;
   };
@@ -90,6 +98,14 @@ function fakeService(options: {
           hasMore: false,
         },
       );
+    }
+    if (url.pathname === "/archives/batch-read") {
+      if (options.batchReadFailure !== undefined) {
+        return Response.json(options.batchReadFailure.body, {
+          status: options.batchReadFailure.status,
+        });
+      }
+      return Response.json({ results: [] });
     }
     if (url.pathname === "/bins/rss-main/actions") {
       const actionName = url.searchParams.get("action");
@@ -274,7 +290,7 @@ void describe("查询服务发现", () => {
     assert.match(
       result.output,
       new RegExp(
-        `Archive query v${String(archiveQueryContractVersion)}: \\/meta\\/query`,
+        `Archive query v${String(archiveQueryContractVersion)}: /meta/query`,
         "u",
       ),
     );
@@ -897,8 +913,10 @@ void describe("查询服务发现", () => {
     assert.match(invalidRole.output, /Allowed item values: "topicRoot"/u);
     assert.match(
       invalidRole.output,
-      /Discover extension fields: binny bin extension-fields linuxdo-main/u,
+      /Source adapter: binny\.source-adapter-linuxdo@1\.0\.1/u,
     );
+    assert.match(invalidRole.output, /Bin: linuxdo-main/u);
+    assert.doesNotMatch(invalidRole.output, /binny bin extension-fields/u);
   });
 
   void it("labels unresolved extension operations as protocol operations", async () => {
@@ -955,10 +973,9 @@ void describe("查询服务发现", () => {
       text.output,
       /Protocol operations: "eq", "in", "has", "hasAny"/u,
     );
-    assert.match(
-      text.output,
-      /Discover extension fields: binny bin extension-fields kimi/u,
-    );
+    assert.match(text.output, /Source adapter: kimi/u);
+    assert.match(text.output, /Bin: kimi/u);
+    assert.doesNotMatch(text.output, /binny bin extension-fields/u);
     assert.doesNotMatch(text.output, /Allowed operations:/u);
   });
 
@@ -1015,10 +1032,9 @@ void describe("查询服务发现", () => {
     assert.match(text.output, /Path: extensions\.filters\.tiers\.values\[0\]/u);
     assert.match(text.output, /Allowed item values: "basic", "pro"/u);
     assert.match(text.output, /Allowed operations: "has", "hasAny"/u);
-    assert.match(
-      text.output,
-      /Discover extension fields: binny bin extension-fields kimi-main/u,
-    );
+    assert.match(text.output, /Source adapter: kimi@0\.1\.0/u);
+    assert.match(text.output, /Bin: kimi-main/u);
+    assert.doesNotMatch(text.output, /binny bin extension-fields/u);
     assert.doesNotMatch(text.output, /Allowed values:/u);
   });
 
@@ -1065,10 +1081,9 @@ void describe("查询服务发现", () => {
     assert.equal(text.exitCode, 1, text.output);
     assert.match(text.output, /Path: extensions\.filters\.section\.value/u);
     assert.match(text.output, /Allowed operations: "eq", "in"/u);
-    assert.match(
-      text.output,
-      /Discover extension fields: binny bin extension-fields kimi-main/u,
-    );
+    assert.match(text.output, /Source adapter: kimi@0\.1\.0/u);
+    assert.match(text.output, /Bin: kimi-main/u);
+    assert.doesNotMatch(text.output, /binny bin extension-fields/u);
     assert.doesNotMatch(text.output, /Allowed values:|Allowed item values:/u);
   });
 
@@ -1120,7 +1135,7 @@ void describe("查询服务发现", () => {
     assert.match(text.output, /Path: extensions\.sourceAdapterId/u);
     assert.doesNotMatch(
       text.output,
-      /Allowed values:|Allowed item values:|Protocol operations:|Discover extension fields:/u,
+      /Allowed values:|Allowed item values:|Protocol operations:|Source adapter:|Bin:/u,
     );
   });
 
@@ -1719,5 +1734,138 @@ void describe("查询服务发现", () => {
       code: "resource_storage_unavailable",
       message: "Archive relations read temporarily unavailable.",
     });
+  });
+
+  void it("renders neutral batch-read limit and payload diagnostics in structured and text output", async () => {
+    const reference = {
+      itemId: "750e8400-e29b-41d4-a716-446655440000",
+      binId: "rss-main",
+      revisionId: "850e8400-e29b-41d4-a716-446655440000",
+      archiveSeq: "12",
+    };
+    const secondReference = {
+      itemId: "750e8400-e29b-41d4-a716-446655440001",
+      binId: "rss-main",
+      revisionId: "850e8400-e29b-41d4-a716-446655440001",
+      archiveSeq: "13",
+    };
+
+    const overLimitService = fakeService({});
+    const tooManyJson = JSON.stringify(
+      Array.from({ length: 51 }, () => reference),
+    );
+    const overLimitStructured = await run(
+      ["archive", "batch-read", "--references", tooManyJson],
+      overLimitService.fetch,
+    );
+    assert.equal(overLimitStructured.exitCode, 1);
+    assert.deepEqual(failureData(overLimitStructured.output), {
+      code: "invalid_input",
+      message: "Batch read accepts at most 50 references per request.",
+      path: ["references"],
+      diagnostic: {
+        maxReferences: 50,
+        requestedReferences: 51,
+      },
+    });
+    assert.deepEqual(overLimitService.requests, []);
+
+    const overLimitText = await run(
+      [
+        "archive",
+        "batch-read",
+        "--references",
+        tooManyJson,
+        "--output",
+        "text",
+      ],
+      overLimitService.fetch,
+    );
+    assert.equal(overLimitText.exitCode, 1);
+    assert.match(overLimitText.output, /Max references: 50/u);
+    assert.match(overLimitText.output, /Requested references: 51/u);
+    assert.doesNotMatch(overLimitText.output, /another request|split/iu);
+
+    const singleOversizedService = fakeService({
+      batchReadFailure: {
+        status: 413,
+        body: {
+          error: {
+            code: "payload_too_large",
+            message: "The complete batch read response exceeds 16777216 bytes.",
+            diagnostic: {
+              maxResponseBytes: 16777216,
+              maxReferences: 50,
+              references: [reference],
+              oversizedRevisionId: reference.revisionId,
+            },
+          },
+        },
+      },
+    });
+    const singleOversizedText = await run(
+      [
+        "archive",
+        "batch-read",
+        "--references",
+        JSON.stringify([reference]),
+        "--output",
+        "text",
+      ],
+      singleOversizedService.fetch,
+    );
+    assert.equal(singleOversizedText.exitCode, 1);
+    assert.match(singleOversizedText.output, /Max response bytes: 16777216/u);
+    assert.match(singleOversizedText.output, /Max references: 50/u);
+    assert.match(
+      singleOversizedText.output,
+      new RegExp(`Oversized revision: ${reference.revisionId}`, "u"),
+    );
+    assert.match(
+      singleOversizedText.output,
+      new RegExp(
+        `itemId=${reference.itemId} binId=${reference.binId} revisionId=${reference.revisionId} archiveSeq=${reference.archiveSeq}`,
+        "u",
+      ),
+    );
+    assert.doesNotMatch(
+      singleOversizedText.output,
+      /Split the references|archive revision/iu,
+    );
+
+    const cumulativeService = fakeService({
+      batchReadFailure: {
+        status: 413,
+        body: {
+          error: {
+            code: "payload_too_large",
+            message: "The complete batch read response exceeds 16777216 bytes.",
+            diagnostic: {
+              maxResponseBytes: 16777216,
+              maxReferences: 50,
+              references: [reference, secondReference],
+            },
+          },
+        },
+      },
+    });
+    const cumulativeText = await run(
+      [
+        "archive",
+        "batch-read",
+        "--references",
+        JSON.stringify([reference, secondReference]),
+        "--output",
+        "text",
+      ],
+      cumulativeService.fetch,
+    );
+    assert.equal(cumulativeText.exitCode, 1);
+    assert.doesNotMatch(cumulativeText.output, /Oversized revision:/u);
+    assert.match(cumulativeText.output, /References:/u);
+    assert.match(
+      cumulativeText.output,
+      new RegExp(`revisionId=${secondReference.revisionId}`, "u"),
+    );
   });
 });

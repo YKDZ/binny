@@ -158,6 +158,19 @@ async function checkPublicManualRunContract(): Promise<void> {
     void output;
     const failureStage: string | undefined = run.result?.error?.stage;
     const failureTarget: string | undefined = run.result?.error?.target;
+    const failureSessionState:
+      | "authenticated"
+      | "unauthenticated"
+      | "challenge_required"
+      | "unknown"
+      | undefined = run.result?.error?.sessionState;
+    const humanSessionStatus:
+      | "none"
+      | "pending"
+      | "opening"
+      | "ready"
+      | "closing"
+      | undefined = run.humanSession?.status;
     const failureAbortCause:
       | "user_cancelled"
       | "source_request_timeout"
@@ -166,7 +179,11 @@ async function checkPublicManualRunContract(): Promise<void> {
       | undefined = run.result?.error?.abortCause;
     void failureStage;
     void failureTarget;
+    void failureSessionState;
+    void humanSessionStatus;
     void failureAbortCause;
+    // @ts-expect-error Manual run failures do not carry prescriptive suggestion strings.
+    void run.result?.error?.suggestion;
     // @ts-expect-error abortCause only allows the declared enum values.
     const invalidAbortCause: "network_reset" | undefined =
       run.result?.error?.abortCause;
@@ -433,6 +450,13 @@ async function checkPublicArchiveContract(): Promise<void> {
     const failure = await batchRead.json();
     void (failure.error.code satisfies string);
     void failure.error.path;
+    if ("diagnostic" in failure.error) {
+      void failure.error.diagnostic?.maxReferences;
+      void failure.error.diagnostic?.requestedReferences;
+      void failure.error.diagnostic?.maxResponseBytes;
+      void failure.error.diagnostic?.references;
+      void failure.error.diagnostic?.oversizedRevisionId;
+    }
   }
 
   void client.archives["batch-read"].$post({

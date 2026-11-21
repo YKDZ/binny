@@ -176,7 +176,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -297,7 +296,6 @@ function throwMergedScopeErrors(
         mergedCompleted.length > 0
           ? `Completed scopes retained: ${mergedCompleted.join(", ")}.`
           : "Affected Qoder scopes failed.",
-      suggestion: "Check Qoder source availability and retry.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),

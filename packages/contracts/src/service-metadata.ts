@@ -8,11 +8,14 @@ import { postgresTextSchema } from "./postgres-text.ts";
  * requests, and deduplicated `relatedRevisions` to archive query and discovery.
  * Version 13 replaces the noVNC web viewer and WebSocket reverse tunnel with
  * direct native VNC access (one-time password on create, host port when ready).
+ * Version 14 removes `suggestion` from public manual-run/archive diagnostics,
+ * adds structured `sessionState` and `humanSession` facts on runs, and exposes
+ * structured batch-read limit/reference diagnostics.
  */
-export const publicApiProtocolVersion = 13;
+export const publicApiProtocolVersion = 14;
 
 /** Archive search and batch-read contract version. */
-export const archiveQueryContractVersion = 6;
+export const archiveQueryContractVersion = 7;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {

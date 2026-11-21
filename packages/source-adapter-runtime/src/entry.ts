@@ -957,7 +957,6 @@ function interruptFailure(): ManualRunCompletion {
       code: "runtime_interrupted",
       message: "运行器正在停止，本次动作没有恢复执行。",
       impact: "本次运行已终结；之前提交的资料仍然保留。",
-      suggestion: "检查运行器后重新触发新的运行。",
       requiresHuman: false,
     },
   };
@@ -1034,7 +1033,6 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
         code: "source_adapter_state_unavailable",
         message: "信源适配器持久状态不可用，相关动作没有启动。",
         impact: "本次运行没有发起来源请求；运行器没有重置或推进接续位置。",
-        suggestion: "检查信源适配器状态并恢复有效备份后重新触发。",
         requiresHuman: true,
       },
     });
@@ -1172,7 +1170,6 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
                     code: "source_adapter_process_interrupted",
                     message: "信源适配器执行进程意外退出。",
                     impact: "本次运行未恢复执行；之前提交的资料仍然保留。",
-                    suggestion: "检查信源适配器后重新触发新的运行。",
                     requiresHuman: false,
                   },
                 }
@@ -1215,7 +1212,6 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
             code: "source_adapter_process_start_failed",
             message: "无法启动隔离的信源适配器执行进程。",
             impact: "本次运行未执行。",
-            suggestion: "检查运行器镜像后重新触发。",
             requiresHuman: false,
           },
         });

@@ -128,7 +128,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -152,7 +151,6 @@ type Problem = {
   readonly message: string;
   readonly impact: string;
   readonly path?: (string | number)[] | undefined;
-  readonly suggestion: string;
   readonly requiresHuman: boolean;
   readonly stage?: string | undefined;
   readonly target?: string | undefined;
@@ -674,8 +672,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Failed to fetch OpenAI News RSS feed: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Cannot discover new articles from OpenAI News.",
                 path: ["news", "rssUrl"],
-                suggestion:
-                  "Check OpenAI network reachability or user agent configuration.",
                 requiresHuman: false,
               });
               continue;
@@ -687,7 +683,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: "OpenAI News RSS feed returned 0 items.",
                 impact: "No articles found to check.",
                 path: ["news", "rssUrl"],
-                suggestion: "Verify that the RSS URL provides valid items.",
                 requiresHuman: false,
               });
               continue;
@@ -706,7 +701,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: "First RSS item has no article link.",
                 impact: "Cannot check article extraction.",
                 path: ["news", "rssUrl"],
-                suggestion: "Verify that feed items contain valid URL links.",
                 requiresHuman: false,
               });
               continue;
@@ -732,8 +726,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Failed to fetch OpenAI News article HTML: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Cannot access OpenAI News article page.",
                 path: ["news", candidateItem.url],
-                suggestion:
-                  "Check network connectivity or Cloudflare challenge.",
                 requiresHuman: false,
               });
               continue;
@@ -752,8 +744,6 @@ export const sourceAdapter = defineSourceAdapter({
                 impact:
                   "OpenAI News article is blocked by Cloudflare challenge or forbidden response.",
                 path: ["news", candidateItem.url],
-                suggestion:
-                  "Inspect Cloudflare mitigation rules or verify user agent.",
                 requiresHuman: false,
               });
               continue;
@@ -767,7 +757,6 @@ export const sourceAdapter = defineSourceAdapter({
                   "OpenAI News article body container could not be found.",
                 impact: "Cannot extract article content from layout.",
                 path: ["news", candidateItem.url],
-                suggestion: "Update article body selector to match new layout.",
                 requiresHuman: false,
               });
               continue;
@@ -787,7 +776,6 @@ export const sourceAdapter = defineSourceAdapter({
                   "Extracted article body has empty text after cleaning.",
                 impact: "Article would be archived without readable content.",
                 path: ["news", candidateItem.url],
-                suggestion: "Check content cleaning rules for OpenAI News.",
                 requiresHuman: false,
               });
             }
@@ -808,8 +796,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Failed to fetch OpenAI Developers Blog list: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Cannot discover blog posts.",
                 path: ["developersBlog", "listUrl"],
-                suggestion:
-                  "Check network reachability for developers.openai.com/blog.",
                 requiresHuman: false,
               });
               continue;
@@ -821,7 +807,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: "OpenAI Developers Blog list page returned 0 posts.",
                 impact: "No blog posts found to check.",
                 path: ["developersBlog", "listUrl"],
-                suggestion: "Verify developers.openai.com/blog page structure.",
                 requiresHuman: false,
               });
               continue;
@@ -894,7 +879,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: `Failed to fetch Developers blog HTML: ${error instanceof Error ? error.message : String(error)}`,
                   impact: "Cannot access Developers blog post.",
                   path: ["developersBlog", candidatePost.url],
-                  suggestion: "Check network connectivity.",
                   requiresHuman: false,
                 });
                 continue;
@@ -907,7 +891,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: `Developers blog article request returned HTTP ${htmlResponse.status}`,
                   impact: "Blog post cannot be fetched.",
                   path: ["developersBlog", candidatePost.url],
-                  suggestion: "Verify post URL.",
                   requiresHuman: false,
                 });
                 continue;
@@ -924,8 +907,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: "Developers blog body container could not be found.",
                   impact: "Cannot extract blog content.",
                   path: ["developersBlog", candidatePost.url],
-                  suggestion:
-                    "Update selectors for developers.openai.com/blog layout.",
                   requiresHuman: false,
                 });
                 continue;
@@ -949,7 +930,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: "Cleaned developers blog body is empty.",
                 impact: "Blog post would be archived without readable content.",
                 path: ["developersBlog", candidatePost.url],
-                suggestion: "Check cleaning rules for developers blog.",
                 requiresHuman: false,
               });
             }
@@ -1014,7 +994,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: `Initial sync failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
                   impact: "News scope baseline could not be established.",
                   path: ["news", "rssUrl"],
-                  suggestion: "Check network connectivity to OpenAI News RSS.",
                   requiresHuman: false,
                   ...problemDiagnostics(error),
                 });
@@ -1072,8 +1051,6 @@ export const sourceAdapter = defineSourceAdapter({
                   impact:
                     "Developers blog scope baseline could not be established.",
                   path: ["developersBlog", "listUrl"],
-                  suggestion:
-                    "Check network connectivity to developers.openai.com/blog.",
                   requiresHuman: false,
                   ...problemDiagnostics(error),
                 });
@@ -1137,7 +1114,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Subsequent sync failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Could not discover new articles.",
                 path: ["news", "rssUrl"],
-                suggestion: "Check network connectivity.",
                 requiresHuman: false,
                 ...problemDiagnostics(error),
               });
@@ -1182,7 +1158,6 @@ export const sourceAdapter = defineSourceAdapter({
                   impact:
                     "Item was not archived and incremental state was not advanced for it.",
                   path: ["news", item.url],
-                  suggestion: "Check access restrictions or Cloudflare status.",
                   requiresHuman: false,
                   ...(archiveResult.stage === undefined
                     ? {}
@@ -1224,7 +1199,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Subsequent sync failed to fetch blog list: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Could not discover new blog posts.",
                 path: ["developersBlog", "listUrl"],
-                suggestion: "Check network connectivity.",
                 requiresHuman: false,
                 ...problemDiagnostics(error),
               });
@@ -1261,7 +1235,6 @@ export const sourceAdapter = defineSourceAdapter({
                   impact:
                     "Item was not archived and incremental state was not advanced for it.",
                   path: ["developersBlog", item.url],
-                  suggestion: "Check post availability.",
                   requiresHuman: false,
                   ...(archiveResult.stage === undefined
                     ? {}
@@ -1302,8 +1275,6 @@ export const sourceAdapter = defineSourceAdapter({
               message: `OpenAI sync finished with problems: ${problems.map((p) => p.message).join("; ")}`,
               impact:
                 "Some items were not synchronized. Incremental state was not advanced for failed items.",
-              suggestion:
-                "Check network reachability, Cloudflare challenge, or article selectors and re-run.",
               requiresHuman: false,
               ...(first.stage === undefined ? {} : { stage: first.stage }),
               ...(first.target === undefined ? {} : { target: first.target }),
@@ -1353,7 +1324,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Collect failed to fetch RSS feed: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Could not discover news articles.",
                 path: ["news", "rssUrl"],
-                suggestion: "Check RSS feed URL or network reachability.",
                 requiresHuman: false,
                 ...problemDiagnostics(error),
               });
@@ -1388,7 +1358,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: `Collect failed for ${item.url}: ${archiveResult.message}`,
                   impact: "Item could not be collected.",
                   path: ["news", item.url],
-                  suggestion: "Check article URL or Cloudflare mitigation.",
                   requiresHuman: false,
                   ...(archiveResult.stage === undefined
                     ? {}
@@ -1440,7 +1409,6 @@ export const sourceAdapter = defineSourceAdapter({
                 message: `Collect failed to fetch developers blog list: ${error instanceof Error ? error.message : String(error)}`,
                 impact: "Could not discover blog posts.",
                 path: ["developersBlog", "listUrl"],
-                suggestion: "Check developers blog list URL.",
                 requiresHuman: false,
                 ...problemDiagnostics(error),
               });
@@ -1473,7 +1441,6 @@ export const sourceAdapter = defineSourceAdapter({
                   message: `Collect failed for ${item.url}: ${archiveResult.message}`,
                   impact: "Item could not be collected.",
                   path: ["developersBlog", item.url],
-                  suggestion: "Check blog post URL or structure.",
                   requiresHuman: false,
                   ...(archiveResult.stage === undefined
                     ? {}
@@ -1523,8 +1490,6 @@ export const sourceAdapter = defineSourceAdapter({
               code: "openai_collection_incomplete",
               message: `OpenAI collection finished with problems: ${problems.map((p) => p.message).join("; ")}`,
               impact: "Some items could not be collected.",
-              suggestion:
-                "Check network reachability, Cloudflare challenge, or article selectors and re-run.",
               requiresHuman: false,
               ...(first.stage === undefined ? {} : { stage: first.stage }),
               ...(first.target === undefined ? {} : { target: first.target }),

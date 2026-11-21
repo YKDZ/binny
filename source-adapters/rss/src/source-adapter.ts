@@ -197,7 +197,6 @@ const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -233,18 +232,12 @@ function selectedFeeds(
   return { feeds, missing };
 }
 
-function feedProblem(
-  feedId: string,
-  code: string,
-  message: string,
-  suggestion: string,
-) {
+function feedProblem(feedId: string, code: string, message: string) {
   return {
     code,
     message,
     impact: `RSS/Atom feed「${feedId}」无法按当前范围完整检查。`,
     path: ["feeds", feedId],
-    suggestion,
     requiresHuman: false,
   };
 }
@@ -526,7 +519,6 @@ async function checkFeeds(context: RssContext, params: ActionParams) {
       feedId,
       "rss_feed_not_configured",
       `本次参数选择了未配置的 feed「${feedId}」。`,
-      "只选择当前 bin 已配置的 feed 稳定标识。",
     ),
   );
   let unavailable = selected.missing.length > 0;
@@ -543,7 +535,6 @@ async function checkFeeds(context: RssContext, params: ActionParams) {
             feed.id,
             "rss_feed_body_unavailable",
             "feed 没有返回本次检查所需的正文。",
-            "检查信源是否允许无条件读取 RSS/Atom 正文。",
           ),
         );
         continue;
@@ -553,12 +544,7 @@ async function checkFeeds(context: RssContext, params: ActionParams) {
         unavailable = true;
         for (const message of entries.problems) {
           problems.push(
-            feedProblem(
-              feed.id,
-              "rss_entry_identity_unavailable",
-              message,
-              "为每个条目提供稳定的 RSS GUID、Atom ID 或唯一 HTTP 链接。",
-            ),
+            feedProblem(feed.id, "rss_entry_identity_unavailable", message),
           );
         }
       }
@@ -581,7 +567,6 @@ async function checkFeeds(context: RssContext, params: ActionParams) {
             feed.id,
             "rss_entry_body_unavailable",
             `${emptyBodyCount} 个条目没有正文或有效内容。`,
-            "检查 feed 是否提供条目正文或有效摘要。",
           ),
         );
       }
@@ -591,12 +576,7 @@ async function checkFeeds(context: RssContext, params: ActionParams) {
       unavailable ||= failure.unavailable;
       unknown ||= !failure.unavailable;
       problems.push(
-        feedProblem(
-          feed.id,
-          "rss_feed_unavailable",
-          failure.message,
-          "检查 feed 地址、信源访问状态与网络连接。",
-        ),
+        feedProblem(feed.id, "rss_feed_unavailable", failure.message),
       );
     }
   }
@@ -619,7 +599,6 @@ function failureFromProblems(
     readonly feedId: string;
     readonly message: string;
     readonly path?: readonly (string | number)[];
-    readonly suggestion?: string;
     readonly stage?: string;
     readonly target?: string;
     readonly abortCause?: ManualRunAbortCause;
@@ -644,9 +623,6 @@ function failureFromProblems(
       message: `RSS/Atom 采集未完整完成：${examples.join("；")}${more}`,
       impact: `${completed}已成功提交的资料不会回滚；受影响 feed 的增量状态不会前移。`,
       ...(first?.path === undefined ? {} : { path: [...first.path] }),
-      suggestion:
-        first?.suggestion ??
-        "检查问题 feed 与媒体来源后重新触发 collect；已归档的相同条目会按稳定信源键处理。",
       requiresHuman: false,
       ...(first?.stage === undefined ? {} : { stage: first.stage }),
       ...(first?.target === undefined ? {} : { target: first.target }),
@@ -667,7 +643,6 @@ async function collectFeeds(
     feedId: string;
     message: string;
     path?: readonly (string | number)[];
-    suggestion?: string;
     stage?: string;
     target?: string;
     abortCause?: ManualRunAbortCause;
@@ -850,7 +825,6 @@ async function syncFeeds(
     feedId: string;
     message: string;
     path?: readonly (string | number)[];
-    suggestion?: string;
     stage?: string;
     target?: string;
     abortCause?: ManualRunAbortCause;
@@ -954,7 +928,6 @@ async function syncFeeds(
           feedId: feed.id,
           message: `${emptyBodyCount} 个条目没有正文或有效内容。`,
           path: ["feeds", feed.id],
-          suggestion: "检查 feed 是否提供条目正文或有效摘要。",
         });
       }
 

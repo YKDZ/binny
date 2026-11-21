@@ -192,7 +192,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -935,8 +934,6 @@ export async function executeMinimaxCheck(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be checked.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -979,8 +976,6 @@ export async function executeMinimaxCheck(
             : `Availability check failed for source "${source.id}".`,
         impact: `MiniMax source "${source.id}" is currently unreachable or has invalid content.`,
         path: ["sources", source.id],
-        suggestion:
-          "Verify network accessibility and document formatting for the source.",
         requiresHuman: false,
       });
     }
@@ -1014,8 +1009,6 @@ export async function executeMinimaxSync(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be synchronized.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -1214,8 +1207,6 @@ export async function executeMinimaxSync(
                 message: `Synchronization failed for article "${article.url}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
                 impact: `Article "${article.articlePath}" failed to archive; incremental state was not advanced for it.`,
                 path: ["sources", source.id, article.articlePath],
-                suggestion:
-                  "Verify network accessibility and article formatting before retrying.",
                 requiresHuman: false,
                 ...(diag.stage === undefined ? {} : { stage: diag.stage }),
                 ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -1243,8 +1234,6 @@ export async function executeMinimaxSync(
         message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Source "${source.id}" failed to complete incremental sync.`,
         path: ["sources", source.id],
-        suggestion:
-          "Verify network accessibility and source formatting before retrying.",
         requiresHuman: false,
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),
         ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -1282,8 +1271,6 @@ export async function executeMinimaxCollect(
       message: `Configured source "${missingId}" was not found.`,
       impact: `Source "${missingId}" cannot be collected.`,
       path: ["sources", missingId],
-      suggestion:
-        "Check whether sourceIds in params match configured source IDs.",
       requiresHuman: false,
     });
   }
@@ -1453,8 +1440,6 @@ export async function executeMinimaxCollect(
             message: `Collection failed for article "${article.url}": ${articleError instanceof Error ? articleError.message : String(articleError)}`,
             impact: `Article "${article.articlePath}" failed to be archived.`,
             path: ["sources", source.id, article.articlePath],
-            suggestion:
-              "Verify network accessibility and content formatting before retrying.",
             requiresHuman: false,
             ...(diag.stage === undefined ? {} : { stage: diag.stage }),
             ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -1476,8 +1461,6 @@ export async function executeMinimaxCollect(
         message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Source "${source.id}" failed to complete collection.`,
         path: ["sources", source.id],
-        suggestion:
-          "Verify network accessibility and content formatting before retrying.",
         requiresHuman: false,
         ...(diag.stage === undefined ? {} : { stage: diag.stage }),
         ...(diag.target === undefined ? {} : { target: diag.target }),

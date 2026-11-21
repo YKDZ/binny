@@ -45,18 +45,27 @@ export type LinuxdoManualRun = {
         readonly scope: string;
         readonly reasonCode: string;
         readonly message: string;
+        readonly target?: {
+          readonly kind: string;
+          readonly targets?: readonly Record<string, unknown>[];
+        };
+        readonly range?: { readonly from: string; readonly to: string };
+        readonly pagesRead?: number;
+        readonly maxPages?: number;
+        readonly lowerBoundConfirmed?: boolean;
+        readonly headVerified?: boolean;
       }[];
       readonly availability?: "available" | "unavailable" | "unknown";
       readonly scope?: readonly string[];
       readonly problems?: readonly {
         readonly code: string;
         readonly requiresHuman: boolean;
-        readonly suggestion?: string;
       }[];
     };
     readonly error?: {
       readonly code: string;
       readonly requiresHuman: boolean;
+      readonly sessionState?: string;
       readonly path?: readonly (string | number)[];
       readonly impact?: string;
       readonly message?: string;
@@ -77,10 +86,10 @@ export type LinuxdoAction = "check" | "collect" | "list-categories" | "sync";
 type LinuxdoCheckOutput = {
   readonly availability: "available" | "unavailable" | "unknown";
   readonly scope: readonly string[];
+  readonly sessionState?: string;
   readonly problems: readonly {
     readonly code: string;
     readonly requiresHuman: boolean;
-    readonly suggestion?: string;
   }[];
 };
 

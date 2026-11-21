@@ -91,7 +91,6 @@ const checkProblemSchema = z
     message: z.string().min(1),
     impact: z.string().min(1),
     path: z.array(z.union([z.string(), z.number()])).optional(),
-    suggestion: z.string().min(1),
     requiresHuman: z.boolean(),
   })
   .strict();
@@ -122,7 +121,6 @@ interface ProblemItem {
   readonly sectionId?: string | undefined;
   readonly message: string;
   readonly path?: readonly (string | number)[] | undefined;
-  readonly suggestion?: string | undefined;
   readonly stage?: string | undefined;
   readonly target?: string | undefined;
   readonly abortCause?: ManualRunAbortCause | undefined;
@@ -160,7 +158,6 @@ function failureFromProblems(
       code: "anthropic_collection_incomplete",
       message: `Anthropic collection failed: ${examples.join("; ")}${more}`,
       impact: `${completed}Submitted material remains in archive; failed scopes were not advanced.`,
-      suggestion: "Check network reachability and Anthropic page structure.",
       requiresHuman: false,
       ...(first?.stage === undefined ? {} : { stage: first.stage }),
       ...(first?.target === undefined ? {} : { target: first.target }),
@@ -235,7 +232,6 @@ async function checkAnthropic(
       message: `Requested section "${miss}" is not configured.`,
       impact: "Cannot check unconfigured section.",
       path: ["sectionIds", miss],
-      suggestion: "Configure the section in source adapter configuration.",
       requiresHuman: false,
     });
   }
@@ -255,7 +251,6 @@ async function checkAnthropic(
           message: `Section "${section.id}" returned HTTP ${status}.`,
           impact: `Section "${section.id}" is unreachable.`,
           path: ["sections", section.id],
-          suggestion: "Verify Anthropic section URL and network connectivity.",
           requiresHuman: false,
         });
         continue;
@@ -268,8 +263,6 @@ async function checkAnthropic(
           message: `No article cards discovered in section "${section.id}".`,
           impact: `Section "${section.id}" list format may have changed.`,
           path: ["sections", section.id],
-          suggestion:
-            "Inspect section HTML layout for changes in card structure.",
           requiresHuman: false,
         });
       } else if (!sampleArticleUrl && discovered[0]) {
@@ -284,7 +277,6 @@ async function checkAnthropic(
         message: `Failed to fetch section "${section.id}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Section "${section.id}" is unavailable.`,
         path: ["sections", section.id],
-        suggestion: "Check network connectivity and Anthropic server status.",
         requiresHuman: false,
       });
     }
@@ -303,7 +295,6 @@ async function checkAnthropic(
           message: `Sample article at "${sampleArticleUrl}" returned HTTP ${status}.`,
           impact: "Sample article extraction failed.",
           path: ["sampleArticle", sampleArticleUrl],
-          suggestion: "Verify article URL reachability.",
           requiresHuman: false,
         });
       } else {
@@ -319,7 +310,6 @@ async function checkAnthropic(
             message: extracted.reason,
             impact: "Article content cannot be cleanly extracted.",
             path: ["sampleArticle", sampleArticleUrl],
-            suggestion: "Verify detail page DOM layout and extraction rules.",
             requiresHuman: false,
           });
         }
@@ -331,7 +321,6 @@ async function checkAnthropic(
         message: `Failed to fetch sample article at "${sampleArticleUrl}": ${error instanceof Error ? error.message : String(error)}`,
         impact: "Sample article verification failed.",
         path: ["sampleArticle", sampleArticleUrl],
-        suggestion: "Check network connectivity.",
         requiresHuman: false,
       });
     }

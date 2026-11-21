@@ -139,11 +139,11 @@ function linuxdoTargets(...ids: (keyof typeof targetDefinitions)[]) {
 type LinuxdoCheckOutput = {
   readonly availability: "available" | "unavailable" | "unknown";
   readonly scope: readonly string[];
+  readonly sessionState?: string;
   readonly problems: readonly {
     readonly code: string;
     readonly message?: string;
     readonly requiresHuman: boolean;
-    readonly suggestion?: string;
   }[];
 };
 
@@ -3864,11 +3864,18 @@ async function verifyDiscovery(): Promise<void> {
     JSON.stringify(challengedListCheck),
   );
   assert.equal(checkOutput(challengedListCheck).availability, "unknown");
+  assert.equal(
+    checkOutput(challengedListCheck).sessionState,
+    "challenge_required",
+  );
   assert.deepEqual(checkOutput(challengedListCheck).scope, ["target:latest"]);
   assert.ok(
     checkOutput(challengedListCheck).problems.some(
-      ({ code, requiresHuman }) =>
-        code === "discourse_target_challenge_response" && requiresHuman,
+      (problem) =>
+        problem.code === "discourse_target_challenge_response" &&
+        problem.requiresHuman &&
+        !("suggestion" in problem) &&
+        !(problem.message ?? "").includes("human open"),
     ),
   );
   assert.equal(challengedListCheck.result?.commits?.length ?? 0, 0);
@@ -3887,10 +3894,10 @@ async function verifyDiscovery(): Promise<void> {
   assert.deepEqual(checkOutput(invalidListCheck).scope, ["target:latest"]);
   assert.ok(
     checkOutput(invalidListCheck).problems.some(
-      ({ code, requiresHuman, suggestion }) =>
-        code === "discourse_topic_list_response_invalid" &&
-        !requiresHuman &&
-        suggestion !== undefined,
+      (problem) =>
+        problem.code === "discourse_topic_list_response_invalid" &&
+        !problem.requiresHuman &&
+        !("suggestion" in problem),
     ),
     JSON.stringify(invalidListCheck),
   );
@@ -4580,18 +4587,7 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
   assert.equal(pageLimit.report?.phase, "partial");
   const pageLimitIncomplete = pageLimit.result?.output?.incompleteScopes?.find(
     ({ reasonCode }) => reasonCode === "post_range_page_limit_reached",
-  ) as
-    | {
-        readonly scope: string;
-        readonly reasonCode: string;
-        readonly pagesRead?: number;
-        readonly maxPages?: number;
-        readonly lowerBoundConfirmed?: boolean;
-        readonly headVerified?: boolean;
-        readonly range?: { readonly from: string; readonly to: string };
-        readonly backfillCollectParams?: unknown;
-      }
-    | undefined;
+  );
   assert.ok(pageLimitIncomplete !== undefined, JSON.stringify(pageLimit));
   assert.equal(pageLimitIncomplete.pagesRead, 2);
   assert.equal(pageLimitIncomplete.maxPages, 2);
@@ -4601,7 +4597,52 @@ async function verifyPostCreatedRangeCollection(): Promise<void> {
     from: "2026-10-28T02:00:00.000Z",
     to: "2026-10-28T04:00:00.000Z",
   });
-  assert.ok(pageLimitIncomplete.backfillCollectParams !== undefined);
+  assert.equal("backfillCollectParams" in pageLimitIncomplete, false);
+  assert.doesNotMatch(
+    pageLimitIncomplete.message,
+    /Run collect|suggest at least/iu,
+  );
+
+  // Discover collect params schema via CLI and construct backfill autonomously from factual coverage
+  const discoveredCollectAction = cliData<{
+    readonly actions: {
+      readonly collect?: {
+        readonly params?: {
+          readonly properties?: Readonly<Record<string, unknown>>;
+        };
+      };
+    };
+  }>(
+    await cli(["bin", "actions", "binny-discovery-topic", "collect"]),
+    "discovered",
+  );
+  assert.ok(
+    discoveredCollectAction.actions.collect?.params?.properties?.targets !==
+      undefined,
+  );
+  assert.ok(
+    discoveredCollectAction.actions.collect?.params?.properties
+      ?.postCreatedRange !== undefined,
+  );
+  const pageLimitBackfill = await trigger("collect", {
+    ...(pageLimitIncomplete.target?.kind === "targets" &&
+    pageLimitIncomplete.target.targets !== undefined
+      ? { targets: pageLimitIncomplete.target.targets }
+      : {}),
+    postCreatedRange: {
+      ...pageLimitIncomplete.range,
+      maxPages: (pageLimitIncomplete.maxPages ?? 2) * 5,
+    },
+  });
+  assert.equal(
+    pageLimitBackfill.status,
+    "completed",
+    JSON.stringify(pageLimitBackfill),
+  );
+  assert.equal(
+    pageLimitBackfill.result?.output?.collectionCompleteness,
+    "complete",
+  );
 
   await setTestClockAt("2026-10-28T03:00:00.000Z");
   const archiveBeforeFutureRange = await searchArchiveItem("区间新增回复内容");
@@ -4672,19 +4713,20 @@ type SyncIncompleteScopeSummary = {
   readonly scope: string;
   readonly reasonCode: string;
   readonly message: string;
-  readonly target?: { readonly kind: string };
+  readonly target?: {
+    readonly kind: string;
+    readonly targets?: readonly Record<string, unknown>[];
+  };
   readonly range?: { readonly from: string; readonly to: string };
   readonly pagesRead?: number;
   readonly maxPages?: number;
   readonly lowerBoundConfirmed?: boolean;
   readonly headVerified?: boolean;
-  readonly backfillCollectParams?: Record<string, unknown>;
 };
 
 type SyncSkippedGapSummary = {
   readonly range: { readonly from: string; readonly to: string };
   readonly message: string;
-  readonly backfillCollectParams: Record<string, unknown>;
 };
 
 type SyncRunOutput = {
@@ -5811,11 +5853,18 @@ async function verifyBoundedSync(): Promise<string> {
       from: workerRecovery.upperBound,
       to: expectedLongRangeFrom,
     });
+    const skippedGap = syncOutput(afterLongQueue).incompleteScopes.find(
+      ({ reasonCode }) => reasonCode === "sync_skipped_before_window",
+    );
     assert.ok(
-      syncOutput(afterLongQueue).incompleteScopes.some(
-        ({ reasonCode }) => reasonCode === "sync_skipped_before_window",
-      ),
+      skippedGap !== undefined,
       JSON.stringify(syncOutput(afterLongQueue)),
+    );
+    assert.equal("backfillCollectParams" in skippedGap, false);
+    assert.equal(
+      "backfillCollectParams" in
+        (syncReport(afterLongQueue).scopes[0]?.skippedGap ?? {}),
+      false,
     );
     const archiveAfterLongQueue = await searchArchiveItem(
       "超过一小时范围的旧回复",
@@ -5832,6 +5881,32 @@ async function verifyBoundedSync(): Promise<string> {
       archiveAfterLongQueue.revisions.length,
       interruptedArchive.revisions.length,
       "长时间排队时不应为一小时窗口之外的旧回复创建新归档版本。",
+    );
+
+    const skippedWindowBackfill = await trigger("collect", {
+      ...(skippedGap.target?.kind === "targets" &&
+      skippedGap.target.targets !== undefined
+        ? { targets: skippedGap.target.targets }
+        : {}),
+      postCreatedRange: {
+        ...skippedGap.range!,
+        maxPages: 20,
+      },
+    });
+    assert.equal(
+      skippedWindowBackfill.status,
+      "completed",
+      JSON.stringify(skippedWindowBackfill),
+    );
+    assert.equal(
+      skippedWindowBackfill.result?.output?.collectionCompleteness,
+      "complete",
+    );
+    assert.ok(
+      (skippedWindowBackfill.result?.commits ?? []).some(({ items }) =>
+        items.some(({ itemId }) => itemId === interruptedArchive.itemId),
+      ),
+      "Autonomous collect using skippedGap.range should backfill the item skipped by the 1-hour sync window.",
     );
 
     await setTestClockAt(

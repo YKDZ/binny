@@ -194,7 +194,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -576,8 +575,6 @@ export async function checkChangelogSource(
           : `Availability check failed for source "${source.id}".`,
       impact: `Kimi changelog "${source.id}" is currently unreachable or invalid.`,
       path: ["sources", source.id],
-      suggestion:
-        "Check whether the source URL is reachable and formatted properly.",
       requiresHuman: false,
     });
   }
@@ -640,8 +637,6 @@ export async function collectChangelogSource(
       message: `Collection failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
       impact: `Source "${source.id}" failed to be archived.`,
       path: ["sources", source.id],
-      suggestion:
-        "Verify network accessibility and content formatting before retrying collection.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -740,8 +735,6 @@ export async function syncChangelogSource(
       message: `Synchronization failed for source "${source.id}": ${error instanceof Error ? error.message : String(error)}`,
       impact: `Source "${source.id}" failed incremental sync; state was not advanced.`,
       path: ["sources", source.id],
-      suggestion:
-        "Verify network accessibility and content formatting before retrying sync.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),

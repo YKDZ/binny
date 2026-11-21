@@ -8,6 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createApiClient } from "@binny/api/client";
 import { validationFailure } from "@binny/api/validation";
 import {
+  archiveBatchReadInputDiagnostic,
   archiveBatchReadInputSchema,
   archiveBatchReadResponseSchema,
   archiveCommitSchema,
@@ -901,9 +902,7 @@ function createCliContract(identity: CliCommandIdentity) {
           ]),
       ...(page.candidatesIncluded
         ? page.hasMore
-          ? [
-              `More results are available. Repeat with query.cursor set to ${page.nextCursor}.`,
-            ]
+          ? ["More results: true", `Next cursor: ${page.nextCursor}`]
           : ["End of results."]
         : []),
       ...(relatedRevisionEntries.length === 0
@@ -961,7 +960,8 @@ function createCliContract(identity: CliCommandIdentity) {
             }),
             ...(page.distribution.hasMore
               ? [
-                  `More distribution groups are available. Repeat with query.distribution.cursor set to ${page.distribution.nextCursor}.`,
+                  "More distribution groups: true",
+                  `Distribution next cursor: ${page.distribution.nextCursor}`,
                 ]
               : ["End of distribution."]),
           ]),
@@ -1084,6 +1084,21 @@ function createCliContract(identity: CliCommandIdentity) {
       ...(stage === undefined ? [] : [`Stage: ${stage}`]),
       ...(target === undefined ? [] : [`Target: ${target}`]),
       ...(abortCause === undefined ? [] : [`Abort cause: ${abortCause}`]),
+      ...(error === undefined
+        ? []
+        : [`Requires human: ${String(error.requiresHuman)}`]),
+      ...(error?.sessionState === undefined
+        ? []
+        : [`Session state: ${error.sessionState}`]),
+      ...(run.humanSession === undefined
+        ? []
+        : [
+            `Human session: ${run.humanSession.status}${
+              run.humanSession.sessionId === undefined
+                ? ""
+                : ` (${run.humanSession.sessionId})`
+            }`,
+          ]),
       ...(run.report === undefined ? [] : jsonSection("Report", run.report)),
       ...(run.result === undefined ? [] : jsonSection("Result", run.result)),
     ]);
@@ -1121,7 +1136,6 @@ function createCliContract(identity: CliCommandIdentity) {
       `Capabilities: ${metadata.capabilities.join(", ")}`,
       "Contracts:",
       `  Archive query v${metadata.contracts.archiveQuery.version}: ${metadata.contracts.archiveQuery.path}`,
-      `Read the current service query rules: ${identity.commandName} service query-contract --operation search`,
     ]);
   const serviceQueryContractText = (discovery: ServiceQueryContractOutput) => {
     const lines: [string, ...string[]] = [
@@ -1430,9 +1444,12 @@ function createCliContract(identity: CliCommandIdentity) {
       >["discovery"]
     >,
   ) => [
-    discovery.binId === undefined
-      ? `Discover extension fields declared by source adapter ${discovery.sourceAdapterId}${discovery.sourceAdapterVersion === undefined ? "" : "@" + discovery.sourceAdapterVersion} with the current service.`
-      : `Discover extension fields: ${identity.commandName} bin extension-fields ${discovery.binId}`,
+    `Source adapter: ${discovery.sourceAdapterId}${
+      discovery.sourceAdapterVersion === undefined
+        ? ""
+        : `@${discovery.sourceAdapterVersion}`
+    }`,
+    ...(discovery.binId === undefined ? [] : [`Bin: ${discovery.binId}`]),
   ];
   const apiErrorText = (error: CliApiError) => {
     const diagnostic = "diagnostic" in error ? error.diagnostic : undefined;
@@ -1471,6 +1488,27 @@ function createCliContract(identity: CliCommandIdentity) {
         ? []
         : [
             `Protocol operations: ${candidateValuesText(diagnostic.protocolOperations)}`,
+          ]),
+      ...(diagnostic?.maxReferences === undefined
+        ? []
+        : [`Max references: ${String(diagnostic.maxReferences)}`]),
+      ...(diagnostic?.requestedReferences === undefined
+        ? []
+        : [`Requested references: ${String(diagnostic.requestedReferences)}`]),
+      ...(diagnostic?.maxResponseBytes === undefined
+        ? []
+        : [`Max response bytes: ${String(diagnostic.maxResponseBytes)}`]),
+      ...(diagnostic?.oversizedRevisionId === undefined
+        ? []
+        : [`Oversized revision: ${diagnostic.oversizedRevisionId}`]),
+      ...(diagnostic?.references === undefined
+        ? []
+        : [
+            "References:",
+            ...diagnostic.references.map(
+              (reference) =>
+                `  - itemId=${reference.itemId} binId=${reference.binId} revisionId=${reference.revisionId} archiveSeq=${reference.archiveSeq}`,
+            ),
           ]),
       ...(diagnostic?.discovery === undefined
         ? []
@@ -1754,11 +1792,17 @@ function createCliContract(identity: CliCommandIdentity) {
     }
     const checked = archiveBatchReadInputSchema.safeParse(request);
     if (!checked.success) {
-      return outcome.failure.apiError(
-        validationFailure(checked.error.issues, {
-          preserveOriginalMessage: true,
-        }).error,
+      const failure = validationFailure(checked.error.issues, {
+        preserveOriginalMessage: true,
+      });
+      const diagnostic = archiveBatchReadInputDiagnostic(
+        request,
+        checked.error.issues[0],
       );
+      return outcome.failure.apiError({
+        ...failure.error,
+        ...(diagnostic === undefined ? {} : { diagnostic }),
+      });
     }
     const compatibilityFailure = await queryCompatibilityFailure(
       dependencies,
@@ -2192,7 +2236,7 @@ function createCliContract(identity: CliCommandIdentity) {
     text.lines([
       "Runs",
       ...page.runs.flatMap((run) => {
-        const line = `${run.createdAt}  ${run.binId}  ${run.action}  ${run.triggerType}  ${run.status}  ${run.stopReasonCode ?? "-"}  ${run.runId}  ${identity.commandName} run get ${run.binId} ${run.runId}`;
+        const line = `${run.createdAt}  ${run.binId}  ${run.action}  ${run.triggerType}  ${run.status}  ${run.stopReasonCode ?? "-"}  ${run.runId}`;
         if (run.queueReason === undefined && run.lastWakeError === undefined) {
           return [line];
         }
@@ -2210,9 +2254,7 @@ function createCliContract(identity: CliCommandIdentity) {
       }),
       ...(page.nextCursor === undefined
         ? []
-        : [
-            `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
-          ]),
+        : [`Next cursor: ${page.nextCursor}`]),
     ]);
   const runListHandler: Handler<
     "runList",
@@ -2720,13 +2762,11 @@ function createCliContract(identity: CliCommandIdentity) {
       "Schedules",
       ...page.schedules.map(
         (schedule) =>
-          `${schedule.enabled ? "enabled" : "disabled"}  ${schedule.binId}  ${schedule.action}  ${schedule.nextDueAt}  ${schedule.scheduleId}  ${identity.commandName} schedule get ${schedule.binId} ${schedule.scheduleId}`,
+          `${schedule.enabled ? "enabled" : "disabled"}  ${schedule.binId}  ${schedule.action}  ${schedule.nextDueAt}  ${schedule.scheduleId}`,
       ),
       ...(page.nextCursor === undefined
         ? []
-        : [
-            `Next page: repeat the same filters and page size, then append --cursor ${page.nextCursor}`,
-          ]),
+        : [`Next cursor: ${page.nextCursor}`]),
     ]);
   const scheduleListHandler: Handler<
     "scheduleList",
@@ -4281,8 +4321,6 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
             targetLabel: "service metadata",
             endpointPath: "/meta",
             schema: serviceMetadataSchema,
-            trailingHint:
-              "check that --url or BINNY_API_URL points to a running service",
           },
           ...(runtime.metadataRetry === undefined
             ? {}
@@ -4322,7 +4360,7 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
     try {
       await runtime.write({
         destination: "stderr",
-        chunk: "命令执行失败；请检查服务地址和运行环境。\n",
+        chunk: "命令执行因未预期内部异常中止。\n",
       });
     } catch {
       // 诊断通道故障不能改变原定退出类别。

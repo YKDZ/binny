@@ -123,7 +123,6 @@ export const checkOutputSchema = z
           message: z.string().min(1),
           impact: z.string().min(1),
           path: z.array(z.union([z.string(), z.number()])).optional(),
-          suggestion: z.string().min(1),
           requiresHuman: z.boolean(),
         })
         .strict(),
@@ -315,7 +314,6 @@ export async function fetchQwenArticleList(
       code: "qwen_source_invalid_response",
       message: `Failed to fetch Qwen articles from ${url}: ${error instanceof Error ? error.message : String(error)}`,
       impact: `Retrieval for language "${language}" failed.`,
-      suggestion: "Verify network connectivity and endpoint availability.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -329,7 +327,6 @@ export async function fetchQwenArticleList(
       code: "qwen_source_invalid_response",
       message: `Qwen retrieval endpoint returned HTTP ${response.status}.`,
       impact: `Retrieval for language "${language}" failed.`,
-      suggestion: "Check the Qwen API endpoint status and configuration.",
       requiresHuman: false,
     });
   }
@@ -344,7 +341,6 @@ export async function fetchQwenArticleList(
       code: "qwen_source_invalid_response",
       message: `Qwen retrieval response is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
       impact: `Retrieval for language "${language}" failed.`,
-      suggestion: "Check whether the endpoint returns a valid JSON document.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -358,7 +354,6 @@ export async function fetchQwenArticleList(
       code: "qwen_source_invalid_response",
       message: `Qwen retrieval response does not contain a non-empty articles array.`,
       impact: `Retrieval for language "${language}" failed.`,
-      suggestion: "Verify the Qwen retrieval API structure and parameters.",
       requiresHuman: false,
     });
   }
@@ -398,7 +393,6 @@ async function checkAction(
           code: "qwen_source_invalid_response",
           message: `Qwen endpoint for language "${language}" returned HTTP ${response.status}.`,
           impact: `Scope "lang:${language}" is unavailable.`,
-          suggestion: "Verify endpoint URL and availability.",
           requiresHuman: false,
         });
         continue;
@@ -413,7 +407,6 @@ async function checkAction(
           code: "qwen_source_invalid_response",
           message: `Qwen endpoint for language "${language}" did not return valid JSON.`,
           impact: `Scope "lang:${language}" cannot be parsed.`,
-          suggestion: "Check the server response format.",
           requiresHuman: false,
         });
         continue;
@@ -425,7 +418,6 @@ async function checkAction(
           code: "qwen_source_invalid_response",
           message: `Qwen endpoint for language "${language}" missing or empty articles array.`,
           impact: `Scope "lang:${language}" contains no articles.`,
-          suggestion: "Verify the endpoint response structure.",
           requiresHuman: false,
         });
         continue;
@@ -438,7 +430,6 @@ async function checkAction(
             message: `Article at index ${index} lacks a valid path string.`,
             impact: `Article identity missing in scope "lang:${language}".`,
             path: ["articles", index, "path"],
-            suggestion: "Check article fields in Qwen retrieval response.",
             requiresHuman: false,
           });
           break;
@@ -449,7 +440,6 @@ async function checkAction(
             message: `Article "${article.path}" lacks inline HTML content string.`,
             impact: `Article content cannot be cleaned in scope "lang:${language}".`,
             path: ["articles", index, "content"],
-            suggestion: "Ensure retrieval response includes inline content.",
             requiresHuman: false,
           });
           break;
@@ -461,7 +451,6 @@ async function checkAction(
         code: "qwen_source_invalid_response",
         message: `Failed to request Qwen endpoint for language "${language}": ${error instanceof Error ? error.message : String(error)}`,
         impact: `Scope "lang:${language}" is unavailable.`,
-        suggestion: "Check network connectivity and endpoint URL.",
         requiresHuman: false,
       });
     }
@@ -539,7 +528,6 @@ async function syncAction(
           code: "qwen_source_invalid_response",
           message: `Failed to fetch Qwen articles for "${language}": ${error instanceof Error ? error.message : String(error)}`,
           impact: `Retrieval for language "${language}" failed.`,
-          suggestion: "Verify network connectivity and endpoint availability.",
           requiresHuman: false,
           ...(diag.stage === undefined ? {} : { stage: diag.stage }),
           ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -663,7 +651,6 @@ async function syncAction(
                 message: `Failed to submit Qwen article "${article.path}" (${language}): ${error instanceof Error ? error.message : String(error)}`,
                 impact: `Article "${article.path}" was not archived.`,
                 path: ["languages", language, article.path],
-                suggestion: "Check archive service availability and retry.",
                 requiresHuman: false,
               });
             }
@@ -719,7 +706,6 @@ async function collectAction(
           code: "qwen_source_invalid_response",
           message: `Failed to fetch Qwen articles for "${language}": ${error instanceof Error ? error.message : String(error)}`,
           impact: `Retrieval for language "${language}" failed.`,
-          suggestion: "Verify network connectivity and endpoint availability.",
           requiresHuman: false,
           ...(diag.stage === undefined ? {} : { stage: diag.stage }),
           ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -811,7 +797,6 @@ async function collectAction(
             message: `Failed to submit Qwen article "${article.path}" (${language}): ${error instanceof Error ? error.message : String(error)}`,
             impact: `Article "${article.path}" was not archived.`,
             path: ["languages", language, article.path],
-            suggestion: "Check archive service availability and retry.",
             requiresHuman: false,
           });
         }

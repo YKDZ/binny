@@ -290,4 +290,73 @@ void describe("Linux.do source adapter failure diagnostics", () => {
     );
     assert.equal(wrapped.failure.abortCause, "user_cancelled");
   });
+
+  void it("emits structured sessionState without suggestion or human open text when login or challenge is required", async () => {
+    const controller = new AbortController();
+    const originalFetch = globalThis.fetch;
+    const originalWindow = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = globalThis;
+
+    const createMockPage = (response: Response) => {
+      globalThis.fetch = async () => response;
+      const page = {
+        url: () => "https://linux.do/",
+        isClosed: () => false,
+        evaluate: async (
+          fn: (arg: unknown) => Promise<unknown>,
+          arg: unknown,
+        ) => await fn(arg),
+      } as unknown as Page;
+      bindPageSourceAccessForTest(page, "https://linux.do", {
+        signal: controller.signal,
+      });
+      return page;
+    };
+
+    try {
+      const unauthPage = createMockPage(
+        new Response(JSON.stringify({ error: "not logged in" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const unauth = await readSessionAccess(
+        unauthPage,
+        { origin: new URL("https://linux.do"), namespace: "linuxdo:linux.do" },
+        controller.signal,
+      );
+      assert.equal(unauth.kind, "unavailable");
+      const unauthFailure = failureFromAccess(unauth).failure;
+      assert.equal(unauthFailure.requiresHuman, true);
+      assert.equal(unauthFailure.sessionState, "unauthenticated");
+      assert.equal("suggestion" in unauthFailure, false);
+      assert.doesNotMatch(unauthFailure.message, /human open/iu);
+      assert.doesNotMatch(unauthFailure.impact, /human open/iu);
+
+      const challengePage = createMockPage(
+        new Response("<html><title>Just a moment...</title></html>", {
+          status: 403,
+          headers: { "content-type": "text/html" },
+        }),
+      );
+      const challenged = await readSessionAccess(
+        challengePage,
+        { origin: new URL("https://linux.do"), namespace: "linuxdo:linux.do" },
+        controller.signal,
+      );
+      assert.equal(challenged.kind, "unavailable");
+      const challengeFailure = failureFromAccess(challenged).failure;
+      assert.equal(challengeFailure.requiresHuman, true);
+      assert.equal(challengeFailure.sessionState, "challenge_required");
+      assert.equal("suggestion" in challengeFailure, false);
+      assert.doesNotMatch(challengeFailure.message, /human open/iu);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalWindow === undefined) {
+        delete (globalThis as { window?: unknown }).window;
+      } else {
+        (globalThis as { window?: unknown }).window = originalWindow;
+      }
+    }
+  });
 });
