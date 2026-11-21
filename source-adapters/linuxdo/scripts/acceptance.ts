@@ -6555,14 +6555,16 @@ async function verifySyncScopeTransitions(): Promise<void> {
     );
     const costReport = syncReport(parentChildOverlap);
     const costEvents = (await sourceState()).events;
-    assert.equal(costReport.phase, "completed", JSON.stringify(costReport));
+    assert.equal(costReport.phase, "partial", JSON.stringify(costReport));
+    assert.equal(costReport.discovery, "partial", JSON.stringify(costReport));
+    assert.equal(syncOutput(parentChildOverlap).outcome, "partial");
     assert.equal(costReport.budget.maxRequests, 30);
     assert.equal(costReport.budget.maxElapsedMs, undefined);
     assert.equal(costReport.budget.remainingMs, undefined);
     assert.equal(costReport.budget.stopReason, undefined);
     assert.equal(costReport.scopes.length, 6);
     assert.ok(
-      costReport.scopes.every(({ status }) => status === "completed"),
+      costReport.scopes.every(({ status }) => status === "partial"),
       `30次主动请求额度内应完成全部6个独立范围：${JSON.stringify(costReport)}`,
     );
     assert.equal(
@@ -6611,7 +6613,7 @@ async function verifySyncScopeTransitions(): Promise<void> {
       [45, 46].map((id) => ({
         scope: { kind: "category", id },
         position: syncReport(parentChildOverlap).upperBound,
-        status: "completed",
+        status: "partial",
       })),
     );
 
