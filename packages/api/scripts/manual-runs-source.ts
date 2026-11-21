@@ -105,10 +105,6 @@ function sourceCheck(
                 ? "受控信源当前无法读取。"
                 : "受控信源没有提供足够信息判断是否可读取。",
             impact: "当前范围 " + request.sourceKey + " 尚未确认可采集。",
-            suggestion:
-              disposition === "unavailable"
-                ? "检查信源连接和访问身份后重新触发 check。"
-                : "完成信源维护后重新触发 check 或 collect。",
             requiresHuman: true,
           },
         ];

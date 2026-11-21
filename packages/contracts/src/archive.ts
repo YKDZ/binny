@@ -315,7 +315,6 @@ const archiveDiagnosticSchema = z
     code: nonEmptyText.max(128, "诊断代码不能超过 128 个字符。"),
     message: nonEmptyText,
     details: jsonObjectSchema.optional(),
-    suggestion: nonEmptyText.optional(),
   })
   .strict();
 
@@ -979,17 +978,44 @@ export const archiveRevisionDiffSchema = withArchiveJsonSchemaProjection(
     .strict(),
 );
 
+const archiveBatchReadArchiveSequenceSchema = archiveSequenceSchema.refine(
+  (value) =>
+    value.length < 19 ||
+    (value.length === 19 && value <= "9223372036854775807"),
+  "Archive sequence must be between 1 and 9223372036854775807.",
+);
+
+/** Maximum number of selected archive views accepted by one batch request. */
+export const archiveBatchReadMaxReferences = 50;
+
+/** Maximum serialized success response size in bytes for one batch read request. */
+export const archiveBatchReadMaxResponseBytes = 16 * 1024 * 1024;
+
+/** One exact content version as observed by one bin in one archive commit. */
+export const archiveBatchReadReferenceSchema = withArchiveJsonSchemaProjection(
+  z
+    .object({
+      itemId: archiveIdentifierSchema,
+      binId: binIdSchema,
+      revisionId: archiveIdentifierSchema,
+      archiveSeq: archiveBatchReadArchiveSequenceSchema,
+    })
+    .strict(),
+);
+
+export type ArchiveBatchReadReference = z.infer<
+  typeof archiveBatchReadReferenceSchema
+>;
+
 /**
- * Machine-readable correction evidence for a search input failure.
+ * Machine-readable diagnostic facts for archive search and batch-read errors.
  *
  * Candidate values are closed sets taken from the active request contract or
- * the selected adapter's declared extension fields. They are never derived
- * from archived data, and a missing field means no finite candidate set is
- * known. `allowedOperations` describes one declared field; `protocolOperations`
- * only lists operations the request protocol accepts when no field declaration
- * is available.
+ * the selected adapter's declared extension fields. Batch-read limit fields
+ * carry only verified constraints, requested counts, references, or a
+ * confirmed single oversized revision ID.
  */
-export const archiveSearchDiagnosticSchema = z
+export const archiveErrorDiagnosticSchema = z
   .object({
     allowedValues: z.array(archiveExtensionScalarSchema).min(1).optional(),
     allowedItemValues: z.array(archiveExtensionScalarSchema).min(1).optional(),
@@ -1006,13 +1032,23 @@ export const archiveSearchDiagnosticSchema = z
       })
       .strict()
       .optional(),
+    maxReferences: z.int().positive().optional(),
+    requestedReferences: z.int().nonnegative().optional(),
+    maxResponseBytes: z.int().positive().optional(),
+    references: z
+      .array(archiveBatchReadReferenceSchema)
+      .max(archiveBatchReadMaxReferences)
+      .optional(),
+    oversizedRevisionId: archiveIdentifierSchema.optional(),
   })
   .strict();
 
+export const archiveSearchDiagnosticSchema = archiveErrorDiagnosticSchema;
+
 /**
  * Public archive failure envelope. `diagnostic` appears only when the failing
- * input has a closed correction set or a discoverable extension declaration;
- * consumers must not infer candidates from archived data.
+ * input has a closed correction set, a discoverable extension declaration, or
+ * verified batch-read limit/reference facts.
  */
 export const archiveErrorSchema = z
   .object({
@@ -1037,7 +1073,7 @@ export const archiveErrorSchema = z
         ]),
         message: z.string(),
         path: z.array(z.union([z.string(), z.number()])).optional(),
-        diagnostic: archiveSearchDiagnosticSchema.optional(),
+        diagnostic: archiveErrorDiagnosticSchema.optional(),
       })
       .strict(),
   })
@@ -1649,10 +1685,11 @@ export function archiveSearchInputIssue(
   return selectedIssue;
 }
 
-/** Optional correction evidence attached to an archive search failure. */
-export type ArchiveSearchDiagnostic = z.infer<
-  typeof archiveSearchDiagnosticSchema
+/** Optional diagnostic evidence attached to an archive failure. */
+export type ArchiveErrorDiagnostic = z.infer<
+  typeof archiveErrorDiagnosticSchema
 >;
+export type ArchiveSearchDiagnostic = ArchiveErrorDiagnostic;
 
 function archiveExtensionScalarCandidates(
   values: readonly unknown[],

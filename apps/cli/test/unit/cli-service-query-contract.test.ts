@@ -432,7 +432,13 @@ void describe("service query contract discovery", () => {
 
     assert.equal(result.exitCode, 0, result.stderr);
     assert.match(result.stdout, /Service: Binny 1\.2\.3/u);
-    assert.match(result.stdout, /Query contract: v4 at \/meta\/query/u);
+    assert.match(
+      result.stdout,
+      new RegExp(
+        `Query contract: v${String(archiveQueryContractVersion)} at /meta/query`,
+        "u",
+      ),
+    );
     assert.match(
       result.stdout,
       /Operation: search \(POST \/archives\/search\)/u,
@@ -521,7 +527,7 @@ void describe("service query contract discovery", () => {
     assert.equal(requests, 0);
   });
 
-  void it("guides service info to the live query contract command", async () => {
+  void it("reports live query contract metadata from service info without embedding commands", async () => {
     const service = fakeService();
     const result = await run(
       ["service", "info", "--output", "text"],
@@ -529,7 +535,14 @@ void describe("service query contract discovery", () => {
     );
 
     assert.equal(result.exitCode, 0, result.stderr);
-    assert.match(result.stdout, /service query-contract --operation search/u);
+    assert.match(
+      result.stdout,
+      new RegExp(
+        `Archive query v${String(remoteContract.version)}: /meta/query`,
+        "u",
+      ),
+    );
+    assert.doesNotMatch(result.stdout, /service query-contract/u);
     assert.deepEqual(
       service.requests.map(({ path }) => path),
       ["/meta"],

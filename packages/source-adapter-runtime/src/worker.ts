@@ -448,7 +448,6 @@ async function executeRun(
         code: "source_adapter_version_unavailable",
         message: "当前运行器没有本次运行要求的信源适配器版本或动作。",
         impact: "本次运行未执行。",
-        suggestion: "部署对应信源适配器版本后重新触发。",
         requiresHuman: false,
       },
     };

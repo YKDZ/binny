@@ -4,14 +4,14 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 10 removes the deprecated `browserIdleTimeoutSeconds` request/response
- * fields in favor of `runtimeSleep.idleTimeoutSeconds` and adds container sleep
- * queue reasons and wake error details to human sessions.
+ * Version 11 removes `suggestion` from public manual-run/archive diagnostics,
+ * adds structured `sessionState` and `humanSession` facts on runs, and exposes
+ * structured batch-read limit/reference diagnostics.
  */
-export const publicApiProtocolVersion = 10;
+export const publicApiProtocolVersion = 11;
 
 /** Archive search and batch-read contract version. */
-export const archiveQueryContractVersion = 4;
+export const archiveQueryContractVersion = 5;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {

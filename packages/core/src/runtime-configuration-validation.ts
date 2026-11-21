@@ -77,9 +77,7 @@ export async function validateConfigurationAtRuntime(
       },
     };
   } catch {
-    return unavailable(
-      "无法连接当前运行器验证长期配置；请确认运行器在线后重试。",
-    );
+    return unavailable("无法连接当前运行器验证长期配置。");
   }
 }
 

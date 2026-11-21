@@ -1,8 +1,12 @@
 import {
+  archiveBatchReadInputDiagnostic,
   archiveBatchReadInputSchema,
+  archiveBatchReadMaxReferences,
   archiveBatchReadMaxResponseBytes,
   archiveBatchReadResponseSchema,
   archiveRevisionReadSchema,
+  type ArchiveBatchReadReference,
+  type ArchiveErrorDiagnostic,
   type ArchiveOperationContext,
   type ArchiveBatchReadItemResult,
   type ArchiveBatchReadOperation,
@@ -66,13 +70,22 @@ type ReadableRevision = {
   resourceBytes?: number;
 };
 
-function payloadTooLarge(): ArchiveBatchReadOperation<never> {
+function payloadTooLarge(
+  references: readonly ArchiveBatchReadReference[],
+  oversizedRevisionId?: string,
+): ArchiveBatchReadOperation<never> {
   return {
     ok: false,
     status: 413,
     error: {
       code: "payload_too_large",
-      message: `The complete batch response exceeds ${String(archiveBatchReadMaxResponseBytes)} bytes. Split the references into smaller requests; if one revision alone exceeds this limit, read it with archive revision <revision-id>.`,
+      message: `The complete batch read response exceeds ${String(archiveBatchReadMaxResponseBytes)} bytes.`,
+      diagnostic: {
+        maxResponseBytes: archiveBatchReadMaxResponseBytes,
+        maxReferences: archiveBatchReadMaxReferences,
+        references: [...references],
+        ...(oversizedRevisionId === undefined ? {} : { oversizedRevisionId }),
+      },
     },
   };
 }
@@ -80,11 +93,17 @@ function payloadTooLarge(): ArchiveBatchReadOperation<never> {
 function invalidInput(
   message: string,
   path: readonly (string | number)[],
+  diagnostic?: ArchiveErrorDiagnostic,
 ): ArchiveBatchReadOperation<never> {
   return {
     ok: false,
     status: 400,
-    error: { code: "invalid_input", message, path: [...path] },
+    error: {
+      code: "invalid_input",
+      message,
+      path: [...path],
+      ...(diagnostic === undefined ? {} : { diagnostic }),
+    },
   };
 }
 
@@ -116,6 +135,7 @@ export function createArchiveBatchReadOperation(
           issue?.path.map((part) =>
             typeof part === "symbol" ? String(part) : part,
           ) ?? [],
+          archiveBatchReadInputDiagnostic(request, issue),
         );
       }
 
@@ -448,7 +468,9 @@ export function createArchiveBatchReadOperation(
             archiveBatchReadMaxResponseBytes,
             assertActive,
           );
-          if (serializedBytes === undefined) return payloadTooLarge();
+          if (serializedBytes === undefined) {
+            return payloadTooLarge(checked.data.references, row.revisionId);
+          }
           const revisionResourceIds = (revision.state.resources ?? []).map(
             ({ resourceId }) => resourceId,
           );
@@ -462,7 +484,9 @@ export function createArchiveBatchReadOperation(
             archiveBatchReadMaxResponseBytes,
             assertActive,
           );
-          if (minimumResourcesBytes === undefined) return payloadTooLarge();
+          if (minimumResourcesBytes === undefined) {
+            return payloadTooLarge(checked.data.references, row.revisionId);
+          }
           revisionsById.set(revisionId, {
             revision,
             serializedBytes,
@@ -473,7 +497,12 @@ export function createArchiveBatchReadOperation(
             assertActive();
             resourceIds.push(resourceId);
           }
-          if (minimumResponseExceedsLimit()) return payloadTooLarge();
+          if (minimumResponseExceedsLimit()) {
+            return payloadTooLarge(
+              checked.data.references,
+              checked.data.references.length === 1 ? row.revisionId : undefined,
+            );
+          }
         }
 
         const resourceAvailability = await resourceStorage.inspectAvailability(
@@ -495,7 +524,12 @@ export function createArchiveBatchReadOperation(
             archiveBatchReadMaxResponseBytes,
             assertActive,
           );
-          if (resourceBytes === undefined) return payloadTooLarge();
+          if (resourceBytes === undefined) {
+            return payloadTooLarge(
+              checked.data.references,
+              readableRevision.revision.revisionId,
+            );
+          }
           readableRevision.resources = resources;
           readableRevision.resourceBytes = resourceBytes;
           revisionsById.set(revisionId, readableRevision);
@@ -547,7 +581,14 @@ export function createArchiveBatchReadOperation(
               archiveBatchReadMaxResponseBytes,
               assertActive,
             );
-            if (baseBytes === undefined) return payloadTooLarge();
+            if (baseBytes === undefined) {
+              return payloadTooLarge(
+                checked.data.references,
+                checked.data.references.length === 1
+                  ? readableRevision.revision.revisionId
+                  : undefined,
+              );
+            }
             resultBytes =
               baseBytes -
               2 -
@@ -562,10 +603,24 @@ export function createArchiveBatchReadOperation(
               resources: readableRevision.resources,
             };
           }
-          if (resultBytes === undefined) return payloadTooLarge();
+          if (resultBytes === undefined) {
+            return payloadTooLarge(
+              checked.data.references,
+              checked.data.references.length === 1 &&
+                result.status === "readable"
+                ? result.revision.revisionId
+                : undefined,
+            );
+          }
           responseBytes += resultBytes + (index > 0 ? 1 : 0);
           if (responseBytes > archiveBatchReadMaxResponseBytes) {
-            return payloadTooLarge();
+            return payloadTooLarge(
+              checked.data.references,
+              checked.data.references.length === 1 &&
+                result.status === "readable"
+                ? result.revision.revisionId
+                : undefined,
+            );
           }
           results.push(result);
         }

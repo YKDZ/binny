@@ -151,7 +151,6 @@ export async function loadIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: "当前运行器未提供信源适配器持久状态。",
       impact: "本次同步已停止，未读取或更新状态。",
-      suggestion: "检查运行器持久状态存储配置后重新触发。",
       requiresHuman: false,
     });
   }
@@ -163,7 +162,6 @@ export async function loadIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: `无法读取信源适配器持久状态：${error instanceof Error ? error.message : String(error)}`,
       impact: "本次同步已停止，未读取或更新状态。",
-      suggestion: "检查持久状态存储后重新触发；不要手动清空状态。",
       requiresHuman: true,
     });
   }
@@ -176,7 +174,6 @@ export async function loadIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: "信源适配器持久状态不符合声明的格式规范。",
       impact: "本次同步已停止，未重置或推进任何范围。",
-      suggestion: "检查持久状态存储内容或恢复有效备份后重新触发。",
       requiresHuman: true,
     });
   }
@@ -193,7 +190,6 @@ export async function saveIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: "当前运行器未提供信源适配器持久状态。",
       impact: "本次同步已停止，状态未持久保存。",
-      suggestion: "检查运行器持久状态存储配置后重新触发。",
       requiresHuman: false,
     });
   }
@@ -203,7 +199,6 @@ export async function saveIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: "要保存的信源适配器持久状态格式无效。",
       impact: "本次同步已停止，状态未持久保存。",
-      suggestion: "检查状态对象是否符合规范后重新触发。",
       requiresHuman: false,
     });
   }
@@ -214,7 +209,6 @@ export async function saveIncrementalSyncState(
       code: "source_adapter_state_unavailable",
       message: `无法保存信源适配器持久状态：${error instanceof Error ? error.message : String(error)}`,
       impact: "本次同步已停止，状态未持久保存。",
-      suggestion: "检查持久状态存储后重新触发；不要手动清空状态。",
       requiresHuman: true,
     });
   }

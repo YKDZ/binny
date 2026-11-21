@@ -164,9 +164,7 @@ export async function validateActionParametersAtRuntime(
       },
     };
   } catch {
-    return unavailable(
-      "无法连接当前运行器验证动作参数；请确认运行器在线后重试。",
-    );
+    return unavailable("无法连接当前运行器验证动作参数。");
   }
 }
 
@@ -242,7 +240,7 @@ export async function checkActionPreflightPreconditions(
     return failure(
       400,
       "invalid_configuration",
-      "Persistent configuration has not passed native validation on the current runtime yet; update the configuration first.",
+      "Persistent configuration has not passed native validation on the current runtime.",
       ["config"],
     );
   return undefined;
@@ -278,7 +276,7 @@ export async function preflightActionInput(
     return failure(
       400,
       "invalid_configuration",
-      "Persistent configuration has not passed native validation on the current runtime yet; update the configuration first.",
+      "Persistent configuration has not passed native validation on the current runtime.",
       ["config"],
     );
   if (

@@ -719,8 +719,6 @@ function failureFromProblems(
       message: `Qoder international blog collection incomplete: ${examples}`,
       impact:
         "Affected blog articles were not archived or their incremental progress was not advanced.",
-      suggestion:
-        "Check blog list accessibility, detail page status, and media availability.",
       requiresHuman: false,
     },
     completedScopes,
@@ -748,8 +746,6 @@ export async function checkInternationalBlog(
           code: "qoder_blog_list_unreachable",
           message: error instanceof Error ? error.message : String(error),
           impact: "Cannot discover international blog articles.",
-          suggestion:
-            "Check network connectivity and blogListUrl configuration.",
           requiresHuman: false,
         },
       ],
@@ -767,7 +763,6 @@ export async function checkInternationalBlog(
           code: "qoder_blog_no_articles_discovered",
           message: `Zero articles found on ${blogListUrl}.`,
           impact: "No blog articles available for collection.",
-          suggestion: "Verify blogListUrl HTML structure and article links.",
           requiresHuman: false,
         },
       ],
@@ -801,7 +796,6 @@ export async function checkInternationalBlog(
           code: "qoder_blog_sample_article_failed",
           message: error instanceof Error ? error.message : String(error),
           impact: "Detail page extraction could not be validated.",
-          suggestion: "Check sample article detail page availability.",
           requiresHuman: false,
         },
       ],

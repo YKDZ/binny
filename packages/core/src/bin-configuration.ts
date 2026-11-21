@@ -570,7 +570,7 @@ export function createBinConfigurationStore(
               return failure(
                 409,
                 "configuration_changed",
-                "配置或运行器声明在原生校验期间发生变化，请重新提交并验证。",
+                "配置或运行器声明在原生校验期间发生变化，本次更新未保存。",
                 ["config"],
               );
             }
@@ -658,7 +658,6 @@ export function createBinConfigurationStore(
                   code: "bin_disabled",
                   message: "bin 已停用，排队中的运行没有执行。",
                   impact: "排队中的运行已结束。",
-                  suggestion: "重新启用后可创建新的运行。",
                   requiresHuman: false,
                 },
                 finishedAt: sql`clock_timestamp()`,

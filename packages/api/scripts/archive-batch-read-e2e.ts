@@ -318,9 +318,9 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     const error = (await outOfRangeSequence.json()).error;
     assert.equal(error.code, "invalid_input");
     assert.deepEqual(error.path, ["references", 0, "archiveSeq"]);
-    assert.match(
+    assert.equal(
       error.message,
-      /Archive sequence must be between 1 and 9223372036854775807.*archiveSeq from the selected search match/u,
+      "Archive sequence must be between 1 and 9223372036854775807.",
     );
   }
 
@@ -366,7 +366,14 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
     const error = (await tooManyReferences.json()).error;
     assert.equal(error.code, "invalid_input");
     assert.deepEqual(error.path, ["references"]);
-    assert.match(error.message, /Read at most 50 references.*another request/u);
+    assert.equal(
+      error.message,
+      `Batch read accepts at most ${String(archiveBatchReadMaxReferences)} references per request.`,
+    );
+    assert.deepEqual(error.diagnostic, {
+      maxReferences: archiveBatchReadMaxReferences,
+      requestedReferences: archiveBatchReadMaxReferences + 1,
+    });
   }
 
   const oversizedToken = token + ":oversized";
@@ -433,15 +440,20 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
   if (oversizedRead.status === 413) {
     const error = (await oversizedRead.json()).error;
     assert.equal(error.code, "payload_too_large");
-    assert.match(
+    assert.equal(
       error.message,
-      new RegExp(
-        `complete batch response exceeds ${String(archiveBatchReadMaxResponseBytes)} bytes`,
-        "u",
-      ),
+      `The complete batch read response exceeds ${String(archiveBatchReadMaxResponseBytes)} bytes.`,
     );
-    assert.match(error.message, /Split the references into smaller requests/u);
-    assert.match(error.message, /archive revision <revision-id>/u);
+    assert.doesNotMatch(
+      error.message,
+      /Split the references|archive revision/u,
+    );
+    assert.deepEqual(error.diagnostic, {
+      maxResponseBytes: archiveBatchReadMaxResponseBytes,
+      maxReferences: archiveBatchReadMaxReferences,
+      references: [oversizedReference],
+      oversizedRevisionId: oversizedReference.revisionId,
+    });
   }
 
   const singleOversizedFallback = await client.archives.revisions[
@@ -551,6 +563,12 @@ async function verifyArchiveBatchRead(baseUrl: string): Promise<{
   if (cumulativeRead.status === 413) {
     const error = (await cumulativeRead.json()).error;
     assert.equal(error.code, "payload_too_large");
+    assert.equal(error.diagnostic?.oversizedRevisionId, undefined);
+    assert.deepEqual(error.diagnostic, {
+      maxResponseBytes: archiveBatchReadMaxResponseBytes,
+      maxReferences: archiveBatchReadMaxReferences,
+      references: cumulativeReferences,
+    });
   }
 
   for (const [index, cumulativeReference] of cumulativeReferences.entries()) {

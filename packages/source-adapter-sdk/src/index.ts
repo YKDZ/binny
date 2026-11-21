@@ -151,6 +151,7 @@ export type {
   JsonObject,
   ManualRunAbortCause,
   ManualRunFailure,
+  ManualRunSessionState,
   SourceAdapterManifest,
   JsonSchema,
 } from "@binny/contracts";
@@ -544,9 +545,6 @@ export function createSourceAdapterContext<
               ...(result.error.path === undefined
                 ? {}
                 : { path: result.error.path }),
-              ...(result.error.code === "invalid_input"
-                ? { suggestion: "检查信源适配器整理后的资料内容。" }
-                : {}),
               requiresHuman: false,
             });
           }

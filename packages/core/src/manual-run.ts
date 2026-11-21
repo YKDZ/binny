@@ -46,6 +46,7 @@ import {
   interruptExpiredManualRuns,
   isRuntimeBrowserBusy,
   isRuntimeOwnerWritable,
+  parseStoredManualRunFailure,
 } from "./manual-run-fencing.ts";
 import {
   actionInputSnapshotStillCurrent,
@@ -127,7 +128,7 @@ export function deriveManualRunStopReasonCode(input: {
       : "cancelled";
   }
   const failureValue =
-    input.failure === null ? null : manualRunFailureSchema.parse(input.failure);
+    input.failure === null ? null : parseStoredManualRunFailure(input.failure);
   if (failureValue !== null) return failureValue.code;
   return input.status === "failed" ? "failed" : "completed";
 }
@@ -539,7 +540,38 @@ async function rowToRun(
     row.status === "failed" ||
     row.status === "cancelled";
   const failureValue =
-    row.failure === null ? null : manualRunFailureSchema.parse(row.failure);
+    row.failure === null ? null : parseStoredManualRunFailure(row.failure);
+  const [activeHumanSession] = await database
+    .select({
+      sessionId: humanSessions.sessionId,
+      status: humanSessions.status,
+    })
+    .from(humanSessions)
+    .where(
+      and(
+        eq(humanSessions.binId, row.binId),
+        inArray(humanSessions.status, [
+          "pending",
+          "opening",
+          "ready",
+          "closing",
+        ]),
+      ),
+    )
+    .limit(1);
+  const humanSession =
+    activeHumanSession !== undefined &&
+    (activeHumanSession.status === "pending" ||
+      activeHumanSession.status === "opening" ||
+      activeHumanSession.status === "ready" ||
+      activeHumanSession.status === "closing")
+      ? {
+          status: activeHumanSession.status,
+          sessionId: activeHumanSession.sessionId,
+        }
+      : failureValue?.requiresHuman === true
+        ? { status: "none" as const }
+        : undefined;
   return manualRunSchema.parse({
     runId: row.runId,
     binId: row.binId,
@@ -552,6 +584,7 @@ async function rowToRun(
     ...(row.lastWakeError === undefined
       ? {}
       : { lastWakeError: row.lastWakeError }),
+    ...(humanSession === undefined ? {} : { humanSession }),
     ...(row.cancelRequestedAt === null
       ? {}
       : { cancellationRequestedAt: row.cancelRequestedAt.toISOString() }),
@@ -626,7 +659,7 @@ export async function createQueuedRunInTransaction(
     return failure(
       400,
       "invalid_configuration",
-      "长期配置尚未通过当前运行器的原生校验，请先更新配置。",
+      "长期配置尚未通过当前运行器的原生校验。",
       ["config"],
     );
   }
@@ -747,7 +780,7 @@ export function createManualRunStore(
             return failure(
               409,
               "action_input_changed",
-              "长期配置或运行器在动作参数原生校验期间发生变化，请重新提交。",
+              "长期配置或运行器在动作参数原生校验期间发生变化，本次运行未创建。",
               ["params"],
             );
           }
@@ -1032,7 +1065,6 @@ export function createManualRunStore(
             code: "source_adapter_changed_before_execution",
             message: "信源适配器清单在运行排队期间发生变化，本次动作没有执行。",
             impact: "本次运行未执行。",
-            suggestion: "确认信源适配器版本后重新触发。",
             requiresHuman: false,
           });
           return { ok: true, value: null };
@@ -1226,7 +1258,6 @@ async function failQueuedRuns(
     code,
     message: "bin 已停用，排队中的运行没有执行。",
     impact: "排队中的运行已结束。",
-    suggestion: "重新启用后可创建新的运行。",
     requiresHuman: false,
   };
   await transaction

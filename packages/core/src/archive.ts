@@ -689,7 +689,7 @@ export function createArchiveStore(
               return failure(
                 409,
                 "relation_endpoint_conflict",
-                "关系标识已经绑定到其他端点；更改端点时请使用新的关系标识。",
+                "关系标识已经绑定到其他端点。",
                 ["relations", index, "relationId"],
               );
             }

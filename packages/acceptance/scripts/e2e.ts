@@ -952,6 +952,10 @@ async function archiveBatchReadCliStep(
     readonly code: string;
     readonly path?: readonly (string | number)[];
     readonly message: string;
+    readonly diagnostic?: {
+      readonly maxReferences?: number;
+      readonly requestedReferences?: number;
+    };
   }>(
     await cli(baseUrl, [
       "archive",
@@ -962,11 +966,26 @@ async function archiveBatchReadCliStep(
     "invalid_input",
   );
   assert.deepEqual(tooMany.path, ["references"]);
-  assert.match(tooMany.message, /Read at most 50 references.*another request/u);
+  assert.match(tooMany.message, /at most 50 references/u);
+  assert.doesNotMatch(tooMany.message, /another request/u);
+  assert.deepEqual(tooMany.diagnostic, {
+    maxReferences: 50,
+    requestedReferences: 51,
+  });
 
   const payloadFailure = cliFailure<{
     readonly code: string;
     readonly message: string;
+    readonly diagnostic?: {
+      readonly maxResponseBytes?: number;
+      readonly maxReferences?: number;
+      readonly references?: readonly {
+        readonly kind: string;
+        readonly itemId?: string;
+        readonly revisionId?: string;
+      }[];
+      readonly oversizedRevisionId?: string;
+    };
   }>(
     await cli(baseUrl, [
       "archive",
@@ -976,11 +995,14 @@ async function archiveBatchReadCliStep(
     ]),
     "payload_too_large",
   );
-  assert.match(
-    payloadFailure.message,
-    /Split the references into smaller requests/u,
-  );
-  assert.match(payloadFailure.message, /archive revision <revision-id>/u);
+  assert.doesNotMatch(payloadFailure.message, /Split the/u);
+  assert.doesNotMatch(payloadFailure.message, /archive revision/u);
+  assert.deepEqual(payloadFailure.diagnostic, {
+    maxResponseBytes: 16_777_216,
+    maxReferences: 50,
+    references: [fixture.oversizedReference],
+    oversizedRevisionId: fixture.oversizedReference.revisionId,
+  });
 
   const singleRevisionFallback = cliData<{
     readonly revisionId: string;
@@ -990,7 +1012,7 @@ async function archiveBatchReadCliStep(
     await cli(baseUrl, [
       "archive",
       "revision",
-      fixture.oversizedReference.revisionId,
+      payloadFailure.diagnostic.oversizedRevisionId,
     ]),
     "found",
   );
@@ -1015,6 +1037,16 @@ async function archiveBatchReadCliStep(
   const cumulativePayloadFailure = cliFailure<{
     readonly code: string;
     readonly message: string;
+    readonly diagnostic?: {
+      readonly maxResponseBytes?: number;
+      readonly maxReferences?: number;
+      readonly references?: readonly {
+        readonly kind: string;
+        readonly itemId?: string;
+        readonly revisionId?: string;
+      }[];
+      readonly oversizedRevisionId?: string;
+    };
   }>(
     await cli(baseUrl, [
       "archive",
@@ -1024,15 +1056,20 @@ async function archiveBatchReadCliStep(
     ]),
     "payload_too_large",
   );
-  assert.match(
-    cumulativePayloadFailure.message,
-    /Split the references into smaller requests/u,
+  assert.doesNotMatch(cumulativePayloadFailure.message, /Split/u);
+  assert.equal(
+    cumulativePayloadFailure.diagnostic?.oversizedRevisionId,
+    undefined,
   );
+  assert.deepEqual(cumulativePayloadFailure.diagnostic, {
+    maxResponseBytes: 16_777_216,
+    maxReferences: 50,
+    references: fixture.cumulativeReferences,
+  });
 
-  for (const [
-    index,
-    cumulativeReference,
-  ] of fixture.cumulativeReferences.entries()) {
+  for (const [index, cumulativeReference] of (
+    cumulativePayloadFailure.diagnostic?.references ?? []
+  ).entries()) {
     const splitBatch = cliData<{
       readonly results: readonly {
         readonly index: number;
@@ -1709,8 +1746,10 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     );
     assert.match(
       unknownFieldText.stderr,
-      /Discover extension fields: binny bin extension-fields binny-runs-one/u,
+      /Source adapter: binny-runs\.manual-run-fixture@1\.0\.0/u,
     );
+    assert.match(unknownFieldText.stderr, /Bin: binny-runs-one/u);
+    assert.doesNotMatch(unknownFieldText.stderr, /binny bin extension-fields/u);
 
     const invalidItemValueText = await cli(baseUrl, [
       "archive",
@@ -2424,10 +2463,9 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     /Candidate order: observedAt desc \(itemId asc\)/u,
   );
   assert.match(readable.stdout, /Matches on this page: 1/u);
-  assert.match(
-    readable.stdout,
-    /More results are available\. Repeat with query\.cursor set to [A-Za-z0-9_-]+\./u,
-  );
+  assert.match(readable.stdout, /More results: true/u);
+  assert.match(readable.stdout, /Next cursor: [A-Za-z0-9_-]+/u);
+  assert.doesNotMatch(readable.stdout, /Repeat with/u);
   assert.doesNotMatch(readable.stdout, /"results"\s*:/u);
 
   const timeWindowReadable = await cli(baseUrl, [
@@ -4443,7 +4481,7 @@ type ManualActionOutput = {
   readonly problems?: readonly {
     readonly code: string;
     readonly message?: string;
-    readonly suggestion?: string;
+    readonly impact?: string;
     readonly requiresHuman?: boolean;
   }[];
 };
@@ -4469,7 +4507,6 @@ type RssManualRun = {
     readonly error?: {
       readonly code: string;
       readonly message: string;
-      readonly suggestion?: string;
     };
   };
 };
@@ -7191,9 +7228,9 @@ async function manualRunsCliStep(
   assert.equal(checkedRun.status, "completed");
   assert.equal(checkedRun.result?.output?.availability, "unknown");
   assert.deepEqual(checkedRun.result?.commits, []);
-  assert.ok(
-    (checkedRun.result?.output?.problems?.[0]?.suggestion?.length ?? 0) > 0,
-  );
+  const checkedProblem = checkedRun.result?.output?.problems?.[0];
+  assert.ok(checkedProblem);
+  assert.equal("suggestion" in checkedProblem, false);
   assert.equal(checkedRun.result?.stopReason.code, "completed");
 
   const followUpGateKey = "check-cli-collect-after-check";
@@ -7319,7 +7356,8 @@ async function manualRunsCliStep(
   ]);
   assert.equal(readableRunHistory.code, 0, readableRunHistory.stderr);
   assert.match(readableRunHistory.stdout, /Runs/u);
-  assert.match(readableRunHistory.stdout, /binny run get binny-runs-one /u);
+  assert.ok(readableRunHistory.stdout.includes(checkTriggered.runId));
+  assert.doesNotMatch(readableRunHistory.stdout, /binny run get/u);
   assert.doesNotMatch(readableRunHistory.stdout, /"runs"/u);
   const firstHistoryRun = firstHistoryPage.runs[0];
   assert.ok(firstHistoryRun);
@@ -7880,10 +7918,8 @@ async function manualRunsCliStep(
   ]);
   assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
   assert.match(readableScheduleList.stdout, /Schedules/u);
-  assert.match(
-    readableScheduleList.stdout,
-    /binny schedule get binny-runs-one /u,
-  );
+  assert.ok(readableScheduleList.stdout.includes(createdSchedule.scheduleId));
+  assert.doesNotMatch(readableScheduleList.stdout, /binny schedule get/u);
   assert.doesNotMatch(readableScheduleList.stdout, /"schedules"/u);
   cliFailure<{ readonly code: string }>(
     await cli(baseUrl, [
@@ -8120,7 +8156,8 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
   ]);
   assert.equal(readableRunList.code, 0, readableRunList.stderr);
   assert.match(readableRunList.stdout, /Runs/u);
-  assert.match(readableRunList.stdout, /binny run get /u);
+  assert.ok(readableRunList.stdout.includes(selectedRun.runId));
+  assert.doesNotMatch(readableRunList.stdout, /binny run get/u);
   assert.doesNotMatch(readableRunList.stdout, /"runs"/u);
 
   const schedules: { readonly binId: string; readonly scheduleId: string }[] =
@@ -8262,7 +8299,12 @@ async function verifyGlobalOperationsCli(baseUrl: string): Promise<void> {
     ]);
     assert.equal(readableScheduleList.code, 0, readableScheduleList.stderr);
     assert.match(readableScheduleList.stdout, /Schedules/u);
-    assert.match(readableScheduleList.stdout, /binny schedule get /u);
+    assert.ok(
+      readableScheduleList.stdout.includes(
+        disabledPlans.schedules[0]!.scheduleId,
+      ),
+    );
+    assert.doesNotMatch(readableScheduleList.stdout, /binny schedule get/u);
     assert.doesNotMatch(readableScheduleList.stdout, /"schedules"/u);
   } finally {
     for (const schedule of schedules) {
@@ -12818,9 +12860,10 @@ async function runRssAcceptance(
   assert.deepEqual(badIdentityCheck.result?.output?.scope, ["bad-identity"]);
   assert.ok(
     badIdentityCheck.result?.output?.problems?.some(
-      ({ code, suggestion }) =>
-        code === "rss_entry_identity_unavailable" &&
-        (suggestion?.length ?? 0) > 0,
+      (problem) =>
+        problem.code === "rss_entry_identity_unavailable" &&
+        !("suggestion" in problem) &&
+        (problem.impact?.length ?? 0) > 0,
     ),
   );
   const badIdentityRun = await triggerRssAction(

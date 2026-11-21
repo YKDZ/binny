@@ -83,7 +83,6 @@ const diagnosticOutputSchema = z.object({
       code: z.string(),
       message: z.string(),
       impact: z.string(),
-      suggestion: z.string(),
       requiresHuman: z.boolean(),
     }),
   ),
@@ -153,7 +152,6 @@ export default defineSourceAdapter({
             code: "source_check_failed",
             message: "信源没有完成可用性检查。",
             impact: "本次检查未得出诊断结果。",
-            suggestion: "检查信源连接后重新触发 check。",
             requiresHuman: false,
           });
         }
@@ -357,7 +355,6 @@ export default defineSourceAdapter({
             code: "source_unavailable",
             message: "信源暂时无法提供资料。",
             impact: "本次信源范围未能归档。",
-            suggestion: "检查信源连接后重新触发。",
             requiresHuman: false,
           });
         }
@@ -369,7 +366,6 @@ export default defineSourceAdapter({
             message: "信源要求人工处理后才能继续读取。",
             impact: "条目 " + source.sourceKey + " 未写入本次归档。",
             path: ["source", "title"],
-            suggestion: "请在人工会话中完成信源验证后重新触发。",
             requiresHuman: true,
           });
         }
@@ -378,7 +374,6 @@ export default defineSourceAdapter({
             code: "source_returned_no_material",
             message: "信源没有返回可归档资料。",
             impact: "条目 " + source.sourceKey + " 保留此前归档状态。",
-            suggestion: "检查目标是否仍可访问后重新触发。",
             requiresHuman: false,
           });
         }
@@ -460,7 +455,6 @@ export default defineSourceAdapter({
               source.sourceKey +
               " 已保存，后续范围没有写入本次归档。",
             path: ["source", "title"],
-            suggestion: "完成信源验证后重新触发新的运行。",
             requiresHuman: true,
           });
         }
