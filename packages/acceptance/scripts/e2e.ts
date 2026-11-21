@@ -14100,20 +14100,7 @@ async function main(): Promise<void> {
                   "runtime-rss-two",
                   "heartbeat-proxy",
                 ];
-    if (runFunctionalJourney && !rssLinuxdoOnly) {
-      e2eServices.push(
-        "runtime-linuxdo",
-        "runtime-linuxdo-two",
-        "linuxdo-e2e-source",
-      );
-    }
-    if (runFunctionalJourney && rssLinuxdoOnly) {
-      e2eServices.push(
-        "runtime-linuxdo",
-        "runtime-linuxdo-two",
-        "linuxdo-e2e-source",
-      );
-    }
+    if (runFunctionalJourney) e2eServices.push("linuxdo-e2e-source");
     await compose([
       "up",
       "--detach",
@@ -14369,6 +14356,14 @@ async function main(): Promise<void> {
           "隔离客户端、RSS/Atom 全文、媒体状态、Compose、PostgreSQL、HTTP API、归档与构建 CLI 旅程通过。\n",
         );
       }
+      await compose([
+        "up",
+        "--detach",
+        "--no-deps",
+        "--no-build",
+        "runtime-linuxdo",
+        "runtime-linuxdo-two",
+      ]);
       await createLinuxdoBin(baseUrl);
       await createLinuxdoBin(
         baseUrl,
