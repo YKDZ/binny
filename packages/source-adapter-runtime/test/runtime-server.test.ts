@@ -51,9 +51,11 @@ function sourceAdapter(includeConstructor: boolean) {
 async function withRuntimeServer(
   includeConstructor: boolean,
   run: (baseUrl: string) => Promise<void>,
+  isReady?: () => { readonly ready: boolean; readonly reason?: string },
 ): Promise<void> {
   const server = createRuntimeServer({
     sourceAdapter: sourceAdapter(includeConstructor),
+    ...(isReady === undefined ? {} : { isReady }),
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -114,5 +116,43 @@ void describe("运行器动作参数校验 HTTP", () => {
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { valid: true });
     });
+  });
+
+  void it("浏览器未就绪时 /health 与原生校验接口返回 503，就绪后恢复 200", async () => {
+    let ready = false;
+    await withRuntimeServer(
+      false,
+      async (baseUrl) => {
+        const healthNotReady = await fetch(new URL("/health", baseUrl));
+        assert.equal(healthNotReady.status, 503);
+
+        const configNotReady = await fetch(
+          new URL("/internal/configuration/validate", baseUrl),
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              sourceAdapterId: "test.runtime-action-lookup",
+              sourceAdapterVersion: "1.0.0",
+              config: {},
+            }),
+          },
+        );
+        assert.equal(configNotReady.status, 503);
+
+        const actionNotReady = await validateAction(baseUrl, "check");
+        assert.equal(actionNotReady.status, 503);
+
+        ready = true;
+        const healthReady = await fetch(new URL("/health", baseUrl));
+        assert.equal(healthReady.status, 200);
+        assert.deepEqual(await healthReady.json(), { process: "ready" });
+
+        const actionReady = await validateAction(baseUrl, "check");
+        assert.equal(actionReady.status, 200);
+      },
+      () =>
+        ready ? { ready: true } : { ready: false, reason: "browser_starting" },
+    );
   });
 });

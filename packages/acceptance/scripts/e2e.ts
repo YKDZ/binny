@@ -4197,6 +4197,35 @@ async function waitForRuntime(baseUrl: string, binId: string): Promise<void> {
   assert.fail(`bin ${binId} 的运行器没有上线。`);
 }
 
+async function serviceContainerId(service: string): Promise<string> {
+  const result = await compose(["ps", "--all", "--quiet", service]);
+  const cid = result.stdout.trim().split("\n")[0];
+  assert.ok(cid, `Compose service ${service} has no container ID.`);
+  return cid;
+}
+
+async function inspectContainerState(containerId: string): Promise<{
+  readonly status: string;
+  readonly exitCode: number;
+  readonly startedAt: string;
+}> {
+  const result = await run(
+    "docker",
+    [
+      "inspect",
+      "--format",
+      "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.StartedAt}}",
+      containerId,
+    ],
+    { env: composeEnvironment() },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const [status = "", exitCodeText = "0", startedAt = ""] = result.stdout
+    .trim()
+    .split("\t");
+  return { status, exitCode: Number(exitCodeText), startedAt };
+}
+
 async function waitForBinRegistration(
   baseUrl: string,
   binId: string,
@@ -5576,11 +5605,15 @@ async function verifyLinuxdoIndependentBrowsersJourney(
 ): Promise<void> {
   const firstBinId = "binny-integration-linuxdo";
   const secondBinId = "binny-integration-linuxdo-two";
-  const browserServices = ["runtime-linuxdo", "runtime-linuxdo-two"] as const;
+  const browserServices = {
+    [firstBinId]: "runtime-linuxdo",
+    [secondBinId]: "runtime-linuxdo-two",
+  } as const;
   type BrowserBin = {
-    readonly browserIdleTimeoutSeconds: number | null;
+    readonly runtimeSleep: { readonly idleTimeoutSeconds: number | null };
     readonly execution: {
       readonly status: string;
+      readonly phase?: string;
       readonly environment?: {
         readonly browser?: { readonly power?: { readonly status: string } };
       };
@@ -5598,7 +5631,7 @@ async function verifyLinuxdoIndependentBrowsersJourney(
         "bin",
         "update",
         binId,
-        "--browser-idle-timeout-seconds",
+        "--idle-timeout-seconds",
         String(timeout),
       ]),
       "updated",
@@ -5615,11 +5648,42 @@ async function verifyLinuxdoIndependentBrowsersJourney(
         bin.execution.environment?.browser?.power?.status === status,
       `${binId} 浏览器进入 ${status}`,
     );
-  const browserProcesses = async (service?: string) => {
+  const waitForContainerSleeping = async (
+    binId: string,
+    service: (typeof browserServices)[keyof typeof browserServices],
+  ): Promise<BrowserBin> => {
+    const cid = await serviceContainerId(service);
+    return (
+      await waitFor(
+        async () => {
+          const [bin, dockerState] = await Promise.all([
+            readBin(binId),
+            inspectContainerState(cid),
+          ]);
+          return { bin, dockerState };
+        },
+        ({ bin, dockerState }) =>
+          bin.execution.status === "sleeping" &&
+          bin.execution.phase === "sleeping" &&
+          dockerState.status === "exited" &&
+          dockerState.exitCode === 0,
+        `${binId} 进入容器休眠 (exited 0)`,
+      )
+    ).bin;
+  };
+  const browserProcesses = async (
+    service?: (typeof browserServices)[keyof typeof browserServices],
+  ) => {
+    const targetServices =
+      service === undefined ? Object.values(browserServices) : [service];
     const snapshots = await Promise.all(
-      (service === undefined ? browserServices : [service]).map((serviceName) =>
-        runtimeProcessSnapshot(serviceName),
-      ),
+      targetServices.map(async (serviceName) => {
+        const state = await inspectContainerState(
+          await serviceContainerId(serviceName),
+        );
+        if (state.status !== "running") return [];
+        return runtimeProcessSnapshot(serviceName);
+      }),
     );
     return snapshots
       .flat()
@@ -5696,39 +5760,43 @@ async function verifyLinuxdoIndependentBrowsersJourney(
 
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   assert.equal(
-    (await waitForPower(firstBinId, "ready")).browserIdleTimeoutSeconds,
+    (await waitForPower(firstBinId, "ready")).runtimeSleep.idleTimeoutSeconds,
     0,
   );
   assert.equal(
-    (await waitForPower(secondBinId, "ready")).browserIdleTimeoutSeconds,
+    (await waitForPower(secondBinId, "ready")).runtimeSleep.idleTimeoutSeconds,
     null,
   );
   assert.equal((await browserProcesses()).length, 2);
 
   await closeHuman(firstBinId, firstHuman.sessionId);
-  const firstStopped = await waitForPower(firstBinId, "stopped");
-  assert.equal(firstStopped.browserIdleTimeoutSeconds, 0);
+  const firstStopped = await waitForContainerSleeping(
+    firstBinId,
+    browserServices[firstBinId],
+  );
+  assert.equal(firstStopped.runtimeSleep.idleTimeoutSeconds, 0);
   assert.equal((await browserProcesses("runtime-linuxdo")).length, 0);
   assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
 
   await closeHuman(secondBinId, secondHuman.sessionId);
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000));
   assert.equal(
-    (await waitForPower(secondBinId, "ready")).browserIdleTimeoutSeconds,
+    (await waitForPower(secondBinId, "ready")).runtimeSleep.idleTimeoutSeconds,
     null,
   );
   assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
 
-  // First bin can run concurrently while second bin remains ready.
+  // First bin can wake from sleep and run concurrently while second bin remains ready.
   const concurrentFirstCheck = await triggerCheck(firstBinId);
   const firstRun = await waitForRunEnd(firstBinId, concurrentFirstCheck.runId);
   assert.equal(firstRun.status, "completed");
   assert.equal(firstRun.result?.output?.availability, "available");
-  await waitForPower(firstBinId, "stopped");
+  await waitForContainerSleeping(firstBinId, browserServices[firstBinId]);
   assert.equal((await browserProcesses("runtime-linuxdo")).length, 0);
   assert.equal((await browserProcesses("runtime-linuxdo-two")).length, 1);
 
-  // Same-bin exclusion still blocks automatic runs behind an active human session.
+  // Opening a human session wakes a sleeping container, and same-bin exclusion
+  // still blocks automatic runs behind an active human session.
   const blockingHuman = await openLinuxdoHumanSession(
     cliForLinuxdo,
     firstBinId,
@@ -5745,17 +5813,16 @@ async function verifyLinuxdoIndependentBrowsersJourney(
   await closeHuman(firstBinId, blockingHuman.sessionId);
   const unblockedRun = await waitForRunEnd(firstBinId, blockedRun.runId);
   assert.equal(unblockedRun.status, "completed");
-  await waitForPower(firstBinId, "stopped");
+  await waitForContainerSleeping(firstBinId, browserServices[firstBinId]);
   await updateIdleTimeout(secondBinId, 0);
-  await waitForPower(secondBinId, "stopped");
+  await waitForContainerSleeping(secondBinId, browserServices[secondBinId]);
   assert.equal((await browserProcesses()).length, 0);
 
   process.stdout.write(
     "同项目 Linux.do 双桶独立浏览器实测：" +
       JSON.stringify({
         concurrentBrowsersObserved: 2,
-        firstStoppedAfterHumanClose:
-          firstStopped.execution.environment?.browser?.power?.status,
+        firstSleepingAfterHumanClose: firstStopped.execution.status,
         disabledSecondStayedReady: true,
         sameBinRunQueueReason: blockedRun.queueReason,
         finalBrowserMainProcessCount: 0,
@@ -12747,37 +12814,6 @@ async function verifyRssRuntimeSleepJourney(
       "found",
     );
 
-  const serviceContainerId = async (service: string): Promise<string> => {
-    const result = await compose(["ps", "--all", "--quiet", service]);
-    const cid = result.stdout.trim().split("\n")[0];
-    assert.ok(cid, `Compose service ${service} has no container ID.`);
-    return cid;
-  };
-
-  const inspectContainerState = async (
-    containerId: string,
-  ): Promise<{
-    readonly status: string;
-    readonly exitCode: number;
-    readonly startedAt: string;
-  }> => {
-    const result = await run(
-      "docker",
-      [
-        "inspect",
-        "--format",
-        "{{.State.Status}}\t{{.State.ExitCode}}\t{{.State.StartedAt}}",
-        containerId,
-      ],
-      { env: composeEnvironment() },
-    );
-    assert.equal(result.code, 0, result.stderr);
-    const [status = "", exitCodeText = "0", startedAt = ""] = result.stdout
-      .trim()
-      .split("\t");
-    return { status, exitCode: Number(exitCodeText), startedAt };
-  };
-
   const waitForContainerSleeping = async (
     binId: string,
     service: string,
@@ -14218,11 +14254,6 @@ async function main(): Promise<void> {
         rssControlSource,
         rssImageUpdate,
       );
-      baseUrl = await verifyRssRuntimeSleepJourney(
-        baseUrl,
-        rssControlSource,
-        rssAcceptance,
-      );
       if (!rssLinuxdoOnly) {
         await runArticleAdaptersJourney({
           baseUrl,
@@ -14320,6 +14351,11 @@ async function main(): Promise<void> {
         linuxdoImageUpdate,
       );
       await verifyLinuxdoIndependentBrowsersJourney(baseUrl);
+      baseUrl = await verifyRssRuntimeSleepJourney(
+        baseUrl,
+        rssControlSource,
+        rssAcceptance,
+      );
       if (rssLinuxdoOnly) {
         process.stdout.write(
           "RSS/Atom, Linux.do source mapping, media reuse, and public history readback passed.\n",

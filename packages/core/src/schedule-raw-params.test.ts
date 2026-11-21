@@ -165,7 +165,7 @@ function createScheduleMockDatabase(options: {
     identityId: "identity-1",
     config: { origin: "https://linux.do" },
     configNativeValid: true,
-    browserIdleTimeoutSeconds: 300,
+    runtimeSleepIdleTimeoutSeconds: 300,
     status: "active" as const,
   };
   const connection = {

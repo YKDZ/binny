@@ -106,7 +106,9 @@ export async function createServerRuntime(options: {
   const runListings = createManualRunListStore(database);
   const schedules = createScheduleStore(database, { containerCoordinator });
   const scheduleListings = createScheduleListStore(database);
-  const humanSessions = createHumanSessionStore(database);
+  const humanSessions = createHumanSessionStore(database, {
+    containerCoordinator,
+  });
   const viewerWaitMs = environmentMilliseconds(
     "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
     60_000,

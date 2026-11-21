@@ -1720,6 +1720,18 @@ function requiresPageReview(response: JsonResponse): boolean {
   );
 }
 
+function isRateLimitedResponse(response: JsonResponse): boolean {
+  if ("recoveryFailure" in response && response.recoveryFailure !== undefined) {
+    return false;
+  }
+  if (response.status === 429) {
+    return true;
+  }
+  return (
+    response.status === 503 && response.rateLimit?.retryAfter !== undefined
+  );
+}
+
 function responseProblemMessage(
   response: JsonResponse,
   message: string,
@@ -2002,7 +2014,7 @@ async function readSessionAccess(
       },
     };
   }
-  if (session.status === 429 || session.status === 503) {
+  if (isRateLimitedResponse(session)) {
     return {
       kind: "unavailable",
       availability: "unknown",
@@ -2122,7 +2134,7 @@ async function readTopic(
       requiresHuman: false,
     });
   }
-  if (topicResponse.status === 429 || topicResponse.status === 503) {
+  if (isRateLimitedResponse(topicResponse)) {
     return accessProblem(topicId, "unknown", {
       code: "discourse_topic_rate_limited",
       message: `Linux.do 主题读取受限：${rateLimitWaitDetail(topicResponse.status, topicResponse.rateLimit)}`,
@@ -2353,7 +2365,7 @@ async function readTopicListPage(
       target: url.href,
     });
   }
-  if (response.status === 429 || response.status === 503) {
+  if (isRateLimitedResponse(response)) {
     throw sourceAdapterActionError({
       code: "discourse_target_rate_limited",
       message: `Linux.do 列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
@@ -2861,7 +2873,7 @@ async function readVisibleCategories(
       },
     );
   }
-  if (response.status === 429 || response.status === 503) {
+  if (isRateLimitedResponse(response)) {
     throw categoryListFailure(
       "discourse_category_list_rate_limited",
       `Linux.do 板块列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
@@ -3773,7 +3785,7 @@ async function readPostFeedPage(
       },
     };
   }
-  if (response.status === 429 || response.status === 503) {
+  if (isRateLimitedResponse(response)) {
     return {
       kind: "error",
       issue: {

@@ -71,9 +71,6 @@ export const binConfigurations = pgTable(
     identityId: text("identity_id").notNull(),
     config: jsonb("config").notNull(),
     configNativeValid: boolean("config_native_valid").notNull().default(true),
-    browserIdleTimeoutSeconds: integer("browser_idle_timeout_seconds").default(
-      300,
-    ),
     runtimeSleepIdleTimeoutSeconds: integer(
       "runtime_sleep_idle_timeout_seconds",
     ).default(300),
@@ -94,10 +91,6 @@ export const binConfigurations = pgTable(
     check(
       "bin_configurations_status_check",
       inArray(table.status, binConfigurationStatuses),
-    ),
-    check(
-      "bin_configurations_browser_idle_timeout_seconds_check",
-      sql`${table.browserIdleTimeoutSeconds} between 0 and 2147483`,
     ),
     check(
       "bin_configurations_runtime_sleep_idle_timeout_seconds_check",

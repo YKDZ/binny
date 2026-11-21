@@ -1,0 +1,2 @@
+ALTER TABLE "bin_configurations" DROP CONSTRAINT "bin_configurations_browser_idle_timeout_seconds_check";--> statement-breakpoint
+ALTER TABLE "bin_configurations" DROP COLUMN "browser_idle_timeout_seconds";

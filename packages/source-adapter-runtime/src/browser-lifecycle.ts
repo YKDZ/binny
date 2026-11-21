@@ -135,6 +135,8 @@ export class BrowserLifecycle {
   private browser: Browser | undefined;
   private workerEndpoint: string | undefined;
   private displayProcess: ChildProcess | undefined;
+  private lockProcess: ChildProcess | undefined;
+  private lockAcquiring: Promise<void> | undefined;
   private human: HumanConnection | undefined;
   private opening: Promise<void> | undefined;
   private stopping: Promise<void> | undefined;
@@ -149,6 +151,102 @@ export class BrowserLifecycle {
   /** 返回由实际 persistent context 与显示进程生命周期得出的当前状态。 */
   get currentPower(): BrowserPower {
     return this.power;
+  }
+
+  get isReady(): boolean {
+    return (
+      this.power.status === "ready" &&
+      this.context !== undefined &&
+      this.browser?.isConnected() === true
+    );
+  }
+
+  /** Acquires the exclusive `.binny-runtime-owner.lock` on the shared profile volume. */
+  async acquireOwnerLock(): Promise<void> {
+    if (
+      this.lockProcess !== undefined &&
+      this.lockProcess.exitCode === null &&
+      this.lockProcess.signalCode === null
+    ) {
+      return;
+    }
+    if (this.lockAcquiring !== undefined) return this.lockAcquiring;
+    const task = (async () => {
+      await mkdir(this.options.profileDirectory, {
+        recursive: true,
+        mode: 0o700,
+      });
+      const lockPath = path.join(
+        this.options.profileDirectory,
+        ".binny-runtime-owner.lock",
+      );
+      const child = spawn(
+        "flock",
+        [
+          "--exclusive",
+          "--nonblock",
+          lockPath,
+          "sh",
+          "-c",
+          "printf 'ready\\n'; exec cat",
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+      await new Promise<void>((resolve, reject) => {
+        let stdout = "";
+        let stderr = "";
+        let settled = false;
+        const onData = (chunk: Buffer | string) => {
+          stdout += String(chunk);
+          if (!settled && stdout.includes("ready\n")) {
+            settled = true;
+            cleanup();
+            resolve();
+          }
+        };
+        const onErrData = (chunk: Buffer | string) => {
+          stderr += String(chunk);
+        };
+        const onError = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+        const onClose = (code: number | null) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          const detail = stderr.trim();
+          const error = Object.assign(
+            new Error(
+              detail.length > 0
+                ? `Unable to acquire exclusive browser profile lock ${lockPath} (exit=${String(code)}): ${detail}`
+                : `Unable to acquire exclusive browser profile lock ${lockPath}: held by another runtime instance.`,
+            ),
+            { code: "browser_owner_lock_conflict" as const },
+          );
+          reject(error);
+        };
+        const cleanup = () => {
+          child.stdout.off("data", onData);
+          child.stderr.off("data", onErrData);
+          child.off("error", onError);
+          child.off("close", onClose);
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onErrData);
+        child.once("error", onError);
+        child.once("close", onClose);
+      });
+      this.lockProcess = child;
+    })();
+    this.lockAcquiring = task;
+    try {
+      await task;
+    } finally {
+      if (this.lockAcquiring === task) this.lockAcquiring = undefined;
+    }
   }
 
   async ensureReady(): Promise<void> {
@@ -176,38 +274,6 @@ export class BrowserLifecycle {
       await opening;
     } finally {
       if (this.opening === opening) this.opening = undefined;
-    }
-  }
-
-  /** 仅在调用方已释放自动与人工使用权后关闭浏览器和显示进程。 */
-  async closeWhenIdle(): Promise<void> {
-    if (this.stopping !== undefined) return this.stopping;
-    if (this.opening !== undefined)
-      throw new Error("浏览器仍在启动，暂时不能进入空闲关闭。");
-    if (this.human !== undefined)
-      throw new Error("人工操作仍持有浏览器，暂时不能进入空闲关闭。");
-
-    const stopping = (async () => {
-      await this.setPower({ status: "stopping" });
-      try {
-        await this.closeBrowserLoad();
-        await this.setPower({ status: "stopped" });
-      } catch (error) {
-        await this.setPower({
-          status: "unknown",
-          error: {
-            code: "browser_stop_failed",
-            message: "浏览器或显示进程没有确认退出，当前状态未知。",
-          },
-        });
-        throw error;
-      }
-    })();
-    this.stopping = stopping;
-    try {
-      await stopping;
-    } finally {
-      if (this.stopping === stopping) this.stopping = undefined;
     }
   }
 
@@ -395,32 +461,45 @@ export class BrowserLifecycle {
   }
 
   async close(): Promise<void> {
-    if (this.human !== undefined) await this.stopHuman(this.human);
-    if (this.stopping !== undefined) await this.stopping;
-    if (this.opening !== undefined) await this.opening;
-    if (
-      this.context === undefined &&
-      this.browser === undefined &&
-      this.displayProcess === undefined
-    ) {
-      if (this.power.status === "unknown") return;
-      await this.setPower({ status: "stopped" });
-      return;
-    }
-    await this.setPower({ status: "stopping" });
     try {
-      await this.closeBrowserLoad();
-      await this.setPower({ status: "stopped" });
-    } catch (error) {
-      await this.setPower({
-        status: "unknown",
-        error: {
-          code: "browser_stop_failed",
-          message: "浏览器或显示进程没有确认退出，当前状态未知。",
-        },
-      });
-      throw error;
+      if (this.human !== undefined) await this.stopHuman(this.human);
+      if (this.stopping !== undefined) await this.stopping;
+      if (this.opening !== undefined) await this.opening;
+      if (
+        this.context === undefined &&
+        this.browser === undefined &&
+        this.displayProcess === undefined
+      ) {
+        if (this.power.status !== "unknown") {
+          await this.setPower({ status: "stopped" });
+        }
+        return;
+      }
+      await this.setPower({ status: "stopping" });
+      try {
+        await this.closeBrowserLoad();
+        await this.setPower({ status: "stopped" });
+      } catch (error) {
+        await this.setPower({
+          status: "unknown",
+          error: {
+            code: "browser_stop_failed",
+            message: "浏览器或显示进程没有确认退出，当前状态未知。",
+          },
+        });
+        throw error;
+      }
+    } finally {
+      await this.releaseOwnerLock();
     }
+  }
+
+  private async releaseOwnerLock(): Promise<void> {
+    const lock = this.lockProcess;
+    if (lock === undefined) return;
+    if (this.lockProcess === lock) this.lockProcess = undefined;
+    lock.stdin?.end();
+    await terminateChild(lock);
   }
 
   private async setPower(power: BrowserPower): Promise<void> {
@@ -446,6 +525,7 @@ export class BrowserLifecycle {
       );
     }
 
+    await this.acquireOwnerLock();
     await this.setPower({ status: "starting" });
     try {
       if (this.context !== undefined || this.browser !== undefined)
@@ -513,6 +593,12 @@ export class BrowserLifecycle {
             "--window-size=1280,800",
             "--no-sandbox",
           ],
+          // entry.ts owns SIGINT/SIGTERM/SIGHUP shutdown; leaving Playwright's
+          // handlers enabled triggers a concurrent gracefullyClose() that
+          // force-kills Chromium before cookies flush to the persistent profile.
+          handleSIGINT: false,
+          handleSIGTERM: false,
+          handleSIGHUP: false,
           headless: false,
           viewport: null,
         },

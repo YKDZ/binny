@@ -52,7 +52,6 @@ function createService(
         identityId: "account-main",
         config: { feedUrl: "https://example.test/feed.xml" },
         runtimeSleep: { idleTimeoutSeconds: null },
-        browserIdleTimeoutSeconds: null,
         status: "active",
         execution: { status: "offline", reason: "runtime_not_connected" },
         sourceStateSnapshot: { freshness: "unknown" },
@@ -174,7 +173,6 @@ void describe("bin discovery", () => {
         identityId: "account-linuxdo",
         config: { baseUrl: "https://linux.do" },
         runtimeSleep: { idleTimeoutSeconds: 0 },
-        browserIdleTimeoutSeconds: 0,
         status: "active",
         execution: {
           status: "online",
@@ -202,7 +200,6 @@ void describe("bin discovery", () => {
         identityId: "account-rss",
         config: { feedUrl: "https://example.test/feed.xml" },
         runtimeSleep: { idleTimeoutSeconds: null },
-        browserIdleTimeoutSeconds: null,
         status: "active",
         execution: {
           status: "online",
@@ -227,7 +224,6 @@ void describe("bin discovery", () => {
         identityId: "account-rss-sleep",
         config: { feedUrl: "https://example.test/sleep.xml" },
         runtimeSleep: { idleTimeoutSeconds: 300 },
-        browserIdleTimeoutSeconds: 300,
         status: "active",
         execution: {
           status: "sleeping",
@@ -248,7 +244,6 @@ void describe("bin discovery", () => {
         identityId: "account-broken",
         config: {},
         runtimeSleep: { idleTimeoutSeconds: 60 },
-        browserIdleTimeoutSeconds: 60,
         status: "active",
         execution: {
           status: "incompatible",

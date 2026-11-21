@@ -51,7 +51,6 @@ const runtimeSelection = {
   configuredSourceAdapter: binConfigurations.sourceAdapter,
   config: binConfigurations.config,
   configNativeValid: binConfigurations.configNativeValid,
-  browserIdleTimeoutSeconds: binConfigurations.browserIdleTimeoutSeconds,
   runtimeSleepIdleTimeoutSeconds:
     binConfigurations.runtimeSleepIdleTimeoutSeconds,
   runtimeId: runtimeConnections.runtimeId,
@@ -304,25 +303,27 @@ function projectSourceStateSnapshot(
   };
 }
 
+function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
+  return (
+    !sourceAdapter.environment.browser.required ||
+    sourceAdapter.environment.browser.profileReuseAfterRestart
+  );
+}
+
 function defaultIdleTimeoutSecondsForAdapter(
   sourceAdapter: SourceAdapterManifest,
 ): number | null {
-  if (
-    sourceAdapter.environment.browser.required &&
-    !sourceAdapter.environment.browser.profileReuseAfterRestart
-  ) {
-    return null;
-  }
-  return 300;
+  return canAdapterAutoSleep(sourceAdapter) ? 300 : null;
 }
 
-function effectiveIdleTimeoutSeconds(row: {
-  readonly runtimeSleepIdleTimeoutSeconds?: number | null | undefined;
-  readonly browserIdleTimeoutSeconds: number | null;
-}): number | null {
-  return row.runtimeSleepIdleTimeoutSeconds !== undefined
-    ? row.runtimeSleepIdleTimeoutSeconds
-    : row.browserIdleTimeoutSeconds;
+function effectiveIdleTimeoutSeconds(
+  row: {
+    readonly runtimeSleepIdleTimeoutSeconds: number | null;
+  },
+  sourceAdapter: SourceAdapterManifest,
+): number | null {
+  if (!canAdapterAutoSleep(sourceAdapter)) return null;
+  return row.runtimeSleepIdleTimeoutSeconds;
 }
 
 function rowExecution(row: RuntimeConnectionRow): RuntimeExecution {
@@ -555,6 +556,7 @@ export function createRuntimeConnectionStore(
               readonly ownerState: "confirmed" | "unconfirmed";
               readonly executionStatus: RuntimeExecution["status"];
               readonly idleTimeoutSeconds: number | null;
+              readonly humanSessionTerminated: boolean;
             };
           }
         | {
@@ -565,6 +567,7 @@ export function createRuntimeConnectionStore(
               readonly ownerState: "confirmed" | "unconfirmed";
               readonly executionStatus: RuntimeExecution["status"];
               readonly idleTimeoutSeconds: number | null;
+              readonly humanSessionTerminated: boolean;
             };
           };
 
@@ -600,7 +603,6 @@ export function createRuntimeConnectionStore(
                 identityId: binId,
                 config: registration.config,
                 configNativeValid: registration.nativeValid,
-                browserIdleTimeoutSeconds: defaultIdleTimeout,
                 runtimeSleepIdleTimeoutSeconds: defaultIdleTimeout,
                 status: "active",
                 lastIssuedOwnerGeneration: "0",
@@ -805,6 +807,9 @@ export function createRuntimeConnectionStore(
               .set({
                 sourceAdapter: registration.sourceAdapter,
                 configNativeValid: registration.configNativeValid,
+                ...(canAdapterAutoSleep(registration.sourceAdapter)
+                  ? {}
+                  : { runtimeSleepIdleTimeoutSeconds: null }),
                 updatedAt: sql`now()`,
               })
               .where(eq(binConfigurations.id, binId));
@@ -858,7 +863,7 @@ export function createRuntimeConnectionStore(
           if (row === undefined)
             throw new Error("心跳写入后 bin 配置意外消失。");
           const execution = rowExecution(row);
-          const humanSession = await applyRuntimeHumanSessionHeartbeat(
+          const humanSessionOutcome = await applyRuntimeHumanSessionHeartbeat(
             transaction,
             {
               binId,
@@ -872,7 +877,13 @@ export function createRuntimeConnectionStore(
                 : { event: checked.data.humanSessionEvent }),
             },
           );
-          const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(row);
+          const configuredAdapter = sourceAdapterManifestStoredSchema.parse(
+            row.configuredSourceAdapter,
+          );
+          const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(
+            row,
+            configuredAdapter,
+          );
           return execution.status === "incompatible"
             ? {
                 ok: false as const,
@@ -882,27 +893,31 @@ export function createRuntimeConnectionStore(
                   ownerState,
                   executionStatus: execution.status,
                   idleTimeoutSeconds,
+                  humanSessionTerminated: humanSessionOutcome.terminated,
                 },
               }
             : {
                 ok: true as const,
                 value: {
                   ...execution,
-                  browserIdleTimeoutSeconds: idleTimeoutSeconds,
-                  ...(humanSession === undefined ? {} : { humanSession }),
+                  ...(humanSessionOutcome.control === undefined
+                    ? {}
+                    : { humanSession: humanSessionOutcome.control }),
                 } satisfies RuntimeHeartbeatResult,
                 notification: {
                   ownerState,
                   executionStatus: execution.status,
                   idleTimeoutSeconds,
+                  humanSessionTerminated: humanSessionOutcome.terminated,
                 },
               };
         },
       );
       if ("notification" in txResult) {
         if (
-          checked.data.stoppedRunId !== undefined &&
-          txResult.notification.ownerState === "confirmed"
+          (checked.data.stoppedRunId !== undefined &&
+            txResult.notification.ownerState === "confirmed") ||
+          txResult.notification.humanSessionTerminated
         ) {
           await containerCoordinator?.markWorkCompleted(binId);
         }
@@ -1015,7 +1030,6 @@ export function createRuntimeConnectionStore(
               identityId: binId,
               config: jsonObjectSchema.parse({}),
               configNativeValid: validation.ok,
-              browserIdleTimeoutSeconds: defaultIdleTimeout,
               runtimeSleepIdleTimeoutSeconds: defaultIdleTimeout,
               status: "active",
               lastIssuedOwnerGeneration: "0",

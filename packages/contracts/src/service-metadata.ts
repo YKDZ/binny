@@ -4,11 +4,11 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 9 adds `"runtime_sleeping"` / `"runtime_waking"` run queue reasons
- * and optional `lastWakeError` details on queued runs, run summaries, and bin
- * execution summaries.
+ * Version 10 removes the deprecated `browserIdleTimeoutSeconds` request/response
+ * fields in favor of `runtimeSleep.idleTimeoutSeconds` and adds container sleep
+ * queue reasons and wake error details to human sessions.
  */
-export const publicApiProtocolVersion = 9;
+export const publicApiProtocolVersion = 10;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 4;

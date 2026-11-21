@@ -439,6 +439,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-one-owner:/var/lib/binny/browser-profile
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   browser-two:
@@ -456,6 +458,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - browser-two-owner:/var/lib/binny/browser-profile
+    labels:
+      io.binny.managed-runtime: "true"
     restart: unless-stopped
 
   browser-one-contender:
@@ -490,6 +494,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - linuxdo-runtime-owner:/var/lib/binny/browser-profile
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -509,6 +515,8 @@ services:
       BINNY_BROWSER_PROFILE_REUSE: "true"
     volumes:
       - linuxdo-runtime-two-owner:/var/lib/binny/browser-profile
+    labels:
+      io.binny.managed-runtime: "true"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

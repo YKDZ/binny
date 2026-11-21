@@ -705,7 +705,6 @@ void describe("run and schedule list commands", () => {
           identityId: "binny-sleep",
           config: {},
           runtimeSleep: { idleTimeoutSeconds: 0 },
-          browserIdleTimeoutSeconds: 0,
           status: "active",
           execution: {
             status: "sleeping",

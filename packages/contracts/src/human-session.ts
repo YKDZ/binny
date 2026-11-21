@@ -1,6 +1,6 @@
 import * as z from "zod";
 
-import { binIdSchema } from "./bin-configuration.ts";
+import { binIdSchema, runtimeWakeErrorSchema } from "./bin-configuration.ts";
 import { postgresTextSchema } from "./postgres-text.ts";
 
 const sessionIdSchema = z.string().uuid();
@@ -16,6 +16,8 @@ export const humanSessionStatusSchema = z.enum([
 
 export const humanSessionQueueReasonSchema = z.enum([
   "runtime_offline",
+  "runtime_sleeping",
+  "runtime_waking",
   "bin_busy",
   "runtime_protocol_outdated",
 ]);
@@ -33,6 +35,7 @@ export const humanSessionSchema = z
     binId: binIdSchema,
     status: humanSessionStatusSchema,
     queueReason: humanSessionQueueReasonSchema.optional(),
+    lastWakeError: runtimeWakeErrorSchema.optional(),
     requestedAt: z.iso.datetime(),
     updatedAt: z.iso.datetime(),
     readyAt: z.iso.datetime().optional(),

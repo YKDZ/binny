@@ -63,7 +63,6 @@ type BinRow = {
   identityId: string;
   config: Record<string, unknown>;
   configNativeValid: boolean;
-  browserIdleTimeoutSeconds: number | null;
   runtimeSleepIdleTimeoutSeconds: number | null;
   status: "active" | "disabled";
   persistentState: unknown;
@@ -241,7 +240,6 @@ function createSliceFakeDatabase(initial: {
             configuredSourceAdapter: b.sourceAdapter,
             config: b.config,
             configNativeValid: b.configNativeValid,
-            browserIdleTimeoutSeconds: b.browserIdleTimeoutSeconds,
             runtimeSleepIdleTimeoutSeconds: b.runtimeSleepIdleTimeoutSeconds,
             runtimeId: conn?.runtimeId ?? null,
             runtimeSourceAdapter: conn?.sourceAdapter ?? null,
@@ -737,7 +735,6 @@ function makeBin(binId: string, overrides: Partial<BinRow> = {}): BinRow {
     identityId: binId,
     config: {},
     configNativeValid: true,
-    browserIdleTimeoutSeconds: 0,
     runtimeSleepIdleTimeoutSeconds: 0,
     status: "active",
     persistentState: null,
