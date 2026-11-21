@@ -10,6 +10,9 @@
     "./oxlint": "./oxlint.config.ts",
     "./bake-compose-contexts": {
       "source": "./scripts/bake-compose-contexts.ts"
+    },
+    "./vnc-viewer-fixture": {
+      "source": "./scripts/vnc-viewer-fixture.ts"
     }
   },
   "scripts": {

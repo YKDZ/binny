@@ -21,6 +21,7 @@ const expectedTargets = [
   "runtime-configuration-fixture",
   "runtime-manual-runs-fixture",
   "runtime-schema-fixture",
+  "runtime-vnc-viewer-fixture",
   "adapter-lightweight-resource-fixture",
   "adapter-browser-session-fixture",
   "adapter-rss",
@@ -66,7 +67,7 @@ void describe("Buildx Bake base image contexts", () => {
     });
   });
 
-  void it("propagates updated root package.json versions to all 21 Bake targets", async () => {
+  void it("propagates updated root package.json versions to all 22 Bake targets", async () => {
     const tempDirectory = await mkdtemp(
       path.join(tmpdir(), "binny-bake-contexts-"),
     );

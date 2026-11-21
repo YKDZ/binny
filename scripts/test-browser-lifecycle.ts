@@ -11,7 +11,11 @@ import {
   resolveBakeComposeContexts,
   type BakeComposeContexts,
 } from "@binny/tooling-config/bake-compose-contexts";
-import type { Browser as PlaywrightBrowser, Page } from "patchright-core";
+import {
+  startVncViewerFixture,
+  type VncViewerFixture,
+  type VncViewerHandle,
+} from "@binny/tooling-config/vnc-viewer-fixture";
 
 import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
 import {
@@ -57,15 +61,39 @@ type CliWire<T> = {
 
 type HumanSessionStatus = {
   readonly sessionId: string;
+  readonly binId?: string;
   readonly status: string;
   readonly queueReason?: string;
+  readonly requestedAt?: string;
   readonly readyAt?: string;
   readonly closedAt?: string;
+  readonly host?: unknown;
+  readonly port?: unknown;
+  readonly password?: unknown;
+  readonly viewerPath?: unknown;
   readonly failure?: { readonly code: string; readonly message: string };
 };
 
 type HumanSessionCreated = HumanSessionStatus & {
-  readonly viewerUrl: string;
+  readonly password: string;
+};
+
+type HumanOpenWaitingRecord = {
+  readonly sessionId: string;
+  readonly binId: string;
+  readonly status: string;
+  readonly queueReason?: string;
+};
+
+type HumanOpenReadyRecord = {
+  readonly sessionId: string;
+  readonly binId: string;
+  readonly status: "ready";
+  readonly host: string;
+  readonly port: number;
+  readonly password: string;
+  readonly requestedAt: string;
+  readonly readyAt: string;
 };
 
 type Run = {
@@ -150,17 +178,6 @@ type SourceMetrics = {
   readonly gates: Readonly<Record<string, SourceGate>>;
 };
 
-type ViewerFrameStats = {
-  receivedFrames: number;
-  receivedBytes: number;
-  receivedSamples: string[];
-  sentFrames: number;
-  sentBytes: number;
-  sentSamples: string[];
-  sentKeyEvents: string[];
-  errors: string[];
-};
-
 const repositoryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -173,8 +190,7 @@ const browserImage = `binny-browser-browser-${suffix}:local`;
 const browserBaselineImage = `binny-browser-browser-${suffix}-image-a:local`;
 const browserNonReusableImage = `binny-browser-browser-${suffix}-non-reusable:local`;
 const browserFixturePackage = "@binny/source-adapter-browser-session-fixture";
-const outerBrowserContainer = `${projectName}-outer-browser`;
-const outerBrowserWsPath = `/binny-browser-${randomUUID()}`;
+const vncViewerImage = `binny-browser-vnc-viewer-${suffix}:local`;
 const processObserver = `${projectName}-process-observer`;
 const password = `binny-browser${randomUUID().replaceAll("-", "")}`;
 const publishedHost = process.env.BINNY_BROWSER_PUBLISHED_HOST ?? "172.17.0.1";
@@ -184,7 +200,7 @@ let heartbeatProxyControlPort: number | undefined;
 let testDirectory: string | undefined;
 let overlayFile: string | undefined;
 let activeBrowserImage = browserImage;
-let playwrightBrowser: PlaywrightBrowser | undefined;
+let vncViewerFixture: VncViewerFixture | undefined;
 let composeStarted = false;
 const builtImages = new Set<string>();
 let processObserverStarted = false;
@@ -196,6 +212,7 @@ function environment(): Readonly<Record<string, string>> {
     ...bakeComposeContexts,
     BINNY_IMAGE: serverImage,
     BINNY_TEST_BROWSER_IMAGE: activeBrowserImage,
+    BINNY_TEST_VNC_VIEWER_IMAGE: vncViewerImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -385,6 +402,8 @@ async function createComposeOverlay(): Promise<void> {
     [
       "services:",
       "  server:",
+      "    environment:",
+      '      BINNY_HUMAN_SESSION_VIEWER_WAIT_MS: "15000"',
       "    ports: !override",
       '      - "3000"',
       "  browser-session-source:",
@@ -739,70 +758,37 @@ async function publishedPort(
   return port;
 }
 
-async function startOuterBrowser(): Promise<PlaywrightBrowser> {
-  const launch = await run("docker", [
+async function buildVncViewerImage(): Promise<void> {
+  const viewerImageBuild = await run("pnpm", [
+    "--workspace-root",
+    "exec",
+    "turbo",
     "run",
-    "--detach",
-    "--name",
-    outerBrowserContainer,
-    "--network",
-    "bridge",
-    "--publish",
-    `${publishedHost}::9224`,
-    "--workdir",
-    "/app/binny-runtime",
-    "--entrypoint",
-    "node",
-    browserImage,
-    "--input-type=module",
-    "--eval",
-    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(outerBrowserWsPath)}, headless: true, channel: "chrome" }); process.stdout.write("BINNY_BROWSER_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
+    "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture",
   ]);
   assert.equal(
-    launch.code,
+    viewerImageBuild.code,
     0,
-    `启动外层正式镜像浏览器失败：\n${launch.stderr}`,
+    `VNC viewer fixture image build failed:\n${(viewerImageBuild.stdout + viewerImageBuild.stderr).slice(-12_000)}`,
   );
+  builtImages.add(vncViewerImage);
+}
 
-  const deadline = Date.now() + 30_000;
-  let logs = "";
-  while (Date.now() < deadline) {
-    const result = await run("docker", ["logs", outerBrowserContainer]);
-    logs = result.stdout + result.stderr;
-    if (logs.includes("BINNY_BROWSER_OUTER_BROWSER_READY")) break;
-    const inspected = await run("docker", [
-      "inspect",
-      "--format",
-      "{{.State.Status}}",
-      outerBrowserContainer,
-    ]);
-    if (inspected.code === 0 && inspected.stdout.trim() !== "running")
-      throw new Error(`外层正式镜像浏览器未能启动：\n${logs.slice(-8_000)}`);
-    await delay(100);
-  }
-  assert.ok(
-    logs.includes("BINNY_BROWSER_OUTER_BROWSER_READY"),
-    `等待外层正式镜像浏览器超时：\n${logs.slice(-8_000)}`,
-  );
+async function startVncViewer(): Promise<VncViewerFixture> {
+  return await startVncViewerFixture({
+    containerName: `${projectName}-vnc-viewer`,
+    image: vncViewerImage,
+    run,
+  });
+}
 
-  const mapping = (
-    await run("docker", ["port", outerBrowserContainer, "9224/tcp"])
-  ).stdout.trim();
-  const portText = /:(\d+)$/u.exec(mapping)?.[1];
-  const port = Number(portText);
-  assert.ok(
-    portText !== undefined &&
-      Number.isInteger(port) &&
-      port > 0 &&
-      port <= 65_535,
-    `外层浏览器没有返回有效宿主端口：${mapping}`,
-  );
+async function publishedVncHostPort(service: BrowserService): Promise<number> {
+  return await publishedPort(service, 5900);
+}
 
-  const endpoint = new URL(`ws://localhost:9224${outerBrowserWsPath}`);
-  endpoint.hostname = publishedHost;
-  endpoint.port = String(port);
-  const { chromium } = await import("patchright-core");
-  return await chromium.connect(endpoint.href);
+function wrongVncPassword(password: string): string {
+  const first = password[0] === "X" ? "Y" : "X";
+  return `${first}${password.slice(1)}`;
 }
 
 function sourceUrl(pathname: string): string {
@@ -1205,26 +1191,6 @@ async function waitForHuman(
   );
 }
 
-async function waitForHumanTerminal(
-  binId: string,
-  sessionId: string,
-  timeoutMs = 90_000,
-): Promise<HumanSessionStatus> {
-  const deadline = Date.now() + timeoutMs;
-  let last: HumanSessionStatus | undefined;
-  while (Date.now() < deadline) {
-    const result = await cli(["human", "get", binId, sessionId]);
-    if (result.code === 0) {
-      last = cliData<HumanSessionStatus>(result, "found");
-      if (last.status === "closed" || last.status === "failed") return last;
-    }
-    await delay(250);
-  }
-  throw new Error(
-    `会话 ${sessionId} 没有在服务恢复后终结：${JSON.stringify(last)}`,
-  );
-}
-
 async function createGate(gateId: string): Promise<Gate> {
   const gate: Gate = {
     started: false,
@@ -1299,190 +1265,124 @@ async function waitForAuthenticatedVisit(
   throw new Error("受控浏览器提交登录表单后没有读取受保护页面。");
 }
 
-async function openViewer(
-  browser: PlaywrightBrowser,
-  viewerUrl: string,
-): Promise<{
-  readonly page: Page;
-  readonly closed: Promise<void>;
-  readonly frames: ViewerFrameStats;
-}> {
-  const page = await browser.newPage();
-  const frames: ViewerFrameStats = {
-    receivedFrames: 0,
-    receivedBytes: 0,
-    receivedSamples: [],
-    sentFrames: 0,
-    sentBytes: 0,
-    sentSamples: [],
-    sentKeyEvents: [],
-    errors: [],
-  };
-  page.on("pageerror", (error) => {
-    if (frames.errors.length < 10)
-      frames.errors.push(`pageerror: ${error.message}`);
-  });
-  page.on("console", (message) => {
-    if (message.type() === "error" && frames.errors.length < 10)
-      frames.errors.push(`console: ${message.text()}`);
-  });
-  let resolveClosed!: () => void;
-  const closed = new Promise<void>((resolve) => {
-    resolveClosed = resolve;
-  });
-  page.on("websocket", (socket) => {
-    if (new URL(socket.url()).pathname.endsWith("/ws")) {
-      socket.on("close", resolveClosed);
-      socket.on("framereceived", ({ payload }) => {
-        const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-        frames.receivedFrames += 1;
-        frames.receivedBytes += bytes.length;
-        if (frames.receivedSamples.length < 20)
-          frames.receivedSamples.push(bytes.subarray(0, 24).toString("hex"));
-      });
-      socket.on("framesent", ({ payload }) => {
-        const bytes = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
-        frames.sentFrames += 1;
-        frames.sentBytes += bytes.length;
-        frames.sentSamples.push(bytes.subarray(0, 24).toString("hex"));
-        if (frames.sentSamples.length > 32) frames.sentSamples.shift();
-        if (bytes[0] === 4 && bytes.length === 8) {
-          frames.sentKeyEvents.push(
-            `${bytes[1] === 1 ? "down" : "up"}:${bytes.readUInt32BE(4).toString(16)}`,
-          );
-          if (frames.sentKeyEvents.length > 64) frames.sentKeyEvents.shift();
-        }
-      });
-    }
-  });
-  await page.goto(viewerUrl);
-  await page
-    .locator("#screen canvas")
-    .waitFor({ state: "visible", timeout: 30_000 });
-  await page.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent ===
-      "已连接，可以操作浏览器。",
-    undefined,
-    { timeout: 30_000 },
+function parseHumanOpenStream(result: ProcessResult): {
+  readonly waiting: readonly HumanOpenWaitingRecord[];
+  readonly ready: HumanOpenReadyRecord;
+} {
+  assert.equal(result.code, 0, result.stderr);
+  const lines = result.stdout
+    .trim()
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          readonly kind: string;
+          readonly variant?: string;
+          readonly data?: unknown;
+        },
+    );
+  assert.ok(
+    lines.length >= 3,
+    `Expected NDJSON stream output:\n${result.stdout}`,
   );
-  return { page, closed, frames };
+  assert.equal(lines[0]?.kind, "stream");
+  assert.equal(lines.at(-1)?.kind, "streamSuccess");
+  const waiting = lines
+    .filter((line) => line.kind === "record" && line.variant === "waiting")
+    .map((line) => line.data as HumanOpenWaitingRecord);
+  const readyRecords = lines.filter(
+    (line) => line.kind === "record" && line.variant === "ready",
+  );
+  assert.equal(
+    readyRecords.length,
+    1,
+    `Expected 1 ready record:\n${result.stdout}`,
+  );
+  const ready = readyRecords[0]?.data as HumanOpenReadyRecord;
+  assert.equal(ready.status, "ready");
+  assert.equal(ready.host, publishedHost);
+  assert.ok(Number.isInteger(ready.port) && ready.port > 0);
+  assert.match(ready.password, /^[A-Za-z0-9]{8}$/u);
+  return { waiting, ready };
 }
 
-async function enterLoginThroughCanvas(
-  page: Page,
+async function openHumanSessionStream(binId: string): Promise<{
+  readonly waiting: readonly HumanOpenWaitingRecord[];
+  readonly ready: HumanOpenReadyRecord;
+}> {
+  assert.ok(serverPort !== undefined);
+  const result = await cli([
+    "human",
+    "open",
+    binId,
+    "--url",
+    `http://${publishedHost}:${String(serverPort)}`,
+  ]);
+  const parsed = parseHumanOpenStream(result);
+  const inspectedCli = cliData<HumanSessionStatus>(
+    await cli(["human", "get", binId, parsed.ready.sessionId]),
+    "found",
+  );
+  assert.equal(inspectedCli.status, "ready");
+  assert.equal(inspectedCli.host, undefined);
+  assert.equal(inspectedCli.port, undefined);
+  assert.equal(inspectedCli.password, undefined);
+  return parsed;
+}
+
+async function getHumanSessionHttp(
+  binId: string,
+  sessionId: string,
+): Promise<HumanSessionStatus> {
+  assert.ok(serverPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(serverPort)}/bins/${binId}/human-sessions/${sessionId}`,
+    { signal: AbortSignal.timeout(5_000) },
+  );
+  const rawBody = await response.text();
+  assert.equal(response.status, 200, rawBody);
+  const body = JSON.parse(rawBody) as HumanSessionStatus;
+  assert.equal(body.password, undefined);
+  assert.equal(body.viewerPath, undefined);
+  return body;
+}
+
+async function enterLoginThroughVnc(
+  viewer: VncViewerHandle,
   maxAgeSeconds: number,
   expectedSubmissionIndex: number,
-  frames: ViewerFrameStats,
 ): Promise<void> {
   const initialMetrics = await sourceMetrics();
   const loginFormIndex = initialMetrics.loginFormsReady;
   const protectedVisitIndex =
     initialMetrics.authenticatedProtectedVisits.length;
-  const canvas = page.locator("#screen canvas");
-  const readViewerState = async () => ({
-    title: await page.title(),
-    status: await page.locator("#status").textContent(),
-    canvas: await canvas.evaluate((element) => {
-      const canvasElement = element as HTMLCanvasElement;
-      const context = canvasElement.getContext("2d");
-      const bounds = canvasElement.getBoundingClientRect();
-      return {
-        width: canvasElement.width,
-        height: canvasElement.height,
-        clientWidth: canvasElement.clientWidth,
-        clientHeight: canvasElement.clientHeight,
-        left: bounds.left,
-        top: bounds.top,
-        right: bounds.right,
-        bottom: bounds.bottom,
-        activeElement: document.activeElement?.tagName,
-        pixelSamples:
-          context === null
-            ? []
-            : [
-                [20, 20],
-                [640, 400],
-                [640, 790],
-                [1270, 790],
-              ].map(([x, y]) =>
-                Array.from(context.getImageData(x!, y!, 1, 1).data),
-              ),
-      };
-    }),
-    frames: {
-      receivedFrames: frames.receivedFrames,
-      receivedBytes: frames.receivedBytes,
-      receivedSamples: [...frames.receivedSamples],
-      sentFrames: frames.sentFrames,
-      sentBytes: frames.sentBytes,
-      sentSamples: [...frames.sentSamples],
-      sentKeyEvents: [...frames.sentKeyEvents],
-      errors: [...frames.errors],
-    },
-  });
-  let beforeInputState = await readViewerState();
-  const frameDeadline = Date.now() + 15_000;
-  while (
-    beforeInputState.canvas.pixelSamples.every((pixel) => pixel[3] === 0) &&
-    Date.now() < frameDeadline
-  ) {
-    await delay(50);
-    beforeInputState = await readViewerState();
-  }
-  const beforeInputScreenshot = await page.screenshot();
-  if (beforeInputState.canvas.pixelSamples.every((pixel) => pixel[3] === 0)) {
-    const screenshotPath = path.join(
-      tmpdir(),
-      `binny-browser-viewer-${suffix}-no-frame.png`,
-    );
-    await writeFile(screenshotPath, beforeInputScreenshot);
-    throw new Error(
-      `noVNC WebSocket 已连接，但 15 秒内没有绘制 RFB 帧：${JSON.stringify(beforeInputState)}；画面截图：${screenshotPath}`,
-    );
-  }
-  const canvasBounds = await canvas.boundingBox();
-  assert.ok(canvasBounds !== null);
-  // 人工维护实际点击浏览器地址栏，再键入站点地址。
-  await canvas.click({
-    position: { x: canvasBounds.width / 2, y: canvasBounds.height * 0.09 },
-  });
-  await page.keyboard.press("Control+a");
-  await page.keyboard.type(
+  await viewer.navigateTo(
     `http://browser-session-source:8081/login?lifetime=${String(maxAgeSeconds)}`,
-    { delay: 10 },
   );
-  await page.keyboard.press("Enter");
-  try {
-    await waitForLoginFormReady(loginFormIndex);
-  } catch (error) {
-    const afterInputState = await readViewerState();
-    const beforeScreenshotPath = path.join(
-      tmpdir(),
-      `binny-browser-viewer-${suffix}-before.png`,
-    );
-    const afterScreenshotPath = path.join(
-      tmpdir(),
-      `binny-browser-viewer-${suffix}-after.png`,
-    );
-    await writeFile(beforeScreenshotPath, beforeInputScreenshot);
-    await page.screenshot({ path: afterScreenshotPath });
-    throw new Error(
-      `The controlled login form was not ready after navigating through noVNC: ${JSON.stringify({ beforeInputState, afterInputState, loginFormsReady: (await sourceMetrics()).loginFormsReady })}. Screenshots: ${beforeScreenshotPath}, ${afterScreenshotPath}. ${String(error)}`,
-      { cause: error },
-    );
-  }
-  await page.keyboard.type("binny-browser-user", { delay: 10 });
-  await page.keyboard.press("Tab");
-  await page.keyboard.type("browser-session", { delay: 10 });
-  await page.keyboard.press("Tab");
-  await page.keyboard.press("Enter");
+  await waitForLoginFormReady(loginFormIndex);
+  await viewer.typeText("binny-browser-user", 10);
+  await viewer.pressKey("Tab");
+  await viewer.typeText("browser-session", 10);
+  await viewer.pressKey("Tab");
+  await viewer.pressKey("Return");
   await waitForLoginSubmission(expectedSubmissionIndex);
   await waitForAuthenticatedVisit(protectedVisitIndex);
 }
 
 async function startHumanSession(binId: string): Promise<HumanSessionCreated> {
-  return cliData(await cli(["human", "open", binId]), "opened");
+  assert.ok(serverPort !== undefined);
+  const response = await fetch(
+    `http://${publishedHost}:${String(serverPort)}/bins/${binId}/human-sessions`,
+    { method: "POST", signal: AbortSignal.timeout(5_000) },
+  );
+  const rawBody = await response.text();
+  assert.equal(response.status, 201, rawBody);
+  const created = JSON.parse(rawBody) as HumanSessionCreated;
+  assert.match(created.password, /^[A-Za-z0-9]{8}$/u);
+  assert.equal(created.viewerPath, undefined);
+  assert.equal(created.port, undefined);
+  return created;
 }
 
 async function closeHumanSession(
@@ -1499,7 +1399,11 @@ async function requestHumanSessionClose(
   sessionId: string,
 ): Promise<HumanSessionStatus> {
   const result = await cli(["human", "close", binId, sessionId.toUpperCase()]);
-  return cliData<HumanSessionStatus>(result, "closed");
+  const closed = cliData<HumanSessionStatus>(result, "closed");
+  assert.equal(closed.host, undefined);
+  assert.equal(closed.port, undefined);
+  assert.equal(closed.password, undefined);
+  return closed;
 }
 
 async function verifyPatchrightDeploys(service: string): Promise<void> {
@@ -1665,37 +1569,6 @@ async function browserMainProcess(
   return { pid, startTime };
 }
 
-async function assertVncLoopbackOnly(): Promise<void> {
-  const processes = await browserProcesses("browser-one");
-  const vncCommand = processes.find((process) =>
-    /\bx11vnc\b/u.test(process.command),
-  );
-  assert.ok(
-    vncCommand !== undefined && vncCommand.command.includes("-localhost"),
-  );
-
-  const listeners = await compose([
-    "exec",
-    "--no-TTY",
-    "browser-one",
-    "node",
-    "-e",
-    'const fs = require("node:fs"); const rows = ["/proc/net/tcp", "/proc/net/tcp6"].flatMap(file => fs.readFileSync(file, "utf8").trim().split("\\n").slice(1)); const entries = rows.map(line => line.trim().split(/\\s+/u)).filter(fields => fields[3] === "0A" && fields[1]?.endsWith(":170C")).map(fields => fields[1].split(":")[0]); console.log(JSON.stringify(entries)); if (entries.length === 0 || entries.some(address => address !== "0100007F" && address !== "00000000000000000000000001000000")) process.exit(2);',
-  ]);
-  const addresses = JSON.parse(listeners.stdout.trim()) as readonly string[];
-  assert.ok(addresses.length > 0);
-
-  const outsideContainer = await compose([
-    "exec",
-    "--no-TTY",
-    "server",
-    "node",
-    "-e",
-    'const socket = require("node:net").connect({ host: "browser-one", port: 5900 }); const timeout = setTimeout(() => process.exit(2), 3000); socket.once("connect", () => { clearTimeout(timeout); process.exit(1); }); socket.once("error", error => { clearTimeout(timeout); process.exit(error.code === "ECONNREFUSED" ? 0 : 3); });',
-  ]);
-  assert.equal(outsideContainer.code, 0, outsideContainer.stderr);
-}
-
 async function assertVncStopped(
   service: BrowserService = "browser-one",
 ): Promise<void> {
@@ -1814,18 +1687,6 @@ async function waitForHostProcessesGone(
   );
 }
 
-async function waitForViewerClosed(
-  promise: Promise<void>,
-  timeoutMs = 15_000,
-): Promise<void> {
-  await Promise.race([
-    promise,
-    delay(timeoutMs).then(() => {
-      throw new Error("浏览器运行器退出后，旧 noVNC WebSocket 没有结束。");
-    }),
-  ]);
-}
-
 async function waitForGateUnload(gateId: string, gate: Gate): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -1890,12 +1751,15 @@ async function main(): Promise<void> {
   await createComposeOverlay();
   assert.ok(testDirectory !== undefined);
 
-  const imageBuild = await run("pnpm", [
-    "--workspace-root",
-    "exec",
-    "turbo",
-    "run",
-    `${browserFixturePackage}#image:build`,
+  const [imageBuild] = await Promise.all([
+    run("pnpm", [
+      "--workspace-root",
+      "exec",
+      "turbo",
+      "run",
+      `${browserFixturePackage}#image:build`,
+    ]),
+    buildVncViewerImage(),
   ]);
   assert.equal(
     imageBuild.code,
@@ -1912,6 +1776,12 @@ async function main(): Promise<void> {
   assert.equal(config.code, 0);
   composeStarted = true;
   builtImages.add(serverImage);
+  await compose(["up", "--detach", "--no-deps", "--no-build", "browser-two"]);
+  const candidateManifestFromImage = await runtimeManifest("browser-two");
+  const browserImageUpdate = await buildBrowserImageUpdate(
+    candidateManifestFromImage,
+    browserBuildContextDirectory,
+  );
   await compose([
     "up",
     "--detach",
@@ -1922,7 +1792,7 @@ async function main(): Promise<void> {
     "browser-one",
     "browser-two",
   ]);
-  playwrightBrowser = await startOuterBrowser();
+  vncViewerFixture = await startVncViewer();
   serverPort = await publishedPort("server", 3000);
   sitePort = await publishedPort("browser-session-source", 8081);
   heartbeatProxyControlPort = await publishedPort(
@@ -1933,10 +1803,6 @@ async function main(): Promise<void> {
   await waitForSource();
   await verifyBrowserRuntimePermissions("browser-one");
 
-  const browserImageUpdate = await buildBrowserImageUpdate(
-    await runtimeManifest("browser-two"),
-    browserBuildContextDirectory,
-  );
   const initialBrowserContainer =
     await browserRuntimeContainerInfo("browser-one");
   assert.equal(
@@ -2030,7 +1896,7 @@ async function main(): Promise<void> {
   );
 
   const oneBindings = await browserPortBindings("browser-one");
-  assert.equal(oneBindings["5900/tcp"], undefined);
+  assert.notEqual(oneBindings["5900/tcp"], undefined);
   assert.equal(oneBindings["6000/tcp"], undefined);
   assert.equal(oneBindings["9222/tcp"], undefined);
 
@@ -2223,31 +2089,74 @@ async function main(): Promise<void> {
     })}\n`,
   );
 
-  assert.ok(playwrightBrowser !== undefined);
-  const outerBrowser = playwrightBrowser;
-  const loginSession = await startHumanSession("binny-browser-one");
-  assert.equal(loginSession.status, "pending");
+  assert.ok(vncViewerFixture !== undefined);
+  const vncViewer = vncViewerFixture;
+  const loginOpen = await openHumanSessionStream("binny-browser-one");
   assert.ok(
-    loginSession.queueReason === "runtime_sleeping" ||
-      loginSession.queueReason === "runtime_waking",
-    `Expected sleep-wake queue reason, got: ${String(loginSession.queueReason)}`,
+    loginOpen.waiting.some(
+      ({ queueReason }) =>
+        queueReason === "runtime_sleeping" || queueReason === "runtime_waking",
+    ),
+    `Expected sleep-wake waiting reason, got: ${JSON.stringify(loginOpen.waiting)}`,
   );
-  const readyLogin = await waitForHuman(
+  const readyLogin = loginOpen.ready;
+  const publishedPortOne = await publishedVncHostPort("browser-one");
+  assert.equal(readyLogin.port, publishedPortOne);
+  const httpReadyLogin = await getHumanSessionHttp(
     "binny-browser-one",
-    loginSession.sessionId,
-    "ready",
+    readyLogin.sessionId,
   );
+  assert.equal(httpReadyLogin.status, "ready");
+  assert.equal(httpReadyLogin.port, publishedPortOne);
+  assert.ok(serverPort !== undefined);
+  for (const legacyPath of [
+    `/human-sessions/${readyLogin.sessionId}`,
+    "/human-viewer.js",
+  ]) {
+    const legacyResponse: Response = await fetch(
+      `http://${publishedHost}:${String(serverPort)}${legacyPath}`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    assert.equal(
+      legacyResponse.status,
+      404,
+      `Legacy noVNC endpoint ${legacyPath} should return 404.`,
+    );
+  }
   const humanWakeProcess = await browserMainProcess("browser-one");
   assert.notEqual(
     humanWakeProcess.startTime,
     initialBrowserProcess.startTime,
     "Human session did not wake container and start a new browser process.",
   );
-  const loginViewerUrl = new URL(loginSession.viewerUrl);
-  loginViewerUrl.hostname = publishedHost;
-  loginViewerUrl.port = String(serverPort);
-  const loginViewer = await openViewer(outerBrowser, loginViewerUrl.href);
-  await enterLoginThroughCanvas(loginViewer.page, 3_600, 0, loginViewer.frames);
+  const loginViewer = await vncViewer.connect({
+    host: readyLogin.host,
+    port: readyLogin.port,
+    password: readyLogin.password,
+  });
+  await vncViewer.expectRejectedConnection({
+    host: readyLogin.host,
+    port: readyLogin.port,
+    password: wrongVncPassword(readyLogin.password),
+  });
+  await vncViewer.expectRejectedConnection({
+    host: readyLogin.host,
+    port: readyLogin.port,
+    password: readyLogin.password,
+    shared: false,
+  });
+  await vncViewer.expectRejectedConnection({
+    host: readyLogin.host,
+    port: readyLogin.port,
+    password: readyLogin.password,
+    shared: true,
+  });
+  assert.equal(
+    await loginViewer.isAlive(),
+    true,
+    "Primary TigerVNC viewer disconnected after rejected clients.",
+  );
+  await enterLoginThroughVnc(loginViewer, 3_600, 0);
   await delay(5_000);
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
@@ -2259,15 +2168,20 @@ async function main(): Promise<void> {
       ?.status,
     "ready",
   );
-  await closeHumanSession("binny-browser-one", loginSession.sessionId);
-  await waitForViewerClosed(loginViewer.closed);
-  const loginViewerAfterClose = loginViewer.page.locator("#status");
+  await closeHumanSession("binny-browser-one", readyLogin.sessionId);
+  const loginViewerExited = await loginViewer.waitForExit();
   assert.equal(
-    await loginViewerAfterClose.textContent(),
-    "连接已结束，请回到终端查看会话状态。",
+    loginViewerExited.exited,
+    true,
+    `TigerVNC viewer stayed running after close:\n${loginViewerExited.log}`,
   );
+  await vncViewer.expectRejectedConnection({
+    host: readyLogin.host,
+    port: readyLogin.port,
+    password: readyLogin.password,
+  });
   await assertVncStopped("browser-one");
-  await loginViewer.page.close();
+  await loginViewer.closeGracefully();
   assert.ok(readyLogin.readyAt !== undefined);
   await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
@@ -2648,42 +2562,42 @@ async function main(): Promise<void> {
   );
   await updateBin("binny-browser-one", 30);
 
-  const disconnectedSession = await startHumanSession("binny-browser-one");
-  await waitForHuman(
-    "binny-browser-one",
-    disconnectedSession.sessionId,
-    "ready",
-  );
-  const disconnectedViewerUrl = new URL(disconnectedSession.viewerUrl);
-  disconnectedViewerUrl.hostname = publishedHost;
-  disconnectedViewerUrl.port = String(serverPort);
-  const disconnectedViewer = await openViewer(
-    outerBrowser,
-    disconnectedViewerUrl.href,
-  );
-  await compose(["stop", "postgres"]);
-  await waitForViewerClosed(disconnectedViewer.closed, 30_000);
-  await waitForVncStopped("browser-one");
-  await disconnectedViewer.page.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent?.includes("连接已结束") ===
-      true,
-    undefined,
-    { timeout: 5_000 },
+  const restartSurvived = (await openHumanSessionStream("binny-browser-one"))
+    .ready;
+  const restartViewer = await vncViewer.connect({
+    host: restartSurvived.host,
+    port: restartSurvived.port,
+    password: restartSurvived.password,
+  });
+  await compose(["restart", "server"]);
+  await waitForApi();
+  serverPort = await publishedPort("server", 3000);
+  await waitForRuntime("binny-browser-one");
+  assert.equal(
+    await restartViewer.isAlive(),
+    true,
+    "Active TigerVNC session disconnected during server restart.",
   );
   assert.equal(
-    await disconnectedViewer.page.locator("#status").textContent(),
-    "连接已结束，请回到终端查看会话状态。",
+    (
+      await waitForHuman(
+        "binny-browser-one",
+        restartSurvived.sessionId,
+        "ready",
+      )
+    ).status,
+    "ready",
   );
+  const restartFormIndex = (await sourceMetrics()).loginFormsReady;
+  await restartViewer.navigateTo(
+    "http://browser-session-source:8081/login?lifetime=3600",
+  );
+  await waitForLoginFormReady(restartFormIndex);
+  await closeHumanSession("binny-browser-one", restartSurvived.sessionId);
+  const restartViewerExited = await restartViewer.waitForExit();
+  assert.equal(restartViewerExited.exited, true);
+  await restartViewer.closeGracefully();
   await assertVncStopped("browser-one");
-  await compose(["start", "postgres"]);
-  await waitForApi();
-  const recoveredSession = await waitForHumanTerminal(
-    "binny-browser-one",
-    disconnectedSession.sessionId,
-  );
-  assert.equal(recoveredSession.status, "closed");
-  await disconnectedViewer.page.close();
   await waitForRuntime("binny-browser-one");
 
   const profileTwoCheck = await triggerRun("binny-browser-two", "check");
@@ -2769,18 +2683,13 @@ async function main(): Promise<void> {
   await assertVncStopped("browser-one");
   await updateBin("binny-browser-one", 30);
 
-  const beforeRestartSession = await startHumanSession("binny-browser-one");
-  const readyBeforeRestart = await waitForHuman(
-    "binny-browser-one",
-    beforeRestartSession.sessionId,
-    "ready",
-  );
-  assert.equal(readyBeforeRestart.status, "ready");
-  const oldViewerUrl = new URL(beforeRestartSession.viewerUrl);
-  oldViewerUrl.hostname = publishedHost;
-  oldViewerUrl.port = String(serverPort);
-  const oldViewer = await openViewer(outerBrowser, oldViewerUrl.href);
-  await assertVncLoopbackOnly();
+  const beforeRestart = (await openHumanSessionStream("binny-browser-one"))
+    .ready;
+  const oldViewer = await vncViewer.connect({
+    host: beforeRestart.host,
+    port: beforeRestart.port,
+    password: beforeRestart.password,
+  });
   const originalProcesses = await browserHostProcesses("browser-one");
   const killed = await run("docker", [
     "kill",
@@ -2789,30 +2698,40 @@ async function main(): Promise<void> {
     `${projectName}-browser-one-1`,
   ]);
   assert.equal(killed.code, 0, killed.stderr);
-  await waitForViewerClosed(oldViewer.closed);
+  const killedExit = await oldViewer.waitForExit();
+  assert.equal(killedExit.exited, true);
   await waitForHostProcessesGone(originalProcesses);
-  await oldViewer.page.close();
+  await oldViewer.closeGracefully();
 
   await compose(["rm", "--force", "--stop", "browser-one"]);
   await compose(["up", "--detach", "--no-deps", "browser-one"]);
   await waitForRuntime("binny-browser-one");
-  await waitForHuman(
+  const killedSession = await waitForHuman(
     "binny-browser-one",
-    beforeRestartSession.sessionId,
-    "closed",
+    beforeRestart.sessionId,
+    "failed",
   );
+  assert.equal(killedSession.failure?.code, "runtime_disconnected");
 
-  const rejectedOldViewer = await outerBrowser.newPage();
-  await rejectedOldViewer.goto(oldViewerUrl.href);
-  await rejectedOldViewer.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent ===
-      "连接已结束，请回到终端查看会话状态。",
-    undefined,
-    { timeout: 15_000 },
-  );
-  assert.equal(await rejectedOldViewer.locator("#screen canvas").count(), 0);
-  await rejectedOldViewer.close();
+  await vncViewer.expectRejectedConnection({
+    host: beforeRestart.host,
+    port: beforeRestart.port,
+    password: beforeRestart.password,
+  });
+
+  const recreatedPort = await publishedVncHostPort("browser-one");
+  assert.notEqual(recreatedPort, beforeRestart.port);
+  const recreatedSession = (await openHumanSessionStream("binny-browser-one"))
+    .ready;
+  assert.equal(recreatedSession.port, recreatedPort);
+  const recreatedViewer = await vncViewer.connect({
+    host: recreatedSession.host,
+    port: recreatedSession.port,
+    password: recreatedSession.password,
+  });
+  await closeHumanSession("binny-browser-one", recreatedSession.sessionId);
+  await recreatedViewer.waitForExit();
+  await recreatedViewer.closeGracefully();
 
   const afterRestartCollect = await triggerRun("binny-browser-one", "collect");
   const afterRestartResult = await waitForRun(
@@ -2855,23 +2774,19 @@ async function main(): Promise<void> {
     `同卷第二实例退出码异常：${contenderState}`,
   );
 
-  const shortSession = await startHumanSession("binny-browser-two");
-  await waitForHuman("binny-browser-two", shortSession.sessionId, "ready");
-  const shortViewerUrl = new URL(shortSession.viewerUrl);
-  shortViewerUrl.hostname = publishedHost;
-  shortViewerUrl.port = String(serverPort);
-  const shortViewer = await openViewer(outerBrowser, shortViewerUrl.href);
+  const shortSession = (await openHumanSessionStream("binny-browser-two"))
+    .ready;
+  const shortViewer = await vncViewer.connect({
+    host: shortSession.host,
+    port: shortSession.port,
+    password: shortSession.password,
+  });
   const shortCookie = (await sourceMetrics()).loginSubmissions.length;
-  await enterLoginThroughCanvas(
-    shortViewer.page,
-    10,
-    shortCookie,
-    shortViewer.frames,
-  );
+  await enterLoginThroughVnc(shortViewer, 10, shortCookie);
   assert.equal((await sourceMetrics()).loginSubmissions.at(-1)?.maxAge, 10);
   await closeHumanSession("binny-browser-two", shortSession.sessionId);
-  await waitForViewerClosed(shortViewer.closed);
-  await shortViewer.page.close();
+  await shortViewer.waitForExit();
+  await shortViewer.closeGracefully();
   await delay(11_000);
   const disabledIdleBin = await readBin("binny-browser-two");
   assert.equal(disabledIdleBin.runtimeSleep.idleTimeoutSeconds, null);
@@ -2916,16 +2831,39 @@ async function main(): Promise<void> {
   ];
   assert.equal(browserConcurrencySamples.at(-1), 1);
 
-  const activeHumanOne = await startHumanSession("binny-browser-one");
-  assert.equal(activeHumanOne.status, "pending");
-  await waitForHuman("binny-browser-one", activeHumanOne.sessionId, "ready");
+  const [activeHumanOne, activeHumanTwo] = await Promise.all([
+    openHumanSessionStream("binny-browser-one"),
+    openHumanSessionStream("binny-browser-two"),
+  ]);
+  const [viewerOne, viewerTwo] = await Promise.all([
+    vncViewer.connect({
+      host: activeHumanOne.ready.host,
+      port: activeHumanOne.ready.port,
+      password: activeHumanOne.ready.password,
+    }),
+    vncViewer.connect({
+      host: activeHumanTwo.ready.host,
+      port: activeHumanTwo.ready.port,
+      password: activeHumanTwo.ready.password,
+    }),
+  ]);
+  assert.equal(await viewerOne.isAlive(), true);
+  assert.equal(await viewerTwo.isAlive(), true);
+  await closeHumanSession("binny-browser-two", activeHumanTwo.ready.sessionId);
+  await viewerTwo.waitForExit();
+  await viewerTwo.closeGracefully();
+  assert.equal(
+    await viewerOne.isAlive(),
+    true,
+    "Closing second bin's VNC viewer disrupted first bin's VNC viewer.",
+  );
   await waitForBrowserPower("binny-browser-one", "ready");
   await waitForBrowserPower("binny-browser-two", "ready");
   browserConcurrencySamples.push(await activeBrowserMainProcessCount());
   assert.equal(
     browserConcurrencySamples.at(-1),
     2,
-    "Second independent browser bin must remain ready during human session.",
+    "Two independent browser bins must remain ready concurrently.",
   );
 
   // Same-bin run must still wait behind active human session on binny-browser-one,
@@ -2945,7 +2883,9 @@ async function main(): Promise<void> {
     "human_session_active",
   );
 
-  await closeHumanSession("binny-browser-one", activeHumanOne.sessionId);
+  await closeHumanSession("binny-browser-one", activeHumanOne.ready.sessionId);
+  await viewerOne.waitForExit();
+  await viewerOne.closeGracefully();
   const unblockedCollectResult = await waitForRun(
     "binny-browser-one",
     waitingCollect.runId,
@@ -2955,6 +2895,125 @@ async function main(): Promise<void> {
   assert.ok((unblockedCollectResult.result?.commits.length ?? 0) > 0);
   browserConcurrencySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserConcurrencySamples.at(-1), 2);
+
+  // Verify independent queue & first-connect timers plus pending revocation.
+  await updateBin("binny-browser-one", "disabled");
+  const cancelPendingGateId = randomUUID();
+  const cancelPendingGate = await createGate(cancelPendingGateId);
+  const cancelPendingRun = await triggerRun("binny-browser-one", "collect", {
+    gateId: cancelPendingGateId,
+  });
+  await waitForGateStarted(cancelPendingGateId, cancelPendingGate);
+  const revokedPending = await startHumanSession("binny-browser-one");
+  assert.equal(revokedPending.status, "pending");
+  assert.equal(revokedPending.queueReason, "bin_busy");
+  const revokedResult = await requestHumanSessionClose(
+    "binny-browser-one",
+    revokedPending.sessionId,
+  );
+  assert.equal(revokedResult.status, "closed");
+  await releaseGate(cancelPendingGateId, cancelPendingGate);
+  const cancelPendingRunDone = await waitForRun(
+    "binny-browser-one",
+    cancelPendingRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(cancelPendingRunDone.status, "completed");
+
+  const queueTimeoutGateId = randomUUID();
+  const queueTimeoutGate = await createGate(queueTimeoutGateId);
+  const queueTimeoutRun = await triggerRun("binny-browser-one", "collect", {
+    gateId: queueTimeoutGateId,
+  });
+  await waitForGateStarted(queueTimeoutGateId, queueTimeoutGate);
+  const timedOutOpenPromise = cli([
+    "human",
+    "open",
+    "binny-browser-one",
+    "--url",
+    `http://${publishedHost}:${String(serverPort)}`,
+  ]);
+  const timedOutOpenResult = await timedOutOpenPromise;
+  assert.equal(
+    timedOutOpenResult.code,
+    1,
+    `Expected queue timeout failure, got:\n${timedOutOpenResult.stdout}`,
+  );
+  assert.match(timedOutOpenResult.stderr, /human_session_closed/u);
+  await refreshGate(queueTimeoutGateId, queueTimeoutGate);
+  assert.equal(queueTimeoutGate.released, false);
+  await releaseGate(queueTimeoutGateId, queueTimeoutGate);
+  const queueTimeoutRunDone = await waitForRun(
+    "binny-browser-one",
+    queueTimeoutRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(queueTimeoutRunDone.status, "completed");
+
+  const independentTimerGateId = randomUUID();
+  const independentTimerGate = await createGate(independentTimerGateId);
+  const independentTimerRun = await triggerRun("binny-browser-one", "collect", {
+    gateId: independentTimerGateId,
+  });
+  await waitForGateStarted(independentTimerGateId, independentTimerGate);
+  const delayedOpenPromise = cli([
+    "human",
+    "open",
+    "binny-browser-one",
+    "--url",
+    `http://${publishedHost}:${String(serverPort)}`,
+  ]);
+  await delay(6_000);
+  await releaseGate(independentTimerGateId, independentTimerGate);
+  const independentOpen = parseHumanOpenStream(await delayedOpenPromise);
+  assert.ok(
+    independentOpen.waiting.some(
+      ({ queueReason }) => queueReason === "bin_busy",
+    ),
+  );
+  const independentRunDone = await waitForRun(
+    "binny-browser-one",
+    independentTimerRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(independentRunDone.status, "completed");
+  // Wait 10s after ready (>16s since requestedAt, yet <15s since x11vnc ready).
+  await delay(10_000);
+  const stillReady = cliData<HumanSessionStatus>(
+    await cli([
+      "human",
+      "get",
+      "binny-browser-one",
+      independentOpen.ready.sessionId,
+    ]),
+    "found",
+  );
+  assert.equal(
+    stillReady.status,
+    "ready",
+    "First-connect timer did not start independently after queue wait.",
+  );
+  const idleExpired = await waitForHuman(
+    "binny-browser-one",
+    independentOpen.ready.sessionId,
+    "closed",
+    30_000,
+  );
+  assert.equal(idleExpired.status, "closed");
+  await waitForVncStopped("browser-one");
+  await vncViewer.expectRejectedConnection({
+    host: independentOpen.ready.host,
+    port: independentOpen.ready.port,
+    password: independentOpen.ready.password,
+  });
+  const postExpireCheck = await triggerRun("binny-browser-one", "check");
+  const postExpireCheckDone = await waitForRun(
+    "binny-browser-one",
+    postExpireCheck.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(postExpireCheckDone.status, "completed");
+  await updateBin("binny-browser-one", 30);
 
   await Promise.all([
     updateBin("binny-browser-one", 0),
@@ -3106,11 +3165,8 @@ try {
     );
   }
 } finally {
-  if (playwrightBrowser !== undefined)
-    await playwrightBrowser.close().catch(() => undefined);
-  await run("docker", ["rm", "--force", outerBrowserContainer]).catch(
-    () => undefined,
-  );
+  if (vncViewerFixture !== undefined)
+    await vncViewerFixture.close().catch(() => undefined);
   if (processObserverStarted)
     await run("docker", ["rm", "--force", processObserver]).catch(
       () => undefined,

@@ -190,6 +190,7 @@ const schemaVariantRuntimeImageName =
 const rssRuntimeImageName = projectName + "-rss:local";
 const rssCandidateRuntimeImageName = projectName + "-rss-candidate:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
+const vncViewerImageName = projectName + "-vnc-viewer:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
 const linuxdoBaselineRuntimeImageName = projectName + "-linuxdo-baseline:local";
 const articleAdapterRuntimeImageNames = {
@@ -1273,6 +1274,8 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
   if (archiveModelJourney) {
     const discovered = cliData<{
       readonly sourceAdapterId: string;
+      readonly summaryFields: readonly unknown[];
+      readonly searchRelations: Record<string, unknown>;
       readonly fields: Readonly<
         Record<
           string,
@@ -1284,6 +1287,8 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       >;
     }>(await cli(baseUrl, ["bin", "extension-fields", binId]), "discovered");
     assert.equal(discovered.sourceAdapterId, "binny-runs.manual-run-fixture");
+    assert.deepEqual(discovered.summaryFields, []);
+    assert.deepEqual(discovered.searchRelations, {});
     assert.deepEqual(discovered.fields.labels?.operations, ["has", "hasAny"]);
     assert.deepEqual(discovered.fields.tiers?.allowedItemValues, [
       "basic",
@@ -1303,6 +1308,8 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       discoveryText.stdout,
       /Allowed item values: \["basic","pro"\]/u,
     );
+    assert.match(discoveryText.stdout, /Summary fields: none/u);
+    assert.match(discoveryText.stdout, /Search relations: none/u);
 
     const extensionQuery = {
       bins: ["binny-runs-one", "binny-runs-two"],
@@ -5019,6 +5026,7 @@ async function verifyLinuxdoArchiveJourney(
   assert.deepEqual(originalRootState.extensions.topic, {
     slug: "controlled-linuxdo-topic",
     createdAt: "2026-10-28T00:00:00.000Z",
+    title: "受控主题标题版本 1",
   });
 
   const firstReplyLocator = await readCollectedItem("post:240002");
@@ -5198,7 +5206,10 @@ async function verifyLinuxdoArchiveJourney(
     value: "2026-10-28T00:00:02.000Z",
   });
   assert.match(updatedRootView.state.body?.markdown ?? "", /主题正文版本 2/u);
-  assert.equal("title" in updatedRootView.state.extensions.topic, false);
+  assert.equal(
+    updatedRootView.state.extensions.topic.title,
+    "受控主题标题版本 2",
+  );
   assert.ok(updatedItem.revisions.length >= 2);
   assert.notEqual(updatedRootView.revisionId, firstRevisionId);
   const updatedReplyItem = cliData<typeof rootItem>(
@@ -5326,6 +5337,287 @@ async function verifyLinuxdoArchiveJourney(
   assert.equal(linuxdoDiff.hasChanges, true);
   assert.equal(linuxdoDiff.fields.body.status, "changed");
   assert.ok(linuxdoDiff.resources.removed.includes(photoResourceId));
+
+  const linuxdoExtensionFields = cliData<{
+    readonly sourceAdapterId: string;
+    readonly summaryFields: readonly { readonly path: string }[];
+    readonly searchRelations: Readonly<
+      Record<
+        string,
+        { readonly relationName: string; readonly direction: string }
+      >
+    >;
+  }>(await cliForLinuxdo(["bin", "extension-fields", binId]), "discovered");
+  assert.equal(
+    linuxdoExtensionFields.sourceAdapterId,
+    "binny.source-adapter-linuxdo",
+  );
+  assert.deepEqual(
+    linuxdoExtensionFields.summaryFields.map(({ path }) => path),
+    ["postNumber", "topic.title"],
+  );
+  assert.equal(
+    linuxdoExtensionFields.searchRelations.topicRoot?.relationName,
+    "topic_reply",
+  );
+  assert.equal(
+    linuxdoExtensionFields.searchRelations.topicRoot?.direction,
+    "incoming",
+  );
+  const linuxdoExtensionFieldsText = await cliForLinuxdo([
+    "bin",
+    "extension-fields",
+    binId,
+    "--output",
+    "text",
+  ]);
+  assert.equal(
+    linuxdoExtensionFieldsText.code,
+    0,
+    linuxdoExtensionFieldsText.stderr,
+  );
+  assert.match(
+    linuxdoExtensionFieldsText.stdout,
+    /Summary fields: postNumber, topic\.title/u,
+  );
+  assert.match(
+    linuxdoExtensionFieldsText.stdout,
+    /Search relations:[\s\S]*- topicRoot: incoming topic_reply/u,
+  );
+
+  const linuxdoReplySearchQuery = {
+    bins: [binId],
+    extensions: {
+      sourceAdapterId: "binny.source-adapter-linuxdo",
+      filters: {
+        topicId: { op: "eq", value: 2401 },
+        postNumber: { op: "eq", value: 2 },
+      },
+    },
+    limit: 10,
+  };
+  const linuxdoReplySearch = cliData<{
+    readonly results: readonly {
+      readonly title: string | null;
+      readonly matches: readonly {
+        readonly binId: string;
+        readonly title: string | null;
+        readonly summaryExtensions?: Record<string, unknown>;
+      }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(linuxdoReplySearchQuery),
+    ]),
+    "found",
+  );
+  assert.equal(linuxdoReplySearch.results.length, 1);
+  assert.equal(linuxdoReplySearch.results[0]?.title, null);
+  assert.equal(linuxdoReplySearch.results[0]?.matches[0]?.title, null);
+  assert.deepEqual(
+    linuxdoReplySearch.results[0]?.matches[0]?.summaryExtensions,
+    {
+      postNumber: 2,
+      "topic.title": "受控主题标题版本 3",
+    },
+  );
+  const linuxdoReplySearchText = await cliForLinuxdo([
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(linuxdoReplySearchQuery),
+    "--output",
+    "text",
+  ]);
+  assert.equal(linuxdoReplySearchText.code, 0, linuxdoReplySearchText.stderr);
+  assert.match(
+    linuxdoReplySearchText.stdout,
+    /View binny-integration-linuxdo: postNumber=2, topic\.title="受控主题标题版本 3"/u,
+  );
+
+  const linuxdoHistoricalSearch = cliData<typeof linuxdoReplySearch>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...linuxdoReplySearchQuery,
+        asOf: firstCommit.archiveSeq,
+      }),
+    ]),
+    "found",
+  );
+  assert.equal(linuxdoHistoricalSearch.results.length, 1);
+  assert.equal(linuxdoHistoricalSearch.results[0]?.title, null);
+  assert.deepEqual(
+    linuxdoHistoricalSearch.results[0]?.matches[0]?.summaryExtensions,
+    {
+      postNumber: 2,
+      "topic.title": "受控主题标题版本 1",
+    },
+  );
+
+  const linuxdoTopicSearchQuery = {
+    bins: [binId],
+    extensions: {
+      sourceAdapterId: "binny.source-adapter-linuxdo",
+      filters: {
+        topicId: { op: "eq", value: 2401 },
+      },
+    },
+    limit: 20,
+  };
+  const linuxdoDefaultTopicSearch = cliData<{
+    readonly relatedRevisions?: unknown;
+    readonly nextCursor?: string;
+    readonly results: readonly {
+      readonly matches: readonly { readonly related?: unknown }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(linuxdoTopicSearchQuery),
+    ]),
+    "found",
+  );
+  assert.equal(linuxdoDefaultTopicSearch.relatedRevisions, undefined);
+  assert.ok(
+    linuxdoDefaultTopicSearch.results.every((result) =>
+      result.matches.every((match) => match.related === undefined),
+    ),
+  );
+
+  const linuxdoTopicWithRootQuery = {
+    ...linuxdoTopicSearchQuery,
+    related: {
+      sourceAdapterId: "binny.source-adapter-linuxdo",
+      include: ["topicRoot"],
+    },
+  };
+  const linuxdoTopicWithRoot = cliData<{
+    readonly relatedRevisions?: Readonly<
+      Record<
+        string,
+        {
+          readonly revision: {
+            readonly revisionId: string;
+            readonly state: { readonly body?: { readonly text?: string } };
+          };
+        }
+      >
+    >;
+    readonly results: readonly {
+      readonly sourceKey: { readonly key: string };
+      readonly matches: readonly {
+        readonly summaryExtensions?: Record<string, unknown>;
+        readonly related?: Readonly<
+          Record<
+            string,
+            {
+              readonly status: string;
+              readonly reference?: { readonly revisionId: string };
+            }
+          >
+        >;
+      }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(linuxdoTopicWithRootQuery),
+    ]),
+    "found",
+  );
+  assert.deepEqual(Object.keys(linuxdoTopicWithRoot.relatedRevisions ?? {}), [
+    partialRevisionId,
+  ]);
+  const rootMatch = linuxdoTopicWithRoot.results.find(
+    (result) => result.matches[0]?.summaryExtensions?.postNumber === 1,
+  );
+  assert.equal(rootMatch?.matches[0]?.related?.topicRoot?.status, "none");
+  const replyMatches = linuxdoTopicWithRoot.results.filter(
+    (result) => result.matches[0]?.summaryExtensions?.postNumber !== 1,
+  );
+  assert.ok(replyMatches.length >= 2);
+  for (const reply of replyMatches) {
+    assert.equal(reply.matches[0]?.related?.topicRoot?.status, "readable");
+    assert.equal(
+      reply.matches[0]?.related?.topicRoot?.reference?.revisionId,
+      partialRevisionId,
+    );
+  }
+  const linuxdoTopicWithRootText = await cliForLinuxdo([
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(linuxdoTopicWithRootQuery),
+    "--output",
+    "text",
+  ]);
+  assert.equal(
+    linuxdoTopicWithRootText.code,
+    0,
+    linuxdoTopicWithRootText.stderr,
+  );
+  assert.match(
+    linuxdoTopicWithRootText.stdout,
+    new RegExp(
+      `Related topicRoot \\(${binId}\\): readable -> revision ${partialRevisionId}`,
+      "u",
+    ),
+  );
+  assert.match(linuxdoTopicWithRootText.stdout, /Related revisions:/u);
+  assert.equal(
+    linuxdoTopicWithRootText.stdout.split(`- Revision: ${partialRevisionId}`)
+      .length - 1,
+    1,
+  );
+
+  const linuxdoHistoricalWithRoot = cliData<typeof linuxdoTopicWithRoot>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...linuxdoTopicWithRootQuery,
+        asOf: firstCommit.archiveSeq,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    Object.keys(linuxdoHistoricalWithRoot.relatedRevisions ?? {}),
+    [firstRevisionId],
+  );
+
+  const invalidRoleData = cliFailure<{
+    readonly code: string;
+    readonly diagnostic?: { readonly allowedItemValues?: readonly string[] };
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...linuxdoTopicSearchQuery,
+        related: {
+          sourceAdapterId: "binny.source-adapter-linuxdo",
+          include: ["badRole"],
+        },
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(invalidRoleData.diagnostic?.allowedItemValues, [
+    "topicRoot",
+  ]);
 
   const relationPage = cliData<{
     readonly relations: readonly {
@@ -14005,12 +14297,20 @@ async function main(): Promise<void> {
       builtImages.add(schemaVariantRuntimeImageName);
     }
     if (runFunctionalJourney) {
-      lightweightImageTasks.push({
-        task: "@binny/source-adapter-linuxdo#image:build",
-        imageVariable: "BINNY_LINUXDO_IMAGE",
-        image: linuxdoRuntimeImageName,
-      });
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-linuxdo#image:build",
+          imageVariable: "BINNY_LINUXDO_IMAGE",
+          image: linuxdoRuntimeImageName,
+        },
+        {
+          task: "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture",
+          imageVariable: "BINNY_TEST_VNC_VIEWER_IMAGE",
+          image: vncViewerImageName,
+        },
+      );
       builtImages.add(linuxdoRuntimeImageName);
+      builtImages.add(vncViewerImageName);
     }
     if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
       lightweightImageTasks.push(
@@ -14443,11 +14743,9 @@ async function main(): Promise<void> {
       );
       linuxdoViewerBrowser = await startLinuxdoViewerBrowser({
         projectName,
-        image: linuxdoRuntimeImageName,
-        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
+        image: vncViewerImageName,
         run,
       });
-      const outerBrowser = linuxdoViewerBrowser.browser;
       const linuxdoSourceControlUrl =
         "http://" +
         (process.env.BINNY_E2E_HOST ?? "172.17.0.1") +
@@ -14458,9 +14756,8 @@ async function main(): Promise<void> {
         binId: "binny-integration-linuxdo",
         topicId: 2401,
         cli: (args) => cli(baseUrl, args),
-        browser: outerBrowser,
-        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
-        serverPort: composePort,
+        vncViewer: linuxdoViewerBrowser,
+        apiUrl: baseUrl,
         sourceOrigin: "http://linuxdo-e2e-source:8081",
         sourceControlUrl: linuxdoSourceControlUrl,
         username: "binny-discovery-user",

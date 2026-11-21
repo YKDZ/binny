@@ -3,6 +3,7 @@ import { createWriteStream } from "node:fs";
 import { readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import { validationFailure } from "@binny/api/validation";
@@ -41,9 +42,12 @@ import {
   runtimeSleepIdleTimeoutSecondsSchema,
   sourceAdapterActionNameSchema,
   identityIdSchema,
-  humanSessionCreatedSchema,
+  humanOpenReadyRecordSchema,
+  humanOpenWaitingRecordSchema,
   humanSessionErrorSchema,
+  humanSessionFailureSchema,
   humanSessionSchema,
+  humanSessionStateSchema,
   jsonObjectSchema,
   manualRunErrorSchema,
   manualRunListPageSchema,
@@ -407,6 +411,8 @@ const errorOutputSchema = z.union([
         "incompatible_http_api_protocol",
         "incompatible_archive_query_contract",
         "service_capability_unavailable",
+        "human_session_closed",
+        "human_session_failed",
       ]),
       message: z.string(),
       reason: metadataFailureReasonSchema.optional(),
@@ -414,6 +420,7 @@ const errorOutputSchema = z.union([
       attempts: z.int().positive().optional(),
     })
     .strict(),
+  humanSessionFailureSchema,
 ]);
 type CliApiError = z.infer<typeof errorOutputSchema>;
 
@@ -781,10 +788,22 @@ function createCliContract(identity: CliCommandIdentity) {
       ? "Candidate order: observedAt desc (itemId asc)"
       : `Candidate order: ${field} desc (nulls last, itemId asc)`;
   };
+  const formatSummaryExtensionValue = (
+    value: string | number | boolean | readonly (string | number | boolean)[],
+  ) =>
+    typeof value === "string" || Array.isArray(value)
+      ? JSON.stringify(value)
+      : String(value);
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
-  ) =>
-    text.lines([
+  ) => {
+    const relatedRevisionEntries =
+      page.relatedRevisions === undefined
+        ? []
+        : Object.entries(page.relatedRevisions).toSorted(([left], [right]) =>
+            left.localeCompare(right),
+          );
+    return text.lines([
       `Snapshot: ${page.snapshot.asOf}`,
       ...(page.timeWindow === undefined
         ? []
@@ -795,28 +814,84 @@ function createCliContract(identity: CliCommandIdentity) {
             `Matches on this page: ${page.results.length}`,
             ...(page.results.length === 0
               ? ["No archived items matched."]
-              : page.results.flatMap((result) => [
-                  `- ${result.title ?? result.sourceKey.key}`,
-                  `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
-                  `  Observed: ${result.observedAt}`,
-                  `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
-                  `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
-                  ...(result.timeStatus === undefined
-                    ? []
-                    : [`  Time review: ${result.timeStatus}`]),
-                  `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
-                  ...result.matches.flatMap(({ binId, timeMatch }) =>
-                    timeMatch === undefined
+              : page.results.flatMap((result) => {
+                  const hasSummaryDetails = result.matches.some(
+                    (match) =>
+                      match.summaryExtensions !== undefined &&
+                      Object.keys(match.summaryExtensions).length > 0,
+                  );
+                  const hasDistinctViewTitles =
+                    result.matches.length > 1 &&
+                    result.matches.some(
+                      (match) =>
+                        match.title !== result.title ||
+                        result.matches.some(
+                          (other) => other.title !== match.title,
+                        ),
+                    );
+                  return [
+                    `- ${result.title ?? result.sourceKey.key}`,
+                    `  Source: ${result.sourceKey.namespace}:${result.sourceKey.key}`,
+                    `  Observed: ${result.observedAt}`,
+                    `  Source published: ${sourceTimeText(result.sourcePublishedAt)}`,
+                    `  Source modified: ${sourceTimeText(result.sourceModifiedAt)}`,
+                    ...(result.timeStatus === undefined
                       ? []
-                      : [
-                          `  Time match ${binId}: ${timeMatch.status}${
-                            timeMatch.status === "undetermined"
-                              ? ` (${timeMatch.reason})`
-                              : ""
-                          }`,
-                        ],
-                  ),
-                ])),
+                      : [`  Time review: ${result.timeStatus}`]),
+                    `  Views: ${result.matches.map(({ binId }) => binId).join(", ")}`,
+                    ...result.matches.flatMap((match) => {
+                      if (!hasSummaryDetails && !hasDistinctViewTitles) {
+                        return [];
+                      }
+                      const parts: string[] = [];
+                      if (match.title !== null) {
+                        parts.push(`title=${JSON.stringify(match.title)}`);
+                      }
+                      if (match.summaryExtensions !== undefined) {
+                        for (const [fieldPath, fieldValue] of Object.entries(
+                          match.summaryExtensions,
+                        )) {
+                          parts.push(
+                            `${fieldPath}=${formatSummaryExtensionValue(fieldValue)}`,
+                          );
+                        }
+                      }
+                      return parts.length === 0
+                        ? []
+                        : [`  View ${match.binId}: ${parts.join(", ")}`];
+                    }),
+                    ...result.matches.flatMap(({ binId, timeMatch }) =>
+                      timeMatch === undefined
+                        ? []
+                        : [
+                            `  Time match ${binId}: ${timeMatch.status}${
+                              timeMatch.status === "undetermined"
+                                ? ` (${timeMatch.reason})`
+                                : ""
+                            }`,
+                          ],
+                    ),
+                    ...result.matches.flatMap(({ binId, related }) =>
+                      related === undefined
+                        ? []
+                        : Object.entries(related).map(([role, relation]) => {
+                            if (relation.status === "readable") {
+                              return `  Related ${role} (${binId}): readable -> revision ${relation.reference.revisionId}`;
+                            }
+                            if (relation.status === "unreadable") {
+                              const identityDetail =
+                                relation.sourceKey !== undefined
+                                  ? ` (${relation.sourceKey.namespace}:${relation.sourceKey.key})`
+                                  : relation.sourceRef !== undefined
+                                    ? ` (${relation.sourceRef})`
+                                    : "";
+                              return `  Related ${role} (${binId}): unreadable (${relation.reason})${identityDetail}`;
+                            }
+                            return `  Related ${role} (${binId}): none`;
+                          }),
+                    ),
+                  ];
+                })),
           ]
         : ["Candidate results were not requested."]),
       ...(page.timeSummary === undefined
@@ -830,6 +905,38 @@ function createCliContract(identity: CliCommandIdentity) {
           ? ["More results: true", `Next cursor: ${page.nextCursor}`]
           : ["End of results."]
         : []),
+      ...(relatedRevisionEntries.length === 0
+        ? []
+        : [
+            "Related revisions:",
+            ...relatedRevisionEntries.flatMap(([revisionId, entry]) => {
+              const { revision, resources } = entry;
+              const body = revision.state.body;
+              return [
+                `- Revision: ${revisionId}`,
+                `  Item: ${revision.itemId}`,
+                `  Source: ${revision.sourceKey.namespace}:${revision.sourceKey.key}`,
+                `  Title: ${revision.state.title ?? "(none)"}`,
+                ...(body === undefined
+                  ? ["  Body: no body representation was stored."]
+                  : Object.entries(body).flatMap(([format, content]) => [
+                      `  Body ${format}:`,
+                      ...String(content)
+                        .split("\n")
+                        .map((line) => `    ${line}`),
+                    ])),
+                ...(resources.length === 0
+                  ? ["  Resources: none"]
+                  : [
+                      "  Resources:",
+                      ...resources.map(
+                        ({ resourceId, status }) =>
+                          `    ${resourceId}: ${status}`,
+                      ),
+                    ]),
+              ];
+            }),
+          ]),
       ...(page.distribution === undefined
         ? []
         : [
@@ -859,6 +966,7 @@ function createCliContract(identity: CliCommandIdentity) {
               : ["End of distribution."]),
           ]),
     ]);
+  };
   const archiveBatchReadText = (
     response: z.infer<typeof archiveBatchReadResponseSchema>,
   ) =>
@@ -1154,6 +1262,7 @@ function createCliContract(identity: CliCommandIdentity) {
     discovery: z.infer<typeof sourceAdapterExtensionFieldsDiscoverySchema>,
   ) => {
     const fields = Object.entries(discovery.fields);
+    const searchRelations = Object.entries(discovery.searchRelations);
     return text.lines([
       `Source adapter: ${discovery.sourceAdapterId}@${discovery.sourceAdapterVersion}`,
       ...(fields.length === 0
@@ -1178,6 +1287,24 @@ function createCliContract(identity: CliCommandIdentity) {
                     `  Allowed item values: ${JSON.stringify(field.allowedItemValues)}`,
                   ]),
             ]),
+          ]),
+      ...(discovery.summaryFields.length === 0
+        ? ["Summary fields: none"]
+        : [
+            `Summary fields: ${discovery.summaryFields.map(({ path }) => path).join(", ")}`,
+          ]),
+      ...(searchRelations.length === 0
+        ? ["Search relations: none"]
+        : [
+            "Search relations:",
+            ...searchRelations.map(
+              ([role, declaration]) =>
+                `- ${role}: ${declaration.direction} ${declaration.relationName}${
+                  declaration.description === undefined
+                    ? ""
+                    : ` (${declaration.description})`
+                }`,
+            ),
           ]),
       "Missing and null extension values do not match filters.",
     ]);
@@ -2229,56 +2356,266 @@ function createCliContract(identity: CliCommandIdentity) {
   });
 
   const humanOpenInputSchema = z.object({ binId: binIdSchema });
-  const humanOpenSuccess = {
-    opened: {
-      description: "人工会话状态和临时入口",
-      exitCode: 0,
-      schema: humanSessionCreatedSchema.extend({
-        viewerUrl: z.url(),
-      }),
-    },
-  } as const;
-  const humanOpenHandler: Handler<
-    "humanOpen",
-    typeof humanOpenInputSchema,
-    typeof humanOpenSuccess,
-    typeof failureSchemas
-  > = async ({ input, dependencies, outcome }) => {
-    const response = await dependencies
-      .createClient()
-      .bins[":binId"]["human-sessions"].$post({
-        param: { binId: input.binId },
-      });
-    if (response.status === 201) {
-      const session = await response.json();
-      return outcome.data.opened({
-        ...session,
-        viewerUrl: new URL(session.viewerPath, dependencies.apiUrl).href,
-      });
-    }
-    if (
-      response.status === 400 ||
-      response.status === 404 ||
-      response.status === 409
-    )
-      return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话状态。");
+  const humanOpenWaitingText = (
+    record: z.infer<typeof humanOpenWaitingRecordSchema>,
+  ) => {
+    const header =
+      record.queueReason === undefined
+        ? `Human session waiting: status=${record.status}`
+        : `Human session waiting: status=${record.status}, reason=${record.queueReason}`;
+    if (record.lastWakeError === undefined) return text.line(header);
+    const wakeError = `Last wake error: ${record.lastWakeError.code}: ${record.lastWakeError.message}${
+      record.lastWakeError.at === undefined
+        ? ""
+        : ` (${record.lastWakeError.at})`
+    }`;
+    return text.fragment(`${header}\n${wakeError}\n`);
   };
-  const humanOpenOutputs = businessOutputs("humanOpen", humanOpenInputSchema, {
-    structuredDescription: "Machine-readable browser session",
-    textDescription: "Readable browser session",
-    success: humanOpenSuccess,
-    failures: failureSchemas,
-    textSuccess: { opened: (session) => outputText("浏览器维护入口", session) },
-    textFailures: failureText,
-    handler: humanOpenHandler,
-  });
+  const humanOpenReadyText = (
+    record: z.infer<typeof humanOpenReadyRecordSchema>,
+  ) =>
+    text.fragment(
+      [
+        "Human session",
+        `ID: ${record.sessionId}`,
+        `Bin: ${record.binId}`,
+        `Status: ${record.status}`,
+        `Host: ${record.host}`,
+        `Port: ${String(record.port)}`,
+        `Password: ${record.password}`,
+        `Requested at: ${record.requestedAt}`,
+        `Ready at: ${record.readyAt}`,
+      ].join("\n") + "\n",
+    );
+  const humanSessionStateText = (
+    heading: string,
+    session: z.infer<typeof humanSessionStateSchema>,
+  ) =>
+    text.lines([
+      heading,
+      `ID: ${session.sessionId}`,
+      `Bin: ${session.binId}`,
+      `Status: ${session.status}`,
+      ...(session.queueReason === undefined
+        ? []
+        : [`Queue reason: ${session.queueReason}`]),
+      ...(session.lastWakeError === undefined
+        ? []
+        : [
+            `Last wake error: ${session.lastWakeError.code}: ${session.lastWakeError.message}${
+              session.lastWakeError.at === undefined
+                ? ""
+                : ` (${session.lastWakeError.at})`
+            }`,
+          ]),
+      `Requested at: ${session.requestedAt}`,
+      `Updated at: ${session.updatedAt}`,
+      ...(session.readyAt === undefined
+        ? []
+        : [`Ready at: ${session.readyAt}`]),
+      ...(session.closedAt === undefined
+        ? []
+        : [`Closed at: ${session.closedAt}`]),
+      ...(session.failure === undefined
+        ? []
+        : [`Failure: ${session.failure.code}: ${session.failure.message}`]),
+    ]);
+  const extractHostFromApiUrl = (apiUrl: string): string => {
+    const { hostname } = new URL(apiUrl);
+    return hostname.startsWith("[") && hostname.endsWith("]")
+      ? hostname.slice(1, -1)
+      : hostname;
+  };
+  const humanOpenExtendedInput = withPostgresJsonSchemaProjection(
+    humanOpenInputSchema.safeExtend({
+      apiUrl: z.string().url().optional(),
+    }),
+  ) as unknown as typeof humanOpenInputSchema;
+  const humanOpenOutputs = define.outputModes(
+    "humanOpen",
+    humanOpenExtendedInput,
+    (mode) => {
+      const records = {
+        waiting: {
+          description: "Waiting status while waking or handing over browser",
+          schema: humanOpenWaitingRecordSchema,
+        },
+        ready: {
+          description: "Ready native VNC connection details",
+          schema: humanOpenReadyRecordSchema,
+        },
+      } as const;
+      const textRecords = {
+        waiting: {
+          ...records.waiting,
+          text: humanOpenWaitingText,
+        },
+        ready: {
+          ...records.ready,
+          text: humanOpenReadyText,
+        },
+      } as const;
+      const streamFailures = {
+        apiError: failureSchemas.apiError,
+      } as const;
+      const textStreamFailures = {
+        apiError: {
+          ...failureSchemas.apiError,
+          text: apiErrorText,
+        },
+      } as const;
+      const handler = async function* (context: {
+        readonly input: Record<string, unknown>;
+        readonly dependencies: CliDependencies;
+        readonly outcome: {
+          readonly record: {
+            readonly waiting: (
+              payload: z.input<typeof humanOpenWaitingRecordSchema>,
+            ) => unknown;
+            readonly ready: (
+              payload: z.input<typeof humanOpenReadyRecordSchema>,
+            ) => unknown;
+          };
+          readonly streamSuccess: () => unknown;
+          readonly failure: {
+            readonly apiError: (payload: CliApiError) => unknown;
+          };
+        };
+      }) {
+        const compatibilityFailure = await httpApiCompatibilityFailure(
+          context.dependencies,
+        );
+        if (compatibilityFailure !== undefined) {
+          return context.outcome.failure.apiError(compatibilityFailure);
+        }
+        const { binId } = context.input as z.output<
+          typeof humanOpenInputSchema
+        >;
+        const host = extractHostFromApiUrl(context.dependencies.apiUrl);
+        const client = context.dependencies.createClient();
+        const createdResponse = await client.bins[":binId"][
+          "human-sessions"
+        ].$post({
+          param: { binId },
+        });
+        if (
+          createdResponse.status === 400 ||
+          createdResponse.status === 404 ||
+          createdResponse.status === 409
+        ) {
+          return context.outcome.failure.apiError(
+            (await createdResponse.json()).error,
+          );
+        }
+        if (createdResponse.status !== 201) {
+          throw new Error(
+            "Service returned an undeclared human-session creation status.",
+          );
+        }
+        const created = await createdResponse.json();
+        const password = created.password;
+        let session: z.infer<typeof humanSessionSchema> = created;
+        let lastWaitingKey: string | undefined;
+        for (;;) {
+          if (session.status === "ready" && session.port !== undefined) {
+            yield context.outcome.record.ready({
+              sessionId: session.sessionId,
+              binId: session.binId,
+              status: "ready",
+              host,
+              port: session.port,
+              password,
+              requestedAt: session.requestedAt,
+              updatedAt: session.updatedAt,
+              readyAt: session.readyAt ?? session.updatedAt,
+            });
+            return context.outcome.streamSuccess();
+          }
+          if (session.status === "failed") {
+            return context.outcome.failure.apiError(
+              session.failure ?? {
+                code: "human_session_failed",
+                message: "Human session failed before becoming ready.",
+              },
+            );
+          }
+          if (session.status === "closed" || session.status === "closing") {
+            return context.outcome.failure.apiError({
+              code: "human_session_closed",
+              message: "Human session closed before becoming ready.",
+            });
+          }
+          if (session.status === "pending" || session.status === "opening") {
+            const waitingKey = `${session.status}:${session.queueReason ?? ""}:${session.lastWakeError?.at ?? ""}`;
+            if (waitingKey !== lastWaitingKey) {
+              lastWaitingKey = waitingKey;
+              yield context.outcome.record.waiting({
+                sessionId: session.sessionId,
+                binId: session.binId,
+                status: session.status,
+                ...(session.queueReason === undefined
+                  ? {}
+                  : { queueReason: session.queueReason }),
+                ...(session.lastWakeError === undefined
+                  ? {}
+                  : { lastWakeError: session.lastWakeError }),
+              });
+            }
+          }
+          await delay(250);
+          const pollResponse = await client.bins[":binId"]["human-sessions"][
+            ":sessionId"
+          ].$get({
+            param: { binId, sessionId: session.sessionId },
+          });
+          if (pollResponse.status === 200) {
+            session = await pollResponse.json();
+          } else if (
+            pollResponse.status === 400 ||
+            pollResponse.status === 404
+          ) {
+            return context.outcome.failure.apiError(
+              (await pollResponse.json()).error,
+            );
+          } else {
+            throw new Error(
+              "Service returned an undeclared human-session status.",
+            );
+          }
+        }
+      };
+      return {
+        default: "structured",
+        modes: {
+          structured: mode.stream({
+            description: "Machine-readable human session stream",
+            format: "structured",
+            success: { kind: "stream", records },
+            failures: streamFailures,
+            handler: handler as never,
+          }),
+          text: mode.stream({
+            description: "Readable human session stream",
+            format: "text",
+            success: {
+              kind: "stream",
+              records: textRecords,
+              text: () => text.silent,
+            },
+            failures: textStreamFailures,
+            handler: handler as never,
+          }),
+        },
+      };
+    },
+  ) as OutputModesDefinition<"humanOpen", typeof humanOpenInputSchema>;
+  outputInputs.set(humanOpenOutputs, humanOpenExtendedInput);
 
   const humanGetSuccess = {
     found: {
-      description: "人工会话状态",
+      description: "Human session state",
       exitCode: 0,
-      schema: humanSessionSchema,
+      schema: humanSessionStateSchema,
     },
   } as const;
   const humanGetHandler: Handler<
@@ -2292,27 +2629,31 @@ function createCliContract(identity: CliCommandIdentity) {
       .bins[":binId"]["human-sessions"][":sessionId"].$get({
         param: { binId: input.binId, sessionId: input.sessionId },
       });
-    if (response.status === 200)
-      return outcome.data.found(await response.json());
+    if (response.status === 200) {
+      const { port: _port, ...state } = await response.json();
+      return outcome.data.found(humanSessionStateSchema.parse(state));
+    }
     if (response.status === 400 || response.status === 404)
       return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话读取状态。");
+    throw new Error("Service returned an undeclared human-session status.");
   };
   const humanGetOutputs = businessOutputs("humanGet", humanSessionInputSchema, {
     structuredDescription: "Machine-readable browser session state",
     textDescription: "Readable browser session state",
     success: humanGetSuccess,
     failures: failureSchemas,
-    textSuccess: { found: (session) => outputText("浏览器会话状态", session) },
+    textSuccess: {
+      found: (session) => humanSessionStateText("Human session", session),
+    },
     textFailures: failureText,
     handler: humanGetHandler,
   });
 
   const humanCloseSuccess = {
     closed: {
-      description: "人工会话关闭状态",
+      description: "Human session closure state",
       exitCode: 0,
-      schema: humanSessionSchema,
+      schema: humanSessionStateSchema,
     },
   } as const;
   const humanCloseHandler: Handler<
@@ -2326,15 +2667,19 @@ function createCliContract(identity: CliCommandIdentity) {
       .bins[":binId"]["human-sessions"][":sessionId"].close.$post({
         param: { binId: input.binId, sessionId: input.sessionId },
       });
-    if (response.status === 200)
-      return outcome.data.closed(await response.json());
+    if (response.status === 200) {
+      const { port: _port, ...state } = await response.json();
+      return outcome.data.closed(humanSessionStateSchema.parse(state));
+    }
     if (
       response.status === 400 ||
       response.status === 404 ||
       response.status === 409
     )
       return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话关闭状态。");
+    throw new Error(
+      "Service returned an undeclared human-session closure status.",
+    );
   };
   const humanCloseOutputs = businessOutputs(
     "humanClose",
@@ -2345,7 +2690,7 @@ function createCliContract(identity: CliCommandIdentity) {
       success: humanCloseSuccess,
       failures: failureSchemas,
       textSuccess: {
-        closed: (session) => outputText("浏览器会话关闭状态", session),
+        closed: (session) => humanSessionStateText("Human session", session),
       },
       textFailures: failureText,
       handler: humanCloseHandler,
@@ -3219,13 +3564,14 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          "Search archived items with literal text groups and optional bin, extension, time-window, and distribution filters.",
+          "Search archived items with literal text groups and optional bin, extension, time-window, distribution, and related-item options.",
         helpSupplement: text.lines([
           "Provide exactly one request source: --query <json>, --query-file <path>, or --query-stdin.",
           "Examples validate the CLI input contract only; the service still validates the search request JSON.",
           "File and stdin examples expect a request prepared as described in the README; native examples do not carry file contents or stdin bytes.",
           "Text matching is case-insensitive and literal. Values in one group use OR; multiple groups use AND.",
           "Extension filters require an explicit bin and the sourceAdapterId declared by bin extension-fields <bin-id>. String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. All filters combine with AND; missing and null extension values do not match.",
+          "Optional related reads ({ sourceAdapterId, include }) resolve adapter-declared searchRelations in each matched bin view and snapshot without changing matches, order, counts, or cursors, returning deduplicated full revisions in relatedRevisions.",
           "A timeWindow uses a half-open [from, until) range (inclusive from, exclusive until) in either form: local calendar dates (YYYY-MM-DD) interpreted at local midnight in a required timeZone, or exact instants with an explicit Z or ±HH:MM offset without timeZone.",
           'Time membership uses stored source precision and zone; timeSummary counts distinct certain and undetermined items, and review="undetermined" with the same snapshot.asOf inspects undetermined views.',
           "Without timeWindow, candidates sort by observedAt descending (itemId ascending breaks ties); with timeWindow, candidates sort by timeWindow.field descending (nulls last, itemId ascending breaks ties).",
@@ -3278,7 +3624,7 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--query",
             description:
-              'Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Distribution groups sort by key ascending ("key", default) or numeric itemCount descending ("count"). Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.',
+              'Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Distribution groups sort by key ascending ("key", default) or numeric itemCount descending ("count"). Optional related reads ({ sourceAdapterId, include }) resolve adapter-declared searchRelations within matched bin views and return deduplicated full revisions in relatedRevisions. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.',
           },
           queryFile: {
             kind: "valueOption",

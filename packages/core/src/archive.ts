@@ -419,6 +419,7 @@ export function createArchiveStore(
   const searchOperations = createArchiveSearchOperation(
     database,
     options.executeCancellableSearchQuery,
+    resourceStorage,
   );
   const batchReadOperations = createArchiveBatchReadOperation(
     database,

@@ -5,7 +5,6 @@ import {
   type OutgoingHttpHeaders,
   type ServerResponse,
 } from "node:http";
-import { connect as createConnection } from "node:net";
 
 const runtimePort = readPort("BINNY_E2E_PROXY_PORT", 8082);
 const controlPort = readPort("BINNY_E2E_PROXY_CONTROL_PORT", 8083);
@@ -431,38 +430,6 @@ const runtimeProxy = createServer((request, response) => {
   void handleRuntimeRequest(request, response).catch((error: unknown) =>
     sendFailure(response, error),
   );
-});
-
-runtimeProxy.on("upgrade", (request, client, head) => {
-  const upstream = createConnection(3000, "server");
-  // A runtime reset is expected I/O; tear down only this tunnel, never the proxy process.
-  const closeTunnel = (): void => {
-    client.destroy();
-    upstream.destroy();
-  };
-  upstream.once("connect", () => {
-    const headers = [...request.rawHeaders];
-    let hasHost = false;
-    for (let index = 0; index < headers.length; index += 2) {
-      if (headers[index]?.toLowerCase() !== "host") continue;
-      headers[index + 1] = "server:3000";
-      hasHost = true;
-    }
-    if (!hasHost) headers.push("Host", "server:3000");
-    const headerLines: string[] = [];
-    for (let index = 0; index < headers.length; index += 2) {
-      headerLines.push(`${headers[index]}: ${headers[index + 1]}`);
-    }
-    upstream.write(
-      `${request.method ?? "GET"} ${request.url ?? "/"} HTTP/${request.httpVersion}\r\n${headerLines.join("\r\n")}\r\n\r\n`,
-    );
-    if (head.length > 0) upstream.write(head);
-    client.pipe(upstream).pipe(client);
-  });
-  upstream.once("error", closeTunnel);
-  client.once("error", closeTunnel);
-  upstream.once("close", () => client.destroy());
-  client.once("close", () => upstream.destroy());
 });
 
 const control = createServer((request, response) => {

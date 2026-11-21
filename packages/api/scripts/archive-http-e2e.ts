@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
 
 import { createApiClient } from "@binny/api/client";
@@ -12,8 +13,11 @@ import {
   archiveQueryContractPath,
   archiveQueryContractVersion,
   publicApiProtocolVersion,
+  runtimeConfigurationValidationPath,
+  runtimeProtocolVersion,
   serviceCapabilities,
   serviceMetadataSchema,
+  sourceAdapterManifestSchema,
   archiveSubmissionInputSchema,
 } from "@binny/contracts";
 import type { ArchiveSearchRequest } from "@binny/contracts";
@@ -2583,6 +2587,7 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
   if (extensionFieldsResponse.status === 200) {
     const extensionFields = (await extensionFieldsResponse.json()) as {
       readonly sourceAdapterId: string;
+      readonly summaryFields: readonly unknown[];
       readonly fields: Readonly<
         Record<
           string,
@@ -2594,6 +2599,7 @@ async function verifyFixedSearch(baseUrl: string): Promise<void> {
         >
       >;
     };
+    assert.deepEqual(extensionFields.summaryFields, []);
     assert.equal(
       extensionFields.sourceAdapterId,
       "binny-runs.manual-run-fixture",
@@ -6885,15 +6891,855 @@ async function verifyArchivePersistence(
   };
 }
 
+async function verifySearchSummaryFields(
+  baseUrl: string,
+  providedControlUrl?: string,
+): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const discovery = await discoverArchiveQueryContract(baseUrl);
+  const searchContract = discovery.queryContract.operations.search;
+  const runId = randomUUID();
+
+  let controlServer: ReturnType<typeof createServer> | undefined;
+  let controlUrl = providedControlUrl;
+  if (controlUrl === undefined) {
+    controlServer = createServer((req, res) => {
+      if (
+        req.method === "POST" &&
+        req.url === runtimeConfigurationValidationPath
+      ) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ valid: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      controlServer!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = controlServer.address();
+    assert.ok(address !== null && typeof address === "object");
+    controlUrl = `http://127.0.0.1:${String(address.port)}`;
+  }
+
+  const buildManifest = (includeSummaryFields: boolean) =>
+    sourceAdapterManifestSchema.parse({
+      id: "e2e.search-summary-fixture",
+      version: includeSummaryFields ? "1.1.0" : "1.0.0",
+      environment: {
+        browser: { required: false, profileReuseAfterRestart: false },
+      },
+      configSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      extensionsSchema: {
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        type: "object",
+        properties: {
+          postNumber: { type: "integer", exclusiveMinimum: 0 },
+          category: { type: "string", enum: ["post", "reply"] },
+          topic: {
+            type: "object",
+            properties: {
+              slug: { type: "string" },
+              title: { type: "string", minLength: 1 },
+            },
+            required: ["slug"],
+            additionalProperties: false,
+          },
+        },
+        required: ["postNumber", "category", "topic"],
+        additionalProperties: false,
+      },
+      ...(includeSummaryFields
+        ? { searchSummaryFields: ["postNumber", "topic.title"] }
+        : {}),
+      actions: {
+        check: {
+          description: "Check summary fixture",
+          params: { type: "object", properties: {} },
+          output: { type: "object", properties: { ok: { type: "boolean" } } },
+        },
+        collect: {
+          description: "Collect summary fixture",
+          params: { type: "object", properties: {} },
+          output: { type: "object", properties: { ok: { type: "boolean" } } },
+        },
+      },
+    });
+
+  const registerBin = async (
+    binId: string,
+    runtimeId: string,
+    manifest: ReturnType<typeof buildManifest>,
+  ) => {
+    const response = await client.bins[":binId"].runtime.heartbeat.$post({
+      param: { binId },
+      json: {
+        protocolVersion: runtimeProtocolVersion,
+        runtimeId,
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        runtimeControlUrl: controlUrl,
+        sourceAdapter: manifest,
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+      },
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  };
+
+  const disconnectBin = async (binId: string, runtimeId: string) => {
+    const response = await client.bins[":binId"].runtime.disconnect.$post({
+      param: { binId },
+      json: {
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+      },
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  };
+
+  const binA = `summary-a-${runId.slice(0, 8)}`;
+  const binB = `summary-b-${runId.slice(0, 8)}`;
+  const runtimeA = `rt-summary-a-${runId.slice(0, 8)}`;
+  const runtimeB = `rt-summary-b-${runId.slice(0, 8)}`;
+  const plainManifest = buildManifest(false);
+  const summaryManifest = buildManifest(true);
+
+  try {
+    await registerBin(binA, runtimeA, plainManifest);
+    await registerBin(binB, runtimeB, summaryManifest);
+
+    const plainDiscoveryRes = await fetch(
+      new URL(`/bins/${binA}/extension-fields`, baseUrl),
+    );
+    assert.equal(plainDiscoveryRes.status, 200);
+    const plainDiscovery = (await plainDiscoveryRes.json()) as {
+      readonly summaryFields: readonly unknown[];
+    };
+    assert.deepEqual(plainDiscovery.summaryFields, []);
+
+    const summaryDiscoveryRes = await fetch(
+      new URL(`/bins/${binB}/extension-fields`, baseUrl),
+    );
+    assert.equal(summaryDiscoveryRes.status, 200);
+    const summaryDiscovery = (await summaryDiscoveryRes.json()) as {
+      readonly summaryFields: readonly { readonly path: string }[];
+    };
+    assert.deepEqual(
+      summaryDiscovery.summaryFields.map(({ path }) => path),
+      ["postNumber", "topic.title"],
+    );
+
+    const token = `summary-token-${runId}`;
+    await submitArchive(client, {
+      requestId: `e2e:summary:a:${runId}`,
+      binId: binA,
+      observedAt: "2026-11-10T10:00:00.000Z",
+      items: [
+        {
+          sourceKey: { namespace: "e2e-summary", key: `${runId}:legacy-reply` },
+          title: null,
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-10T09:00:00.000Z",
+            timeZone: "UTC",
+          },
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 2,
+            category: "reply",
+            topic: { slug: "legacy-topic" },
+          },
+          body: { text: `${token} legacy reply without topic title` },
+          capture: {
+            scope: { case: "summary" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: "e2e-summary", key: `${runId}:shared-reply` },
+          title: "Own Post Title A",
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-10T09:30:00.000Z",
+            timeZone: "UTC",
+          },
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 3,
+            category: "reply",
+            topic: { slug: "shared-topic", title: "Topic Title View A" },
+          },
+          body: { text: `${token} shared reply view a` },
+          capture: {
+            scope: { case: "summary" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    });
+
+    await submitArchive(client, {
+      requestId: `e2e:summary:b:${runId}`,
+      binId: binB,
+      observedAt: "2026-11-10T11:00:00.000Z",
+      items: [
+        {
+          sourceKey: { namespace: "e2e-summary", key: `${runId}:shared-reply` },
+          title: "Own Post Title B",
+          sourcePublishedAt: {
+            precision: "instant",
+            value: "2026-11-10T09:30:00.000Z",
+            timeZone: "UTC",
+          },
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 4,
+            category: "reply",
+            topic: { slug: "shared-topic", title: "Topic Title View B" },
+          },
+          body: { text: `${token} shared reply view b` },
+          capture: {
+            scope: { case: "summary" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    });
+
+    const baselineQuery = {
+      bins: [binA, binB],
+      text: { in: "body" as const, groups: [[token]] },
+      extensions: {
+        sourceAdapterId: "e2e.search-summary-fixture",
+        filters: { category: { op: "eq" as const, value: "reply" } },
+      },
+      limit: 1,
+      distribution: { by: "bin" as const, limit: 10 },
+    };
+
+    const beforePage1 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, baselineQuery),
+    );
+    assert.equal(beforePage1.results.length, 1);
+    assert.equal(beforePage1.hasMore, true);
+    assert.ok(beforePage1.nextCursor);
+    const sharedBefore = beforePage1.results[0]!;
+    assert.equal(sharedBefore.title, "Own Post Title B");
+    assert.equal(sharedBefore.matches[0]?.binId, binB);
+    assert.deepEqual(sharedBefore.matches[0]?.summaryExtensions, {
+      postNumber: 4,
+      "topic.title": "Topic Title View B",
+    });
+    assert.equal(sharedBefore.matches[1]?.binId, binA);
+    assert.equal(sharedBefore.matches[1]?.summaryExtensions, undefined);
+
+    const beforePage2 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, {
+        ...baselineQuery,
+        cursor: beforePage1.nextCursor,
+      }),
+    );
+    assert.equal(beforePage2.results.length, 1);
+    assert.equal(beforePage2.results[0]?.title, null);
+    assert.equal(
+      beforePage2.results[0]?.matches[0]?.summaryExtensions,
+      undefined,
+    );
+
+    // Upgrade binA's adapter manifest in-place to declare searchSummaryFields.
+    await registerBin(binA, runtimeA, summaryManifest);
+
+    const afterPage1 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, baselineQuery),
+    );
+    assert.equal(afterPage1.nextCursor, beforePage1.nextCursor);
+    assert.deepEqual(afterPage1.distribution, beforePage1.distribution);
+    assert.deepEqual(
+      afterPage1.results.map(({ itemId }) => itemId),
+      beforePage1.results.map(({ itemId }) => itemId),
+    );
+    assert.deepEqual(afterPage1.results[0]?.matches[0]?.summaryExtensions, {
+      postNumber: 4,
+      "topic.title": "Topic Title View B",
+    });
+    assert.deepEqual(afterPage1.results[0]?.matches[1]?.summaryExtensions, {
+      postNumber: 3,
+      "topic.title": "Topic Title View A",
+    });
+
+    const afterPage2 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, {
+        ...baselineQuery,
+        cursor: afterPage1.nextCursor,
+      }),
+    );
+    assert.equal(afterPage2.results.length, 1);
+    assert.equal(afterPage2.results[0]?.itemId, beforePage2.results[0]?.itemId);
+    assert.equal(afterPage2.results[0]?.title, null);
+    assert.deepEqual(afterPage2.results[0]?.matches[0]?.summaryExtensions, {
+      postNumber: 2,
+    });
+    assert.equal(afterPage2.hasMore, false);
+
+    await disconnectBin(binA, runtimeA);
+    await disconnectBin(binB, runtimeB);
+  } finally {
+    if (controlServer !== undefined) {
+      await new Promise<void>((resolve) => {
+        controlServer.close(() => resolve());
+      });
+    }
+  }
+}
+
+async function verifySearchRelatedItems(
+  baseUrl: string,
+  providedControlUrl?: string,
+): Promise<void> {
+  const client = createApiClient(baseUrl);
+  const discovery = await discoverArchiveQueryContract(baseUrl);
+  const searchContract = discovery.queryContract.operations.search;
+  const runId = randomUUID();
+
+  let controlServer: ReturnType<typeof createServer> | undefined;
+  let controlUrl = providedControlUrl;
+  if (controlUrl === undefined) {
+    controlServer = createServer((req, res) => {
+      if (
+        req.method === "POST" &&
+        req.url === runtimeConfigurationValidationPath
+      ) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ valid: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => {
+      controlServer!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = controlServer.address();
+    assert.ok(address !== null && typeof address === "object");
+    controlUrl = `http://127.0.0.1:${String(address.port)}`;
+  }
+
+  const adapterId = "e2e.search-related-fixture";
+  const manifest = sourceAdapterManifestSchema.parse({
+    id: adapterId,
+    version: "1.0.0",
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    configSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    extensionsSchema: {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      properties: {
+        postNumber: { type: "integer", exclusiveMinimum: 0 },
+        topicId: { type: "integer", exclusiveMinimum: 0 },
+        topic: {
+          type: "object",
+          properties: {
+            slug: { type: "string" },
+            title: { type: "string", minLength: 1 },
+          },
+          required: ["slug"],
+          additionalProperties: false,
+        },
+      },
+      required: ["postNumber", "topicId", "topic"],
+      additionalProperties: false,
+    },
+    searchSummaryFields: ["postNumber", "topic.title"],
+    searchRelations: {
+      topicRoot: {
+        relationName: "topic_reply",
+        direction: "incoming",
+        description: "Opening post of the topic linked via topic_reply.",
+      },
+    },
+    actions: {
+      check: {
+        description: "Check related fixture",
+        params: { type: "object", properties: {} },
+        output: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
+      collect: {
+        description: "Collect related fixture",
+        params: { type: "object", properties: {} },
+        output: { type: "object", properties: { ok: { type: "boolean" } } },
+      },
+    },
+  });
+
+  const registerBin = async (binId: string, runtimeId: string) => {
+    const response = await client.bins[":binId"].runtime.heartbeat.$post({
+      param: { binId },
+      json: {
+        protocolVersion: runtimeProtocolVersion,
+        runtimeId,
+        ownerGeneration: "1",
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+        runtimeControlUrl: controlUrl,
+        sourceAdapter: manifest,
+        environment: {
+          kind: "lightweight",
+          browser: {
+            available: false,
+            profileReuseAfterRestart: false,
+            power: { status: "unavailable" },
+          },
+        },
+      },
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  };
+
+  const disconnectBin = async (binId: string, runtimeId: string) => {
+    const response = await client.bins[":binId"].runtime.disconnect.$post({
+      param: { binId },
+      json: {
+        runtimeId,
+        ownerLockAcquired: true,
+        activeRunId: null,
+        claimInFlight: false,
+      },
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  };
+
+  const binMain = `related-main-${runId.slice(0, 8)}`;
+  const binOther = `related-other-${runId.slice(0, 8)}`;
+  const runtimeMain = `rt-related-main-${runId.slice(0, 8)}`;
+  const runtimeOther = `rt-related-other-${runId.slice(0, 8)}`;
+  const ns = `e2e-related-${runId.slice(0, 8)}`;
+  const token = `related-token-${runId}`;
+
+  try {
+    await registerBin(binMain, runtimeMain);
+    await registerBin(binOther, runtimeOther);
+
+    const discoveryRes = await fetch(
+      new URL(`/bins/${binMain}/extension-fields`, baseUrl),
+    );
+    assert.equal(discoveryRes.status, 200);
+    const discovered = (await discoveryRes.json()) as {
+      readonly searchRelations: Readonly<
+        Record<
+          string,
+          { readonly relationName: string; readonly direction: string }
+        >
+      >;
+    };
+    assert.deepEqual(discovered.searchRelations, {
+      topicRoot: {
+        relationName: "topic_reply",
+        direction: "incoming",
+        description: "Opening post of the topic linked via topic_reply.",
+      },
+    });
+
+    const commitV1 = await submitArchive(client, {
+      requestId: `e2e:related:v1:${runId}`,
+      binId: binMain,
+      observedAt: "2026-11-11T10:00:00.000Z",
+      items: [
+        {
+          sourceKey: { namespace: ns, key: "post:101" },
+          title: "Topic One Opening Post",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 1,
+            topicId: 101,
+            topic: { slug: "topic-1", title: "Topic One" },
+          },
+          body: { text: `${token} opening post v1` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: ns, key: "post:102" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 2,
+            topicId: 101,
+            topic: { slug: "topic-1", title: "Topic One" },
+          },
+          body: { text: `${token} reply 102` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: ns, key: "post:103" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 3,
+            topicId: 101,
+            topic: { slug: "topic-1", title: "Topic One" },
+          },
+          body: { text: `${token} reply 103` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+      relations: [
+        {
+          relationId: `${ns}:topic:101:reply:102`,
+          value: {
+            from: { namespace: ns, key: "post:101" },
+            to: { sourceKey: { namespace: ns, key: "post:102" } },
+            name: "topic_reply",
+            cascade: true,
+          },
+        },
+        {
+          relationId: `${ns}:topic:101:reply:103`,
+          value: {
+            from: { namespace: ns, key: "post:101" },
+            to: { sourceKey: { namespace: ns, key: "post:103" } },
+            name: "topic_reply",
+            cascade: true,
+          },
+        },
+      ],
+    });
+    const rootV1RevisionId = commitV1.items.find(
+      (item) => item.sourceKey.key === "post:101",
+    )!.revisionId;
+
+    // Seed unobserved root (only observed in binOther) so binMain reports not_observed.
+    const commitOther = await submitArchive(client, {
+      requestId: `e2e:related:other:${runId}`,
+      binId: binOther,
+      observedAt: "2026-11-11T10:05:00.000Z",
+      items: [
+        {
+          sourceKey: { namespace: ns, key: "post:201" },
+          title: "Topic Two Opening Post",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 1,
+            topicId: 201,
+            topic: { slug: "topic-2", title: "Topic Two" },
+          },
+          body: { text: "other bin opening post" },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+    });
+    const rootTwoItemId = commitOther.items[0]!.itemId;
+
+    const commitV2 = await submitArchive(client, {
+      requestId: `e2e:related:v2:${runId}`,
+      binId: binMain,
+      observedAt: "2026-11-11T10:10:00.000Z",
+      items: [
+        {
+          sourceKey: { namespace: ns, key: "post:101" },
+          title: "Topic One Opening Post",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 1,
+            topicId: 101,
+            topic: { slug: "topic-1", title: "Topic One" },
+          },
+          body: { text: `${token} opening post v2` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: ns, key: "post:202" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 2,
+            topicId: 201,
+            topic: { slug: "topic-2", title: "Topic Two" },
+          },
+          body: { text: `${token} reply 202 unobserved root` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: ns, key: "post:301" },
+          title: "Topic Three Opening Post",
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 1,
+            topicId: 301,
+            topic: { slug: "topic-3", title: "Topic Three" },
+          },
+          body: { text: "deleted root 301" },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+        {
+          sourceKey: { namespace: ns, key: "post:302" },
+          title: null,
+          sourcePublishedAt: null,
+          sourceModifiedAt: null,
+          extensions: {
+            postNumber: 2,
+            topicId: 301,
+            topic: { slug: "topic-3", title: "Topic Three" },
+          },
+          body: { text: `${token} reply 302 deleted root` },
+          capture: {
+            scope: { case: "related" },
+            completeness: "complete",
+            missing: [],
+          },
+        },
+      ],
+      relations: [
+        {
+          relationId: `${ns}:topic:201:reply:202`,
+          value: {
+            from: { namespace: ns, key: "post:201" },
+            to: { sourceKey: { namespace: ns, key: "post:202" } },
+            name: "topic_reply",
+            cascade: false,
+          },
+        },
+        {
+          relationId: `${ns}:topic:301:reply:302`,
+          value: {
+            from: { namespace: ns, key: "post:301" },
+            to: { sourceKey: { namespace: ns, key: "post:302" } },
+            name: "topic_reply",
+            cascade: false,
+          },
+        },
+      ],
+    });
+    const rootV2RevisionId = commitV2.items.find(
+      (item) => item.sourceKey.key === "post:101",
+    )!.revisionId;
+    const rootThreeItemId = commitV2.items.find(
+      (item) => item.sourceKey.key === "post:301",
+    )!.itemId;
+
+    const deleteRoot3Res = await client.archives.items[":itemId"].$delete({
+      param: { itemId: rootThreeItemId },
+    });
+    assert.equal(deleteRoot3Res.status, 200);
+
+    const baseQuery = {
+      bins: [binMain],
+      text: { in: "body" as const, groups: [[token]] },
+      distribution: { by: "bin" as const, limit: 10 },
+      limit: 2,
+    };
+
+    const defaultPage1 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, baseQuery),
+    );
+    assert.equal(defaultPage1.relatedRevisions, undefined);
+    assert.equal(defaultPage1.results[0]?.matches[0]?.related, undefined);
+    assert.equal(defaultPage1.hasMore, true);
+    assert.ok(defaultPage1.nextCursor);
+
+    const relatedPage1 = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, {
+        ...baseQuery,
+        related: { sourceAdapterId: adapterId, include: ["topicRoot"] },
+      }),
+    );
+    assert.equal(relatedPage1.nextCursor, defaultPage1.nextCursor);
+    assert.deepEqual(relatedPage1.distribution, defaultPage1.distribution);
+    assert.deepEqual(
+      relatedPage1.results.map(({ itemId }) => itemId),
+      defaultPage1.results.map(({ itemId }) => itemId),
+    );
+
+    const relatedFullPage = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, {
+        bins: [binMain],
+        text: { in: "body" as const, groups: [[token]] },
+        limit: 20,
+        related: { sourceAdapterId: adapterId, include: ["topicRoot"] },
+      }),
+    );
+    assert.equal(relatedFullPage.results.length, 5);
+    assert.deepEqual(Object.keys(relatedFullPage.relatedRevisions ?? {}), [
+      rootV2RevisionId,
+    ]);
+    assert.equal(
+      relatedFullPage.relatedRevisions?.[rootV2RevisionId]?.revision.state.body
+        ?.text,
+      `${token} opening post v2`,
+    );
+
+    const bySourceKey = new Map(
+      relatedFullPage.results.map((result) => [
+        result.sourceKey.key,
+        result.matches[0]?.related?.topicRoot,
+      ]),
+    );
+    const rel102 = bySourceKey.get("post:102");
+    const rel103 = bySourceKey.get("post:103");
+    assert.equal(rel102?.status, "readable");
+    assert.equal(rel103?.status, "readable");
+    if (rel102?.status === "readable" && rel103?.status === "readable") {
+      assert.equal(rel102.reference.revisionId, rootV2RevisionId);
+      assert.equal(rel103.reference.revisionId, rootV2RevisionId);
+    }
+    assert.deepEqual(bySourceKey.get("post:101"), { status: "none" });
+    assert.deepEqual(bySourceKey.get("post:202"), {
+      status: "unreadable",
+      reason: "not_observed",
+      itemId: rootTwoItemId,
+      sourceKey: { namespace: ns, key: "post:201" },
+    });
+    assert.deepEqual(bySourceKey.get("post:302"), {
+      status: "unreadable",
+      reason: "deleted",
+      itemId: rootThreeItemId,
+      sourceKey: { namespace: ns, key: "post:301" },
+    });
+
+    const historicalPage = archiveSearchPageSchema.parse(
+      await postDiscoveredSearch(baseUrl, searchContract, {
+        bins: [binMain],
+        text: { in: "body" as const, groups: [[token]] },
+        asOf: commitV1.archiveSeq,
+        limit: 20,
+        related: { sourceAdapterId: adapterId, include: ["topicRoot"] },
+      }),
+    );
+    assert.deepEqual(Object.keys(historicalPage.relatedRevisions ?? {}), [
+      rootV1RevisionId,
+    ]);
+    assert.equal(
+      historicalPage.relatedRevisions?.[rootV1RevisionId]?.revision.state.body
+        ?.text,
+      `${token} opening post v1`,
+    );
+
+    const invalidRoleResponse = await fetch(
+      new URL(searchContract.path, baseUrl),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          bins: [binMain],
+          related: { sourceAdapterId: adapterId, include: ["unknownRole"] },
+        }),
+      },
+    );
+    assert.equal(invalidRoleResponse.status, 400);
+    const invalidRoleError = archiveErrorSchema.parse(
+      await invalidRoleResponse.json(),
+    );
+    assert.equal(invalidRoleError.error.code, "invalid_input");
+    assert.deepEqual(invalidRoleError.error.path, ["related", "include", 0]);
+    assert.deepEqual(invalidRoleError.error.diagnostic?.allowedItemValues, [
+      "topicRoot",
+    ]);
+
+    await disconnectBin(binMain, runtimeMain);
+    await disconnectBin(binOther, runtimeOther);
+  } finally {
+    if (controlServer !== undefined) {
+      await new Promise<void>((resolve) => {
+        controlServer.close(() => resolve());
+      });
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const [stage, baseUrl] = process.argv.slice(2);
   if (baseUrl === undefined || baseUrl.length === 0) {
     throw new Error("归档 HTTP 验收需要 base URL。");
   }
+  if (stage === "search-summary") {
+    await verifySearchSummaryFields(
+      baseUrl,
+      process.env.BINNY_E2E_SEARCH_SUMMARY_RUNTIME_URL,
+    );
+    process.stdout.write("Search summary fields HTTP acceptance passed.\n");
+    return;
+  }
+  if (stage === "search-related") {
+    await verifySearchRelatedItems(
+      baseUrl,
+      process.env.BINNY_E2E_SEARCH_SUMMARY_RUNTIME_URL,
+    );
+    process.stdout.write("Search related items HTTP acceptance passed.\n");
+    return;
+  }
   if (stage === "fixed-search") {
     await verifyFixedSearch(baseUrl);
     await verifyTimeWindowSearch(baseUrl);
     await verifyCountOrderedDistribution(baseUrl);
+    if (process.env.BINNY_E2E_SEARCH_SUMMARY_RUNTIME_URL !== undefined) {
+      await verifySearchSummaryFields(
+        baseUrl,
+        process.env.BINNY_E2E_SEARCH_SUMMARY_RUNTIME_URL,
+      );
+      await verifySearchRelatedItems(
+        baseUrl,
+        process.env.BINNY_E2E_SEARCH_SUMMARY_RUNTIME_URL,
+      );
+    }
     process.stdout.write(
       "Fixed archive search and pagination acceptance passed.\n",
     );

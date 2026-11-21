@@ -8,7 +8,10 @@ import type {
 import {
   archiveExtensionOperationSchema,
   archiveExtensionScalarSchema,
+  archiveExtensionSummaryValueSchema,
   archiveSearchExtensionsSchema,
+  archiveSearchRelationRoleSchema,
+  archiveSearchSummaryFieldPathSchema,
   type ArchiveExtensionOperation,
   type ArchiveExtensionScalar,
 } from "./archive-extensions.ts";
@@ -1465,6 +1468,30 @@ function archiveSearchBinsSchema(requiredExtensionScope = false) {
     });
 }
 
+/** Declared adapter relation roles to resolve alongside matched search views. */
+export const archiveSearchRelatedRequestSchema = z
+  .object({
+    sourceAdapterId: sourceAdapterIdSchema,
+    include: z
+      .array(archiveSearchRelationRoleSchema)
+      .min(1)
+      .max(16)
+      .superRefine((roles, context) => {
+        const seen = new Set<string>();
+        for (const [index, role] of roles.entries()) {
+          if (seen.has(role)) {
+            context.addIssue({
+              code: "custom",
+              path: [index],
+              message: "A related role can appear only once.",
+            });
+          }
+          seen.add(role);
+        }
+      }),
+  })
+  .strict();
+
 const archiveSearchInputSharedFields = {
   text: archiveSearchTextSchema.optional(),
   timeWindow: archiveSearchTimeWindowSchema.optional(),
@@ -1473,6 +1500,11 @@ const archiveSearchInputSharedFields = {
     .default(true)
     .describe(
       "Return candidate item results alongside an optional distribution.",
+    ),
+  related: archiveSearchRelatedRequestSchema
+    .optional()
+    .describe(
+      "Optionally resolve adapter-declared related item revisions for each matched view at this snapshot.",
     ),
   asOf: archiveSnapshotSequenceSchema.optional(),
   limit: z.number().int().min(1).max(100).default(50),
@@ -1562,6 +1594,45 @@ export const archiveSearchInputSchema = withArchiveJsonSchemaProjection(
           path: ["distribution", "sourceAdapterId"],
           message:
             "Extension filters and distributions must use the same source adapter.",
+        });
+      }
+      if (!input.includeCandidates && input.related !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["related"],
+          message:
+            "Related item reads cannot be requested when candidates are omitted.",
+        });
+      }
+      if (input.related !== undefined && input.bins === undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["bins"],
+          message: "Related item reads require an explicit bin scope.",
+        });
+      }
+      if (
+        input.related !== undefined &&
+        input.extensions !== undefined &&
+        input.related.sourceAdapterId !== input.extensions.sourceAdapterId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["related", "sourceAdapterId"],
+          message:
+            "Extension filters and related item reads must use the same source adapter.",
+        });
+      }
+      if (
+        input.related !== undefined &&
+        input.distribution?.by === "extension" &&
+        input.related.sourceAdapterId !== input.distribution.sourceAdapterId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["related", "sourceAdapterId"],
+          message:
+            "Extension distributions and related item reads must use the same source adapter.",
         });
       }
     }),
@@ -1713,10 +1784,13 @@ function archiveSearchInputExtensionDiscovery(
   const distribution = isPlainJsonObject(input.distribution)
     ? input.distribution
     : undefined;
+  const related = isPlainJsonObject(input.related) ? input.related : undefined;
   // Discovery navigation is optional evidence; never let an invalid identity
   // turn an otherwise normal input failure into a diagnostic construction error.
   const checkedSourceAdapterId = sourceAdapterIdSchema.safeParse(
-    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId,
+    extensions?.sourceAdapterId ??
+      distribution?.sourceAdapterId ??
+      related?.sourceAdapterId,
   );
   if (!checkedSourceAdapterId.success) return undefined;
   const bins = Array.isArray(input.bins) ? input.bins : undefined;
@@ -1759,7 +1833,9 @@ export function archiveSearchInputDiagnostic(
         )
       : undefined;
   const extensionIssue =
-    issue.path[0] === "extensions" || issue.path[0] === "distribution";
+    issue.path[0] === "extensions" ||
+    issue.path[0] === "distribution" ||
+    issue.path[0] === "related";
   const discovery = extensionIssue
     ? archiveSearchInputExtensionDiscovery(input)
     : undefined;
@@ -1778,6 +1854,59 @@ export function archiveSearchInputDiagnostic(
   return archiveSearchDiagnosticSchema.parse(diagnostic);
 }
 
+export const archiveResourceAvailabilitySchema = z
+  .object({
+    resourceId: archiveIdentifierSchema,
+    status: z.enum(["available", "missing"]),
+  })
+  .strict();
+
+export const archiveSearchRelatedReferenceSchema = z
+  .object({
+    itemId: archiveIdentifierSchema,
+    binId: binIdSchema,
+    revisionId: archiveIdentifierSchema,
+    archiveSeq: archiveSequenceSchema,
+  })
+  .strict();
+
+export const archiveSearchRelatedUnreadableReasonSchema = z.enum([
+  "deleted",
+  "not_observed",
+  "external_target",
+  "ambiguous_target",
+]);
+
+export const archiveSearchRelatedMatchSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("readable"),
+      reference: archiveSearchRelatedReferenceSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("unreadable"),
+      reason: archiveSearchRelatedUnreadableReasonSchema,
+      itemId: archiveIdentifierSchema.optional(),
+      sourceKey: sourceKeySchema.optional(),
+      sourceRef: nonEmptyText.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("none"),
+    })
+    .strict(),
+]);
+
+export const archiveSearchRelatedRevisionSchema = z
+  .object({
+    revision: archiveRevisionReadSchema,
+    resources: z.array(archiveResourceAvailabilitySchema),
+  })
+  .strict();
+
 const archiveSearchMatchSchema = z
   .object({
     binId: binIdSchema,
@@ -1790,6 +1919,21 @@ const archiveSearchMatchSchema = z
     sourcePublishedAt: sourceTimeSchema.nullable(),
     sourceModifiedAt: sourceTimeSchema.nullable(),
     timeMatch: archiveSearchTimeMatchSchema.optional(),
+    summaryExtensions: z
+      .record(
+        archiveSearchSummaryFieldPathSchema,
+        archiveExtensionSummaryValueSchema,
+      )
+      .optional()
+      .describe(
+        "Adapter-declared summary extension values stored on this matched bin view's revision.",
+      ),
+    related: z
+      .record(archiveSearchRelationRoleSchema, archiveSearchRelatedMatchSchema)
+      .optional()
+      .describe(
+        "Per-role related item resolution in this matched bin view and snapshot.",
+      ),
   })
   .strict();
 
@@ -1858,10 +2002,31 @@ export const archiveSearchPageSchema = withArchiveJsonSchemaProjection(
       hasMore: z.boolean(),
       nextCursor: z.string().min(1).max(4096).optional(),
       distribution: archiveSearchDistributionPageSchema.optional(),
+      relatedRevisions: z
+        .record(archiveIdentifierSchema, archiveSearchRelatedRevisionSchema)
+        .optional()
+        .describe(
+          "Deduplicated complete revisions keyed by revisionId for readable related items on this page.",
+        ),
     })
     .strict(),
 );
 
+export type ArchiveResourceAvailability = z.infer<
+  typeof archiveResourceAvailabilitySchema
+>;
+export type ArchiveSearchRelatedRequest = z.infer<
+  typeof archiveSearchRelatedRequestSchema
+>;
+export type ArchiveSearchRelatedReference = z.infer<
+  typeof archiveSearchRelatedReferenceSchema
+>;
+export type ArchiveSearchRelatedMatch = z.infer<
+  typeof archiveSearchRelatedMatchSchema
+>;
+export type ArchiveSearchRelatedRevision = z.infer<
+  typeof archiveSearchRelatedRevisionSchema
+>;
 export type ArchiveSearchInput = z.infer<typeof archiveSearchInputSchema>;
 export type ArchiveSearchRequest = z.input<typeof archiveSearchInputSchema>;
 export type ArchiveSearchPage = z.infer<typeof archiveSearchPageSchema>;

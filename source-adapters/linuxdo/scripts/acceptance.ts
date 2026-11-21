@@ -11,7 +11,7 @@ import {
   resolveBakeComposeContexts,
   type BakeComposeContexts,
 } from "@binny/tooling-config/bake-compose-contexts";
-import { type Browser, type Page } from "patchright-core";
+import type { VncViewerHandle } from "@binny/tooling-config/vnc-viewer-fixture";
 
 import {
   closeLinuxdoHumanSession,
@@ -223,6 +223,7 @@ const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
 const projectName = `binny-discovery-${suffix}`;
 const serverImage = `${projectName}-server:local`;
 const browserImage = `${projectName}-linuxdo:local`;
+const vncViewerImage = `${projectName}-vnc-viewer:local`;
 const internalStep = process.env.BINNY_E2E_INTERNAL_STEP;
 const publishedHost =
   process.env.BINNY_DISCOVERY_PUBLISHED_HOST ?? "172.17.0.1";
@@ -234,7 +235,6 @@ assert.ok(
 );
 let overlayDirectory: string | undefined;
 let overlayFile: string | undefined;
-let browser: Browser | undefined;
 let viewerBrowser: LinuxdoViewerBrowser | undefined;
 let serverPort = 0;
 let sourcePort = 0;
@@ -248,6 +248,7 @@ function environment(): Readonly<Record<string, string>> {
     BINNY_IMAGE: serverImage,
     BINNY_LINUXDO_BIN_ID: "binny-discovery-topic",
     BINNY_LINUXDO_IMAGE: browserImage,
+    BINNY_TEST_VNC_VIEWER_IMAGE: vncViewerImage,
     BINNY_POSTGRES_PASSWORD: password,
   };
 }
@@ -709,27 +710,37 @@ async function trigger(
   );
 }
 
-async function startOuterBrowser(): Promise<Browser> {
-  viewerBrowser = await startLinuxdoViewerBrowser({
+async function startOuterBrowser(): Promise<LinuxdoViewerBrowser> {
+  const viewerImageBuild = await run("turbo", [
+    "run",
+    "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture",
+  ]);
+  assert.equal(
+    viewerImageBuild.code,
+    0,
+    `VNC viewer fixture image build failed:\n${(viewerImageBuild.stdout + viewerImageBuild.stderr).slice(-12_000)}`,
+  );
+  return await startLinuxdoViewerBrowser({
     projectName,
-    image: browserImage,
-    publishedHost,
+    image: vncViewerImage,
     run,
   });
-  return viewerBrowser.browser;
 }
 
-async function openViewer(session: BrowserSession): Promise<Page> {
-  assert.ok(browser !== undefined);
-  return await openLinuxdoViewer(browser, session, publishedHost, serverPort);
+async function openViewer(session: BrowserSession): Promise<VncViewerHandle> {
+  assert.ok(viewerBrowser !== undefined);
+  return await openLinuxdoViewer(viewerBrowser, session);
 }
 
-async function navigateThroughViewer(page: Page, url: string): Promise<void> {
-  await navigateThroughLinuxdoViewer(page, url);
+async function navigateThroughViewer(
+  viewer: VncViewerHandle,
+  url: string,
+): Promise<void> {
+  await navigateThroughLinuxdoViewer(viewer, url);
 }
 
 async function openHumanSession(): Promise<BrowserSession> {
-  return await openLinuxdoHumanSession(cli, "binny-discovery-topic");
+  return await openLinuxdoHumanSession(cli, "binny-discovery-topic", apiUrl());
 }
 
 async function closeHumanSession(sessionId: string): Promise<void> {
@@ -908,14 +919,13 @@ async function diagnostics(): Promise<string> {
 async function verifyLoginRequired(): Promise<
   Awaited<ReturnType<typeof linuxdoUserJourney>>
 > {
-  assert.ok(browser !== undefined);
+  assert.ok(viewerBrowser !== undefined);
   return await linuxdoUserJourney({
     binId: "binny-discovery-topic",
     topicId: 2401,
     cli,
-    browser,
-    publishedHost,
-    serverPort,
+    vncViewer: viewerBrowser,
+    apiUrl: apiUrl(),
     sourceOrigin: "http://linuxdo-e2e-source:8081",
     sourceControlUrl: sourceUrl("/__control/state"),
     username: "binny-discovery-user",
@@ -927,13 +937,12 @@ async function ensureAuthenticatedLinuxdoUser(): Promise<void> {
   const check = await trigger("check", { topicId: 2401 });
   assert.equal(check.status, "completed", JSON.stringify(check));
   if (checkOutput(check).availability === "unavailable") {
-    assert.ok(browser !== undefined);
+    assert.ok(viewerBrowser !== undefined);
     await loginLinuxdoUser({
       binId: "binny-discovery-topic",
       cli,
-      browser,
-      publishedHost,
-      serverPort,
+      vncViewer: viewerBrowser,
+      apiUrl: apiUrl(),
       sourceOrigin: "http://linuxdo-e2e-source:8081",
       sourceControlUrl: sourceUrl("/__control/state"),
       username: "binny-discovery-user",
@@ -3138,6 +3147,7 @@ async function verifyTopicArchive(
   assert.deepEqual(topicMetadata, {
     slug: "controlled-linuxdo-topic",
     createdAt: "2026-10-28T00:00:00.000Z",
+    title: "受控主题标题版本 1",
   });
   assert.equal(rootState.extensions.authorUsername, "fixture-author");
   assert.equal(rootState.extensions.authorName, "Linux.do 示例作者");
@@ -3307,8 +3317,8 @@ async function verifyTopicArchive(
     value: "2026-10-28T00:00:02.000Z",
   });
   assert.equal(
-    "title" in (editedRootState.extensions.topic as Record<string, unknown>),
-    false,
+    (editedRootState.extensions.topic as Record<string, unknown>).title,
+    "受控主题标题版本 2",
   );
   const editedFirstReplyState = binState(editedFirstReply);
   assert.equal(editedFirstReplyState.title, null);
@@ -6773,12 +6783,12 @@ async function verifySyncScopeTransitions(): Promise<void> {
       "updated",
     );
     await waitForRuntime();
+    assert.ok(viewerBrowser !== undefined);
     await loginLinuxdoUser({
       binId: "binny-discovery-topic",
       cli,
-      browser: browser!,
-      publishedHost,
-      serverPort,
+      vncViewer: viewerBrowser,
+      apiUrl: apiUrl(),
       sourceOrigin: "http://linuxdo-e2e-other:8081",
       sourceControlUrl: sourceUrl("/__control/state"),
       username: "binny-discovery-user",
@@ -6858,12 +6868,12 @@ async function verifySyncScopeTransitions(): Promise<void> {
       "updated",
     );
     await waitForRuntime("linuxdo-two");
+    assert.ok(viewerBrowser !== undefined);
     await loginLinuxdoUser({
       binId: "linuxdo-two",
       cli,
-      browser: browser!,
-      publishedHost,
-      serverPort,
+      vncViewer: viewerBrowser,
+      apiUrl: apiUrl(),
       sourceOrigin: originalOrigin,
       sourceControlUrl: sourceUrl("/__control/state"),
       username: "binny-discovery-user",
@@ -7431,7 +7441,8 @@ async function verifyLogout(): Promise<void> {
     await waitForSourceEvent("logout", logoutCount + 1);
   } finally {
     await closeHumanSession(session.sessionId);
-    await viewer.close();
+    await viewer.waitForExit(15_000);
+    await viewer.closeGracefully();
   }
   const loggedOut = await sourceState();
   assert.ok(
@@ -7513,7 +7524,8 @@ async function main(): Promise<void> {
       `Linux.do 验收隔离环境：project=${projectName}, serverImage=${serverImage}, browserImage=${browserImage}, server=${publishedHost}:${String(serverPort)}, source=${publishedHost}:${String(sourcePort)}。\n`,
     );
     await Promise.all([waitForApi(), waitForRuntimeHealth()]);
-    if (acceptanceFocus === undefined) browser = await startOuterBrowser();
+    if (acceptanceFocus === undefined)
+      viewerBrowser = await startOuterBrowser();
 
     const manifest = await runtimeManifest();
     await waitForBinRegistration(manifest.sourceAdapter);
@@ -7746,6 +7758,7 @@ async function main(): Promise<void> {
       "--force",
       serverImage,
       browserImage,
+      vncViewerImage,
     ]).catch(() => undefined);
     if (overlayDirectory !== undefined)
       await rm(overlayDirectory, { recursive: true, force: true });

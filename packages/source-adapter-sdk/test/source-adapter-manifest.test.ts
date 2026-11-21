@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  searchSummaryField,
   sourceAdapterManifest,
 } from "../src/index.ts";
 
@@ -78,4 +79,239 @@ void test("adapter manifest publishes extension and state JSON Schemas", () => {
     >;
   };
   assert.equal(unavailable.properties?.status?.const, "unavailable");
+  assert.equal("searchSummaryFields" in manifest, false);
+  assert.equal("searchRelations" in manifest, false);
+});
+
+void test("adapter manifest preserves declared searchRelations and rejects invalid declarations", () => {
+  const withRelations = defineSourceAdapter({
+    id: "test.search-relations",
+    version: "1.0.0",
+    configSchema,
+    extensionsSchema,
+    searchRelations: {
+      topicRoot: {
+        relationName: "topic_reply",
+        direction: "incoming",
+        description: "Opening post of the topic linked to a reply.",
+      },
+    },
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    actions: { check: action, collect: action },
+  });
+
+  const manifest = sourceAdapterManifest(withRelations);
+  assert.deepEqual(manifest.searchRelations, {
+    topicRoot: {
+      relationName: "topic_reply",
+      direction: "incoming",
+      description: "Opening post of the topic linked to a reply.",
+    },
+  });
+
+  const withEmptyRelations = defineSourceAdapter({
+    id: "test.empty-search-relations",
+    version: "1.0.0",
+    configSchema,
+    extensionsSchema,
+    searchRelations: {},
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    actions: { check: action, collect: action },
+  });
+  assert.equal(
+    "searchRelations" in sourceAdapterManifest(withEmptyRelations),
+    false,
+  );
+
+  assert.throws(() =>
+    sourceAdapterManifest(
+      defineSourceAdapter({
+        id: "test.invalid-search-relations",
+        version: "1.0.0",
+        configSchema,
+        extensionsSchema,
+        searchRelations: {
+          "bad role": {
+            relationName: "topic_reply",
+            direction: "incoming",
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+        actions: { check: action, collect: action },
+      }),
+    ),
+  );
+  assert.throws(() =>
+    sourceAdapterManifest(
+      defineSourceAdapter({
+        id: "test.invalid-relation-name",
+        version: "1.0.0",
+        configSchema,
+        extensionsSchema,
+        searchRelations: {
+          topicRoot: {
+            relationName: "",
+            direction: "incoming",
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+        actions: { check: action, collect: action },
+      }),
+    ),
+  );
+});
+
+function hasKeywordAnywhere(node: unknown, keyword: string): boolean {
+  if (typeof node !== "object" || node === null) return false;
+  if (Array.isArray(node)) {
+    return node.some((item) => hasKeywordAnywhere(item, keyword));
+  }
+  if (Object.hasOwn(node, keyword)) return true;
+  return Object.values(node).some((value) =>
+    hasKeywordAnywhere(value, keyword),
+  );
+}
+
+void test("adapter manifest extracts searchSummaryFields and strips internal markers from extensionsSchema", () => {
+  const summaryExtensionsSchema = z
+    .object({
+      postNumber: searchSummaryField(z.int().positive().describe("Floor")),
+      tags: searchSummaryField(z.array(z.string()).nullable().optional()),
+      topic: z.strictObject({
+        slug: z.string(),
+        title: searchSummaryField(z.string().min(1)).optional(),
+      }),
+      nullableTopic: z
+        .strictObject({
+          label: searchSummaryField(z.string()).nullable(),
+        })
+        .optional(),
+    })
+    .strict();
+
+  const summaryAction = defineSourceAdapterAction(
+    configSchema,
+    summaryExtensionsSchema,
+    {
+      description: "Execute summary test action.",
+      params: z.object({}),
+      output: z.object({ accepted: z.boolean() }),
+      async execute() {
+        return { accepted: true };
+      },
+    },
+  );
+
+  const sourceAdapter = defineSourceAdapter({
+    id: "test.search-summary-manifest",
+    version: "1.0.0",
+    configSchema,
+    extensionsSchema: summaryExtensionsSchema,
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    actions: { check: summaryAction, collect: summaryAction },
+  });
+
+  const manifest = sourceAdapterManifest(sourceAdapter);
+
+  assert.deepEqual(manifest.searchSummaryFields, [
+    "postNumber",
+    "tags",
+    "topic.title",
+    "nullableTopic.label",
+  ]);
+  assert.equal(
+    hasKeywordAnywhere(manifest.extensionsSchema, "x-binny-search-summary"),
+    false,
+  );
+});
+
+void test("adapter manifest rejects invalid searchSummaryField placements", () => {
+  const buildManifest = (badExtensionsSchema: z.ZodObject) => {
+    const badAction = defineSourceAdapterAction(
+      configSchema,
+      badExtensionsSchema,
+      {
+        description: "Invalid summary test action.",
+        params: z.object({}),
+        output: z.object({ accepted: z.boolean() }),
+        async execute() {
+          return { accepted: true };
+        },
+      },
+    );
+    return sourceAdapterManifest(
+      defineSourceAdapter({
+        id: "test.invalid-summary",
+        version: "1.0.0",
+        configSchema,
+        extensionsSchema: badExtensionsSchema,
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+        actions: { check: badAction, collect: badAction },
+      }),
+    );
+  };
+
+  assert.throws(() =>
+    buildManifest(
+      z.strictObject({
+        topic: searchSummaryField(z.strictObject({ title: z.string() })),
+      }),
+    ),
+  );
+  assert.throws(() =>
+    buildManifest(
+      z.strictObject({
+        media: searchSummaryField(z.array(z.strictObject({ url: z.string() }))),
+      }),
+    ),
+  );
+  assert.throws(() =>
+    buildManifest(
+      z.strictObject({
+        tags: z.array(searchSummaryField(z.string())),
+      }),
+    ),
+  );
+  assert.throws(() =>
+    buildManifest(
+      z.strictObject({
+        "topic.title": searchSummaryField(z.string()),
+      }),
+    ),
+  );
+  assert.throws(() =>
+    buildManifest(
+      z.strictObject({
+        a: z.strictObject({
+          b: z.strictObject({
+            c: z.strictObject({
+              d: z.strictObject({
+                e: z.strictObject({
+                  f: z.strictObject({
+                    g: z.strictObject({
+                      h: z.strictObject({
+                        i: searchSummaryField(z.string()),
+                      }),
+                    }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    ),
+  );
 });

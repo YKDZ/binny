@@ -42,7 +42,8 @@
         "@ykdz/binny#build",
         "@binny/source-adapter-sdk#build",
         "@binny/source-adapter-rss#build",
-        "@binny/acceptance#typecheck"
+        "@binny/acceptance#typecheck",
+        "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture"
       ],
       "passThroughEnv": [
         "BINNY_E2E_HOST",
@@ -80,6 +81,7 @@
         "packages/source-adapter-runtime/Dockerfile.manual-runs-fixture",
         "packages/source-adapter-runtime/Dockerfile.schema-fixture",
         "packages/source-adapter-runtime/Dockerfile.browser",
+        "packages/source-adapter-runtime/Dockerfile.vnc-viewer-fixture",
         "packages/source-adapter-runtime/src/**",
         "packages/source-adapter-runtime/test/fixtures/**",
         "packages/source-adapter-runtime/package.json",
@@ -161,6 +163,9 @@
       "tags": ["quality:heavy"]
     },
     "//#test:browser-lifecycle": {
+      "dependsOn": [
+        "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture"
+      ],
       "passThroughEnv": [
         "BINNY_BROWSER_PUBLISHED_HOST",
         "BINNY_CAPACITY_SUBNET"
@@ -170,6 +175,7 @@
         "Dockerfile",
         "docker-bake.hcl",
         "packages/source-adapter-runtime/Dockerfile.browser",
+        "packages/source-adapter-runtime/Dockerfile.vnc-viewer-fixture",
         "scripts/binny-image-update-context.ts",
         "scripts/test-browser-lifecycle.ts",
         "scripts/binny-cli-adapter-discovery.ts",

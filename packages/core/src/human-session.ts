@@ -1,9 +1,4 @@
-import {
-  createHash,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 
 import {
   sourceAdapterManifestStoredSchema,
@@ -13,9 +8,10 @@ import {
   runtimeProtocolVersion,
   type HumanSession,
   type HumanSessionApiError,
+  type HumanSessionCreated,
   type HumanSessionOperation,
   type HumanSessionOperations,
-  type HumanSessionStatus,
+  type RuntimeActiveHumanSession,
   type RuntimeHumanSessionControl,
   type RuntimeHumanSessionEvent,
   type RuntimeWakeError,
@@ -48,23 +44,23 @@ import {
 } from "./runtime-container.ts";
 
 const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
+const defaultConnectTimeoutMs = 60_000;
+const vncPasswordAlphabet =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 type SessionRow = typeof humanSessions.$inferSelect;
 
 export type HumanSessionStore = HumanSessionOperations & {
-  authorizeHumanTunnel(
-    sessionId: string,
-    binId: string,
-    runtimeId: string,
-    ownerGeneration: string,
-    token: string,
-  ): Promise<boolean>;
-  authorizeHumanViewer(sessionId: string, token: string): Promise<boolean>;
-  markHumanGatewayClosed(sessionId: string): Promise<void>;
   expirePendingHumanSessions(maxAgeMs: number): Promise<number>;
-  beginHumanGatewayShutdown(): Promise<void>;
-  reconcileHumanSessionsAfterGatewayRestart(): Promise<void>;
 };
+
+export function generateVncPassword(): string {
+  let password = "";
+  for (let index = 0; index < 8; index += 1) {
+    password += vncPasswordAlphabet[randomInt(0, vncPasswordAlphabet.length)]!;
+  }
+  return password;
+}
 
 function failure<T>(
   status: 400 | 404 | 409,
@@ -83,13 +79,10 @@ function failure<T>(
   };
 }
 
-function tokenHash(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
 async function rowToSession(
   database: Database | Transaction,
   row: SessionRow,
+  resolveRuntimeVncHostPort?: (binId: string) => Promise<number | null>,
 ): Promise<HumanSession> {
   const failure =
     row.failure === null
@@ -171,27 +164,23 @@ async function rowToSession(
       }
     }
   }
+  const hostPort =
+    row.status === "ready" && resolveRuntimeVncHostPort !== undefined
+      ? await resolveRuntimeVncHostPort(row.binId)
+      : null;
   return humanSessionSchema.parse({
     sessionId: row.sessionId,
     binId: row.binId,
     status: row.status,
     ...(queueReason === undefined ? {} : { queueReason }),
     ...(lastWakeError === undefined ? {} : { lastWakeError }),
+    ...(hostPort === null ? {} : { port: hostPort }),
     requestedAt: row.requestedAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     ...(row.readyAt === null ? {} : { readyAt: row.readyAt.toISOString() }),
     ...(row.closedAt === null ? {} : { closedAt: row.closedAt.toISOString() }),
     ...(failure === undefined ? {} : { failure }),
   });
-}
-
-function closingStatus(
-  status: HumanSessionStatus,
-  gatewayClosed: boolean,
-  runtimeClosed: boolean,
-): HumanSessionStatus {
-  if (!gatewayClosed || !runtimeClosed) return "closing";
-  return status === "failed" ? "failed" : "closed";
 }
 
 async function readActiveSession(
@@ -218,6 +207,45 @@ export async function hasActiveHumanSession(
   return (await readActiveSession(database, binId)) !== undefined;
 }
 
+/**
+ * Settles active runtime-bound human sessions when a runtime container is
+ * discovered offline or exited before closing the session cleanly.
+ */
+export async function settleDisconnectedRuntimeHumanSessions(
+  transaction: Transaction,
+  binId: string,
+): Promise<void> {
+  const session = await readActiveSession(transaction, binId);
+  if (session === undefined || session.status === "pending") return;
+  if (session.status === "closing") {
+    await transaction
+      .update(humanSessions)
+      .set({
+        status: "closed",
+        runtimeClosed: true,
+        vncPasswordPending: null,
+        updatedAt: sql`clock_timestamp()`,
+        closedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(humanSessions.sessionId, session.sessionId));
+    return;
+  }
+  await transaction
+    .update(humanSessions)
+    .set({
+      status: "failed",
+      runtimeClosed: true,
+      vncPasswordPending: null,
+      failure: {
+        code: "runtime_disconnected",
+        message: "Runtime container stopped before the human session closed.",
+      },
+      updatedAt: sql`clock_timestamp()`,
+      closedAt: sql`clock_timestamp()`,
+    })
+    .where(eq(humanSessions.sessionId, session.sessionId));
+}
+
 export async function applyRuntimeHumanSessionHeartbeat(
   transaction: Transaction,
   options: {
@@ -226,6 +254,8 @@ export async function applyRuntimeHumanSessionHeartbeat(
     readonly ownerGeneration: string;
     readonly ownerConfirmed: boolean;
     readonly runtimeEnvironment: unknown;
+    readonly connectTimeoutMs?: number;
+    readonly activeHumanSession?: RuntimeActiveHumanSession | null;
     readonly event?: RuntimeHumanSessionEvent;
   },
 ): Promise<{
@@ -251,105 +281,149 @@ export async function applyRuntimeHumanSessionHeartbeat(
         .update(humanSessions)
         .set({
           status: "ready",
-          runtimeTokenHash: null,
+          vncPasswordPending: null,
           readyAt: sql`clock_timestamp()`,
           updatedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
     } else if (
       event.event === "expired" &&
-      session.status === "ready" &&
+      (session.status === "opening" ||
+        session.status === "ready" ||
+        session.status === "closing") &&
       ownsSession
     ) {
+      terminated = true;
       await transaction
         .update(humanSessions)
         .set({
-          status: "closing",
-          runtimeTokenHash: null,
+          status: "closed",
+          runtimeClosed: true,
+          vncPasswordPending: null,
           updatedAt: sql`clock_timestamp()`,
+          closedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
+      return { terminated };
     } else if (
       event.event === "failed" &&
-      (session.status === "opening" || session.status === "ready") &&
+      (session.status === "opening" ||
+        session.status === "ready" ||
+        session.status === "closing") &&
       ownsSession
     ) {
       const failure = humanSessionFailureSchema.parse(
         event.failure ?? {
           code: "browser_session_failed",
-          message: "浏览器人工会话没有完成启动。",
+          message: "Browser human session failed to start.",
         },
       );
-      const nextStatus = closingStatus("failed", session.gatewayClosed, true);
-      if (nextStatus === "failed") terminated = true;
+      terminated = true;
       await transaction
         .update(humanSessions)
         .set({
-          status: nextStatus,
+          status: "failed",
           runtimeClosed: true,
-          runtimeTokenHash: null,
+          vncPasswordPending: null,
           failure,
           updatedAt: sql`clock_timestamp()`,
-          ...(session.gatewayClosed
-            ? { closedAt: sql`clock_timestamp()` }
-            : {}),
+          closedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
+      return { terminated };
     } else if (
       event.event === "closed" &&
-      session.status === "closing" &&
+      (session.status === "opening" ||
+        session.status === "ready" ||
+        session.status === "closing") &&
       (ownsSession || options.ownerConfirmed)
     ) {
-      const nextStatus = closingStatus(
-        session.status,
-        session.gatewayClosed,
-        true,
-      );
-      if (nextStatus === "closed") terminated = true;
+      terminated = true;
       await transaction
         .update(humanSessions)
         .set({
-          status: nextStatus,
+          status: "closed",
           runtimeClosed: true,
-          runtimeTokenHash: null,
+          vncPasswordPending: null,
           updatedAt: sql`clock_timestamp()`,
-          ...(nextStatus === "closed"
-            ? { closedAt: sql`clock_timestamp()` }
-            : {}),
+          closedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
+      return { terminated };
     }
     session = (await readActiveSession(transaction, options.binId)) ?? session;
   }
 
   if (
-    session.status === "opening" &&
-    (session.runtimeId !== options.runtimeId ||
-      session.ownerGeneration !== generation)
+    (session.status === "opening" ||
+      session.status === "ready" ||
+      session.status === "closing") &&
+    !ownsSession
   ) {
-    await transaction
-      .update(humanSessions)
-      .set({
-        status: "closing",
-        runtimeTokenHash: null,
-        updatedAt: sql`clock_timestamp()`,
-      })
-      .where(eq(humanSessions.sessionId, session.sessionId));
-    session = (await readActiveSession(transaction, options.binId)) ?? session;
-  } else if (
-    session.status === "ready" &&
-    (session.runtimeId !== options.runtimeId ||
-      session.ownerGeneration !== generation)
-  ) {
-    await transaction
-      .update(humanSessions)
-      .set({
-        status: "closing",
-        runtimeTokenHash: null,
-        updatedAt: sql`clock_timestamp()`,
-      })
-      .where(eq(humanSessions.sessionId, session.sessionId));
-    session = (await readActiveSession(transaction, options.binId)) ?? session;
+    if (options.activeHumanSession !== undefined && options.ownerConfirmed) {
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: "closed",
+          runtimeClosed: true,
+          vncPasswordPending: null,
+          updatedAt: sql`clock_timestamp()`,
+          closedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+      return { terminated: true };
+    }
+    if (session.status !== "closing") {
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: "closing",
+          vncPasswordPending: null,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+      session =
+        (await readActiveSession(transaction, options.binId)) ?? session;
+    }
+  } else if (ownsSession && options.activeHumanSession !== undefined) {
+    if (options.activeHumanSession?.sessionId === session.sessionId) {
+      if (
+        session.status === "opening" &&
+        options.activeHumanSession.phase === "ready"
+      ) {
+        await transaction
+          .update(humanSessions)
+          .set({
+            status: "ready",
+            vncPasswordPending: null,
+            readyAt: sql`clock_timestamp()`,
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(humanSessions.sessionId, session.sessionId));
+        session =
+          (await readActiveSession(transaction, options.binId)) ?? session;
+      } else if (session.status === "ready") {
+        await transaction
+          .update(humanSessions)
+          .set({
+            updatedAt: sql`clock_timestamp()`,
+          })
+          .where(eq(humanSessions.sessionId, session.sessionId));
+      }
+    } else if (session.status === "ready" || session.status === "closing") {
+      // Runtime reports no matching active VNC session; reconcile after server downtime.
+      await transaction
+        .update(humanSessions)
+        .set({
+          status: "closed",
+          runtimeClosed: true,
+          vncPasswordPending: null,
+          updatedAt: sql`clock_timestamp()`,
+          closedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+      return { terminated: true };
+    }
   }
 
   if (session.status === "pending" && options.ownerConfirmed) {
@@ -379,7 +453,6 @@ export async function applyRuntimeHumanSessionHeartbeat(
           status: "opening",
           runtimeId: options.runtimeId,
           ownerGeneration: generation,
-          gatewayClosed: false,
           runtimeClosed: false,
           failure: null,
           updatedAt: sql`clock_timestamp()`,
@@ -392,19 +465,23 @@ export async function applyRuntimeHumanSessionHeartbeat(
 
   if (session.status === "opening" && options.ownerConfirmed) {
     if (isRuntimeBrowserBusy(options.runtimeEnvironment)) return { terminated };
-    const tunnelToken = randomBytes(32).toString("base64url");
-    await transaction
-      .update(humanSessions)
-      .set({
-        runtimeTokenHash: tokenHash(tunnelToken),
-        updatedAt: sql`clock_timestamp()`,
-      })
-      .where(eq(humanSessions.sessionId, session.sessionId));
+    let password = session.vncPasswordPending;
+    if (password === null) {
+      password = generateVncPassword();
+      await transaction
+        .update(humanSessions)
+        .set({
+          vncPasswordPending: password,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(humanSessions.sessionId, session.sessionId));
+    }
     return {
       control: {
         sessionId: session.sessionId,
         action: "open",
-        tunnelToken,
+        password,
+        connectTimeoutMs: options.connectTimeoutMs ?? defaultConnectTimeoutMs,
       },
       terminated,
     };
@@ -423,13 +500,23 @@ export async function applyRuntimeHumanSessionHeartbeat(
 
 export function createHumanSessionStore(
   database: Database,
-  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
+  options?: {
+    readonly containerCoordinator?: RuntimeContainerCoordinator;
+    readonly resolveRuntimeVncHostPort?: (
+      binId: string,
+    ) => Promise<number | null>;
+  },
 ): HumanSessionStore {
   const containerCoordinator = options?.containerCoordinator;
+  const resolveRuntimeVncHostPort =
+    options?.resolveRuntimeVncHostPort ??
+    (containerCoordinator !== undefined
+      ? (binId: string) => containerCoordinator.resolveVncHostPort(binId)
+      : undefined);
   return {
     async requestHumanSession(binId) {
       const result = await database.transaction<
-        HumanSessionOperation<HumanSession & { readonly viewerPath: string }>
+        HumanSessionOperation<HumanSessionCreated>
       >(async (transaction) => {
         const [bin] = await transaction
           .select({
@@ -440,7 +527,7 @@ export function createHumanSessionStore(
           .where(eq(binConfigurations.id, binId))
           .for("update");
         if (bin === undefined)
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+          return failure(404, "bin_not_found", "Bin not found.", ["binId"]);
 
         const manifest = sourceAdapterManifestStoredSchema.parse(
           bin.sourceAdapter,
@@ -449,7 +536,7 @@ export function createHumanSessionStore(
           return failure(
             409,
             "browser_not_required",
-            "这个信源适配器没有声明需要浏览器环境。",
+            "Source adapter does not require a browser environment.",
             ["binId"],
           );
 
@@ -457,31 +544,31 @@ export function createHumanSessionStore(
           return failure(
             409,
             "human_session_active",
-            "这个 bin 已有待处理或正在使用的浏览器人工会话。",
+            "This bin already has an active or pending human session.",
             ["binId"],
           );
 
         const sessionId = randomUUID();
-        const accessToken = randomBytes(32).toString("base64url");
+        const password = generateVncPassword();
         const [row] = await transaction
           .insert(humanSessions)
           .values({
             sessionId,
             binId,
-            accessTokenHash: tokenHash(accessToken),
+            vncPasswordPending: password,
           })
           .returning();
         if (row === undefined)
-          throw new Error("浏览器人工会话创建后没有返回记录。");
+          throw new Error("Human session insert returned no row.");
         return {
           ok: true,
           value: {
-            ...(await rowToSession(transaction, row)),
-            viewerPath:
-              "/human-sessions/" +
-              sessionId +
-              "?token=" +
-              encodeURIComponent(accessToken),
+            ...(await rowToSession(
+              transaction,
+              row,
+              resolveRuntimeVncHostPort,
+            )),
+            password,
           },
         };
       });
@@ -502,15 +589,12 @@ export function createHumanSessionStore(
           ),
         );
       return row === undefined
-        ? failure(
-            404,
-            "human_session_not_found",
-            "没有找到这个浏览器人工会话。",
-            ["sessionId"],
-          )
+        ? failure(404, "human_session_not_found", "Human session not found.", [
+            "sessionId",
+          ])
         : {
             ok: true,
-            value: await rowToSession(database, row),
+            value: await rowToSession(database, row, resolveRuntimeVncHostPort),
           };
     },
 
@@ -525,7 +609,7 @@ export function createHumanSessionStore(
           .where(eq(binConfigurations.id, binId))
           .for("update");
         if (bin === undefined)
-          return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+          return failure(404, "bin_not_found", "Bin not found.", ["binId"]);
         const [row] = await transaction
           .select()
           .from(humanSessions)
@@ -540,7 +624,7 @@ export function createHumanSessionStore(
           return failure(
             404,
             "human_session_not_found",
-            "没有找到这个浏览器人工会话。",
+            "Human session not found.",
             ["sessionId"],
           );
         if (row.status === "pending") {
@@ -549,19 +633,22 @@ export function createHumanSessionStore(
             .update(humanSessions)
             .set({
               status: "closed",
-              gatewayClosed: true,
               runtimeClosed: true,
-              runtimeTokenHash: null,
+              vncPasswordPending: null,
               updatedAt: sql`clock_timestamp()`,
               closedAt: sql`clock_timestamp()`,
             })
             .where(eq(humanSessions.sessionId, sessionId))
             .returning();
           if (closed === undefined)
-            throw new Error("待处理的浏览器人工会话没有关闭记录。");
+            throw new Error("Pending human session close returned no row.");
           return {
             ok: true as const,
-            value: await rowToSession(transaction, closed),
+            value: await rowToSession(
+              transaction,
+              closed,
+              resolveRuntimeVncHostPort,
+            ),
           };
         }
         const [updated] = await transaction
@@ -571,16 +658,20 @@ export function createHumanSessionStore(
               row.status === "closed" || row.status === "failed"
                 ? row.status
                 : "closing",
-            runtimeTokenHash: null,
+            vncPasswordPending: null,
             updatedAt: sql`clock_timestamp()`,
           })
           .where(eq(humanSessions.sessionId, sessionId))
           .returning();
         if (updated === undefined)
-          throw new Error("浏览器人工会话关闭请求没有返回记录。");
+          throw new Error("Human session close update returned no row.");
         return {
           ok: true as const,
-          value: await rowToSession(transaction, updated),
+          value: await rowToSession(
+            transaction,
+            updated,
+            resolveRuntimeVncHostPort,
+          ),
         };
       });
       if (result.ok && closedPending) {
@@ -589,118 +680,40 @@ export function createHumanSessionStore(
       return result;
     },
 
-    async authorizeHumanTunnel(
-      sessionId,
-      binId,
-      runtimeId,
-      ownerGeneration,
-      token,
-    ) {
-      const [row] = await database
-        .select({
-          status: humanSessions.status,
-          binId: humanSessions.binId,
-          runtimeId: humanSessions.runtimeId,
-          ownerGeneration: humanSessions.ownerGeneration,
-          runtimeTokenHash: humanSessions.runtimeTokenHash,
-        })
-        .from(humanSessions)
-        .where(eq(humanSessions.sessionId, sessionId));
-      return (
-        row?.status === "opening" &&
-        row.binId === binId &&
-        row.runtimeId === runtimeId &&
-        row.ownerGeneration === BigInt(ownerGeneration) &&
-        row.runtimeTokenHash !== null &&
-        timingSafeEqual(
-          Buffer.from(row.runtimeTokenHash, "hex"),
-          Buffer.from(tokenHash(token), "hex"),
-        )
-      );
-    },
-
-    async authorizeHumanViewer(sessionId, token) {
-      const [row] = await database
-        .select({
-          status: humanSessions.status,
-          accessTokenHash: humanSessions.accessTokenHash,
-        })
-        .from(humanSessions)
-        .where(eq(humanSessions.sessionId, sessionId));
-      if (row?.status !== "ready") return false;
-      const stored = Buffer.from(row.accessTokenHash, "hex");
-      const supplied = Buffer.from(tokenHash(token), "hex");
-      return (
-        stored.length === supplied.length && timingSafeEqual(stored, supplied)
-      );
-    },
-
-    async markHumanGatewayClosed(sessionId) {
-      let terminatedBinId: string | undefined;
-      await database.transaction(async (transaction) => {
-        const [row] = await transaction
-          .select({
-            binId: humanSessions.binId,
-            status: humanSessions.status,
-            gatewayClosed: humanSessions.gatewayClosed,
-            runtimeClosed: humanSessions.runtimeClosed,
-          })
-          .from(humanSessions)
-          .where(eq(humanSessions.sessionId, sessionId))
-          .for("update");
-        if (row === undefined || row.status === "closed") return;
-        if (row.status !== "closing" && row.status !== "failed") return;
-        const status = closingStatus(row.status, true, row.runtimeClosed);
-        if (status === "closed" || status === "failed") {
-          terminatedBinId = row.binId;
-        }
-        await transaction
-          .update(humanSessions)
-          .set({
-            status,
-            gatewayClosed: true,
-            runtimeTokenHash: null,
-            updatedAt: sql`clock_timestamp()`,
-            ...(status === "closed" || status === "failed"
-              ? { closedAt: sql`clock_timestamp()` }
-              : {}),
-          })
-          .where(eq(humanSessions.sessionId, sessionId));
-      });
-      if (terminatedBinId !== undefined) {
-        await containerCoordinator?.markWorkCompleted(terminatedBinId);
-      }
-    },
-
     async expirePendingHumanSessions(maxAgeMs) {
       if (!Number.isSafeInteger(maxAgeMs) || maxAgeMs < 1)
-        throw new Error("人工会话等待期限必须是正整数。");
+        throw new Error(
+          "Human session wait timeout must be a positive integer.",
+        );
       const expiredBinIds: string[] = [];
       const expiredCount = await database.transaction(async (transaction) => {
+        const candidates = await transaction
+          .select({ binId: humanSessions.binId })
+          .from(humanSessions)
+          .where(
+            and(
+              inArray(humanSessions.status, ["pending", "opening"]),
+              sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+            ),
+          );
+        const candidateBinIds = [
+          ...new Set(candidates.map((candidate) => candidate.binId)),
+        ].toSorted();
+        if (candidateBinIds.length === 0) return 0;
         const bins = await transaction
           .select({ id: binConfigurations.id })
           .from(binConfigurations)
-          .innerJoin(
-            humanSessions,
-            eq(humanSessions.binId, binConfigurations.id),
-          )
-          .where(
-            and(
-              eq(humanSessions.status, "pending"),
-              sql`${humanSessions.requestedAt} < clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
-            ),
-          )
+          .where(inArray(binConfigurations.id, candidateBinIds))
           .orderBy(binConfigurations.id)
           .for("update");
         let expired = 0;
         for (const bin of bins) {
-          const rows = await transaction
+          const closedRows = await transaction
             .update(humanSessions)
             .set({
               status: "closed",
-              gatewayClosed: true,
               runtimeClosed: true,
-              runtimeTokenHash: null,
+              vncPasswordPending: null,
               updatedAt: sql`clock_timestamp()`,
               closedAt: sql`clock_timestamp()`,
             })
@@ -708,13 +721,31 @@ export function createHumanSessionStore(
               and(
                 eq(humanSessions.binId, bin.id),
                 eq(humanSessions.status, "pending"),
-                sql`${humanSessions.requestedAt} < clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+                sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
               ),
             )
             .returning({ sessionId: humanSessions.sessionId });
-          if (rows.length > 0) {
-            expired += rows.length;
+          if (closedRows.length > 0) {
+            expired += closedRows.length;
             expiredBinIds.push(bin.id);
+          }
+          const closingRows = await transaction
+            .update(humanSessions)
+            .set({
+              status: "closing",
+              vncPasswordPending: null,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(humanSessions.binId, bin.id),
+                eq(humanSessions.status, "opening"),
+                sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+              ),
+            )
+            .returning({ sessionId: humanSessions.sessionId });
+          if (closingRows.length > 0) {
+            expired += closingRows.length;
           }
         }
         return expired;
@@ -723,67 +754,6 @@ export function createHumanSessionStore(
         await containerCoordinator?.markWorkCompleted(binId);
       }
       return expiredCount;
-    },
-
-    async beginHumanGatewayShutdown() {
-      await database.transaction(async (transaction) => {
-        const bins = await transaction
-          .select({ id: binConfigurations.id })
-          .from(binConfigurations)
-          .innerJoin(
-            humanSessions,
-            eq(humanSessions.binId, binConfigurations.id),
-          )
-          .where(inArray(humanSessions.status, activeStatuses))
-          .orderBy(binConfigurations.id)
-          .for("update");
-        for (const bin of bins) {
-          await transaction
-            .update(humanSessions)
-            .set({
-              status: "closing",
-              runtimeTokenHash: null,
-              updatedAt: sql`clock_timestamp()`,
-            })
-            .where(
-              and(
-                eq(humanSessions.binId, bin.id),
-                inArray(humanSessions.status, activeStatuses),
-              ),
-            );
-        }
-      });
-    },
-
-    async reconcileHumanSessionsAfterGatewayRestart() {
-      await database.transaction(async (transaction) => {
-        const bins = await transaction
-          .select({ id: binConfigurations.id })
-          .from(binConfigurations)
-          .innerJoin(
-            humanSessions,
-            eq(humanSessions.binId, binConfigurations.id),
-          )
-          .where(inArray(humanSessions.status, activeStatuses))
-          .orderBy(binConfigurations.id)
-          .for("update");
-        for (const bin of bins) {
-          await transaction
-            .update(humanSessions)
-            .set({
-              status: "closing",
-              gatewayClosed: true,
-              runtimeTokenHash: null,
-              updatedAt: sql`clock_timestamp()`,
-            })
-            .where(
-              and(
-                eq(humanSessions.binId, bin.id),
-                inArray(humanSessions.status, activeStatuses),
-              ),
-            );
-        }
-      });
     },
   };
 }

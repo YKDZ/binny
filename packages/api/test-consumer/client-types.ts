@@ -860,6 +860,40 @@ async function checkPublicArchiveContract(): Promise<void> {
     },
   });
 
+  const relatedSearch = await client.archives.search.$post({
+    json: {
+      bins: ["linuxdo-main"],
+      text: { in: "body", groups: [["reply"]] },
+      related: {
+        sourceAdapterId: "binny.source-adapter-linuxdo",
+        include: ["topicRoot"],
+      },
+    },
+  });
+  if (relatedSearch.status === 200) {
+    const page = await relatedSearch.json();
+    const relatedMatch = page.results[0]?.matches[0]?.related?.topicRoot;
+    if (relatedMatch?.status === "readable") {
+      const rev = page.relatedRevisions?.[relatedMatch.reference.revisionId];
+      void rev?.revision.state.body?.text;
+      void rev?.resources[0]?.status;
+    } else if (relatedMatch?.status === "unreadable") {
+      void relatedMatch.reason;
+    }
+  }
+
+  void client.archives.search.$post({
+    json: {
+      bins: ["linuxdo-main"],
+      related: {
+        sourceAdapterId: "binny.source-adapter-linuxdo",
+        include: ["topicRoot"],
+        // @ts-expect-error Related search requests reject undeclared fields.
+        extra: true,
+      },
+    },
+  });
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",
@@ -966,3 +1000,55 @@ async function checkPublicServiceDiscoveryContract(): Promise<void> {
 }
 
 void checkPublicServiceDiscoveryContract;
+
+async function checkPublicHumanSessionContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "browser-main";
+  const sessionId = "650e8400-e29b-41d4-a716-446655440000";
+
+  const opened = await client.bins[":binId"]["human-sessions"].$post({
+    param: { binId },
+  });
+  if (opened.status === 201) {
+    const created = await opened.json();
+    const password: string = created.password;
+    const status = created.status;
+    void password;
+    void status;
+    // @ts-expect-error Native VNC creation response does not include legacy viewerPath.
+    void created.viewerPath;
+    // @ts-expect-error Native VNC creation response does not expose host port before ready.
+    void created.port;
+  } else if (opened.status === 404 || opened.status === 409) {
+    void (await opened.json()).error.code;
+  }
+
+  const fetched = await client.bins[":binId"]["human-sessions"][
+    ":sessionId"
+  ].$get({
+    param: { binId, sessionId },
+  });
+  if (fetched.status === 200) {
+    const session = await fetched.json();
+    const port: number | undefined = session.port;
+    void port;
+    // @ts-expect-error Human session GET must never expose the one-time VNC password.
+    void session.password;
+  } else if (fetched.status === 404) {
+    void (await fetched.json()).error.code;
+  }
+
+  const closed = await client.bins[":binId"]["human-sessions"][
+    ":sessionId"
+  ].close.$post({
+    param: { binId, sessionId },
+  });
+  if (closed.status === 200) {
+    const state = await closed.json();
+    void state.status;
+    // @ts-expect-error Human session close does not expose VNC password.
+    void state.password;
+  }
+}
+
+void checkPublicHumanSessionContract;

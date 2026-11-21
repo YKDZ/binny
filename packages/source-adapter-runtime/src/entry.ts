@@ -1231,18 +1231,17 @@ async function executeRun(run: ManualRunExecution): Promise<void> {
   }
 }
 
-async function closeHumanSessionAfterHeartbeatFailure(): Promise<void> {
+async function closeActiveHumanSessionOnOwnershipLoss(): Promise<void> {
   const sessionId = activeHumanSessionId;
   if (sessionId === undefined || browserLifecycle === undefined) return;
   try {
-    // 核心不可达时先停掉本地画面与通道，状态事件留待下一次正常心跳回报。
     await browserLifecycle.closeHumanSession(sessionId);
     if (activeHumanSessionId === sessionId) activeHumanSessionId = undefined;
     if (pendingHumanSessionEvent?.sessionId !== sessionId)
       pendingHumanSessionEvent = { sessionId, event: "closed" };
   } catch (error) {
     process.stderr.write(
-      `核心心跳失败后浏览器通道仍未确认关闭：session=${sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
+      `Failed to close local human session after ownership loss: session=${sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
     );
   }
 }
@@ -1269,6 +1268,8 @@ async function heartbeat(
 
   const stoppedRunId = pendingStoppedRunId;
   const humanSessionEvent = pendingHumanSessionEvent;
+  const activeHumanSession =
+    browserLifecycle?.getActiveHumanSessionSnapshot() ?? null;
   let heartbeatAccepted = false;
   try {
     const response = await client.bins[":binId"].runtime.heartbeat.$post({
@@ -1281,6 +1282,7 @@ async function heartbeat(
         activeRunId,
         claimInFlight,
         runtimeControlUrl,
+        activeHumanSession,
         ...(stoppedRunId === undefined ? {} : { stoppedRunId }),
         ...(humanSessionEvent === undefined ? {} : { humanSessionEvent }),
         sourceAdapter: manifest,
@@ -1311,14 +1313,20 @@ async function heartbeat(
     } else {
       const result = await response.json();
       logStatus(result.error.code, result.error.message);
-      await closeHumanSessionAfterHeartbeatFailure();
+      if (
+        response.status === 409 &&
+        result.error.code === "runtime_owner_mismatch"
+      ) {
+        await closeActiveHumanSessionOnOwnershipLoss();
+      }
     }
   } catch (error) {
     logStatus(
       "disconnected",
       error instanceof Error ? error.message : String(error),
     );
-    await closeHumanSessionAfterHeartbeatFailure();
+    // Keep active VNC sessions alive while the server is temporarily unreachable
+    // (e.g. during server restart); subsequent heartbeats reconcile state.
   } finally {
     if (stopping === undefined) {
       heartbeatTimer = setTimeout(
@@ -1367,7 +1375,11 @@ async function applyHumanSessionControl(
   control: RuntimeHumanSessionControl,
 ): Promise<void> {
   if (control.action === "open") {
-    if (activeHumanSessionId === control.sessionId) return;
+    if (
+      activeHumanSessionId === control.sessionId ||
+      openingHumanSessionId === control.sessionId
+    )
+      return;
     if (browserLifecycle === undefined) {
       pendingHumanSessionEvent = {
         sessionId: control.sessionId,
@@ -1381,10 +1393,11 @@ async function applyHumanSessionControl(
     }
     openingHumanSessionId = control.sessionId;
     try {
-      const { ended } = await browserLifecycle.openHumanSession(
-        control.sessionId,
-        control.tunnelToken,
-      );
+      const { ended } = await browserLifecycle.openHumanSession({
+        sessionId: control.sessionId,
+        password: control.password,
+        connectTimeoutMs: control.connectTimeoutMs,
+      });
       activeHumanSessionId = control.sessionId;
       openingHumanSessionId = undefined;
       pendingHumanSessionEvent = {
@@ -1394,14 +1407,26 @@ async function applyHumanSessionControl(
       void ended.then((result) => {
         if (activeHumanSessionId !== control.sessionId) return;
         activeHumanSessionId = undefined;
-        pendingHumanSessionEvent =
-          result.failure === undefined
-            ? { sessionId: control.sessionId, event: "closed" }
-            : {
-                sessionId: control.sessionId,
-                event: "failed",
-                failure: result.failure,
-              };
+        if (result.reason === "failed") {
+          pendingHumanSessionEvent = {
+            sessionId: control.sessionId,
+            event: "failed",
+            failure: result.failure ?? {
+              code: "browser_vnc_failed",
+              message: "x11vnc session failed.",
+            },
+          };
+        } else if (result.reason === "expired") {
+          pendingHumanSessionEvent = {
+            sessionId: control.sessionId,
+            event: "expired",
+          };
+        } else {
+          pendingHumanSessionEvent = {
+            sessionId: control.sessionId,
+            event: "closed",
+          };
+        }
         startHeartbeat();
       });
     } catch (error) {

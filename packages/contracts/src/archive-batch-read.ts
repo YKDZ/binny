@@ -4,7 +4,7 @@ import {
   archiveBatchReadMaxReferences,
   archiveBatchReadReferenceSchema,
   archiveErrorDiagnosticSchema,
-  archiveIdentifierSchema,
+  archiveResourceAvailabilitySchema,
   archiveRevisionReadSchema,
   withArchiveJsonSchemaProjection,
   type ArchiveError,
@@ -68,13 +68,6 @@ export type ArchiveBatchReadRequest = z.input<
   typeof archiveBatchReadInputSchema
 >;
 
-const archiveBatchReadResourceSchema = z
-  .object({
-    resourceId: archiveIdentifierSchema,
-    status: z.enum(["available", "missing"]),
-  })
-  .strict();
-
 const archiveBatchReadItemResultSchema = z.discriminatedUnion("status", [
   z
     .object({
@@ -82,7 +75,7 @@ const archiveBatchReadItemResultSchema = z.discriminatedUnion("status", [
       reference: archiveBatchReadReferenceSchema,
       status: z.literal("readable"),
       revision: archiveRevisionReadSchema,
-      resources: z.array(archiveBatchReadResourceSchema),
+      resources: z.array(archiveResourceAvailabilitySchema),
     })
     .strict(),
   z

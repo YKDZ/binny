@@ -70,5 +70,5 @@ RUN command -v Xvfb \
   && mkdir -p /var/lib/binny/browser-profile \
   && chown -R node:node /var/lib/binny/browser-profile
 USER node
-EXPOSE 8080
+EXPOSE 8080 5900
 ENTRYPOINT ["/usr/bin/tini", "--", "node", "/app/binny-runtime/dist/entry.js"]
