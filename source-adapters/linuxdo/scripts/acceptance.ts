@@ -5508,7 +5508,7 @@ async function verifyBoundedSync(): Promise<string> {
     syncScenarioStage: 0,
     siteHomeDelayMs: 5_000,
   });
-  await setTestClockAt("2026-10-28T02:00:00.000Z");
+  await setTestClockAt("2026-10-28T02:05:00.000Z");
   let lastConfirmedPosition: string | undefined;
 
   try {
@@ -5536,8 +5536,8 @@ async function verifyBoundedSync(): Promise<string> {
     );
     const initialUpperBound = syncReport(reportBeforeSourceResponse).upperBound;
     assert.ok(
-      Date.parse(initialUpperBound) >= Date.parse("2026-10-28T02:00:00.000Z") &&
-        Date.parse(initialUpperBound) < Date.parse("2026-10-28T02:00:30.000Z"),
+      Date.parse(initialUpperBound) >= Date.parse("2026-10-28T02:05:00.000Z") &&
+        Date.parse(initialUpperBound) < Date.parse("2026-10-28T02:05:30.000Z"),
       initialUpperBound,
     );
     assert.deepEqual(syncReport(reportBeforeSourceResponse).intent, {
@@ -5591,7 +5591,7 @@ async function verifyBoundedSync(): Promise<string> {
     assert.deepEqual(await searchArchiveSourceKeys("发现主题 2500"), []);
 
     await updateFixtureState({ syncScenarioStage: 1 });
-    await setTestClockAt("2026-10-28T03:00:00.000Z");
+    await setTestClockAt("2026-10-28T03:02:00.000Z");
     await clearSourceEvents();
     const firstIncrement = await trigger("sync", params);
     assert.equal(
@@ -5602,8 +5602,8 @@ async function verifyBoundedSync(): Promise<string> {
     assert.equal(syncReport(firstIncrement).phase, "completed");
     const firstUpperBound = syncReport(firstIncrement).upperBound;
     assert.ok(
-      Date.parse(firstUpperBound) >= Date.parse("2026-10-28T03:00:00.000Z") &&
-        Date.parse(firstUpperBound) < Date.parse("2026-10-28T03:00:30.000Z"),
+      Date.parse(firstUpperBound) >= Date.parse("2026-10-28T03:02:00.000Z") &&
+        Date.parse(firstUpperBound) < Date.parse("2026-10-28T03:02:30.000Z"),
       firstUpperBound,
     );
     const expectedFirstRangeFrom = new Date(

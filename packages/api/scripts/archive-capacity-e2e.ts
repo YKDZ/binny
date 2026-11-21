@@ -565,7 +565,7 @@ async function seedCapacity(
         sourcePublishedAt: {
           precision: "instant",
           value: "2026-02-14T11:00:00.000Z",
-          timeZone: linuxdoTrafficTimeZone,
+          timeZone: "UTC",
         },
         sourceModifiedAt: null,
         extensions: {
@@ -609,7 +609,7 @@ async function seedCapacity(
         sourcePublishedAt: {
           precision: "instant",
           value: "2026-02-14T15:59:59.000Z",
-          timeZone: linuxdoTrafficTimeZone,
+          timeZone: "UTC",
         },
         sourceModifiedAt: null,
         extensions: {
@@ -644,7 +644,7 @@ async function seedCapacity(
         sourcePublishedAt: {
           precision: "instant",
           value: "2026-02-15T16:00:00.000Z",
-          timeZone: linuxdoTrafficTimeZone,
+          timeZone: "UTC",
         },
         sourceModifiedAt: null,
         extensions: {
@@ -691,7 +691,7 @@ async function seedCapacity(
           sourcePublishedAt: {
             precision: "instant",
             value: publishedIso,
-            timeZone: linuxdoTrafficTimeZone,
+            timeZone: "UTC",
           },
           sourceModifiedAt: null,
           extensions: {
