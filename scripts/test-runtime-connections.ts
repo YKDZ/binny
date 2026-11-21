@@ -6,6 +6,11 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import {
+  resolveBakeComposeContexts,
+  type BakeComposeContexts,
+} from "@binny/tooling-config/bake-compose-contexts";
+
 import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
 import { copyImageBuildContext } from "./binny-image-update-context.ts";
 
@@ -56,9 +61,12 @@ let runtimeResourcePort = 0;
 let composeOverlayDirectory: string | undefined;
 let composeOverlayFile: string | undefined;
 let imageBuildContextDirectory: string | undefined;
+let bakeComposeContexts: BakeComposeContexts | undefined;
 
 function environment(): Readonly<Record<string, string>> {
+  bakeComposeContexts ??= resolveBakeComposeContexts(repositoryRoot);
   return {
+    ...bakeComposeContexts,
     BINNY_IMAGE: imageName,
     BINNY_TEST_LIGHTWEIGHT_IMAGE: runtimeImage,
     BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE: resourceImage,

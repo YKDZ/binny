@@ -7,13 +7,17 @@
     "./base.json": "./base.json",
     "./node.json": "./node.json",
     "./oxfmt": "./oxfmt.config.ts",
-    "./oxlint": "./oxlint.config.ts"
+    "./oxlint": "./oxlint.config.ts",
+    "./bake-compose-contexts": {
+      "source": "./scripts/bake-compose-contexts.ts"
+    }
   },
   "scripts": {
     "format:check": "oxfmt --list-different .",
     "format:write": "oxfmt --write .",
     "lint": "oxlint --quiet --format=unix --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix . --fix",
+    "test": "node --conditions=source --test --test-reporter=spec 'test/**/*.test.ts'",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "devDependencies": {

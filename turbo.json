@@ -60,6 +60,7 @@
         "pnpm-workspace.yaml",
         "compose.acceptance.yaml",
         "Dockerfile",
+        "docker-bake.hcl",
         "scripts/binny-e2e.ts",
         "scripts/binny-e2e-heartbeat-proxy.ts",
         "scripts/binny-image-update-context.ts",
@@ -120,6 +121,7 @@
         "source-adapters/linuxdo/src/**",
         "source-adapters/linuxdo/scripts/**",
         "packages/acceptance/**",
+        "packages/tooling-config/**",
         "patches/**"
       ],
       "outputs": [],
@@ -148,6 +150,7 @@
         "packages/core/package.json",
         "packages/db/**",
         "packages/server/package.json",
+        "docker-bake.hcl",
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-workspace.yaml",
@@ -165,6 +168,7 @@
       "inputs": [
         "compose.acceptance.yaml",
         "Dockerfile",
+        "docker-bake.hcl",
         "packages/source-adapter-runtime/Dockerfile.browser",
         "scripts/binny-image-update-context.ts",
         "scripts/test-browser-lifecycle.ts",
@@ -207,6 +211,7 @@
       "inputs": [
         "compose.acceptance.yaml",
         "Dockerfile",
+        "docker-bake.hcl",
         "packages/source-adapter-runtime/Dockerfile.lightweight",
         "packages/source-adapter-runtime/Dockerfile.protocol-fixture",
         "scripts/test-runtime-connections.ts",
@@ -225,6 +230,7 @@
         "packages/db/**",
         "packages/server/package.json",
         "packages/server/src/**",
+        "packages/tooling-config/**",
         "patches/**"
       ],
       "outputs": [],
