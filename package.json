@@ -8,6 +8,7 @@
     "lint": "oxlint --quiet --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template",
     "lint:fix": "oxlint --format=unix --no-error-on-unmatched-pattern *.config.ts scripts template --fix",
     "typecheck": "tsc --build --noEmit --pretty false",
+    "test": "node --conditions=source --test scripts/*.test.ts",
     "check": "node --conditions=source scripts/task-gates.ts check",
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",

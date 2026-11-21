@@ -472,7 +472,6 @@ export async function applyRuntimeHumanSessionHeartbeat(
         .update(humanSessions)
         .set({
           vncPasswordPending: password,
-          updatedAt: sql`clock_timestamp()`,
         })
         .where(eq(humanSessions.sessionId, session.sessionId));
     }
@@ -691,9 +690,15 @@ export function createHumanSessionStore(
           .select({ binId: humanSessions.binId })
           .from(humanSessions)
           .where(
-            and(
-              inArray(humanSessions.status, ["pending", "opening"]),
-              sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+            or(
+              and(
+                eq(humanSessions.status, "pending"),
+                sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+              ),
+              and(
+                eq(humanSessions.status, "opening"),
+                sql`${humanSessions.updatedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+              ),
             ),
           );
         const candidateBinIds = [
@@ -740,7 +745,7 @@ export function createHumanSessionStore(
               and(
                 eq(humanSessions.binId, bin.id),
                 eq(humanSessions.status, "opening"),
-                sql`${humanSessions.requestedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
+                sql`${humanSessions.updatedAt} <= clock_timestamp() - ${maxAgeMs} * interval '1 millisecond'`,
               ),
             )
             .returning({ sessionId: humanSessions.sessionId });

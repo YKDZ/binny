@@ -164,7 +164,9 @@ export async function validateActionParametersAtRuntime(
       },
     };
   } catch {
-    return unavailable("无法连接当前运行器验证动作参数。");
+    return unavailable(
+      "Unable to connect to the current runtime to validate action parameters.",
+    );
   }
 }
 

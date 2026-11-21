@@ -114,7 +114,8 @@ export const sourceAdapter = defineSourceAdapter({
           problems: [
             {
               code: "login_required",
-              message: "受控站点尚未登录，持久浏览器会话未认证。",
+              message:
+                "Controlled site is not logged in; persistent browser session is unauthenticated.",
               impact: "无法读取受控保护页面。",
               requiresHuman: true,
             },
@@ -140,7 +141,8 @@ export const sourceAdapter = defineSourceAdapter({
             if (!(await isAuthenticated(page))) {
               throw sourceAdapterActionError({
                 code: "login_required",
-                message: "受控站点需要登录，当前持久浏览器会话未认证。",
+                message:
+                  "Controlled site requires login; current persistent browser session is unauthenticated.",
                 impact: "本次采集没有读取受控资料。",
                 requiresHuman: true,
                 sessionState: "unauthenticated",

@@ -659,7 +659,7 @@ export async function createQueuedRunInTransaction(
     return failure(
       400,
       "invalid_configuration",
-      "长期配置尚未通过当前运行器的原生校验。",
+      "Persistent configuration has not passed native validation on the current runtime.",
       ["config"],
     );
   }
@@ -780,7 +780,7 @@ export function createManualRunStore(
             return failure(
               409,
               "action_input_changed",
-              "长期配置或运行器在动作参数原生校验期间发生变化，本次运行未创建。",
+              "Persistent configuration or runtime changed during native action parameter validation; run was not created.",
               ["params"],
             );
           }

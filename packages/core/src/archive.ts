@@ -690,7 +690,7 @@ export function createArchiveStore(
               return failure(
                 409,
                 "relation_endpoint_conflict",
-                "关系标识已经绑定到其他端点。",
+                "Relation ID is already bound to different endpoints.",
                 ["relations", index, "relationId"],
               );
             }

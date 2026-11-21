@@ -170,6 +170,33 @@ function createInMemoryDatabase(initial: {
     return undefined;
   }
 
+  function matchesHumanSessionTimestampFilter(
+    row: HumanSessionRow,
+    compiled: { readonly sql: string; readonly params: readonly unknown[] },
+  ): boolean {
+    if (!compiled.sql.includes("clock_timestamp()")) return true;
+    const maxAgeMs = compiled.params.find(
+      (param): param is number => typeof param === "number",
+    );
+    if (maxAgeMs === undefined) return true;
+    const cutoffMs = Date.now() - maxAgeMs;
+    const checksRequested = compiled.sql.includes(
+      '"requested_at" <= clock_timestamp()',
+    );
+    const checksUpdated = compiled.sql.includes(
+      '"updated_at" <= clock_timestamp()',
+    );
+    if (checksRequested && checksUpdated) {
+      return (
+        (row.status === "pending" && row.requestedAt.getTime() <= cutoffMs) ||
+        (row.status === "opening" && row.updatedAt.getTime() <= cutoffMs)
+      );
+    }
+    if (checksRequested) return row.requestedAt.getTime() <= cutoffMs;
+    if (checksUpdated) return row.updatedAt.getTime() <= cutoffMs;
+    return true;
+  }
+
   function isConnectionOnline(connection: ConnectionRow | undefined): boolean {
     if (connection === undefined || connection.disconnected) return false;
     return Date.now() - connection.lastHeartbeatAt.getTime() <= 8_000;
@@ -264,6 +291,9 @@ function createInMemoryDatabase(initial: {
           ["pending", "opening", "ready", "closing"].includes(r.status),
         );
       }
+      rows = rows.filter((r) =>
+        matchesHumanSessionTimestampFilter(r, compiled),
+      );
       return rows.map((r) => ({ ...r }));
     }
 
@@ -438,6 +468,9 @@ function createInMemoryDatabase(initial: {
         ) {
           continue;
         }
+        if (!matchesHumanSessionTimestampFilter(row, compiled)) {
+          continue;
+        }
         if ("status" in values)
           row.status = values.status as HumanSessionRow["status"];
         if ("runtimeId" in values)
@@ -451,7 +484,7 @@ function createInMemoryDatabase(initial: {
         if ("failure" in values) row.failure = values.failure;
         if ("readyAt" in values) row.readyAt = new Date();
         if ("closedAt" in values) row.closedAt = new Date();
-        row.updatedAt = new Date();
+        if ("updatedAt" in values) row.updatedAt = new Date();
         updated.push({ ...row });
       }
       return updated;
@@ -1452,12 +1485,17 @@ void describe("independent browser bins without cross-bin capacity", () => {
         },
       ],
       humanSessions: [
-        makeHumanSession(pendingSessionId, "bin-expire-a", "pending"),
+        {
+          ...makeHumanSession(pendingSessionId, "bin-expire-a", "pending"),
+          requestedAt: new Date(Date.now() - 61_000),
+        },
         {
           ...makeHumanSession(openingSessionId, "bin-expire-b", "opening"),
           runtimeId: "rt-b",
           ownerGeneration: 1n,
           vncPasswordPending: "Ab12Cd34",
+          requestedAt: new Date(Date.now() - 61_000),
+          updatedAt: new Date(Date.now() - 61_000),
         },
       ],
     });
@@ -1489,6 +1527,142 @@ void describe("independent browser bins without cross-bin capacity", () => {
     assert.equal(mock.sessions.get(openingSessionId)?.vncPasswordPending, null);
     assert.equal(mock.runs.get(activeRunId)?.status, "executing");
     assert.deepEqual(workCompletedCalls, ["bin-expire-a"]);
+  });
+
+  void it("grants opening sessions a full startup window from handoff without extending updatedAt on opening heartbeats", async () => {
+    const openingSessionId = "99999999-9999-4999-8999-999999999999";
+    const staleOpeningSessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const now = Date.now();
+    const mock = createInMemoryDatabase({
+      bins: [makeBin("bin-handoff"), makeBin("bin-stale-opening")],
+      connections: [
+        makeConnection("bin-handoff", "rt-handoff", "ready"),
+        makeConnection("bin-stale-opening", "rt-stale", "ready"),
+      ],
+      runs: [],
+      humanSessions: [
+        {
+          ...makeHumanSession(openingSessionId, "bin-handoff", "pending"),
+          vncPasswordPending: "Ab12Cd34",
+          requestedAt: new Date(now - 58_000),
+          updatedAt: new Date(now - 58_000),
+        },
+        {
+          ...makeHumanSession(
+            staleOpeningSessionId,
+            "bin-stale-opening",
+            "opening",
+          ),
+          runtimeId: "rt-stale",
+          ownerGeneration: 1n,
+          vncPasswordPending: "Ef56Gh78",
+          requestedAt: new Date(now - 120_000),
+          updatedAt: new Date(now - 61_000),
+        },
+      ],
+    });
+    const workCompletedCalls: string[] = [];
+    const coordinatorStub = {
+      requestWake() {},
+      async onRuntimeHeartbeat() {},
+      async markWorkCompleted(binId: string) {
+        workCompletedCalls.push(binId);
+      },
+      async resolveVncHostPort() {
+        return 39_002;
+      },
+    };
+    const runtimeStore = createRuntimeConnectionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createRuntimeConnectionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+    const humanStore = createHumanSessionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createHumanSessionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+
+    const heartbeatBase = (binId: string, runtimeId: string) => ({
+      protocolVersion: runtimeProtocolVersion as typeof runtimeProtocolVersion,
+      runtimeId,
+      ownerGeneration: "1",
+      ownerLockAcquired: true as const,
+      activeRunId: null,
+      claimInFlight: false,
+      runtimeControlUrl: `http://${binId}:8080`,
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser" as const,
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" as const },
+        },
+      },
+    });
+
+    // 1. Handing off from pending -> opening writes updatedAt to transition time.
+    const hbHandoff = await runtimeStore.heartbeat(
+      "bin-handoff",
+      heartbeatBase("bin-handoff", "rt-handoff"),
+    );
+    assert.equal(hbHandoff.ok, true);
+    if (!hbHandoff.ok) return;
+    assert.equal(hbHandoff.value.humanSession?.action, "open");
+    const sessionRow = mock.sessions.get(openingSessionId)!;
+    assert.equal(sessionRow.status, "opening");
+    assert.ok(sessionRow.updatedAt.getTime() >= now - 1_000);
+
+    // 2. Subsequent heartbeats while opening must not refresh updatedAt.
+    const openingStartedAt = new Date(Date.now() - 4_000);
+    sessionRow.requestedAt = new Date(Date.now() - 62_000);
+    sessionRow.updatedAt = openingStartedAt;
+    const hbStillOpening = await runtimeStore.heartbeat(
+      "bin-handoff",
+      heartbeatBase("bin-handoff", "rt-handoff"),
+    );
+    assert.equal(hbStillOpening.ok, true);
+    assert.equal(
+      sessionRow.updatedAt.getTime(),
+      openingStartedAt.getTime(),
+      "heartbeats while opening must not extend updatedAt",
+    );
+
+    // 3. Passing requestedAt + maxAgeMs does not close an opening session still inside its own startup window,
+    //    while an opening session whose updatedAt exceeds maxAgeMs transitions to closing.
+    const expiredCount = await humanStore.expirePendingHumanSessions(60_000);
+    assert.equal(expiredCount, 1);
+    assert.equal(mock.sessions.get(openingSessionId)?.status, "opening");
+    assert.equal(mock.sessions.get(staleOpeningSessionId)?.status, "closing");
+    assert.deepEqual(workCompletedCalls, []);
+
+    // 4. Runtime subsequently reports ready and the session becomes ready cleanly.
+    const hbReady = await runtimeStore.heartbeat("bin-handoff", {
+      ...heartbeatBase("bin-handoff", "rt-handoff"),
+      humanSessionEvent: {
+        sessionId: openingSessionId,
+        event: "ready",
+      },
+    });
+    assert.equal(hbReady.ok, true);
+    const readyState = await humanStore.getHumanSession(
+      "bin-handoff",
+      openingSessionId,
+    );
+    assert.equal(readyState.ok, true);
+    if (readyState.ok) {
+      assert.equal(readyState.value.status, "ready");
+      assert.equal(readyState.value.port, 39_002);
+    }
   });
 
   void it("reports runtime_sleeping when human open arrives while container is stopping before disconnect", async () => {

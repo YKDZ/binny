@@ -533,8 +533,8 @@ try {
       waitForManifest(runtimeResourcePort),
     ]);
   assert.deepEqual(runtimeOneManifest, runtimeTwoManifest);
-  assert.equal(resourceManifest.protocolVersion, 9);
-  assert.equal(runtimeOneManifest.protocolVersion, 9);
+  assert.equal(resourceManifest.protocolVersion, 10);
+  assert.equal(runtimeOneManifest.protocolVersion, 10);
   const sourceAdapter = runtimeOneManifest.sourceAdapter;
   assert.ok(typeof sourceAdapter === "object" && sourceAdapter !== null);
   const sourceAdapterRecord = sourceAdapter as Record<string, unknown>;
