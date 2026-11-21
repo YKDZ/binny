@@ -1237,6 +1237,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     const discovered = cliData<{
       readonly sourceAdapterId: string;
       readonly summaryFields: readonly unknown[];
+      readonly searchRelations: Record<string, unknown>;
       readonly fields: Readonly<
         Record<
           string,
@@ -1249,6 +1250,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
     }>(await cli(baseUrl, ["bin", "extension-fields", binId]), "discovered");
     assert.equal(discovered.sourceAdapterId, "binny-runs.manual-run-fixture");
     assert.deepEqual(discovered.summaryFields, []);
+    assert.deepEqual(discovered.searchRelations, {});
     assert.deepEqual(discovered.fields.labels?.operations, ["has", "hasAny"]);
     assert.deepEqual(discovered.fields.tiers?.allowedItemValues, [
       "basic",
@@ -1269,6 +1271,7 @@ async function archiveSearchCliStep(baseUrl: string): Promise<void> {
       /Allowed item values: \["basic","pro"\]/u,
     );
     assert.match(discoveryText.stdout, /Summary fields: none/u);
+    assert.match(discoveryText.stdout, /Search relations: none/u);
 
     const extensionQuery = {
       bins: ["binny-runs-one", "binny-runs-two"],
@@ -5300,6 +5303,12 @@ async function verifyLinuxdoArchiveJourney(
   const linuxdoExtensionFields = cliData<{
     readonly sourceAdapterId: string;
     readonly summaryFields: readonly { readonly path: string }[];
+    readonly searchRelations: Readonly<
+      Record<
+        string,
+        { readonly relationName: string; readonly direction: string }
+      >
+    >;
   }>(await cliForLinuxdo(["bin", "extension-fields", binId]), "discovered");
   assert.equal(
     linuxdoExtensionFields.sourceAdapterId,
@@ -5308,6 +5317,14 @@ async function verifyLinuxdoArchiveJourney(
   assert.deepEqual(
     linuxdoExtensionFields.summaryFields.map(({ path }) => path),
     ["postNumber", "topic.title"],
+  );
+  assert.equal(
+    linuxdoExtensionFields.searchRelations.topicRoot?.relationName,
+    "topic_reply",
+  );
+  assert.equal(
+    linuxdoExtensionFields.searchRelations.topicRoot?.direction,
+    "incoming",
   );
   const linuxdoExtensionFieldsText = await cliForLinuxdo([
     "bin",
@@ -5324,6 +5341,10 @@ async function verifyLinuxdoArchiveJourney(
   assert.match(
     linuxdoExtensionFieldsText.stdout,
     /Summary fields: postNumber, topic\.title/u,
+  );
+  assert.match(
+    linuxdoExtensionFieldsText.stdout,
+    /Search relations:[\s\S]*- topicRoot: incoming topic_reply/u,
   );
 
   const linuxdoReplySearchQuery = {
@@ -5400,6 +5421,165 @@ async function verifyLinuxdoArchiveJourney(
       "topic.title": "受控主题标题版本 1",
     },
   );
+
+  const linuxdoTopicSearchQuery = {
+    bins: [binId],
+    extensions: {
+      sourceAdapterId: "binny.source-adapter-linuxdo",
+      filters: {
+        topicId: { op: "eq", value: 2401 },
+      },
+    },
+    limit: 20,
+  };
+  const linuxdoDefaultTopicSearch = cliData<{
+    readonly relatedRevisions?: unknown;
+    readonly nextCursor?: string;
+    readonly results: readonly {
+      readonly matches: readonly { readonly related?: unknown }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(linuxdoTopicSearchQuery),
+    ]),
+    "found",
+  );
+  assert.equal(linuxdoDefaultTopicSearch.relatedRevisions, undefined);
+  assert.ok(
+    linuxdoDefaultTopicSearch.results.every((result) =>
+      result.matches.every((match) => match.related === undefined),
+    ),
+  );
+
+  const linuxdoTopicWithRootQuery = {
+    ...linuxdoTopicSearchQuery,
+    related: {
+      sourceAdapterId: "binny.source-adapter-linuxdo",
+      include: ["topicRoot"],
+    },
+  };
+  const linuxdoTopicWithRoot = cliData<{
+    readonly relatedRevisions?: Readonly<
+      Record<
+        string,
+        {
+          readonly revision: {
+            readonly revisionId: string;
+            readonly state: { readonly body?: { readonly text?: string } };
+          };
+        }
+      >
+    >;
+    readonly results: readonly {
+      readonly sourceKey: { readonly key: string };
+      readonly matches: readonly {
+        readonly summaryExtensions?: Record<string, unknown>;
+        readonly related?: Readonly<
+          Record<
+            string,
+            {
+              readonly status: string;
+              readonly reference?: { readonly revisionId: string };
+            }
+          >
+        >;
+      }[];
+    }[];
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify(linuxdoTopicWithRootQuery),
+    ]),
+    "found",
+  );
+  assert.deepEqual(Object.keys(linuxdoTopicWithRoot.relatedRevisions ?? {}), [
+    partialRevisionId,
+  ]);
+  const rootMatch = linuxdoTopicWithRoot.results.find(
+    (result) => result.matches[0]?.summaryExtensions?.postNumber === 1,
+  );
+  assert.equal(rootMatch?.matches[0]?.related?.topicRoot?.status, "none");
+  const replyMatches = linuxdoTopicWithRoot.results.filter(
+    (result) => result.matches[0]?.summaryExtensions?.postNumber !== 1,
+  );
+  assert.ok(replyMatches.length >= 2);
+  for (const reply of replyMatches) {
+    assert.equal(reply.matches[0]?.related?.topicRoot?.status, "readable");
+    assert.equal(
+      reply.matches[0]?.related?.topicRoot?.reference?.revisionId,
+      partialRevisionId,
+    );
+  }
+  const linuxdoTopicWithRootText = await cliForLinuxdo([
+    "archive",
+    "search",
+    "--query",
+    JSON.stringify(linuxdoTopicWithRootQuery),
+    "--output",
+    "text",
+  ]);
+  assert.equal(
+    linuxdoTopicWithRootText.code,
+    0,
+    linuxdoTopicWithRootText.stderr,
+  );
+  assert.match(
+    linuxdoTopicWithRootText.stdout,
+    new RegExp(
+      `Related topicRoot \\(${binId}\\): readable -> revision ${partialRevisionId}`,
+      "u",
+    ),
+  );
+  assert.match(linuxdoTopicWithRootText.stdout, /Related revisions:/u);
+  assert.equal(
+    linuxdoTopicWithRootText.stdout.split(`- Revision: ${partialRevisionId}`)
+      .length - 1,
+    1,
+  );
+
+  const linuxdoHistoricalWithRoot = cliData<typeof linuxdoTopicWithRoot>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...linuxdoTopicWithRootQuery,
+        asOf: firstCommit.archiveSeq,
+      }),
+    ]),
+    "found",
+  );
+  assert.deepEqual(
+    Object.keys(linuxdoHistoricalWithRoot.relatedRevisions ?? {}),
+    [firstRevisionId],
+  );
+
+  const invalidRoleData = cliFailure<{
+    readonly code: string;
+    readonly diagnostic?: { readonly allowedItemValues?: readonly string[] };
+  }>(
+    await cliForLinuxdo([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({
+        ...linuxdoTopicSearchQuery,
+        related: {
+          sourceAdapterId: "binny.source-adapter-linuxdo",
+          include: ["badRole"],
+        },
+      }),
+    ]),
+    "invalid_input",
+  );
+  assert.deepEqual(invalidRoleData.diagnostic?.allowedItemValues, [
+    "topicRoot",
+  ]);
 
   const relationPage = cliData<{
     readonly relations: readonly {

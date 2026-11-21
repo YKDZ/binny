@@ -6445,6 +6445,14 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema: sourceAdapterConfigSchema,
   extensionsSchema: linuxDoExtensionsSchema,
+  searchRelations: {
+    topicRoot: {
+      relationName: "topic_reply",
+      direction: "incoming",
+      description:
+        "Opening post of the topic linked to a reply via topic_reply.",
+    },
+  },
   stateSchema: syncPersistentStateSchema,
   stateSnapshotSchema: syncPublicStateSchema,
   actions: {

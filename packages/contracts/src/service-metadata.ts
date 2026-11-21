@@ -4,13 +4,13 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 11 adds adapter-declared `searchSummaryFields` and per-view
- * `summaryExtensions` to extension field discovery and archive search responses.
+ * Version 12 adds adapter-declared `searchRelations`, on-demand `related` search
+ * requests, and deduplicated `relatedRevisions` to archive query and discovery.
  */
-export const publicApiProtocolVersion = 11;
+export const publicApiProtocolVersion = 12;
 
 /** Archive search and batch-read contract version. */
-export const archiveQueryContractVersion = 5;
+export const archiveQueryContractVersion = 6;
 export const archiveQueryContractPath = "/meta/query";
 
 export const serviceCapabilities = {
