@@ -4,20 +4,29 @@ import { createHash } from "node:crypto";
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  feedSyncOutputSchema,
   fetchSourceResponse,
+  hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   isSourceAdapterActionError,
   loadIncrementalSyncState,
   readFailureDiagnosticContext,
+  recordIncrementalArchivedEntry,
+  recordIncrementalBaselineEntry,
+  recordIncrementalBodyGapEntry,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
+  type FeedBodyGap,
+  type FeedIncompleteScope,
   type IncrementalEntryRecord,
+  type IncrementalSyncState,
+  type ManualRunAbortCause,
   type ManualRunFailure,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -62,12 +71,7 @@ const collectOutputSchema = z
   .object({ completedScopes: z.array(z.string()).readonly() })
   .strict();
 
-const syncOutputSchema = z
-  .object({
-    completedScopes: z.array(z.string()).readonly(),
-    initializedScopes: z.array(z.string()).readonly().optional(),
-  })
-  .strict();
+const syncOutputSchema = feedSyncOutputSchema;
 
 export type HuggingFaceConfig = z.output<typeof configSchema>;
 export type HuggingFaceParams = z.output<typeof paramsSchema>;
@@ -211,11 +215,15 @@ async function fetchFeedXml(
   };
 }
 
-/** Fetches full HTML of an article page. */
+/** Fetches full HTML of an article page without throwing on HTTP status codes. */
 async function fetchArticleHtml(
   url: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<{
+  readonly ok: boolean;
+  readonly status: number;
+  readonly html: string;
+}> {
   const response = await fetchSourceResponse({
     url,
     signal,
@@ -226,14 +234,13 @@ async function fetchArticleHtml(
     },
   });
 
-  if (response.status !== 200) {
+  if (!response.ok) {
     await response.cancelBody();
-    throw new Error(
-      `Article request to ${url} returned HTTP ${response.status}`,
-    );
+    return { ok: false, status: response.status, html: "" };
   }
 
-  return await response.text();
+  const html = await response.text();
+  return { ok: true, status: response.status, html };
 }
 
 /** Parses feed items from XML string. */
@@ -269,63 +276,205 @@ function parseFeedItems(xmlText: string, baseUrl: string): ParsedFeedItem[] {
   });
 }
 
-/** Processes, extracts, cleans, and submits an article; rejects failed/empty pages. */
-async function processAndSubmitArticle(
+function normalizeComparableUrl(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function findExistingEntryForUrl(
+  state: IncrementalSyncState | undefined,
+  scopeId: string,
+  itemUrl: string,
+  feedItem: ParsedFeedItem | undefined,
+):
+  | { readonly key: string; readonly entry: IncrementalEntryRecord }
+  | undefined {
+  const entries = state?.scopes[scopeId]?.entries;
+  if (entries === undefined) return undefined;
+
+  if (feedItem !== undefined) {
+    const feedKey = extractSlugOrKey(feedItem.url, feedItem.id);
+    const byFeedKey = entries[feedKey];
+    if (byFeedKey !== undefined) {
+      return { key: feedKey, entry: byFeedKey };
+    }
+  }
+
+  const normalizedTarget = normalizeComparableUrl(itemUrl);
+  for (const [key, entry] of Object.entries(entries)) {
+    if (entry.articleUrl === itemUrl) {
+      return { key, entry };
+    }
+    if (
+      entry.articleUrl !== undefined &&
+      normalizeComparableUrl(entry.articleUrl) === normalizedTarget
+    ) {
+      return { key, entry };
+    }
+  }
+
+  const slugKey = extractSlugOrKey(itemUrl, feedItem?.id);
+  const bySlugKey = entries[slugKey];
+  if (bySlugKey !== undefined) {
+    return { key: slugKey, entry: bySlugKey };
+  }
+  return undefined;
+}
+
+type FetchAndExtractArticleResult =
+  | {
+      readonly ok: true;
+      readonly extracted: ExtractedArticle;
+    }
+  | {
+      readonly ok: false;
+      readonly gap: {
+        readonly stage: "fetching-article" | "extracting-article";
+        readonly code:
+          | "article_fetch_failed"
+          | "article_http_error"
+          | "article_extraction_failed"
+          | "article_content_empty";
+        readonly reason: string;
+        readonly httpStatus?: number;
+        readonly abortCause?: ManualRunAbortCause;
+        readonly target?: string;
+      };
+    };
+
+/** Fetches and extracts article HTML without submitting to the archive. */
+async function fetchAndExtractArticle(
+  itemUrl: string,
+  signal: AbortSignal,
+): Promise<FetchAndExtractArticleResult> {
+  let articleRes: {
+    readonly ok: boolean;
+    readonly status: number;
+    readonly html: string;
+  };
+  try {
+    articleRes = await fetchArticleHtml(itemUrl, signal);
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
+    if (
+      diag.abortCause === "user_cancelled" ||
+      diag.abortCause === "action_budget_exhausted"
+    ) {
+      throw error;
+    }
+    return {
+      ok: false,
+      gap: {
+        stage: "fetching-article",
+        code: "article_fetch_failed",
+        reason: `Failed to fetch article at ${itemUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        ...(diag.target === undefined
+          ? { target: itemUrl }
+          : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
+      },
+    };
+  }
+
+  if (!articleRes.ok) {
+    return {
+      ok: false,
+      gap: {
+        stage: "fetching-article",
+        code: "article_http_error",
+        reason: `Article HTTP request returned status ${String(articleRes.status)}.`,
+        ...(articleRes.status >= 100 && articleRes.status <= 599
+          ? { httpStatus: articleRes.status }
+          : {}),
+        target: itemUrl,
+      },
+    };
+  }
+
+  let extracted: ExtractedArticle | undefined;
+  try {
+    extracted = extractArticle(articleRes.html, itemUrl);
+  } catch (error) {
+    return {
+      ok: false,
+      gap: {
+        stage: "extracting-article",
+        code: "article_extraction_failed",
+        reason: `Failed to extract article HTML at ${itemUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        target: itemUrl,
+      },
+    };
+  }
+
+  if (
+    !extracted ||
+    !extracted.cleanResult.hasSubstantialContent ||
+    extracted.cleanResult.text.trim().length === 0
+  ) {
+    return {
+      ok: false,
+      gap: {
+        stage: "extracting-article",
+        code: "article_content_empty",
+        reason: `Article at ${itemUrl} has no substantial content after cleaning.`,
+        target: itemUrl,
+      },
+    };
+  }
+
+  return { ok: true, extracted };
+}
+
+function failureFromArticleGap(
+  itemUrl: string,
+  gap: Extract<FetchAndExtractArticleResult, { ok: false }>["gap"],
+): ManualRunFailure {
+  const code =
+    gap.code === "article_http_error" ? "article_fetch_failed" : gap.code;
+  return {
+    code,
+    message: gap.reason,
+    impact:
+      gap.stage === "fetching-article"
+        ? "Article was not fetched and will not be archived."
+        : "Article was not archived.",
+    requiresHuman: false,
+    stage: gap.stage,
+    target: gap.target ?? itemUrl,
+    ...(gap.abortCause === undefined ? {} : { abortCause: gap.abortCause }),
+  };
+}
+
+/** Submits an extracted article to the Core archive and returns aligned index metadata. */
+async function submitExtractedArticle(
   context: SourceAdapterContext<
     HuggingFaceConfig,
     never,
     HuggingFaceExtensions
   >,
   itemUrl: string,
-  feedItem: ParsedFeedItem | undefined,
+  extracted: ExtractedArticle,
+  options?: {
+    readonly feedItem?: ParsedFeedItem | undefined;
+    readonly matchedKey?: string | undefined;
+    readonly previousEntry?: IncrementalEntryRecord | undefined;
+  },
 ): Promise<{
   readonly key: string;
   readonly fingerprint: string;
   readonly publishedAt?: string | undefined;
+  readonly articleUrl: string;
   readonly completeness: "complete" | "partial";
 }> {
-  let html: string;
-  try {
-    html = await fetchArticleHtml(itemUrl, context.signal);
-  } catch (error) {
-    if (context.signal.aborted) throw context.signal.reason ?? error;
-    const diag = readFailureDiagnosticContext(error);
-    throw sourceAdapterActionError({
-      code: "article_fetch_failed",
-      message: `Failed to fetch article at ${itemUrl}: ${error instanceof Error ? error.message : String(error)}`,
-      impact: "Article was not fetched and will not be archived.",
-      suggestion: "Check article URL accessibility.",
-      requiresHuman: false,
-      ...(diag.stage === undefined ? {} : { stage: diag.stage }),
-      ...(diag.target === undefined ? {} : { target: diag.target }),
-      ...(diag.abortCause === undefined ? {} : { abortCause: diag.abortCause }),
-    });
-  }
-
-  let extracted: ExtractedArticle | undefined;
-  try {
-    extracted = extractArticle(html, itemUrl);
-  } catch (error) {
-    throw sourceAdapterActionError({
-      code: "article_extraction_failed",
-      message: `Failed to extract article HTML at ${itemUrl}: ${error instanceof Error ? error.message : String(error)}`,
-      impact: "Article content could not be parsed and will not be archived.",
-      suggestion: "Check article DOM structure.",
-      requiresHuman: false,
-    });
-  }
-
-  if (!extracted || !extracted.cleanResult.hasSubstantialContent) {
-    throw sourceAdapterActionError({
-      code: "article_content_empty",
-      message: `Article at ${itemUrl} has no substantial content after cleaning. Title-only archiving is rejected.`,
-      impact: "Article was not archived.",
-      suggestion: "Verify that the article contains main content.",
-      requiresHuman: false,
-    });
-  }
-
-  const key = extractSlugOrKey(itemUrl, feedItem?.id);
+  const feedItem = options?.feedItem;
+  const previousEntry = options?.previousEntry;
+  const key = options?.matchedKey ?? extractSlugOrKey(itemUrl, feedItem?.id);
   const feedPublishedAt = feedItem?.published ?? undefined;
   const articlePublishedAt = extracted.articlePublishedAt;
   const publishedDate = articlePublishedAt ?? feedPublishedAt;
@@ -367,6 +516,8 @@ async function processAndSubmitArticle(
     },
   });
 
+  // Preserve the feed's index fingerprint (or prior recorded fingerprint during offline backfill)
+  // so explicit collect does not diverge from RSS <pubDate>/<category> on the next sync.
   const fingerprint = feedItem
     ? computeFeedItemFingerprint({
         title: feedItem.title,
@@ -374,17 +525,30 @@ async function processAndSubmitArticle(
         published: feedPublishedAt,
         categories: feedItem.categories,
       })
-    : computeFeedItemFingerprint({
-        title,
-        url: itemUrl,
-        published: publishedDate,
-        categories,
-      });
+    : previousEntry !== undefined
+      ? previousEntry.fingerprint
+      : computeFeedItemFingerprint({
+          title,
+          url: itemUrl,
+          published: publishedDate,
+          categories,
+        });
+
+  const recordedPublishedAt = feedItem
+    ? feedPublishedAt
+    : previousEntry !== undefined
+      ? previousEntry.publishedAt
+      : publishedDate;
+  const recordedArticleUrl =
+    feedItem?.url ?? previousEntry?.articleUrl ?? itemUrl;
 
   return {
     key,
     fingerprint,
-    ...(publishedDate === undefined ? {} : { publishedAt: publishedDate }),
+    ...(recordedPublishedAt === undefined
+      ? {}
+      : { publishedAt: recordedPublishedAt }),
+    articleUrl: recordedArticleUrl,
     completeness: result.hasMediaFailures ? "partial" : "complete",
   };
 }
@@ -465,8 +629,24 @@ async function checkHuggingFace(
   // Validate full-text HTML extraction on 1 sample item
   const sample = items[0]!;
   try {
-    const html = await fetchArticleHtml(sample.url, context.signal);
-    const extracted = extractArticle(html, sample.url);
+    const articleRes = await fetchArticleHtml(sample.url, context.signal);
+    if (!articleRes.ok) {
+      return {
+        availability: "unavailable",
+        scope: [scopeId],
+        basis: `Sample article check failed: Article request to ${sample.url} returned HTTP ${articleRes.status}`,
+        problems: [
+          {
+            code: "sample_fetch_failed",
+            message: `Article request to ${sample.url} returned HTTP ${articleRes.status}`,
+            impact: "Sample article HTML could not be fetched.",
+            suggestion: "Check sample article URL accessibility.",
+            requiresHuman: false,
+          },
+        ],
+      };
+    }
+    const extracted = extractArticle(articleRes.html, sample.url);
     if (!extracted || !extracted.cleanResult.hasSubstantialContent) {
       return {
         availability: "unavailable",
@@ -571,7 +751,6 @@ async function syncHuggingFace(
       code: "feed_request_failed",
       message: `Failed to fetch feed at ${context.config.feedUrl}: ${error instanceof Error ? error.message : String(error)}`,
       impact: "Incremental sync could not be completed.",
-      suggestion: "Check feed URL and connectivity.",
       requiresHuman: false,
       ...(diag.stage === undefined ? {} : { stage: diag.stage }),
       ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -585,10 +764,27 @@ async function syncHuggingFace(
       lastModified: feedResult.lastModified,
     });
     await saveIncrementalSyncState(context, state);
-    return { completedScopes: [scopeId] };
+    return {
+      collectionCompleteness: "complete",
+      completedScopes: [scopeId],
+    };
   }
 
-  const items = parseFeedItems(feedResult.text, context.config.feedUrl);
+  let items: ParsedFeedItem[];
+  try {
+    items = parseFeedItems(feedResult.text, context.config.feedUrl);
+  } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
+    throw sourceAdapterActionError({
+      code: "feed_parse_failed",
+      message: `Failed to parse feed XML at ${context.config.feedUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      impact:
+        "Incremental sync could not parse feed items; feed validators were not advanced.",
+      requiresHuman: false,
+      stage: "parsing-feed",
+      target: context.config.feedUrl,
+    });
+  }
 
   // 1. Initial sync (baseline):
   // Records ALL discovered feed items in state with archivedCompleteness: "baseline"
@@ -604,11 +800,11 @@ async function syncHuggingFace(
         published: pubDate,
         categories: item.categories,
       });
-      entries[key] = {
+      entries[key] = recordIncrementalBaselineEntry({
         fingerprint,
-        ...(pubDate === undefined ? {} : { publishedAt: pubDate }),
-        archivedCompleteness: "baseline",
-      };
+        publishedAt: pubDate,
+        articleUrl: item.url,
+      });
     }
 
     initializeIncrementalScope(state, scopeId, {
@@ -622,6 +818,7 @@ async function syncHuggingFace(
     });
     await saveIncrementalSyncState(context, state);
     return {
+      collectionCompleteness: "complete",
       completedScopes: [scopeId],
       initializedScopes: [scopeId],
     };
@@ -630,7 +827,11 @@ async function syncHuggingFace(
   // 2. Subsequent sync:
   // Compares against state entries, fetching article HTML ONLY for newly added or modified feed items.
   const scope = state.scopes[scopeId]!;
-  const toProcess: ParsedFeedItem[] = [];
+  const changedItems: {
+    readonly item: ParsedFeedItem;
+    readonly key: string;
+    readonly fingerprint: string;
+  }[] = [];
 
   for (const item of items) {
     const key = extractSlugOrKey(item.url, item.id);
@@ -641,50 +842,102 @@ async function syncHuggingFace(
       categories: item.categories,
     });
     const existing = scope.entries[key];
-    if (existing === undefined || existing.fingerprint !== fingerprint) {
-      toProcess.push(item);
+    if (hasIncrementalEntryChanged(existing, fingerprint)) {
+      changedItems.push({ item, key, fingerprint });
     }
   }
 
-  const problems: ManualRunFailure[] = [];
-  for (const item of toProcess) {
+  const bodyGaps: FeedBodyGap[] = [];
+  let archivedCount = 0;
+
+  for (const { item, key, fingerprint } of changedItems) {
     if (context.signal.aborted) throw context.signal.reason;
-    try {
-      const processed = await processAndSubmitArticle(context, item.url, item);
-      upsertIncrementalScopeEntry(state, scopeId, processed.key, {
-        fingerprint: processed.fingerprint,
-        ...(processed.publishedAt === undefined
+
+    const existing = scope.entries[key];
+    const fetchExtract = await fetchAndExtractArticle(item.url, context.signal);
+    if (!fetchExtract.ok) {
+      const gapRecord = {
+        url: item.url,
+        stage: fetchExtract.gap.stage,
+        code: fetchExtract.gap.code,
+        reason: fetchExtract.gap.reason,
+        ...(fetchExtract.gap.httpStatus === undefined
           ? {}
-          : { publishedAt: processed.publishedAt }),
-        archivedCompleteness: processed.completeness,
+          : { httpStatus: fetchExtract.gap.httpStatus }),
+        ...(fetchExtract.gap.abortCause === undefined
+          ? {}
+          : { abortCause: fetchExtract.gap.abortCause }),
+      };
+      upsertIncrementalScopeEntry(
+        state,
+        scopeId,
+        key,
+        recordIncrementalBodyGapEntry(existing, {
+          fingerprint,
+          publishedAt: item.published ?? undefined,
+          articleUrl: item.url,
+          gap: gapRecord,
+        }),
+      );
+      // Persist body gap immediately so unchanged subsequent syncs do not re-fetch it.
+      await saveIncrementalSyncState(context, state);
+      bodyGaps.push({
+        scope: scopeId,
+        itemKey: key,
+        ...gapRecord,
       });
+      continue;
+    }
+
+    try {
+      const submitted = await submitExtractedArticle(
+        context,
+        item.url,
+        fetchExtract.extracted,
+        {
+          feedItem: item,
+          matchedKey: key,
+          previousEntry: existing,
+        },
+      );
+      upsertIncrementalScopeEntry(
+        state,
+        scopeId,
+        submitted.key,
+        recordIncrementalArchivedEntry(existing, {
+          fingerprint: submitted.fingerprint,
+          publishedAt: submitted.publishedAt,
+          articleUrl: submitted.articleUrl,
+          completeness: submitted.completeness,
+        }),
+      );
       // Persist each archived article immediately so partial failures do not drop committed progress.
       await saveIncrementalSyncState(context, state);
+      archivedCount += 1;
     } catch (error) {
       if (context.signal.aborted) throw context.signal.reason ?? error;
-      if (isSourceAdapterActionError(error)) {
-        problems.push(error.failure);
-      } else {
-        const diag = readFailureDiagnosticContext(error);
-        problems.push({
-          code: "article_sync_failed",
-          message: `Failed to sync article at ${item.url}: ${error instanceof Error ? error.message : String(error)}`,
-          impact:
-            "Article was not archived; feed validators were not advanced.",
-          suggestion: "Check article URL accessibility and content structure.",
-          requiresHuman: false,
-          ...(diag.stage === undefined ? {} : { stage: diag.stage }),
-          ...(diag.target === undefined ? {} : { target: diag.target }),
-          ...(diag.abortCause === undefined
-            ? {}
-            : { abortCause: diag.abortCause }),
-        });
+      const diag = readFailureDiagnosticContext(error);
+      if (
+        diag.abortCause === "user_cancelled" ||
+        diag.abortCause === "action_budget_exhausted"
+      ) {
+        throw error;
       }
+      if (isSourceAdapterActionError(error)) {
+        throw error;
+      }
+      throw sourceAdapterActionError({
+        code: "article_sync_failed",
+        message: `Failed to submit article at ${item.url}: ${error instanceof Error ? error.message : String(error)}`,
+        impact: "Article was not archived; feed validators were not advanced.",
+        requiresHuman: false,
+        ...(diag.stage === undefined ? {} : { stage: diag.stage }),
+        ...(diag.target === undefined ? {} : { target: diag.target }),
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
+      });
     }
-  }
-
-  if (problems.length > 0) {
-    throw failureFromProblems(problems, []);
   }
 
   updateIncrementalScopeValidators(state, scopeId, {
@@ -693,7 +946,26 @@ async function syncHuggingFace(
   });
   await saveIncrementalSyncState(context, state);
 
-  return { completedScopes: [scopeId] };
+  if (bodyGaps.length > 0) {
+    const incompleteScopes: FeedIncompleteScope[] = [
+      {
+        scope: scopeId,
+        reasonCode: "article_body_unavailable",
+        message: `${String(bodyGaps.length)} of ${String(changedItems.length)} changed feed items had unavailable article body; ${String(archivedCount)} items were archived.`,
+      },
+    ];
+    return {
+      collectionCompleteness: "partial",
+      completedScopes: [],
+      incompleteScopes,
+      bodyGaps,
+    };
+  }
+
+  return {
+    collectionCompleteness: "complete",
+    completedScopes: [scopeId],
+  };
 }
 
 /** Collect action: collects explicitly requested URLs or feed items (optionally limited by maxItems). */
@@ -715,37 +987,86 @@ async function collectHuggingFace(
   let truncatedByMaxItems = false;
 
   if (params.itemUrls && params.itemUrls.length > 0) {
-    // Process explicit itemUrls
+    // Non-fatally load feed items so explicit URL collection aligns with feed keys and fingerprints when reachable.
+    let feedItems: readonly ParsedFeedItem[] = [];
+    try {
+      const feedResult = await fetchFeedXml(
+        context.config.feedUrl,
+        context.signal,
+      );
+      if (feedResult.status === "ok") {
+        feedItems = parseFeedItems(feedResult.text, context.config.feedUrl);
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      feedItems = [];
+    }
+
     for (const itemUrl of params.itemUrls) {
       if (context.signal.aborted) throw context.signal.reason;
+      const normalizedItemUrl = normalizeComparableUrl(itemUrl);
+      const feedItem = feedItems.find(
+        (candidate) =>
+          candidate.url === itemUrl ||
+          normalizeComparableUrl(candidate.url) === normalizedItemUrl,
+      );
+      const existingMatch = findExistingEntryForUrl(
+        state,
+        scopeId,
+        itemUrl,
+        feedItem,
+      );
+
+      const fetchExtract = await fetchAndExtractArticle(
+        itemUrl,
+        context.signal,
+      );
+      if (!fetchExtract.ok) {
+        problems.push(failureFromArticleGap(itemUrl, fetchExtract.gap));
+        continue;
+      }
+
       try {
-        const processed = await processAndSubmitArticle(
+        const submitted = await submitExtractedArticle(
           context,
           itemUrl,
-          undefined,
+          fetchExtract.extracted,
+          {
+            feedItem,
+            matchedKey: existingMatch?.key,
+            previousEntry: existingMatch?.entry,
+          },
         );
         if (state) {
-          upsertIncrementalScopeEntry(state, scopeId, processed.key, {
-            fingerprint: processed.fingerprint,
-            ...(processed.publishedAt === undefined
-              ? {}
-              : { publishedAt: processed.publishedAt }),
-            archivedCompleteness: processed.completeness,
-          });
+          upsertIncrementalScopeEntry(
+            state,
+            scopeId,
+            submitted.key,
+            recordIncrementalArchivedEntry(existingMatch?.entry, {
+              fingerprint: submitted.fingerprint,
+              publishedAt: submitted.publishedAt,
+              articleUrl: submitted.articleUrl,
+              completeness: submitted.completeness,
+            }),
+          );
           await saveIncrementalSyncState(context, state);
         }
       } catch (error) {
         if (context.signal.aborted) throw context.signal.reason ?? error;
+        const diag = readFailureDiagnosticContext(error);
+        if (
+          diag.abortCause === "user_cancelled" ||
+          diag.abortCause === "action_budget_exhausted"
+        ) {
+          throw error;
+        }
         if (isSourceAdapterActionError(error)) {
           problems.push(error.failure);
         } else {
-          const diag = readFailureDiagnosticContext(error);
           problems.push({
             code: "article_collect_failed",
             message: `Failed to collect article at ${itemUrl}: ${error instanceof Error ? error.message : String(error)}`,
             impact: "Article was not archived.",
-            suggestion:
-              "Check article URL accessibility and content structure.",
             requiresHuman: false,
             ...(diag.stage === undefined ? {} : { stage: diag.stage }),
             ...(diag.target === undefined ? {} : { target: diag.target }),
@@ -789,7 +1110,21 @@ async function collectHuggingFace(
       });
     }
 
-    const items = parseFeedItems(feedResult.text, context.config.feedUrl);
+    let items: ParsedFeedItem[];
+    try {
+      items = parseFeedItems(feedResult.text, context.config.feedUrl);
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
+      throw sourceAdapterActionError({
+        code: "feed_parse_failed",
+        message: `Failed to parse feed XML at ${context.config.feedUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        impact: "Collection could not parse feed articles.",
+        requiresHuman: false,
+        stage: "parsing-feed",
+        target: context.config.feedUrl,
+      });
+    }
+
     const selected =
       params.maxItems !== undefined ? items.slice(0, params.maxItems) : items;
     truncatedByMaxItems =
@@ -797,34 +1132,59 @@ async function collectHuggingFace(
 
     for (const item of selected) {
       if (context.signal.aborted) throw context.signal.reason;
+      const key = extractSlugOrKey(item.url, item.id);
+      const existing = state?.scopes[scopeId]?.entries[key];
+
+      const fetchExtract = await fetchAndExtractArticle(
+        item.url,
+        context.signal,
+      );
+      if (!fetchExtract.ok) {
+        problems.push(failureFromArticleGap(item.url, fetchExtract.gap));
+        continue;
+      }
+
       try {
-        const processed = await processAndSubmitArticle(
+        const submitted = await submitExtractedArticle(
           context,
           item.url,
-          item,
+          fetchExtract.extracted,
+          {
+            feedItem: item,
+            matchedKey: key,
+            previousEntry: existing,
+          },
         );
         if (state) {
-          upsertIncrementalScopeEntry(state, scopeId, processed.key, {
-            fingerprint: processed.fingerprint,
-            ...(processed.publishedAt === undefined
-              ? {}
-              : { publishedAt: processed.publishedAt }),
-            archivedCompleteness: processed.completeness,
-          });
+          upsertIncrementalScopeEntry(
+            state,
+            scopeId,
+            submitted.key,
+            recordIncrementalArchivedEntry(existing, {
+              fingerprint: submitted.fingerprint,
+              publishedAt: submitted.publishedAt,
+              articleUrl: submitted.articleUrl,
+              completeness: submitted.completeness,
+            }),
+          );
           await saveIncrementalSyncState(context, state);
         }
       } catch (error) {
         if (context.signal.aborted) throw context.signal.reason ?? error;
+        const diag = readFailureDiagnosticContext(error);
+        if (
+          diag.abortCause === "user_cancelled" ||
+          diag.abortCause === "action_budget_exhausted"
+        ) {
+          throw error;
+        }
         if (isSourceAdapterActionError(error)) {
           problems.push(error.failure);
         } else {
-          const diag = readFailureDiagnosticContext(error);
           problems.push({
             code: "article_collect_failed",
             message: `Failed to collect article at ${item.url}: ${error instanceof Error ? error.message : String(error)}`,
             impact: "Article was not archived.",
-            suggestion:
-              "Check article URL accessibility and content structure.",
             requiresHuman: false,
             ...(diag.stage === undefined ? {} : { stage: diag.stage }),
             ...(diag.target === undefined ? {} : { target: diag.target }),

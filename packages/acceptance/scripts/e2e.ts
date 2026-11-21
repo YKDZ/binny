@@ -4294,6 +4294,10 @@ type RssControlSource = {
   readonly setRssVersion: (version: number) => Promise<void>;
   readonly setAtomVersion: (version: number) => Promise<void>;
   readonly setArticleVersion: (version: 1 | 2) => Promise<void>;
+  readonly setArticleFeedScenario: (
+    scenario: "standard" | "gap-discovery" | "gap-fingerprint-updated",
+  ) => Promise<void>;
+  readonly setBrokenArticleAvailable: (available: boolean) => Promise<void>;
   readonly setDocumentVersion: (version: 1 | 2) => Promise<void>;
   readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
@@ -4369,6 +4373,12 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     },
     async setArticleVersion(version) {
       await updateState({ articleVersion: version });
+    },
+    async setArticleFeedScenario(scenario) {
+      await updateState({ articleFeedScenario: scenario });
+    },
+    async setBrokenArticleAvailable(available) {
+      await updateState({ brokenArticleAvailable: available });
     },
     async setDocumentVersion(version) {
       await updateState({ documentVersion: version });

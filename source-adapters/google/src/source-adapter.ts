@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   defineSourceAdapter,
   defineSourceAdapterAction,
+  feedSyncOutputSchema,
   fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
@@ -11,13 +12,19 @@ import {
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
   readFailureDiagnosticContext,
+  recordIncrementalArchivedEntry,
+  recordIncrementalBaselineEntry,
+  recordIncrementalBodyGapEntry,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
+  type FeedBodyGap,
+  type FeedIncompleteScope,
   type IncrementalEntryRecord,
+  type IncrementalSyncState,
   type ManualRunAbortCause,
   type SourceAdapterContext,
 } from "@binny/source-adapter-sdk";
@@ -109,12 +116,7 @@ export const collectOutputSchema = z
   .object({ completedScopes: z.array(z.string()).readonly() })
   .strict();
 
-export const syncOutputSchema = z
-  .object({
-    completedScopes: z.array(z.string()).readonly(),
-    initializedScopes: z.array(z.string()).readonly().optional(),
-  })
-  .strict();
+export const syncOutputSchema = feedSyncOutputSchema;
 
 export type GoogleConfig = z.output<typeof configSchema>;
 export type GoogleParams = z.output<typeof paramsSchema>;
@@ -525,6 +527,226 @@ async function check(
   };
 }
 
+function normalizeComparableUrl(rawUrl: string): string {
+  try {
+    return new URL(rawUrl).href;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function findMatchedEntryByUrl(
+  state: IncrementalSyncState,
+  sourceId: string,
+  targetUrl: string,
+):
+  | { readonly itemKey: string; readonly entry: IncrementalEntryRecord }
+  | undefined {
+  const entries = state.scopes[sourceId]?.entries;
+  if (entries === undefined) return undefined;
+  const normalizedTarget = normalizeComparableUrl(targetUrl);
+  for (const [itemKey, entry] of Object.entries(entries)) {
+    if (entry.articleUrl === targetUrl || itemKey === targetUrl) {
+      return { itemKey, entry };
+    }
+    if (
+      entry.articleUrl !== undefined &&
+      normalizeComparableUrl(entry.articleUrl) === normalizedTarget
+    ) {
+      return { itemKey, entry };
+    }
+  }
+  return undefined;
+}
+
+function resolveSourceForUrl(
+  url: string,
+  selectedSources: readonly GoogleSourceDefinition[],
+  feedsBySourceId: ReadonlyMap<string, FeedFetchResult | undefined>,
+  state: IncrementalSyncState,
+):
+  | {
+      readonly source: GoogleSourceDefinition;
+      readonly item: ParsedFeedItemData;
+    }
+  | undefined {
+  const normalizedTarget = normalizeComparableUrl(url);
+
+  for (const source of selectedSources) {
+    const feedRes = feedsBySourceId.get(source.id);
+    if (feedRes?.status === 200) {
+      const feedItem = feedRes.items.find(
+        (item) =>
+          item.articleUrl === url ||
+          normalizeComparableUrl(item.articleUrl) === normalizedTarget,
+      );
+      if (feedItem !== undefined) {
+        return { source, item: feedItem };
+      }
+    }
+  }
+
+  for (const source of selectedSources) {
+    const matched = findMatchedEntryByUrl(state, source.id, url);
+    if (matched !== undefined) {
+      return {
+        source,
+        item: {
+          itemKey: matched.itemKey,
+          articleUrl: url,
+          published: matched.entry.publishedAt,
+          updated: matched.entry.updatedAt,
+          authors: [],
+          categories: [],
+          fingerprint: matched.entry.fingerprint,
+        },
+      };
+    }
+  }
+
+  const fallbackSource = (() => {
+    if (url.includes("blog.google")) {
+      return selectedSources.find((s) => s.id === "google-ai");
+    }
+    if (url.includes("deepmind.google")) {
+      return selectedSources.find((s) => s.id === "deepmind");
+    }
+    if (selectedSources.length === 1) {
+      return selectedSources[0];
+    }
+    try {
+      const targetParsed = new URL(url);
+      const pathMatches = selectedSources.filter((s) => {
+        const sourceParsed = new URL(s.url);
+        if (sourceParsed.origin !== targetParsed.origin) return false;
+        const dir = sourceParsed.pathname.replace(/[^/]*$/u, "");
+        return dir.length > 1 && targetParsed.pathname.startsWith(dir);
+      });
+      if (pathMatches.length === 1) {
+        return pathMatches[0];
+      }
+    } catch {
+      // Ignore malformed URLs during heuristic source matching.
+    }
+    return undefined;
+  })();
+
+  if (fallbackSource === undefined) return undefined;
+  return {
+    source: fallbackSource,
+    item: {
+      itemKey: url,
+      articleUrl: url,
+      authors: [],
+      categories: [],
+      fingerprint: createHash("sha256").update(url).digest("hex"),
+    },
+  };
+}
+
+type FetchAndExtractResult =
+  | {
+      readonly ok: true;
+      readonly extracted: NonNullable<ReturnType<typeof extractArticle>>;
+    }
+  | {
+      readonly ok: false;
+      readonly gap: {
+        readonly stage: "fetching-article" | "extracting-article";
+        readonly code:
+          | "article_fetch_failed"
+          | "article_http_error"
+          | "article_extraction_failed"
+          | "article_content_empty";
+        readonly reason: string;
+        readonly httpStatus?: number;
+        readonly abortCause?: ManualRunAbortCause;
+        readonly problemMessage: string;
+      };
+    };
+
+async function fetchAndExtractForArticle(
+  articleUrl: string,
+  sourceId: string,
+  signal: AbortSignal,
+): Promise<FetchAndExtractResult> {
+  let articleRes: { ok: boolean; status: number; html: string };
+  try {
+    articleRes = await fetchArticleHtml(articleUrl, signal);
+  } catch (error) {
+    if (signal.aborted) throw signal.reason ?? error;
+    const diag = readFailureDiagnosticContext(error);
+    if (
+      diag.abortCause === "user_cancelled" ||
+      diag.abortCause === "action_budget_exhausted"
+    ) {
+      throw error;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      gap: {
+        stage: "fetching-article",
+        code: "article_fetch_failed",
+        reason: detail,
+        ...(diag.abortCause === undefined
+          ? {}
+          : { abortCause: diag.abortCause }),
+        problemMessage: `Article "${articleUrl}" fetch failed: ${detail}`,
+      },
+    };
+  }
+
+  if (!articleRes.ok) {
+    return {
+      ok: false,
+      gap: {
+        stage: "fetching-article",
+        code: "article_http_error",
+        reason: `Article HTTP request returned status ${String(articleRes.status)}.`,
+        ...(articleRes.status >= 100 && articleRes.status <= 599
+          ? { httpStatus: articleRes.status }
+          : {}),
+        problemMessage: `Article "${articleUrl}" returned HTTP ${articleRes.status}.`,
+      },
+    };
+  }
+
+  let extracted: ReturnType<typeof extractArticle>;
+  try {
+    extracted = extractArticle(articleRes.html, articleUrl, sourceId);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      gap: {
+        stage: "extracting-article",
+        code: "article_extraction_failed",
+        reason: detail,
+        problemMessage: `Article "${articleUrl}" extraction failed: ${detail}`,
+      },
+    };
+  }
+
+  if (
+    !extracted ||
+    !extracted.cleanResult.hasSubstantialContent ||
+    extracted.cleanResult.text.trim().length === 0
+  ) {
+    return {
+      ok: false,
+      gap: {
+        stage: "extracting-article",
+        code: "article_content_empty",
+        reason: "Article page yielded no extractable article body.",
+        problemMessage: `Article "${articleUrl}" yielded no extractable article body.`,
+      },
+    };
+  }
+
+  return { ok: true, extracted };
+}
+
 async function sync(
   context: SourceAdapterContext<GoogleConfig, never, GoogleExtensions>,
   params: GoogleParams,
@@ -533,6 +755,8 @@ async function sync(
   const state = await loadIncrementalSyncState(context);
   const completedScopes: string[] = [];
   const initializedScopes: string[] = [];
+  const incompleteScopes: FeedIncompleteScope[] = [];
+  const bodyGaps: FeedBodyGap[] = [];
   const problems: ActionProblem[] = selected.missing.map((id) => ({
     sourceId: id,
     message: `Requested source "${id}" is not configured.`,
@@ -573,12 +797,12 @@ async function sync(
 
       const baselineEntries: Record<string, IncrementalEntryRecord> = {};
       for (const item of feedRes.items) {
-        baselineEntries[item.itemKey] = {
+        baselineEntries[item.itemKey] = recordIncrementalBaselineEntry({
           fingerprint: item.fingerprint,
-          ...(item.published ? { publishedAt: item.published } : {}),
-          ...(item.updated ? { updatedAt: item.updated } : {}),
-          archivedCompleteness: "baseline",
-        };
+          publishedAt: item.published,
+          updatedAt: item.updated,
+          articleUrl: item.articleUrl,
+        });
       }
 
       initializeIncrementalScope(state, source.id, {
@@ -596,12 +820,10 @@ async function sync(
     }
 
     // Initialized scope: conditional request & incremental archiving
-    const hasPartial = Object.values(scopeState.entries).some(
-      (entry) => entry.archivedCompleteness === "partial",
-    );
-    const validators = hasPartial
-      ? {}
-      : { etag: scopeState.etag, lastModified: scopeState.lastModified };
+    const validators = {
+      etag: scopeState.etag,
+      lastModified: scopeState.lastModified,
+    };
 
     let feedRes: FeedFetchResult;
     try {
@@ -621,62 +843,64 @@ async function sync(
       continue;
     }
 
-    let scopeFailed = false;
-    for (const item of feedRes.items) {
+    const changedItems = feedRes.items.filter((item) =>
+      hasIncrementalEntryChanged(
+        scopeState.entries[item.itemKey],
+        item.fingerprint,
+        item.updated,
+      ),
+    );
+
+    let scopeSubmitFailed = false;
+    let gapCountForScope = 0;
+    let archivedCountForScope = 0;
+
+    for (const item of changedItems) {
       if (context.signal.aborted) throw context.signal.reason;
 
       const previous = scopeState.entries[item.itemKey];
-      const changed = hasIncrementalEntryChanged(
-        previous,
-        item.fingerprint,
-        item.updated,
-      );
-
-      if (!changed) {
-        continue;
-      }
-
-      let articleRes: { ok: boolean; status: number; html: string };
-      try {
-        articleRes = await fetchArticleHtml(item.articleUrl, context.signal);
-      } catch (error) {
-        if (context.signal.aborted) throw context.signal.reason ?? error;
-        scopeFailed = true;
-        problems.push({
-          sourceId: source.id,
-          message: `Article "${item.articleUrl}" fetch failed: ${error instanceof Error ? error.message : String(error)}`,
-          ...problemDiagnostics(error),
-        });
-        continue;
-      }
-
-      if (!articleRes.ok) {
-        scopeFailed = true;
-        problems.push({
-          sourceId: source.id,
-          message: `Article "${item.articleUrl}" returned HTTP ${articleRes.status}.`,
-        });
-        continue;
-      }
-
-      const extracted = extractArticle(
-        articleRes.html,
+      const fetchExtract = await fetchAndExtractForArticle(
         item.articleUrl,
         source.id,
+        context.signal,
       );
-      if (
-        !extracted ||
-        !extracted.cleanResult.hasSubstantialContent ||
-        extracted.cleanResult.text.trim().length === 0
-      ) {
-        scopeFailed = true;
-        problems.push({
-          sourceId: source.id,
-          message: `Article "${item.articleUrl}" yielded no extractable article body.`,
+      if (!fetchExtract.ok) {
+        const gapRecord = {
+          url: item.articleUrl,
+          stage: fetchExtract.gap.stage,
+          code: fetchExtract.gap.code,
+          reason: fetchExtract.gap.reason,
+          ...(fetchExtract.gap.httpStatus === undefined
+            ? {}
+            : { httpStatus: fetchExtract.gap.httpStatus }),
+          ...(fetchExtract.gap.abortCause === undefined
+            ? {}
+            : { abortCause: fetchExtract.gap.abortCause }),
+        };
+        upsertIncrementalScopeEntry(
+          state,
+          source.id,
+          item.itemKey,
+          recordIncrementalBodyGapEntry(previous, {
+            fingerprint: item.fingerprint,
+            updatedAt: item.updated,
+            publishedAt: item.published,
+            articleUrl: item.articleUrl,
+            gap: gapRecord,
+          }),
+        );
+        // Persist body gap immediately so unchanged subsequent syncs do not re-fetch it.
+        await saveIncrementalSyncState(context, state);
+        bodyGaps.push({
+          scope: source.id,
+          itemKey: item.itemKey,
+          ...gapRecord,
         });
+        gapCountForScope += 1;
         continue;
       }
 
+      const { extracted } = fetchExtract;
       const combinedAuthors = Array.from(
         new Set([...extracted.pageMetadata.authors, ...item.authors]),
       );
@@ -710,34 +934,58 @@ async function sync(
           },
         });
 
-        upsertIncrementalScopeEntry(state, source.id, item.itemKey, {
-          fingerprint: item.fingerprint,
-          ...(item.published ? { publishedAt: item.published } : {}),
-          ...(item.updated ? { updatedAt: item.updated } : {}),
-          archivedCompleteness: submitResult.hasMediaFailures
-            ? "partial"
-            : "complete",
-        });
+        upsertIncrementalScopeEntry(
+          state,
+          source.id,
+          item.itemKey,
+          recordIncrementalArchivedEntry(previous, {
+            fingerprint: item.fingerprint,
+            updatedAt: item.updated,
+            publishedAt: item.published,
+            articleUrl: item.articleUrl,
+            completeness: submitResult.hasMediaFailures
+              ? "partial"
+              : "complete",
+          }),
+        );
         // Persist immediately after each archived article so partial failures do not drop committed progress.
         await saveIncrementalSyncState(context, state);
+        archivedCountForScope += 1;
       } catch (error) {
         if (context.signal.aborted) throw context.signal.reason ?? error;
-        scopeFailed = true;
+        const diag = readFailureDiagnosticContext(error);
+        if (
+          diag.abortCause === "user_cancelled" ||
+          diag.abortCause === "action_budget_exhausted"
+        ) {
+          throw error;
+        }
+        scopeSubmitFailed = true;
         problems.push({
           sourceId: source.id,
           message: `Failed to submit article "${item.articleUrl}": ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
-        continue;
+        // Stop this scope on archive submission failure so untried items keep retry eligibility.
+        break;
       }
     }
 
-    if (!scopeFailed) {
+    if (!scopeSubmitFailed) {
       updateIncrementalScopeValidators(state, source.id, {
         etag: feedRes.validators.etag,
         lastModified: feedRes.validators.lastModified,
       });
       await saveIncrementalSyncState(context, state);
-      completedScopes.push(source.id);
+      if (gapCountForScope > 0) {
+        incompleteScopes.push({
+          scope: source.id,
+          reasonCode: "article_body_unavailable",
+          message: `${String(gapCountForScope)} of ${String(changedItems.length)} changed feed items had unavailable article body; ${String(archivedCountForScope)} items were archived.`,
+        });
+      } else {
+        completedScopes.push(source.id);
+      }
     }
   }
 
@@ -745,7 +993,16 @@ async function sync(
     throw failureFromProblems(problems, completedScopes);
   }
 
-  return { completedScopes, initializedScopes };
+  return {
+    collectionCompleteness:
+      incompleteScopes.length > 0
+        ? ("partial" as const)
+        : ("complete" as const),
+    completedScopes,
+    initializedScopes,
+    ...(incompleteScopes.length > 0 ? { incompleteScopes } : {}),
+    ...(bodyGaps.length > 0 ? { bodyGaps } : {}),
+  };
 }
 
 async function collect(
@@ -760,56 +1017,55 @@ async function collect(
     message: `Requested source "${id}" is not configured.`,
   }));
 
+  const explicitUrlsMode = Boolean(
+    params.itemUrls && params.itemUrls.length > 0,
+  );
+  const itemsBySourceId = new Map<string, ParsedFeedItemData[]>();
+
+  if (explicitUrlsMode && params.itemUrls) {
+    const feedsBySourceId = new Map<string, FeedFetchResult | undefined>();
+    for (const source of selected.sources) {
+      if (context.signal.aborted) throw context.signal.reason;
+      try {
+        feedsBySourceId.set(
+          source.id,
+          await fetchFeed(source.url, {}, context.signal),
+        );
+      } catch (error) {
+        if (context.signal.aborted) throw context.signal.reason ?? error;
+        feedsBySourceId.set(source.id, undefined);
+      }
+      itemsBySourceId.set(source.id, []);
+    }
+
+    for (const url of params.itemUrls) {
+      const resolved = resolveSourceForUrl(
+        url,
+        selected.sources,
+        feedsBySourceId,
+        state,
+      );
+      if (resolved === undefined) {
+        problems.push({
+          sourceId: selected.sources[0]?.id ?? "google",
+          message: `Article URL "${url}" did not match any selected Google source.`,
+        });
+        continue;
+      }
+      itemsBySourceId.get(resolved.source.id)!.push(resolved.item);
+    }
+  }
+
   for (const source of selected.sources) {
     if (context.signal.aborted) throw context.signal.reason;
 
-    let itemsToCollect: {
-      itemKey: string;
-      articleUrl: string;
-      title?: string | undefined;
-      published?: string | undefined;
-      updated?: string | undefined;
-      authors: readonly string[];
-      categories: readonly string[];
-      fingerprint: string;
-    }[] = [];
-
+    let itemsToCollect: ParsedFeedItemData[] = [];
     let truncatedByMaxItems = false;
-    if (params.itemUrls && params.itemUrls.length > 0) {
-      let feedRes: FeedFetchResult | undefined;
-      try {
-        feedRes = await fetchFeed(source.url, {}, context.signal);
-      } catch (error) {
-        if (context.signal.aborted) throw context.signal.reason ?? error;
-        // Feed fetch optional when direct URLs are provided
-      }
 
-      for (const url of params.itemUrls) {
-        const feedItem =
-          feedRes?.status === 200
-            ? feedRes.items.find((item) => item.articleUrl === url)
-            : undefined;
-
-        if (feedItem) {
-          itemsToCollect.push(feedItem);
-        } else {
-          const isGoogleAi =
-            source.id === "google-ai" && url.includes("blog.google");
-          const isDeepMind =
-            source.id === "deepmind" && url.includes("deepmind.google");
-          const isOther =
-            !url.includes("blog.google") && !url.includes("deepmind.google");
-
-          if (isGoogleAi || isDeepMind || isOther) {
-            itemsToCollect.push({
-              itemKey: url,
-              articleUrl: url,
-              authors: [],
-              categories: [],
-              fingerprint: createHash("sha256").update(url).digest("hex"),
-            });
-          }
-        }
+    if (explicitUrlsMode) {
+      itemsToCollect = itemsBySourceId.get(source.id) ?? [];
+      if (itemsToCollect.length === 0) {
+        continue;
       }
     } else {
       let feedRes: FeedFetchResult;
@@ -841,47 +1097,26 @@ async function collect(
     for (const item of itemsToCollect) {
       if (context.signal.aborted) throw context.signal.reason;
 
-      let articleRes: { ok: boolean; status: number; html: string };
-      try {
-        articleRes = await fetchArticleHtml(item.articleUrl, context.signal);
-      } catch (error) {
-        if (context.signal.aborted) throw context.signal.reason ?? error;
-        scopeFailed = true;
-        problems.push({
-          sourceId: source.id,
-          message: `Article "${item.articleUrl}" fetch failed: ${error instanceof Error ? error.message : String(error)}`,
-          ...problemDiagnostics(error),
-        });
-        continue;
-      }
-
-      if (!articleRes.ok) {
-        scopeFailed = true;
-        problems.push({
-          sourceId: source.id,
-          message: `Article "${item.articleUrl}" returned HTTP ${articleRes.status}.`,
-        });
-        continue;
-      }
-
-      const extracted = extractArticle(
-        articleRes.html,
+      const fetchExtract = await fetchAndExtractForArticle(
         item.articleUrl,
         source.id,
+        context.signal,
       );
-      if (
-        !extracted ||
-        !extracted.cleanResult.hasSubstantialContent ||
-        extracted.cleanResult.text.trim().length === 0
-      ) {
+      if (!fetchExtract.ok) {
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
-          message: `Article "${item.articleUrl}" yielded no extractable article body.`,
+          message: fetchExtract.gap.problemMessage,
+          stage: fetchExtract.gap.stage,
+          target: item.articleUrl,
+          ...(fetchExtract.gap.abortCause === undefined
+            ? {}
+            : { abortCause: fetchExtract.gap.abortCause }),
         });
         continue;
       }
 
+      const { extracted } = fetchExtract;
       const combinedAuthors = Array.from(
         new Set([...extracted.pageMetadata.authors, ...item.authors]),
       );
@@ -915,21 +1150,36 @@ async function collect(
           },
         });
 
-        upsertIncrementalScopeEntry(state, source.id, item.itemKey, {
-          fingerprint: item.fingerprint,
-          ...(item.published ? { publishedAt: item.published } : {}),
-          ...(item.updated ? { updatedAt: item.updated } : {}),
-          archivedCompleteness: submitResult.hasMediaFailures
-            ? "partial"
-            : "complete",
-        });
+        const previousEntry = state.scopes[source.id]?.entries[item.itemKey];
+        upsertIncrementalScopeEntry(
+          state,
+          source.id,
+          item.itemKey,
+          recordIncrementalArchivedEntry(previousEntry, {
+            fingerprint: item.fingerprint,
+            updatedAt: item.updated,
+            publishedAt: item.published,
+            articleUrl: item.articleUrl,
+            completeness: submitResult.hasMediaFailures
+              ? "partial"
+              : "complete",
+          }),
+        );
         await saveIncrementalSyncState(context, state);
       } catch (error) {
         if (context.signal.aborted) throw context.signal.reason ?? error;
+        const diag = readFailureDiagnosticContext(error);
+        if (
+          diag.abortCause === "user_cancelled" ||
+          diag.abortCause === "action_budget_exhausted"
+        ) {
+          throw error;
+        }
         scopeFailed = true;
         problems.push({
           sourceId: source.id,
           message: `Failed to submit article "${item.articleUrl}": ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         });
         continue;
       }

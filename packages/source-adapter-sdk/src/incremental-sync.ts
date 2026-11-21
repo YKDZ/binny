@@ -1,6 +1,7 @@
 // Shared incremental synchronization state schemas and management helpers.
 import { createHash } from "node:crypto";
 
+import { manualRunAbortCauseSchema } from "@binny/contracts";
 import { z } from "zod";
 
 import {
@@ -8,20 +9,96 @@ import {
   type SourceAdapterContext,
 } from "./index.ts";
 
+export const incrementalBodyGapRecordSchema = z
+  .object({
+    url: z.string().min(1),
+    stage: z.enum(["fetching-article", "extracting-article"]),
+    code: z.string().min(1),
+    reason: z.string().min(1),
+    httpStatus: z.number().int().min(100).max(599).optional(),
+    abortCause: manualRunAbortCauseSchema.optional(),
+  })
+  .strict();
+
+export type IncrementalBodyGapRecord = z.infer<
+  typeof incrementalBodyGapRecordSchema
+>;
+
 export const incrementalEntryRecordSchema = z
   .object({
+    /** Latest observed index fingerprint (updated on baseline, archive, or body gap). */
     fingerprint: z.string().min(1),
     updatedAt: z.string().optional(),
     publishedAt: z.string().optional(),
+    /** Canonical article URL observed in the feed, used to align explicit URL backfill with feed state. */
+    articleUrl: z.string().min(1).optional(),
+    /**
+     * Actual archive state:
+     * - "baseline": initial sync index baseline without archiving;
+     * - "complete" | "partial": successfully archived ("partial" indicates missing secondary media only);
+     * - undefined: never successfully archived (e.g. body fetch or extraction failed on discovery).
+     */
     archivedCompleteness: z
       .enum(["baseline", "partial", "complete"])
       .optional(),
+    /** Index fingerprint of the most recent successful archive submission. */
+    archivedFingerprint: z.string().min(1).optional(),
+    /** Unresolved article body fetch/extraction gap for the current observed fingerprint. */
+    bodyGap: incrementalBodyGapRecordSchema.optional(),
   })
   .strict();
 
 export type IncrementalEntryRecord = z.infer<
   typeof incrementalEntryRecordSchema
 >;
+
+export const feedBodyGapSchema = z
+  .object({
+    scope: z
+      .string()
+      .min(1)
+      .describe("Source scope identifier where the item was discovered."),
+    itemKey: z
+      .string()
+      .min(1)
+      .describe("Stable source item key from the feed."),
+    url: z.url().describe("Article URL whose body could not be archived."),
+    stage: z.enum(["fetching-article", "extracting-article"]),
+    code: z.enum([
+      "article_fetch_failed",
+      "article_http_error",
+      "article_extraction_failed",
+      "article_content_empty",
+    ]),
+    reason: z.string().min(1).describe("Factual reason for the body failure."),
+    httpStatus: z.number().int().min(100).max(599).optional(),
+    abortCause: manualRunAbortCauseSchema.optional(),
+  })
+  .strict();
+
+export type FeedBodyGap = z.infer<typeof feedBodyGapSchema>;
+
+export const feedIncompleteScopeSchema = z
+  .object({
+    scope: z.string().min(1),
+    reasonCode: z.enum(["article_body_unavailable", "max_items_reached"]),
+    message: z.string().min(1),
+  })
+  .strict();
+
+export type FeedIncompleteScope = z.infer<typeof feedIncompleteScopeSchema>;
+
+export const feedSyncOutputSchema = z
+  .object({
+    collectionCompleteness: z.enum(["complete", "partial"]),
+    completedScopes: z.array(z.string().min(1)),
+    initializedScopes: z.array(z.string().min(1)).optional(),
+    incompleteScopes: z.array(feedIncompleteScopeSchema).optional(),
+    bodyGaps: z.array(feedBodyGapSchema).optional(),
+  })
+  .strict();
+
+export type FeedSyncOutput = z.infer<typeof feedSyncOutputSchema>;
 
 export const incrementalOngoingDocumentRecordSchema = z
   .object({
@@ -228,6 +305,92 @@ export function upsertIncrementalScopeEntry(
     state.scopes[scopeId] = scope;
   }
   scope.entries[entryKey] = record;
+}
+
+/** Builds a baseline incremental entry record without archiving article content. */
+export function recordIncrementalBaselineEntry(input: {
+  readonly fingerprint: string;
+  readonly updatedAt?: string | undefined;
+  readonly publishedAt?: string | undefined;
+  readonly articleUrl?: string | undefined;
+}): IncrementalEntryRecord {
+  return {
+    fingerprint: input.fingerprint,
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.publishedAt ? { publishedAt: input.publishedAt } : {}),
+    ...(input.articleUrl ? { articleUrl: input.articleUrl } : {}),
+    archivedCompleteness: "baseline",
+  };
+}
+
+/**
+ * Records a successfully archived entry, preserving any prior observed index
+ * fingerprint during explicit backfill and clearing any recorded body gap.
+ */
+export function recordIncrementalArchivedEntry(
+  previous: IncrementalEntryRecord | undefined,
+  input: {
+    readonly fingerprint?: string | undefined;
+    readonly updatedAt?: string | undefined;
+    readonly publishedAt?: string | undefined;
+    readonly articleUrl?: string | undefined;
+    readonly completeness: "partial" | "complete";
+  },
+): IncrementalEntryRecord {
+  const effectiveFingerprint = input.fingerprint ?? previous?.fingerprint;
+  if (effectiveFingerprint === undefined || effectiveFingerprint.length === 0) {
+    throw new Error(
+      "Cannot record an archived incremental entry without a fingerprint.",
+    );
+  }
+  const effectiveUpdatedAt = input.updatedAt ?? previous?.updatedAt;
+  const effectivePublishedAt = input.publishedAt ?? previous?.publishedAt;
+  const effectiveArticleUrl = input.articleUrl ?? previous?.articleUrl;
+  return {
+    fingerprint: effectiveFingerprint,
+    ...(effectiveUpdatedAt ? { updatedAt: effectiveUpdatedAt } : {}),
+    ...(effectivePublishedAt ? { publishedAt: effectivePublishedAt } : {}),
+    ...(effectiveArticleUrl ? { articleUrl: effectiveArticleUrl } : {}),
+    archivedCompleteness: input.completeness,
+    archivedFingerprint: effectiveFingerprint,
+  };
+}
+
+/**
+ * Records an article body fetch/extraction gap for the observed feed index
+ * while never marking the failed version as archived.
+ */
+export function recordIncrementalBodyGapEntry(
+  previous: IncrementalEntryRecord | undefined,
+  input: {
+    readonly fingerprint: string;
+    readonly updatedAt?: string | undefined;
+    readonly publishedAt?: string | undefined;
+    readonly articleUrl: string;
+    readonly gap: IncrementalBodyGapRecord;
+  },
+): IncrementalEntryRecord {
+  const hasPreviousArchive =
+    previous?.archivedCompleteness === "complete" ||
+    previous?.archivedCompleteness === "partial";
+  const previousArchivedFingerprint = hasPreviousArchive
+    ? (previous.archivedFingerprint ?? previous.fingerprint)
+    : undefined;
+  return {
+    fingerprint: input.fingerprint,
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.publishedAt ? { publishedAt: input.publishedAt } : {}),
+    articleUrl: input.articleUrl,
+    ...(hasPreviousArchive
+      ? {
+          archivedCompleteness: previous.archivedCompleteness,
+          ...(previousArchivedFingerprint
+            ? { archivedFingerprint: previousArchivedFingerprint }
+            : {}),
+        }
+      : {}),
+    bodyGap: input.gap,
+  };
 }
 
 /** Updates HTTP conditional validators (ETag, Last-Modified, scopeUrl) on a scope. */
