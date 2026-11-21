@@ -15,6 +15,11 @@ const requests: {
 let rssVersion = 1;
 let atomVersion = 1;
 let articleVersion = 1;
+let articleFeedScenario:
+  | "standard"
+  | "gap-discovery"
+  | "gap-fingerprint-updated" = "standard";
+let brokenArticleAvailable = false;
 let documentVersion = 1;
 let atomTextMode: "text" | "html" = "text";
 let temporaryAvailable = false;
@@ -48,6 +53,8 @@ function state(): unknown {
   return {
     requests,
     articleVersion,
+    articleFeedScenario,
+    brokenArticleAvailable,
     documentVersion,
     photoBytes: photoBytes.toString("base64"),
     audioBytes: audioBytes.toString("base64"),
@@ -115,11 +122,35 @@ function updateState(value: unknown): boolean {
   ) {
     return false;
   }
+  if (
+    "articleFeedScenario" in updates &&
+    updates.articleFeedScenario !== "standard" &&
+    updates.articleFeedScenario !== "gap-discovery" &&
+    updates.articleFeedScenario !== "gap-fingerprint-updated"
+  ) {
+    return false;
+  }
+  if (
+    "brokenArticleAvailable" in updates &&
+    typeof updates.brokenArticleAvailable !== "boolean"
+  ) {
+    return false;
+  }
   if (updates.rssVersion !== undefined) rssVersion = Number(updates.rssVersion);
   if (updates.atomVersion !== undefined)
     atomVersion = Number(updates.atomVersion);
   if (updates.articleVersion !== undefined)
     articleVersion = Number(updates.articleVersion);
+  if (
+    updates.articleFeedScenario === "standard" ||
+    updates.articleFeedScenario === "gap-discovery" ||
+    updates.articleFeedScenario === "gap-fingerprint-updated"
+  ) {
+    articleFeedScenario = updates.articleFeedScenario;
+  }
+  if (typeof updates.brokenArticleAvailable === "boolean") {
+    brokenArticleAvailable = updates.brokenArticleAvailable;
+  }
   if (updates.documentVersion !== undefined)
     documentVersion = Number(updates.documentVersion);
   if (updates.atomTextMode === "text" || updates.atomTextMode === "html") {
@@ -196,9 +227,13 @@ function sendFeed(
 
 const articleSourceOrigin = "http://rss-e2e-source:8081";
 
-function articleSourceResponse(
-  pathname: string,
-): { readonly mediaType: string; readonly body: string } | undefined {
+function articleSourceResponse(pathname: string):
+  | {
+      readonly status?: number;
+      readonly mediaType: string;
+      readonly body: string;
+    }
+  | undefined {
   const version = articleVersion;
   const articleBody = (title: string): string =>
     `<h1>${title}</h1>
@@ -297,6 +332,38 @@ function articleSourceResponse(
     </head><body><main><article>${articleBody(title)}</article></main></body></html>`);
   }
   if (pathname === "/google/ai/feed.xml") {
+    const gapItems =
+      articleFeedScenario === "standard"
+        ? ""
+        : [
+            rssItem({
+              id: "urn:binny:google:gap-a",
+              title: "Google AI Gap Article A",
+              path: "/google/ai/gap-article-a",
+              published: "Tue, 03 Nov 2026 13:00:00 +0530",
+              category: "Research",
+            }),
+            rssItem({
+              id: "urn:binny:google:gap-b",
+              title:
+                articleFeedScenario === "gap-fingerprint-updated"
+                  ? "Google AI Gap Article B Updated"
+                  : "Google AI Gap Article B",
+              path: "/google/ai/broken-article",
+              published:
+                articleFeedScenario === "gap-fingerprint-updated"
+                  ? "Tue, 03 Nov 2026 14:30:00 +0530"
+                  : "Tue, 03 Nov 2026 14:00:00 +0530",
+              category: "Research",
+            }),
+            rssItem({
+              id: "urn:binny:google:gap-c",
+              title: "Google AI Gap Article C",
+              path: "/google/ai/gap-article-c",
+              published: "Tue, 03 Nov 2026 15:00:00 +0530",
+              category: "Research",
+            }),
+          ].join("");
     return {
       mediaType: "application/rss+xml; charset=utf-8",
       body: `<?xml version="1.0" encoding="UTF-8"?>
@@ -308,6 +375,7 @@ function articleSourceResponse(
             published: "Tue, 03 Nov 2026 12:00:00 +0530",
             category: "Research",
           })}
+          ${gapItems}
         </channel></rss>`,
     };
   }
@@ -326,7 +394,81 @@ function articleSourceResponse(
       })}</script>
     </head><body><article class="uni-blog-article">${articleBody(title)}</article></body></html>`);
   }
+  if (
+    pathname === "/google/ai/gap-article-a" ||
+    pathname === "/google/ai/gap-article-c"
+  ) {
+    const label = pathname.endsWith("-a") ? "A" : "C";
+    const title = `Google AI Gap Article ${label}`;
+    return html(`<!doctype html><html lang="en"><head><title>${title}</title>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        headline: title,
+        datePublished: "2026-11-03T13:00:00+05:30",
+        author: { "@type": "Person", name: "Google AI Team" },
+        articleSection: "Research",
+        inLanguage: "en",
+      })}</script>
+    </head><body><article class="uni-blog-article"><h1>${title}</h1><p>Substantive body for ${title}.</p></article></body></html>`);
+  }
+  if (pathname === "/google/ai/broken-article") {
+    if (!brokenArticleAvailable) {
+      return {
+        status: 503,
+        mediaType: "text/plain; charset=utf-8",
+        body: "Controlled Google article temporarily unavailable",
+      };
+    }
+    const title =
+      articleFeedScenario === "gap-fingerprint-updated"
+        ? "Google AI Gap Article B Updated"
+        : "Google AI Gap Article B";
+    return html(`<!doctype html><html lang="en"><head><title>${title}</title>
+      <script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "BlogPosting",
+        headline: title,
+        datePublished: "2026-11-03T14:00:00+05:30",
+        author: { "@type": "Person", name: "Google AI Team" },
+        articleSection: "Research",
+        inLanguage: "en",
+      })}</script>
+    </head><body><article class="uni-blog-article"><h1>${title}</h1><p>Recovered substantive body for ${title}.</p></article></body></html>`);
+  }
   if (pathname === "/huggingface/blog/feed.xml") {
+    const gapItems =
+      articleFeedScenario === "standard"
+        ? ""
+        : [
+            rssItem({
+              id: "urn:binny:huggingface:gap-a",
+              title: "Hugging Face Gap Note A",
+              path: "/huggingface/blog/gap-note-a",
+              published: "Tue, 07 May 2024 09:30:00 +0530",
+              category: "engineering",
+            }),
+            rssItem({
+              id: "urn:binny:huggingface:gap-b",
+              title:
+                articleFeedScenario === "gap-fingerprint-updated"
+                  ? "Hugging Face Gap Note B Updated"
+                  : "Hugging Face Gap Note B",
+              path: "/huggingface/blog/broken-note",
+              published:
+                articleFeedScenario === "gap-fingerprint-updated"
+                  ? "Tue, 07 May 2024 10:30:00 +0530"
+                  : "Tue, 07 May 2024 10:00:00 +0530",
+              category: "engineering",
+            }),
+            rssItem({
+              id: "urn:binny:huggingface:gap-c",
+              title: "Hugging Face Gap Note C",
+              path: "/huggingface/blog/gap-note-c",
+              published: "Tue, 07 May 2024 11:00:00 +0530",
+              category: "engineering",
+            }),
+          ].join("");
     return {
       mediaType: "application/rss+xml; charset=utf-8",
       body: `<?xml version="1.0" encoding="UTF-8"?>
@@ -338,6 +480,7 @@ function articleSourceResponse(
             published: "Mon, 06 May 2024 09:30:00 +0530",
             category: "engineering",
           })}
+          ${gapItems}
         </channel></rss>`,
     };
   }
@@ -354,6 +497,44 @@ function articleSourceResponse(
       </header><div class="blog-content">${articleBody(title)}
         <span class="tag">systems</span>
       </div></article></body></html>`);
+  }
+  if (
+    pathname === "/huggingface/blog/gap-note-a" ||
+    pathname === "/huggingface/blog/gap-note-c"
+  ) {
+    const label = pathname.endsWith("-a") ? "A" : "C";
+    const title = `Hugging Face Gap Note ${label}`;
+    return html(`<!doctype html><html><head><title>${title} - Hugging Face</title>
+      <meta name="author" content="Research Team" />
+      <meta property="article:tag" content="engineering" />
+    </head><body><article>
+      <header><h1>${title}</h1>
+        <div class="authors"><a href="/authors/research-team">Research Team</a></div>
+        <time datetime="2024-05-07T09:30:00+02:00">May 7, 2024</time>
+      </header><div class="blog-content"><h1>${title}</h1><p>Substantive body for ${title}.</p><span class="tag">systems</span></div>
+    </article></body></html>`);
+  }
+  if (pathname === "/huggingface/blog/broken-note") {
+    if (!brokenArticleAvailable) {
+      return {
+        status: 503,
+        mediaType: "text/plain; charset=utf-8",
+        body: "Controlled Hugging Face article temporarily unavailable",
+      };
+    }
+    const title =
+      articleFeedScenario === "gap-fingerprint-updated"
+        ? "Hugging Face Gap Note B Updated"
+        : "Hugging Face Gap Note B";
+    return html(`<!doctype html><html><head><title>${title} - Hugging Face</title>
+      <meta name="author" content="Research Team" />
+      <meta property="article:tag" content="engineering" />
+    </head><body><article>
+      <header><h1>${title}</h1>
+        <div class="authors"><a href="/authors/research-team">Research Team</a></div>
+        <time datetime="2024-05-12T16:00:00+02:00">May 12, 2024</time>
+      </header><div class="blog-content"><h1>${title}</h1><p>Recovered substantive body for ${title}.</p><span class="tag">systems</span></div>
+    </article></body></html>`);
   }
   if (pathname === "/mistral/news/rss") {
     return {
@@ -678,12 +859,18 @@ const server = createServer((request, response) => {
     }
 
     if (request.method === "GET") {
-      const sourceResponse =
+      const sourceResponse:
+        | {
+            readonly status?: number;
+            readonly mediaType: string;
+            readonly body: string;
+          }
+        | undefined =
         qoderSourceResponse(pathname) ??
         documentSourceResponse(pathname) ??
         articleSourceResponse(pathname);
       if (sourceResponse !== undefined) {
-        response.writeHead(200, {
+        response.writeHead(sourceResponse.status ?? 200, {
           "content-type": sourceResponse.mediaType,
         });
         response.end(sourceResponse.body);

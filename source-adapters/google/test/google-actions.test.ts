@@ -883,14 +883,16 @@ await test("Article full-text failure fails scope without falling back to summar
   }
 });
 
-await test("Incremental sync persists archived item A when item B fails, skips A on retry, and advances etag only after full feed completion", async () => {
+await test("Incremental sync reports bodyGaps and partial completion for A/B/C, skips unchanged B on 304 and 200, and heals via fingerprint update", async () => {
   const submissions: GoogleSubmission[] = [];
   const resources: ArchiveResourceMetadata[] = [];
   let persistentStateData: IncrementalSyncState | undefined;
-  let feedVersion: 1 | 2 = 1;
-  let articleBFails = true;
+  let feedVersion: 1 | 2 | 3 = 1;
+  let serveEtag = true;
+  let articleBMode: "503" | "empty" | "ok" = "503";
   let articleAFetches = 0;
   let articleBFetches = 0;
+  let articleCFetches = 0;
   const seenIfNoneMatch: (string | undefined)[] = [];
 
   const server = createServer((request, response) => {
@@ -899,7 +901,7 @@ await test("Incremental sync persists archived item A when item B fails, skips A
     if (path === "/partial/rss") {
       const etag = `"partial-v${feedVersion}"`;
       seenIfNoneMatch.push(request.headers["if-none-match"]);
-      if (request.headers["if-none-match"] === etag) {
+      if (serveEtag && request.headers["if-none-match"] === etag) {
         response.writeHead(304, { etag });
         response.end();
         return;
@@ -907,7 +909,7 @@ await test("Incremental sync persists archived item A when item B fails, skips A
 
       response.writeHead(200, {
         "content-type": "application/rss+xml; charset=utf-8",
-        etag,
+        ...(serveEtag ? { etag } : {}),
       });
 
       const items = [
@@ -921,7 +923,7 @@ await test("Incremental sync persists archived item A when item B fails, skips A
         `,
       ];
 
-      if (feedVersion === 2) {
+      if (feedVersion >= 2) {
         items.push(
           `
           <item>
@@ -934,9 +936,17 @@ await test("Incremental sync persists archived item A when item B fails, skips A
           `
           <item>
             <guid>urn:google:b</guid>
-            <title>Article B</title>
+            <title>${feedVersion === 3 ? "Article B Updated" : "Article B"}</title>
             <link>${origin}/partial/b</link>
-            <pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate>
+            <pubDate>${feedVersion === 3 ? "Tue, 03 Nov 2026 10:30:00 GMT" : "Tue, 03 Nov 2026 10:00:00 GMT"}</pubDate>
+          </item>
+          `,
+          `
+          <item>
+            <guid>urn:google:c</guid>
+            <title>Article C</title>
+            <link>${origin}/partial/c</link>
+            <pubDate>Tue, 03 Nov 2026 11:00:00 GMT</pubDate>
           </item>
           `,
         );
@@ -964,14 +974,28 @@ await test("Incremental sync persists archived item A when item B fails, skips A
 
     if (path === "/partial/b") {
       articleBFetches += 1;
-      if (articleBFails) {
-        response.writeHead(500, { "content-type": "text/plain" });
+      if (articleBMode === "503") {
+        response.writeHead(503, { "content-type": "text/plain" });
         response.end("Temporary upstream error");
+        return;
+      }
+      if (articleBMode === "empty") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end("<html><body><nav>Nav only</nav></body></html>");
         return;
       }
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(
         "<article><h1>Article B</h1><p>Full text for article B after recovery.</p></article>",
+      );
+      return;
+    }
+
+    if (path === "/partial/c") {
+      articleCFetches += 1;
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        "<article><h1>Article C</h1><p>Full text for article C preserved across partial failure.</p></article>",
       );
       return;
     }
@@ -1028,33 +1052,46 @@ await test("Incremental sync persists archived item A when item B fails, skips A
       makeContext(),
       {},
     );
+    assert.equal(baseline.collectionCompleteness, "complete");
     assert.deepEqual(baseline.completedScopes, ["google-ai"]);
     assert.equal(
       persistentStateData?.scopes["google-ai"]?.etag,
       '"partial-v1"',
     );
 
-    // 2. Feed updates to v2 with A (succeeds) and B (fails)
+    // 2. Feed updates to v2 with A (ok), B (503), C (ok)
     feedVersion = 2;
-    articleBFails = true;
-    await assert.rejects(
-      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
-      (error: unknown) => {
-        assert.ok(isSourceAdapterActionError(error));
-        assert.deepEqual(error.completedScopes, []);
-        return true;
+    articleBMode = "503";
+    const gapSync = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(gapSync.collectionCompleteness, "partial");
+    assert.deepEqual(gapSync.completedScopes, []);
+    assert.deepEqual(gapSync.incompleteScopes, [
+      {
+        scope: "google-ai",
+        reasonCode: "article_body_unavailable",
+        message:
+          "1 of 3 changed feed items had unavailable article body; 2 items were archived.",
       },
-    );
+    ]);
+    assert.equal(gapSync.bodyGaps?.length, 1);
+    assert.deepEqual(gapSync.bodyGaps?.[0], {
+      scope: "google-ai",
+      itemKey: "urn:google:b",
+      url: `${origin}/partial/b`,
+      stage: "fetching-article",
+      code: "article_http_error",
+      reason: "Article HTTP request returned status 503.",
+      httpStatus: 503,
+    });
 
-    // Article A was submitted and persisted immediately; feed etag stayed at v1
+    // A and C were archived; B was NOT archived and carries bodyGap
     assert.equal(articleAFetches, 1);
     assert.equal(articleBFetches, 1);
-    assert.equal(submissions.length, 1);
-    assert.equal(submissions[0]?.items[0]?.sourceKey.key, "urn:google:a");
-    assert.ok(
-      submissions[0]?.items[0]?.body?.markdown?.includes(
-        "Full text for article A preserved across partial failure.",
-      ),
+    assert.equal(articleCFetches, 1);
+    assert.equal(submissions.length, 2);
+    assert.deepEqual(
+      submissions.map((s) => s.items[0]?.sourceKey.key),
+      ["urn:google:a", "urn:google:c"],
     );
     assert.equal(
       persistentStateData?.scopes["google-ai"]?.entries["urn:google:a"]
@@ -1062,44 +1099,470 @@ await test("Incremental sync persists archived item A when item B fails, skips A
       "complete",
     );
     assert.equal(
-      persistentStateData?.scopes["google-ai"]?.entries["urn:google:b"],
-      undefined,
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:c"]
+        ?.archivedCompleteness,
+      "complete",
     );
-    assert.equal(
-      persistentStateData?.scopes["google-ai"]?.etag,
-      '"partial-v1"',
-    );
-
-    // 3. Recover B and sync again: A must NOT be re-fetched; B is archived; etag advances to v2
-    articleBFails = false;
-    const retryRes = await sourceAdapter.actions.sync.execute(
-      makeContext(),
-      {},
-    );
-    assert.deepEqual(retryRes.completedScopes, ["google-ai"]);
-    assert.equal(seenIfNoneMatch.at(-1), '"partial-v1"');
-    assert.equal(
-      articleAFetches,
-      1,
-      "Archived unchanged item A must not be re-fetched",
-    );
-    assert.equal(articleBFetches, 2);
-    assert.equal(submissions.length, 2);
-    assert.equal(submissions[1]?.items[0]?.sourceKey.key, "urn:google:b");
+    const gapEntryB =
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:b"];
+    assert.ok(gapEntryB !== undefined);
+    assert.equal(gapEntryB.archivedCompleteness, undefined);
+    assert.equal(gapEntryB.articleUrl, `${origin}/partial/b`);
+    assert.equal(gapEntryB.bodyGap?.httpStatus, 503);
     assert.equal(
       persistentStateData?.scopes["google-ai"]?.etag,
       '"partial-v2"',
     );
 
-    // 4. Subsequent sync sends v2 etag and receives 304
-    const thirdRes = await sourceAdapter.actions.sync.execute(
+    // 3a. Unchanged sync with 304 skips B
+    const sync304 = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(sync304.collectionCompleteness, "complete");
+    assert.deepEqual(sync304.completedScopes, ["google-ai"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"partial-v2"');
+    assert.equal(articleAFetches, 1);
+    assert.equal(articleBFetches, 1);
+    assert.equal(articleCFetches, 1);
+
+    // 3b. Unchanged sync with 200 XML (no ETag) also skips B
+    serveEtag = false;
+    const sync200 = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(sync200.collectionCompleteness, "complete");
+    assert.deepEqual(sync200.completedScopes, ["google-ai"]);
+    assert.equal(articleAFetches, 1);
+    assert.equal(articleBFetches, 1);
+    assert.equal(articleCFetches, 1);
+
+    // 4. Fingerprint changes on v3 (empty body first -> bodyGap updated, then v3 with ok body on v4 -> sync heals B automatically)
+    feedVersion = 3;
+    articleBMode = "empty";
+    const emptyGapSync = await sourceAdapter.actions.sync.execute(
       makeContext(),
       {},
     );
-    assert.deepEqual(thirdRes.completedScopes, ["google-ai"]);
-    assert.equal(seenIfNoneMatch.at(-1), '"partial-v2"');
-    assert.equal(articleAFetches, 1);
+    assert.equal(emptyGapSync.collectionCompleteness, "partial");
     assert.equal(articleBFetches, 2);
+    assert.equal(emptyGapSync.bodyGaps?.[0]?.stage, "extracting-article");
+    assert.equal(emptyGapSync.bodyGaps?.[0]?.code, "article_content_empty");
+
+    // 5. Explicit collect by URL backfills B and clears bodyGap; next 200 sync skips B
+    articleBMode = "ok";
+    const backfillRes = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      { itemUrls: [emptyGapSync.bodyGaps[0].url] },
+    );
+    assert.deepEqual(backfillRes.completedScopes, ["google-ai"]);
+    assert.equal(articleBFetches, 3);
+    assert.equal(submissions.length, 3);
+    assert.equal(submissions[2]?.items[0]?.sourceKey.key, "urn:google:b");
+    const healedEntryB =
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:b"];
+    assert.equal(healedEntryB?.archivedCompleteness, "complete");
+    assert.equal(healedEntryB?.bodyGap, undefined);
+
+    const postBackfillSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(postBackfillSync.collectionCompleteness, "complete");
+    assert.deepEqual(postBackfillSync.completedScopes, ["google-ai"]);
+    assert.equal(
+      articleBFetches,
+      3,
+      "Post-backfill unchanged sync must not re-fetch B",
+    );
+
+    // 6. When B enters bodyGap again and feed fingerprint changes while B is healthy, sync heals B automatically
+    feedVersion = 2;
+    articleBMode = "503";
+    const secondGapSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(secondGapSync.collectionCompleteness, "partial");
+    assert.equal(articleBFetches, 4);
+
+    feedVersion = 3;
+    articleBMode = "ok";
+    const autoHealedSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(autoHealedSync.collectionCompleteness, "complete");
+    assert.deepEqual(autoHealedSync.completedScopes, ["google-ai"]);
+    assert.equal(autoHealedSync.bodyGaps, undefined);
+    assert.equal(articleBFetches, 5);
+    assert.equal(submissions.length, 4);
+    const autoHealedEntryB =
+      persistentStateData?.scopes["google-ai"]?.entries["urn:google:b"];
+    assert.equal(autoHealedEntryB?.archivedCompleteness, "complete");
+    assert.equal(autoHealedEntryB?.bodyGap, undefined);
+  } finally {
+    server.close();
+  }
+});
+
+await test("Google explicit collect by itemUrls routes to exact matching source without duplicating across other sources", async () => {
+  const submissions: GoogleSubmission[] = [];
+  const resources: ArchiveResourceMetadata[] = [];
+  let persistentStateData: IncrementalSyncState | undefined;
+  let feedVersion: 1 | 2 = 1;
+  let articleBFails = true;
+  let googleAiFeedAvailable = true;
+  let deepmindBFetches = 0;
+  let googleAiBFetches = 0;
+
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+    if (path === "/google-ai/feed.xml") {
+      if (!googleAiFeedAvailable) {
+        response.writeHead(503);
+        response.end("Feed down");
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      const items = [
+        `<item><guid>urn:gai:base</guid><title>GAI Base</title><link>${origin}/google-ai/base</link><pubDate>Mon, 02 Nov 2026 08:00:00 GMT</pubDate></item>`,
+      ];
+      if (feedVersion === 2) {
+        items.push(
+          `<item><guid>urn:gai:b</guid><title>GAI B</title><link>${origin}/google-ai/b</link><pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate></item>`,
+        );
+      }
+      response.end(
+        `<rss version="2.0"><channel><title>GAI</title>${items.join("")}</channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/deepmind/feed.xml") {
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+      });
+      response.end(
+        `<rss version="2.0"><channel><title>DM</title><item><guid>urn:dm:base</guid><title>DM Base</title><link>${origin}/deepmind/base</link><pubDate>Mon, 02 Nov 2026 08:00:00 GMT</pubDate></item></channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/google-ai/b") {
+      googleAiBFetches += 1;
+      if (articleBFails) {
+        response.writeHead(503);
+        response.end("Unavailable");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        "<article><h1>GAI B</h1><p>Substantive Google AI B article content.</p></article>",
+      );
+      return;
+    }
+    if (path.startsWith("/deepmind/")) {
+      deepmindBFetches += 1;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const client = createMockClient(submissions, resources);
+  const makeContext = () =>
+    createSourceAdapterContext<
+      GoogleConfig,
+      typeof sourceAdapter.extensionsSchema,
+      never
+    >(
+      client,
+      {
+        binId: "google-multi-bin",
+        identityId: "google-multi-id",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T00:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: {
+          sources: [
+            {
+              id: "google-ai",
+              url: `${origin}/google-ai/feed.xml`,
+              title: "Google AI Blog",
+            },
+            {
+              id: "deepmind",
+              url: `${origin}/deepmind/feed.xml`,
+              title: "Google DeepMind Blog",
+            },
+          ],
+        },
+        signal: new AbortController().signal,
+        persistentState: {
+          async load() {
+            return persistentStateData;
+          },
+          async save(state: unknown) {
+            persistentStateData = state as IncrementalSyncState;
+          },
+        },
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  try {
+    await sourceAdapter.actions.sync.execute(makeContext(), {});
+    feedVersion = 2;
+    const partialRes = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(partialRes.collectionCompleteness, "partial");
+    assert.deepEqual(partialRes.completedScopes, ["deepmind"]);
+    assert.equal(partialRes.bodyGaps?.length, 1);
+    const gapUrl = partialRes.bodyGaps[0]!.url;
+
+    // Even when feed is unreachable and sourceIds is omitted, state.articleUrl routes ONLY to google-ai
+    articleBFails = false;
+    googleAiFeedAvailable = false;
+    const collectRes = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      { itemUrls: [gapUrl] },
+    );
+    assert.deepEqual(collectRes.completedScopes, ["google-ai"]);
+    assert.equal(googleAiBFetches, 2);
+    assert.equal(deepmindBFetches, 0);
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(submissions[0]?.items[0]?.sourceKey, {
+      namespace: "google:google-ai",
+      key: "urn:gai:b",
+    });
+
+    // Feed recovers and stays at v2: subsequent sync skips B with 0 fetches
+    googleAiFeedAvailable = true;
+    const nextSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(nextSync.collectionCompleteness, "complete");
+    assert.deepEqual(nextSync.completedScopes, ["google-ai", "deepmind"]);
+    assert.equal(googleAiBFetches, 2);
+  } finally {
+    server.close();
+  }
+});
+
+await test("Google sync preserves retry opportunities on feed failure, user cancellation, and archive submission failure, and keeps conditional headers despite partial media", async () => {
+  const submissions: GoogleSubmission[] = [];
+  const resources: ArchiveResourceMetadata[] = [];
+  let persistentStateData: IncrementalSyncState | undefined;
+  const currentState = () => persistentStateData;
+  let feedVersion: 1 | 2 = 1;
+  let feedFails = false;
+  let archiveShouldFailOnKey: string | undefined;
+  let cancelAfterArticleA = false;
+  let controller = new AbortController();
+  const seenIfNoneMatch: (string | undefined)[] = [];
+
+  const server = createServer((request, response) => {
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+    if (path === "/retry/rss") {
+      seenIfNoneMatch.push(request.headers["if-none-match"]);
+      if (feedFails) {
+        response.writeHead(500);
+        response.end("Feed 500");
+        return;
+      }
+      const etag = `"retry-v${feedVersion}"`;
+      if (request.headers["if-none-match"] === etag) {
+        response.writeHead(304, { etag });
+        response.end();
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        etag,
+      });
+      const items = [
+        `<item><guid>urn:r:base</guid><title>Base</title><link>${origin}/retry/base</link><pubDate>Mon, 02 Nov 2026 08:00:00 GMT</pubDate></item>`,
+      ];
+      if (feedVersion === 2) {
+        items.push(
+          `<item><guid>urn:r:a</guid><title>A</title><link>${origin}/retry/a</link><pubDate>Tue, 03 Nov 2026 09:00:00 GMT</pubDate></item>`,
+          `<item><guid>urn:r:b</guid><title>B</title><link>${origin}/retry/b</link><pubDate>Tue, 03 Nov 2026 10:00:00 GMT</pubDate></item>`,
+          `<item><guid>urn:r:c</guid><title>C</title><link>${origin}/retry/c</link><pubDate>Tue, 03 Nov 2026 11:00:00 GMT</pubDate></item>`,
+        );
+      }
+      response.end(
+        `<rss version="2.0"><channel><title>Retry</title>${items.join("")}</channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/retry/a") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        '<article><h1>A</h1><p>Body A</p><img src="/media/missing.png" alt="missing" /></article>',
+      );
+      return;
+    }
+    if (path === "/retry/b") {
+      if (cancelAfterArticleA) {
+        controller.abort(createActionCancelledReason());
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<article><h1>B</h1><p>Body B</p></article>");
+      return;
+    }
+    if (path === "/retry/c") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<article><h1>C</h1><p>Body C</p></article>");
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const baseClient = createMockClient(submissions, resources);
+  const client = {
+    ...baseClient,
+    archives: {
+      $post: (async (args: { json: any }) => {
+        const key = args.json?.items?.[0]?.sourceKey?.key;
+        if (
+          archiveShouldFailOnKey !== undefined &&
+          key === archiveShouldFailOnKey
+        ) {
+          return {
+            status: 503,
+            json: async () => ({
+              error: {
+                code: "archive_unavailable",
+                message: "Archive service temporarily unavailable.",
+              },
+            }),
+          };
+        }
+        return await (baseClient.archives.$post as any)(args);
+      }) as any,
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const makeContext = () =>
+    createSourceAdapterContext<
+      GoogleConfig,
+      typeof sourceAdapter.extensionsSchema,
+      never
+    >(
+      client,
+      {
+        binId: "google-retry-bin",
+        identityId: "google-retry-id",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T00:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: {
+          sources: [{ id: "google-ai", url: `${origin}/retry/rss` }],
+        },
+        signal: controller.signal,
+        persistentState: {
+          async load() {
+            return persistentStateData;
+          },
+          async save(state: unknown) {
+            persistentStateData = state as IncrementalSyncState;
+          },
+        },
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  try {
+    await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(persistentStateData?.scopes["google-ai"]?.etag, '"retry-v1"');
+
+    // 1. Feed 500 throws and leaves etag at v1
+    feedVersion = 2;
+    feedFails = true;
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(persistentStateData?.scopes["google-ai"]?.etag, '"retry-v1"');
+
+    // 2. User cancellation on B preserves A (archived with partial media), leaves B & C unrecorded, and keeps etag at v1
+    feedFails = false;
+    cancelAfterArticleA = true;
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isActionCancelledReason(error),
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:r:a"]
+        ?.archivedCompleteness,
+      "partial",
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:r:b"],
+      undefined,
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:r:c"],
+      undefined,
+    );
+    assert.equal(persistentStateData?.scopes["google-ai"]?.etag, '"retry-v1"');
+
+    // 3. Archive submit failure on B leaves B & C unrecorded (NO bodyGap) and keeps etag at v1
+    cancelAfterArticleA = false;
+    controller = new AbortController();
+    archiveShouldFailOnKey = "urn:r:b";
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:r:b"],
+      undefined,
+    );
+    assert.equal(
+      persistentStateData?.scopes["google-ai"]?.entries["urn:r:c"],
+      undefined,
+    );
+    assert.equal(persistentStateData?.scopes["google-ai"]?.etag, '"retry-v1"');
+
+    // 4. Recovery succeeds for B and C and advances etag to v2
+    archiveShouldFailOnKey = undefined;
+    const recovered = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(recovered.collectionCompleteness, "complete");
+    assert.deepEqual(recovered.completedScopes, ["google-ai"]);
+    assert.equal(
+      currentState()?.scopes["google-ai"]?.entries["urn:r:b"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(
+      currentState()?.scopes["google-ai"]?.entries["urn:r:c"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(currentState()?.scopes["google-ai"]?.etag, '"retry-v2"');
+
+    // 5. Conditional If-None-Match is still sent even though urn:r:a has archivedCompleteness: "partial"
+    const nextSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.deepEqual(nextSync.completedScopes, ["google-ai"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"retry-v2"');
   } finally {
     server.close();
   }

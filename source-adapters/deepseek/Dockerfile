@@ -1,7 +1,7 @@
-FROM node:26.13.0-bookworm-slim AS build
+FROM node-bookworm-slim AS build
 
 # Keep the package manager version aligned with the repository lockfile.
-COPY --from=ghcr.io/pnpm/pnpm:12.9.1 /opt/pnpm /opt/pnpm
+COPY --from=pnpm-release /opt/pnpm /opt/pnpm
 RUN for bin in pnpm pn pnpx pnx; do ln -s /opt/pnpm/pnpm "/usr/local/bin/$bin"; done
 WORKDIR /workspace
 COPY . .

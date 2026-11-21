@@ -21,6 +21,10 @@ import {
   type LinuxdoViewerBrowser,
   type LinuxdoUserJourney,
 } from "@binny/source-adapter-linuxdo/acceptance";
+import {
+  resolveBakeComposeContexts,
+  type BakeComposeContexts,
+} from "@binny/tooling-config/bake-compose-contexts";
 
 import { runArticleAdaptersJourney } from "./article-adapters-journey.ts";
 import {
@@ -212,6 +216,16 @@ let manualRunSourcePort = 0;
 let linuxdoSourcePort = 0;
 let linuxdoViewerBrowser: LinuxdoViewerBrowser | undefined;
 let installedCliConsumer: IsolatedCliConsumer | undefined;
+const bakeContextsByDirectory = new Map<string, BakeComposeContexts>();
+
+function bakeComposeContexts(directory: string): BakeComposeContexts {
+  let contexts = bakeContextsByDirectory.get(directory);
+  if (contexts === undefined) {
+    contexts = resolveBakeComposeContexts(directory);
+    bakeContextsByDirectory.set(directory, contexts);
+  }
+  return contexts;
+}
 
 function createHeartbeatDelayProxy(
   controlPort: number,
@@ -372,7 +386,10 @@ function composePrefix(): readonly string[] {
 }
 
 function composeEnvironment(): Readonly<Record<string, string>> {
+  const contextDirectory =
+    composeProjectDirectory.length > 0 ? composeProjectDirectory : artifactRoot;
   return {
+    ...bakeComposeContexts(contextDirectory),
     BINNY_IMAGE: activeServerImage,
     BINNY_TEST_RUNNER_IMAGE: runtimeImageName,
     BINNY_TEST_RUNNER_SCHEMA_IMAGE: schemaVariantRuntimeImageName,
@@ -4297,6 +4314,10 @@ type RssControlSource = {
   readonly setRssVersion: (version: number) => Promise<void>;
   readonly setAtomVersion: (version: number) => Promise<void>;
   readonly setArticleVersion: (version: 1 | 2) => Promise<void>;
+  readonly setArticleFeedScenario: (
+    scenario: "standard" | "gap-discovery" | "gap-fingerprint-updated",
+  ) => Promise<void>;
+  readonly setBrokenArticleAvailable: (available: boolean) => Promise<void>;
   readonly setDocumentVersion: (version: 1 | 2) => Promise<void>;
   readonly setAtomTextMode: (mode: "text" | "html") => Promise<void>;
   readonly setTemporaryAvailable: (available: boolean) => Promise<void>;
@@ -4372,6 +4393,12 @@ async function createRssControlSource(port: number): Promise<RssControlSource> {
     },
     async setArticleVersion(version) {
       await updateState({ articleVersion: version });
+    },
+    async setArticleFeedScenario(scenario) {
+      await updateState({ articleFeedScenario: scenario });
+    },
+    async setBrokenArticleAvailable(available) {
+      await updateState({ brokenArticleAvailable: available });
     },
     async setDocumentVersion(version) {
       await updateState({ documentVersion: version });

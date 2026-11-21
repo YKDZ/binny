@@ -688,7 +688,7 @@ void test("Hugging Face blog HTML extractor strips unwanted sections and preserv
   );
 });
 
-void test("Hugging Face sync persists item A & C when B fails, skips A & C on retry, and advances etag only after full feed completion", async () => {
+void test("Hugging Face sync reports bodyGaps and partial completion for A/B/C, skips unchanged B on 304 and 200, and heals via fingerprint update", async () => {
   let storedPersistentState: IncrementalSyncState | undefined;
   const persistentState = {
     async load() {
@@ -699,8 +699,9 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
     },
   };
 
-  let feedVersion: 1 | 2 = 1;
-  let itemBFails = true;
+  let feedVersion: 1 | 2 | 3 = 1;
+  let serveEtag = true;
+  let itemBMode: "503" | "empty" | "ok" = "503";
   let fetchCountA = 0;
   let fetchCountB = 0;
   let fetchCountC = 0;
@@ -711,7 +712,7 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
     if (path === "/blog/feed.xml") {
       const etag = `"hf-partial-v${feedVersion}"`;
       seenIfNoneMatch.push(req.headers["if-none-match"]);
-      if (req.headers["if-none-match"] === etag) {
+      if (serveEtag && req.headers["if-none-match"] === etag) {
         res.writeHead(304, { etag });
         res.end();
         return;
@@ -719,16 +720,16 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
       const items = [
         `<item><title>Base</title><link>${origin}/blog/base</link><guid>base</guid></item>`,
       ];
-      if (feedVersion === 2) {
+      if (feedVersion >= 2) {
         items.push(
           `<item><title>Post A</title><link>${origin}/blog/post-a</link><guid>post-a</guid></item>`,
-          `<item><title>Post B</title><link>${origin}/blog/post-b</link><guid>post-b</guid></item>`,
+          `<item><title>${feedVersion === 3 ? "Post B Updated" : "Post B"}</title><link>${origin}/blog/post-b</link><guid>post-b</guid><pubDate>${feedVersion === 3 ? "Tue, 07 May 2024 10:30:00 +0530" : "Mon, 06 May 2024 09:30:00 +0530"}</pubDate><category>engineering</category></item>`,
           `<item><title>Post C</title><link>${origin}/blog/post-c</link><guid>post-c</guid></item>`,
         );
       }
       res.writeHead(200, {
         "content-type": "application/rss+xml; charset=utf-8",
-        etag,
+        ...(serveEtag ? { etag } : {}),
       });
       res.end(
         `<rss version="2.0"><channel><title>HF</title>${items.join("")}</channel></rss>`,
@@ -745,14 +746,19 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
     }
     if (path === "/blog/post-b") {
       fetchCountB += 1;
-      if (itemBFails) {
-        res.writeHead(500);
-        res.end("Upstream 500");
+      if (itemBMode === "503") {
+        res.writeHead(503);
+        res.end("Upstream 503");
+        return;
+      }
+      if (itemBMode === "empty") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end("<html><body><nav>Nav only</nav></body></html>");
         return;
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(
-        "<div class='blog-content'><h1>Post B</h1><p>Body for Post B.</p></div>",
+        `<article><header><h1>Post B</h1><time datetime="2024-05-10T16:00:00+02:00">May 10, 2024</time></header><div class='blog-content'><p>Body for Post B.</p><span class="tag">systems</span></div></article>`,
       );
       return;
     }
@@ -842,23 +848,38 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
 
   try {
     const baseRes = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(baseRes.collectionCompleteness, "complete");
     assert.deepEqual(baseRes.completedScopes, ["blog"]);
     assert.equal(
       storedPersistentState?.scopes["blog"]?.etag,
       '"hf-partial-v1"',
     );
 
-    // Feed updates to v2: A succeeds, B fails, C succeeds
+    // Feed updates to v2: A succeeds, B returns 503, C succeeds
     feedVersion = 2;
-    itemBFails = true;
-    await assert.rejects(
-      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
-      (error: unknown) => {
-        assert.ok(isSourceAdapterActionError(error));
-        assert.deepEqual(error.completedScopes, []);
-        return true;
+    itemBMode = "503";
+    const gapSync = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(gapSync.collectionCompleteness, "partial");
+    assert.deepEqual(gapSync.completedScopes, []);
+    assert.deepEqual(gapSync.incompleteScopes, [
+      {
+        scope: "blog",
+        reasonCode: "article_body_unavailable",
+        message:
+          "1 of 3 changed feed items had unavailable article body; 2 items were archived.",
       },
-    );
+    ]);
+    assert.deepEqual(gapSync.bodyGaps, [
+      {
+        scope: "blog",
+        itemKey: "post-b",
+        url: `${origin}/blog/post-b`,
+        stage: "fetching-article",
+        code: "article_http_error",
+        reason: "Article HTTP request returned status 503.",
+        httpStatus: 503,
+      },
+    ]);
 
     assert.equal(fetchCountA, 1);
     assert.equal(fetchCountB, 1);
@@ -874,40 +895,362 @@ void test("Hugging Face sync persists item A & C when B fails, skips A & C on re
         ?.archivedCompleteness,
       "complete",
     );
-    assert.equal(
-      storedPersistentState?.scopes["blog"]?.entries["post-b"],
-      undefined,
-    );
-    assert.equal(
-      storedPersistentState?.scopes["blog"]?.etag,
-      '"hf-partial-v1"',
-    );
-
-    // Retry after B recovers: A & C are skipped, B is archived, etag advances to v2
-    itemBFails = false;
-    const retryRes = await sourceAdapter.actions.sync.execute(
-      makeContext(),
-      {},
-    );
-    assert.deepEqual(retryRes.completedScopes, ["blog"]);
-    assert.equal(seenIfNoneMatch.at(-1), '"hf-partial-v1"');
-    assert.equal(fetchCountA, 1, "Unchanged A must not be re-fetched");
-    assert.equal(fetchCountC, 1, "Unchanged C must not be re-fetched");
-    assert.equal(fetchCountB, 2);
-    assert.equal(submissions.length, 3);
-    assert.equal(submissions[2]?.items[0]?.sourceKey.key, "post-b");
+    const gapEntryB = storedPersistentState?.scopes["blog"]?.entries["post-b"];
+    assert.ok(gapEntryB !== undefined);
+    assert.equal(gapEntryB.archivedCompleteness, undefined);
+    assert.equal(gapEntryB.bodyGap?.httpStatus, 503);
     assert.equal(
       storedPersistentState?.scopes["blog"]?.etag,
       '"hf-partial-v2"',
     );
 
-    // Subsequent sync hits 304
-    const thirdRes = await sourceAdapter.actions.sync.execute(
+    // Unchanged sync with 304 skips B
+    const sync304 = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(sync304.collectionCompleteness, "complete");
+    assert.deepEqual(sync304.completedScopes, ["blog"]);
+    assert.equal(seenIfNoneMatch.at(-1), '"hf-partial-v2"');
+    assert.equal(fetchCountA, 1);
+    assert.equal(fetchCountB, 1);
+    assert.equal(fetchCountC, 1);
+
+    // Unchanged sync with 200 XML (no ETag) also skips B
+    serveEtag = false;
+    const sync200 = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(sync200.collectionCompleteness, "complete");
+    assert.deepEqual(sync200.completedScopes, ["blog"]);
+    assert.equal(fetchCountA, 1);
+    assert.equal(fetchCountB, 1);
+    assert.equal(fetchCountC, 1);
+
+    // Fingerprint updates on v3 while B is empty -> records extraction gap; then explicit collect heals B and subsequent 200 sync skips B even when page <time> differs from RSS <pubDate>
+    feedVersion = 3;
+    itemBMode = "empty";
+    const emptySync = await sourceAdapter.actions.sync.execute(
       makeContext(),
       {},
     );
-    assert.deepEqual(thirdRes.completedScopes, ["blog"]);
-    assert.equal(seenIfNoneMatch.at(-1), '"hf-partial-v2"');
+    assert.equal(emptySync.collectionCompleteness, "partial");
+    assert.equal(emptySync.bodyGaps?.[0]?.stage, "extracting-article");
+    assert.equal(emptySync.bodyGaps?.[0]?.code, "article_content_empty");
+    assert.equal(fetchCountB, 2);
+
+    // Backfill B via collect({ itemUrls }) -> subsequent non-304 200 sync skips B (0 re-fetches!)
+    itemBMode = "ok";
+    const collectRes = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      { itemUrls: [emptySync.bodyGaps[0].url] },
+    );
+    assert.deepEqual(collectRes.completedScopes, ["blog"]);
+    assert.equal(fetchCountB, 3);
+    assert.equal(submissions.length, 3);
+    assert.equal(submissions[2]?.items[0]?.sourceKey.key, "post-b");
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-b"]?.bodyGap,
+      undefined,
+    );
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-b"]
+        ?.archivedCompleteness,
+      "complete",
+    );
+
+    const postBackfillSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(postBackfillSync.collectionCompleteness, "complete");
+    assert.deepEqual(postBackfillSync.completedScopes, ["blog"]);
+    assert.equal(
+      fetchCountB,
+      3,
+      "Post-backfill sync must not re-fetch B when page <time> differs from RSS <pubDate>",
+    );
+
+    // Also verify auto-healing via fingerprint change on sync
+    feedVersion = 2;
+    itemBMode = "503";
+    const gapAgain = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(gapAgain.collectionCompleteness, "partial");
+    assert.equal(fetchCountB, 4);
+
+    feedVersion = 3;
+    itemBMode = "ok";
+    const healedBySync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(healedBySync.collectionCompleteness, "complete");
+    assert.deepEqual(healedBySync.completedScopes, ["blog"]);
+    assert.equal(healedBySync.bodyGaps, undefined);
+    assert.equal(fetchCountB, 5);
+    assert.equal(
+      storedPersistentState?.scopes["blog"]?.entries["post-b"]?.bodyGap,
+      undefined,
+    );
+  } finally {
+    server.close();
+  }
+});
+
+void test("Hugging Face explicit collect aligns fingerprint even when feed is unreachable and preserves retry on feed/cancel/archive errors", async () => {
+  let storedPersistentState: IncrementalSyncState | undefined;
+  const currentState = () => storedPersistentState;
+  const persistentState = {
+    async load() {
+      return storedPersistentState as unknown as JsonObject | undefined;
+    },
+    async save(state: JsonObject) {
+      storedPersistentState = state as unknown as IncrementalSyncState;
+    },
+  };
+
+  let feedVersion: 1 | 2 = 1;
+  let feedMode: "ok" | "500" | "invalid-xml" = "ok";
+  let itemBFails = true;
+  let fetchCountB = 0;
+  let cancelOnB = false;
+  let archiveShouldFailOnKey: string | undefined;
+  let controller = new AbortController();
+
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path === "/blog/feed.xml") {
+      if (feedMode === "500") {
+        res.writeHead(500);
+        res.end("Feed 500");
+        return;
+      }
+      if (feedMode === "invalid-xml") {
+        res.writeHead(200, { "content-type": "application/rss+xml" });
+        res.end("<rss><unclosed");
+        return;
+      }
+      const etag = `"hf-retry-v${feedVersion}"`;
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304, { etag });
+        res.end();
+        return;
+      }
+      const items = [
+        `<item><title>Base</title><link>${origin}/blog/base</link><guid>base</guid></item>`,
+      ];
+      if (feedVersion === 2) {
+        items.push(
+          `<item><title>Post A</title><link>${origin}/blog/post-a</link><guid>post-a</guid></item>`,
+          `<item><title>Post B</title><link>${origin}/blog/post-b</link><guid>post-b</guid><pubDate>Mon, 06 May 2024 09:30:00 +0530</pubDate><category>engineering</category></item>`,
+          `<item><title>Post C</title><link>${origin}/blog/post-c</link><guid>post-c</guid></item>`,
+        );
+      }
+      res.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        etag,
+      });
+      res.end(
+        `<rss version="2.0"><channel><title>HF</title>${items.join("")}</channel></rss>`,
+      );
+      return;
+    }
+    if (path === "/blog/post-a") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end("<div class='blog-content'><h1>Post A</h1><p>Body A.</p></div>");
+      return;
+    }
+    if (path === "/blog/post-b") {
+      fetchCountB += 1;
+      if (cancelOnB) {
+        controller.abort(createActionCancelledReason());
+      }
+      if (itemBFails) {
+        res.writeHead(503);
+        res.end("Unavailable");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        `<article><header><h1>Post B</h1><time datetime="2024-05-12T16:00:00+02:00">May 12, 2024</time></header><div class='blog-content'><p>Body B.</p><span class="tag">systems</span></div></article>`,
+      );
+      return;
+    }
+    if (path === "/blog/post-c") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end("<div class='blog-content'><h1>Post C</h1><p>Body C.</p></div>");
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address !== null && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  const submissions: HuggingFaceSubmission[] = [];
+  const client = {
+    archives: {
+      async $post({ json }: { json: HuggingFaceSubmission }) {
+        const key = json.items[0]?.sourceKey.key;
+        if (
+          archiveShouldFailOnKey !== undefined &&
+          key === archiveShouldFailOnKey
+        ) {
+          return {
+            status: 503,
+            async json() {
+              return {
+                error: {
+                  code: "archive_unavailable",
+                  message: "Archive unavailable.",
+                },
+              };
+            },
+          };
+        }
+        submissions.push(json);
+        return {
+          status: 201,
+          async json() {
+            return {
+              commitId: randomUUID(),
+              archiveSeq: String(submissions.length),
+              binId: "hf-retry-bin",
+              runId: randomUUID(),
+              sourceAdapterVersion: sourceAdapter.version,
+              observedAt: "2026-11-07T12:00:00.000Z",
+              recordedAt: "2026-11-07T12:00:00.000Z",
+              items: json.items.map((it) => ({
+                itemId: randomUUID(),
+                revisionId: randomUUID(),
+                sourceKey: it.sourceKey,
+              })),
+              relations: [],
+            };
+          },
+        };
+      },
+    },
+    resources: {
+      async $post() {
+        return {
+          status: 201,
+          async json() {
+            return {};
+          },
+        };
+      },
+      resolve: {
+        async $post() {
+          return {
+            status: 200,
+            async json() {
+              return { resources: [], items: [], mediaByUrl: {} };
+            },
+          };
+        },
+      },
+    },
+  } as unknown as SourceAdapterApiClient;
+
+  const makeContext = () =>
+    createSourceAdapterContext(
+      client,
+      {
+        binId: "hf-retry-bin",
+        identityId: "hf-retry-id",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: { feedUrl: `${origin}/blog/feed.xml` },
+        signal: controller.signal,
+        persistentState,
+        report: async () => {},
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  try {
+    await sourceAdapter.actions.sync.execute(makeContext(), {});
+
+    // 1. Feed 500 & invalid XML preserve etag and retry opportunity
+    feedVersion = 2;
+    feedMode = "500";
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(currentState()?.scopes["blog"]?.etag, '"hf-retry-v1"');
+
+    feedMode = "invalid-xml";
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(currentState()?.scopes["blog"]?.etag, '"hf-retry-v1"');
+
+    // 2. Cancellation during B preserves A, leaves B & C unrecorded, and keeps etag at v1
+    feedMode = "ok";
+    cancelOnB = true;
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isActionCancelledReason(error),
+    );
+    assert.equal(
+      currentState()?.scopes["blog"]?.entries["post-a"]?.archivedCompleteness,
+      "complete",
+    );
+    assert.equal(currentState()?.scopes["blog"]?.entries["post-b"], undefined);
+    assert.equal(currentState()?.scopes["blog"]?.entries["post-c"], undefined);
+    assert.equal(currentState()?.scopes["blog"]?.etag, '"hf-retry-v1"');
+
+    // 3. Archive submit failure on B leaves B & C unrecorded (no bodyGap) and keeps etag at v1
+    cancelOnB = false;
+    itemBFails = false;
+    controller = new AbortController();
+    archiveShouldFailOnKey = "post-b";
+    await assert.rejects(
+      () => sourceAdapter.actions.sync.execute(makeContext(), {}),
+      (error: unknown) => isSourceAdapterActionError(error),
+    );
+    assert.equal(currentState()?.scopes["blog"]?.entries["post-b"], undefined);
+    assert.equal(currentState()?.scopes["blog"]?.entries["post-c"], undefined);
+    assert.equal(currentState()?.scopes["blog"]?.etag, '"hf-retry-v1"');
+
+    // 4. B fails on fetch -> bodyGap recorded; then explicit collect while feed is 500 uses scope.entries fingerprint so next 200 sync skips B
+    archiveShouldFailOnKey = undefined;
+    itemBFails = true;
+    const gapSync = await sourceAdapter.actions.sync.execute(makeContext(), {});
+    assert.equal(gapSync.collectionCompleteness, "partial");
+    assert.equal(gapSync.bodyGaps?.length, 1);
+    const fetchesAtGap = fetchCountB;
+
+    itemBFails = false;
+    feedMode = "500";
+    const offlineCollect = await sourceAdapter.actions.collect.execute(
+      makeContext(),
+      { itemUrls: [gapSync.bodyGaps[0]!.url] },
+    );
+    assert.deepEqual(offlineCollect.completedScopes, ["blog"]);
+    assert.equal(fetchCountB, fetchesAtGap + 1);
+    assert.equal(
+      currentState()?.scopes["blog"]?.entries["post-b"]?.bodyGap,
+      undefined,
+    );
+
+    feedMode = "ok";
+    const postOfflineCollectSync = await sourceAdapter.actions.sync.execute(
+      makeContext(),
+      {},
+    );
+    assert.equal(postOfflineCollectSync.collectionCompleteness, "complete");
+    assert.equal(
+      fetchCountB,
+      fetchesAtGap + 1,
+      "Offline-feed explicit collect must keep feed fingerprint so subsequent sync skips B",
+    );
   } finally {
     server.close();
   }

@@ -12,6 +12,10 @@ type ArticleSourceControl = {
   readonly baseUrl: string;
   readonly requests: () => Promise<readonly { readonly path: string }[]>;
   readonly setArticleVersion: (version: 1 | 2) => Promise<void>;
+  readonly setArticleFeedScenario: (
+    scenario: "standard" | "gap-discovery" | "gap-fingerprint-updated",
+  ) => Promise<void>;
+  readonly setBrokenArticleAvailable: (available: boolean) => Promise<void>;
 };
 
 type ArticleAdapterId =
@@ -49,6 +53,16 @@ type RunCommit = {
   }[];
 };
 
+type ArticleBodyGap = {
+  readonly scope: string;
+  readonly itemKey: string;
+  readonly url: string;
+  readonly stage: string;
+  readonly code: string;
+  readonly reason: string;
+  readonly httpStatus?: number;
+};
+
 type ArticleRun = {
   readonly runId: string;
   readonly binId: string;
@@ -56,6 +70,16 @@ type ArticleRun = {
   readonly status: string;
   readonly result?: {
     readonly commits?: readonly RunCommit[];
+    readonly output?: {
+      readonly collectionCompleteness?: "complete" | "partial";
+      readonly completedScopes?: readonly string[];
+      readonly incompleteScopes?: readonly {
+        readonly scope: string;
+        readonly reasonCode: string;
+        readonly message: string;
+      }[];
+      readonly bodyGaps?: readonly ArticleBodyGap[];
+    };
     readonly error?: { readonly code?: string; readonly message?: string };
   };
 };
@@ -478,6 +502,271 @@ async function readRevision(
   );
 }
 
+async function listArchivedTitlesInBin(
+  binId: string,
+  cli: Cli,
+): Promise<readonly (string | null)[]> {
+  const page = data<{
+    readonly results: readonly { readonly title: string | null }[];
+  }>(
+    await cli([
+      "archive",
+      "search",
+      "--query",
+      JSON.stringify({ bins: [binId], limit: 50 }),
+    ]),
+    "found",
+  );
+  return page.results.map(({ title }) => title);
+}
+
+async function discoverCollectItemUrlsSchema(
+  binId: string,
+  cli: Cli,
+): Promise<void> {
+  const discovered = data<{
+    readonly actions: Readonly<
+      Record<
+        string,
+        {
+          readonly params?: {
+            readonly properties?: Record<string, unknown>;
+          };
+        }
+      >
+    >;
+  }>(await cli(["bin", "actions", binId, "collect"]), "discovered");
+  assert.ok(
+    discovered.actions.collect?.params?.properties?.itemUrls !== undefined,
+    `${binId} collect action must declare itemUrls in params schema.`,
+  );
+}
+
+async function countSourceRequests(
+  articleSource: ArticleSourceControl,
+  pathname: string,
+): Promise<number> {
+  const requests = await articleSource.requests();
+  return requests.filter(({ path }) => path === pathname).length;
+}
+
+async function verifyFeedBodyGapsJourney(options: {
+  readonly articleSource: ArticleSourceControl;
+  readonly cli: Cli;
+}): Promise<void> {
+  const { articleSource, cli } = options;
+
+  await articleSource.setArticleFeedScenario("gap-discovery");
+  await articleSource.setBrokenArticleAvailable(false);
+
+  const targets = [
+    {
+      binId: "binny-article-google",
+      scope: "google-ai",
+      itemKey: "urn:binny:google:gap-b",
+      brokenPath: "/google/ai/broken-article",
+      titleA: "Google AI Gap Article A",
+      titleB: "Google AI Gap Article B",
+      titleBUpdated: "Google AI Gap Article B Updated",
+      titleC: "Google AI Gap Article C",
+    },
+    {
+      binId: "binny-article-huggingface",
+      scope: "blog",
+      itemKey: "huggingface/blog/broken-note",
+      brokenPath: "/huggingface/blog/broken-note",
+      titleA: "Hugging Face Gap Note A",
+      titleB: "Hugging Face Gap Note B",
+      titleBUpdated: "Hugging Face Gap Note B Updated",
+      titleC: "Hugging Face Gap Note C",
+    },
+  ] as const;
+
+  const discoveredGaps = new Map<string, ArticleBodyGap>();
+
+  for (const target of targets) {
+    const beforeCount = await countSourceRequests(
+      articleSource,
+      target.brokenPath,
+    );
+    const gapRun = await runAction(target.binId, "sync", {}, cli);
+    const output = gapRun.result?.output;
+    assert.equal(output?.collectionCompleteness, "partial");
+    assert.deepEqual(output?.completedScopes, []);
+    assert.ok(
+      output?.incompleteScopes?.some(
+        (entry) =>
+          entry.scope === target.scope &&
+          entry.reasonCode === "article_body_unavailable",
+      ),
+    );
+    assert.equal(output?.bodyGaps?.length, 1);
+    const gap = output.bodyGaps[0]!;
+    assert.equal(gap.scope, target.scope);
+    assert.equal(gap.itemKey, target.itemKey);
+    assert.equal(gap.url, `${articleSource.baseUrl}${target.brokenPath}`);
+    assert.equal(gap.stage, "fetching-article");
+    assert.equal(gap.code, "article_http_error");
+    assert.equal(gap.httpStatus, 503);
+    assert.equal(gap.reason.includes("binny"), false);
+    discoveredGaps.set(target.binId, gap);
+
+    const afterGapCount = await countSourceRequests(
+      articleSource,
+      target.brokenPath,
+    );
+    assert.equal(afterGapCount, beforeCount + 1);
+
+    const titlesAfterGap = await listArchivedTitlesInBin(target.binId, cli);
+    assert.ok(titlesAfterGap.includes(target.titleA));
+    assert.ok(titlesAfterGap.includes(target.titleC));
+    assert.equal(titlesAfterGap.includes(target.titleB), false);
+
+    // Unchanged feed must skip B without making another request to the broken URL.
+    const unchangedRun = await runAction(target.binId, "sync", {}, cli);
+    assert.equal(
+      unchangedRun.result?.output?.collectionCompleteness,
+      "complete",
+    );
+    assert.deepEqual(unchangedRun.result?.output?.completedScopes, [
+      target.scope,
+    ]);
+    assert.equal(committedItems(unchangedRun).length, 0);
+    const afterUnchangedCount = await countSourceRequests(
+      articleSource,
+      target.brokenPath,
+    );
+    assert.equal(afterUnchangedCount, afterGapCount);
+  }
+
+  // Branch 1 (Google): discover collect params schema, explicitly collect gap URL, then sync skips B.
+  const googleTarget = targets[0];
+  const googleGap = discoveredGaps.get(googleTarget.binId)!;
+  await discoverCollectItemUrlsSchema(googleTarget.binId, cli);
+  await articleSource.setBrokenArticleAvailable(true);
+
+  const googleBeforeCollect = await countSourceRequests(
+    articleSource,
+    googleTarget.brokenPath,
+  );
+  const googleCollect = await runAction(
+    googleTarget.binId,
+    "collect",
+    { itemUrls: [googleGap.url] },
+    cli,
+  );
+  assert.deepEqual(googleCollect.result?.output?.completedScopes, [
+    googleTarget.scope,
+  ]);
+  assert.ok(
+    (await listArchivedTitlesInBin(googleTarget.binId, cli)).includes(
+      googleTarget.titleB,
+    ),
+  );
+  const googleAfterCollect = await countSourceRequests(
+    articleSource,
+    googleTarget.brokenPath,
+  );
+  assert.equal(googleAfterCollect, googleBeforeCollect + 1);
+
+  const googlePostCollectSync = await runAction(
+    googleTarget.binId,
+    "sync",
+    {},
+    cli,
+  );
+  assert.equal(
+    googlePostCollectSync.result?.output?.collectionCompleteness,
+    "complete",
+  );
+  assert.equal(committedItems(googlePostCollectSync).length, 0);
+  assert.equal(
+    await countSourceRequests(articleSource, googleTarget.brokenPath),
+    googleAfterCollect,
+  );
+
+  // Branch 2 (Hugging Face): fingerprint update heals B on sync, then explicit collect + sync verifies 0 re-fetches.
+  const hfTarget = targets[1];
+  const hfGap = discoveredGaps.get(hfTarget.binId)!;
+  await articleSource.setArticleFeedScenario("gap-fingerprint-updated");
+
+  const hfBeforeHealedSync = await countSourceRequests(
+    articleSource,
+    hfTarget.brokenPath,
+  );
+  const hfHealedSync = await runAction(hfTarget.binId, "sync", {}, cli);
+  assert.equal(hfHealedSync.result?.output?.collectionCompleteness, "complete");
+  assert.deepEqual(hfHealedSync.result?.output?.completedScopes, [
+    hfTarget.scope,
+  ]);
+  assert.equal(hfHealedSync.result?.output?.bodyGaps?.length ?? 0, 0);
+  assert.ok(
+    (await listArchivedTitlesInBin(hfTarget.binId, cli)).includes(
+      hfTarget.titleBUpdated,
+    ),
+  );
+  const hfAfterHealedSync = await countSourceRequests(
+    articleSource,
+    hfTarget.brokenPath,
+  );
+  assert.equal(hfAfterHealedSync, hfBeforeHealedSync + 1);
+
+  await discoverCollectItemUrlsSchema(hfTarget.binId, cli);
+  await runAction(hfTarget.binId, "collect", { itemUrls: [hfGap.url] }, cli);
+  const hfAfterCollect = await countSourceRequests(
+    articleSource,
+    hfTarget.brokenPath,
+  );
+  assert.equal(hfAfterCollect, hfAfterHealedSync + 1);
+
+  const hfPostCollectSync = await runAction(hfTarget.binId, "sync", {}, cli);
+  assert.equal(
+    hfPostCollectSync.result?.output?.collectionCompleteness,
+    "complete",
+  );
+  assert.equal(committedItems(hfPostCollectSync).length, 0);
+  assert.equal(
+    await countSourceRequests(articleSource, hfTarget.brokenPath),
+    hfAfterCollect,
+  );
+
+  // Also verify Google picks up fingerprint update and skips unchanged subsequent sync.
+  const googleUpdatedBefore = await countSourceRequests(
+    articleSource,
+    googleTarget.brokenPath,
+  );
+  const googleUpdatedSync = await runAction(
+    googleTarget.binId,
+    "sync",
+    {},
+    cli,
+  );
+  assert.equal(
+    googleUpdatedSync.result?.output?.collectionCompleteness,
+    "complete",
+  );
+  assert.ok(
+    (await listArchivedTitlesInBin(googleTarget.binId, cli)).includes(
+      googleTarget.titleBUpdated,
+    ),
+  );
+  const googleUpdatedAfter = await countSourceRequests(
+    articleSource,
+    googleTarget.brokenPath,
+  );
+  assert.equal(googleUpdatedAfter, googleUpdatedBefore + 1);
+
+  const googleFinalSync = await runAction(googleTarget.binId, "sync", {}, cli);
+  assert.equal(committedItems(googleFinalSync).length, 0);
+  assert.equal(
+    await countSourceRequests(articleSource, googleTarget.brokenPath),
+    googleUpdatedAfter,
+  );
+
+  await articleSource.setArticleFeedScenario("standard");
+  await articleSource.setBrokenArticleAvailable(false);
+}
+
 /** Runs the formal CLI/runtime/archive journey for all article-source adapters. */
 export async function runArticleAdaptersJourney(options: {
   readonly baseUrl: string;
@@ -696,6 +985,11 @@ export async function runArticleAdaptersJourney(options: {
       assert.ok(timeline.events.some(({ runId }) => runId === updated.runId));
     }
   }
+
+  await verifyFeedBodyGapsJourney({
+    articleSource: options.articleSource,
+    cli: options.cli,
+  });
 
   const requests = (await options.articleSource.requests()).map(
     ({ path }) => path,

@@ -24,6 +24,7 @@
         "../../source-adapters/rss/package.json",
         "../../source-adapters/rss/src/**",
         "../../source-adapters/rss/tsconfig.build.json",
+        "../../docker-bake.hcl",
         "../../package.json",
         "../../pnpm-lock.yaml",
         "../../pnpm-workspace.yaml",
