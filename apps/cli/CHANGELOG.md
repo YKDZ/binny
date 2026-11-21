@@ -1,5 +1,17 @@
 # 更新日志
 
+## 0.3.0
+
+### Minor Changes
+
+- 发布 0.3.0。
+
+  - 公开 HTTP API 协议版本由 5 升至 10，`/meta/query` 归档查询契约版本由 3 升至 4。
+  - 统一运行器容器休眠与按需唤醒模型：`bin create` 与 `bin update` 删除 `--browser-idle-timeout-seconds`，改为 `--idle-timeout-seconds`（`runtimeSleep.idleTimeoutSeconds`）；`bin list` 与 `bin get` 输出 `sleeping`、`waking` 状态、`runtimeSleep` 策略及拆分后的浏览器 `power` 状态；`run list`、`run get` 与 `human-session` 相关输出新增 `queueReason`（`runtime_sleeping` / `runtime_waking`）和 `lastWakeError`。
+  - 增强运行记录检索与失败诊断：`run list` 新增 `triggerType` 与 `stopReasonCode`；`run get` 在有直接证据时输出失败或取消的 `stage`、`target` 与 `abortCause`。
+  - 扩展归档搜索的时间窗口与分布排序：`timeWindow` 支持不带 `timeZone` 的 ISO 8601 偏移精确时刻左闭右开区间；`distribution` 新增 `order: "count" | "key"`，支持按去重条目数降序分页；单条版本超过 `archive batch-read` 的 16 MiB 上限时可回退使用 `archive revision` 完整读取。
+  - 元数据与查询契约请求（`/meta`、`/meta/query`）新增瞬态失败指数退避重试，并在错误输出中返回 `reason`、`httpStatus` 与 `attempts`。
+
 ## 0.2.0
 
 ### Minor Changes
