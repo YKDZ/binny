@@ -334,8 +334,11 @@ export class BrowserLifecycle {
     if (context === undefined) return;
     try {
       const pages = context.pages();
-      // 持久 Chromium 在关闭最后一个窗口后会退出；空闲复用期间留一个空白页。
-      const keeper = pages[0] ?? (await context.newPage());
+      // Persistent Chromium exits if the last window closes; keep one blank tab
+      // and close every non-blank human or worker page so unload handlers fire.
+      const keeper =
+        pages.find((page) => page.url() === "about:blank") ??
+        (await context.newPage());
       while (context.pages().length > 1) {
         await Promise.all(
           context
@@ -344,9 +347,11 @@ export class BrowserLifecycle {
             .map((page) => page.close({ runBeforeUnload: false })),
         );
       }
-      await keeper.goto("about:blank");
+      if (keeper.url() !== "about:blank") {
+        await keeper.goto("about:blank");
+      }
     } catch {
-      // 已退出 worker 仍留下不能关闭的页面时，重启整个 context 才能确认交接。
+      // Restart the entire context if an exited worker left unclosable pages.
       await this.closeContext();
     }
   }
@@ -530,13 +535,15 @@ export class BrowserLifecycle {
 
     if (!human.stopping) {
       human.phase = "ready";
-      human.firstConnectTimer = setTimeout(() => {
-        human.firstConnectTimer = undefined;
-        if (!human.stopping && human.acceptedClientId === undefined) {
-          void this.stopHuman(human, { reason: "expired" });
-        }
-      }, input.connectTimeoutMs);
-      human.firstConnectTimer.unref();
+      if (human.acceptedClientId === undefined) {
+        human.firstConnectTimer = setTimeout(() => {
+          human.firstConnectTimer = undefined;
+          if (!human.stopping && human.acceptedClientId === undefined) {
+            void this.stopHuman(human, { reason: "expired" });
+          }
+        }, input.connectTimeoutMs);
+        human.firstConnectTimer.unref();
+      }
     }
     return { ended };
   }

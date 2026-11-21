@@ -1227,18 +1227,18 @@ void describe("independent browser bins without cross-bin capacity", () => {
     assert.deepEqual(workCompletedCalls, ["bin-human"]);
   });
 
-  void it("reconciles active and terminated human sessions across server restart via activeHumanSession", async () => {
+  void it("reconciles active and terminated ready/opening/closing human sessions across server restart and unblocks queued runs", async () => {
+    const queuedRunId = "55555555-5555-4555-8555-555555555550";
+    const readySessionId = "55555555-5555-4555-8555-555555555555";
+    const openingSessionId = "55555555-5555-4555-8555-555555555556";
+    const closingSessionId = "55555555-5555-4555-8555-555555555557";
     const mock = createInMemoryDatabase({
       bins: [makeBin("bin-reconcile")],
       connections: [makeConnection("bin-reconcile", "rt-1", "ready")],
-      runs: [],
+      runs: [makeQueuedRun(queuedRunId, "bin-reconcile")],
       humanSessions: [
         {
-          ...makeHumanSession(
-            "55555555-5555-4555-8555-555555555555",
-            "bin-reconcile",
-            "ready",
-          ),
+          ...makeHumanSession(readySessionId, "bin-reconcile", "ready"),
           runtimeId: "rt-1",
           ownerGeneration: 1n,
           readyAt: new Date(1000),
@@ -1274,29 +1274,33 @@ void describe("independent browser bins without cross-bin capacity", () => {
           : never
         : never,
     });
-
-    // Situation A: runtime still holds the connected VNC session after server restart.
-    const hbStillActive = await runtimeStore.heartbeat("bin-reconcile", {
-      protocolVersion: runtimeProtocolVersion,
+    const runsStore = createManualRunStore(mock.database);
+    const heartbeatBase = {
+      protocolVersion: runtimeProtocolVersion as typeof runtimeProtocolVersion,
       runtimeId: "rt-1",
       ownerGeneration: "1",
-      ownerLockAcquired: true,
+      ownerLockAcquired: true as const,
       activeRunId: null,
       claimInFlight: false,
-      activeHumanSession: {
-        sessionId: "55555555-5555-4555-8555-555555555555",
-        phase: "ready",
-        clientConnected: true,
-      },
       runtimeControlUrl: "http://bin-reconcile:8080",
       sourceAdapter: browserAdapter,
       environment: {
-        kind: "browser",
+        kind: "browser" as const,
         browser: {
           available: true,
           profileReuseAfterRestart: true,
-          power: { status: "ready" },
+          power: { status: "ready" as const },
         },
+      },
+    };
+
+    // 1. Ready session still held by runtime across server restart keeps queued run blocked.
+    const hbStillActive = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
+      activeHumanSession: {
+        sessionId: readySessionId,
+        phase: "ready",
+        clientConnected: true,
       },
     });
     assert.equal(hbStillActive.ok, true);
@@ -1304,38 +1308,128 @@ void describe("independent browser bins without cross-bin capacity", () => {
       assert.equal(hbStillActive.value.humanSession, undefined);
     }
     assert.deepEqual(workCompletedCalls, []);
+    assert.deepEqual(
+      await runsStore.claimRun("bin-reconcile", { runtimeId: "rt-1" }),
+      { ok: true, value: null },
+    );
 
-    // Situation B: runtime reports no active human session (client disconnected while server was down).
-    const hbGone = await runtimeStore.heartbeat("bin-reconcile", {
-      protocolVersion: runtimeProtocolVersion,
-      runtimeId: "rt-1",
-      ownerGeneration: "1",
-      ownerLockAcquired: true,
-      activeRunId: null,
-      claimInFlight: false,
+    // 2. Ready session whose client disconnected during server downtime settles to closed and unblocks run scheduling.
+    const hbReadyGone = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
       activeHumanSession: null,
-      runtimeControlUrl: "http://bin-reconcile:8080",
-      sourceAdapter: browserAdapter,
-      environment: {
-        kind: "browser",
-        browser: {
-          available: true,
-          profileReuseAfterRestart: true,
-          power: { status: "ready" },
-        },
-      },
     });
-    assert.equal(hbGone.ok, true);
+    assert.equal(hbReadyGone.ok, true);
     assert.deepEqual(workCompletedCalls, ["bin-reconcile"]);
 
-    const finalState = await humanStore.getHumanSession(
+    const finalReadyState = await humanStore.getHumanSession(
       "bin-reconcile",
-      "55555555-5555-4555-8555-555555555555",
+      readySessionId,
     );
-    assert.equal(finalState.ok, true);
-    if (finalState.ok) {
-      assert.equal(finalState.value.status, "closed");
-      assert.equal(finalState.value.port, undefined);
+    assert.equal(finalReadyState.ok, true);
+    if (finalReadyState.ok) {
+      assert.equal(finalReadyState.value.status, "closed");
+      assert.equal(finalReadyState.value.port, undefined);
+    }
+    const claimedAfterReadyGone = await runsStore.claimRun("bin-reconcile", {
+      runtimeId: "rt-1",
+    });
+    assert.equal(claimedAfterReadyGone.ok, true);
+    if (claimedAfterReadyGone.ok) {
+      assert.equal(claimedAfterReadyGone.value?.runId, queuedRunId);
+    }
+
+    // 3. Opening session: advances to ready if runtime reports ready, or settles to closed if client already disconnected.
+    mock.runs.set(queuedRunId, makeQueuedRun(queuedRunId, "bin-reconcile"));
+    mock.sessions.set(openingSessionId, {
+      ...makeHumanSession(openingSessionId, "bin-reconcile", "opening"),
+      runtimeId: "rt-1",
+      ownerGeneration: 1n,
+      vncPasswordPending: "Ab12Cd34",
+    });
+    const hbOpeningReady = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
+      activeHumanSession: {
+        sessionId: openingSessionId,
+        phase: "ready",
+        clientConnected: true,
+      },
+    });
+    assert.equal(hbOpeningReady.ok, true);
+    assert.equal(mock.sessions.get(openingSessionId)?.status, "ready");
+    assert.equal(mock.sessions.get(openingSessionId)?.vncPasswordPending, null);
+    assert.deepEqual(workCompletedCalls, ["bin-reconcile"]);
+
+    mock.sessions.set(openingSessionId, {
+      ...makeHumanSession(openingSessionId, "bin-reconcile", "opening"),
+      runtimeId: "rt-1",
+      ownerGeneration: 1n,
+      vncPasswordPending: "Ab12Cd34",
+    });
+    const hbOpeningGone = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
+      activeHumanSession: null,
+      humanSessionEvent: {
+        sessionId: openingSessionId,
+        event: "closed",
+      },
+    });
+    assert.equal(hbOpeningGone.ok, true);
+    assert.deepEqual(workCompletedCalls, ["bin-reconcile", "bin-reconcile"]);
+    assert.equal(mock.sessions.get(openingSessionId)?.status, "closed");
+    assert.equal(mock.sessions.get(openingSessionId)?.vncPasswordPending, null);
+    const claimedAfterOpeningGone = await runsStore.claimRun("bin-reconcile", {
+      runtimeId: "rt-1",
+    });
+    assert.equal(claimedAfterOpeningGone.ok, true);
+    if (claimedAfterOpeningGone.ok) {
+      assert.equal(claimedAfterOpeningGone.value?.runId, queuedRunId);
+    }
+
+    // 4. Closing session: re-emits close if still active on runtime, or settles to closed when activeHumanSession is null.
+    mock.runs.set(queuedRunId, makeQueuedRun(queuedRunId, "bin-reconcile"));
+    mock.sessions.set(closingSessionId, {
+      ...makeHumanSession(closingSessionId, "bin-reconcile", "closing"),
+      runtimeId: "rt-1",
+      ownerGeneration: 1n,
+    });
+    const hbClosingStillActive = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
+      activeHumanSession: {
+        sessionId: closingSessionId,
+        phase: "ready",
+        clientConnected: true,
+      },
+    });
+    assert.equal(hbClosingStillActive.ok, true);
+    if (hbClosingStillActive.ok) {
+      assert.deepEqual(hbClosingStillActive.value.humanSession, {
+        sessionId: closingSessionId,
+        action: "close",
+      });
+    }
+    assert.deepEqual(workCompletedCalls, ["bin-reconcile", "bin-reconcile"]);
+    assert.deepEqual(
+      await runsStore.claimRun("bin-reconcile", { runtimeId: "rt-1" }),
+      { ok: true, value: null },
+    );
+
+    const hbClosingGone = await runtimeStore.heartbeat("bin-reconcile", {
+      ...heartbeatBase,
+      activeHumanSession: null,
+    });
+    assert.equal(hbClosingGone.ok, true);
+    assert.deepEqual(workCompletedCalls, [
+      "bin-reconcile",
+      "bin-reconcile",
+      "bin-reconcile",
+    ]);
+    assert.equal(mock.sessions.get(closingSessionId)?.status, "closed");
+    const claimedAfterClosingGone = await runsStore.claimRun("bin-reconcile", {
+      runtimeId: "rt-1",
+    });
+    assert.equal(claimedAfterClosingGone.ok, true);
+    if (claimedAfterClosingGone.ok) {
+      assert.equal(claimedAfterClosingGone.value?.runId, queuedRunId);
     }
   });
 

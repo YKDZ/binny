@@ -1300,8 +1300,12 @@ async function heartbeat(
         pendingHumanSessionEvent === humanSessionEvent
       )
         pendingHumanSessionEvent = undefined;
-      if (execution.humanSession !== undefined)
+      if (
+        execution.humanSession !== undefined &&
+        (stopping === undefined || execution.humanSession.action === "close")
+      ) {
         await applyHumanSessionControl(execution.humanSession);
+      }
       logStatus(execution.status);
       if (
         execution.status === "online" &&

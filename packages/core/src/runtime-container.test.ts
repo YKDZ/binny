@@ -925,9 +925,20 @@ void describe("runtime container coordinator", () => {
       await new Promise((r) => setTimeout(r, 30));
       assert.deepEqual(fakeDriver.stopCalls, []);
 
-      // Once stopConfirmedAt is set, idle clock starts and stops the 0s container.
-      run.status = "completed";
-      run.stopConfirmedAt = new Date(fakeNow);
+      // Active human sessions also block idle stop across heartbeats, sweeps, and server startup reconciliation.
+      db.runs.delete("run-1");
+      db.sessions.set("hs-1", {
+        sessionId: "hs-1",
+        binId: "binny-rss-one",
+        status: "ready",
+      });
+      await coordinator.reconcileOnStartup();
+      await coordinator.sweepIdleContainers();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(fakeDriver.stopCalls, []);
+      assert.equal(db.containers.get("binny-rss-one")?.idleSince, null);
+
+      db.sessions.get("hs-1")!.status = "closed";
       await coordinator.markWorkCompleted("binny-rss-one");
       await new Promise((r) => setTimeout(r, 50));
       assert.deepEqual(fakeDriver.stopCalls, ["cid-rss-1"]);
