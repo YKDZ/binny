@@ -29,7 +29,7 @@ export function isElement(node: Node | undefined | null): node is Element {
     node !== undefined &&
     node !== null &&
     "tagName" in node &&
-    typeof (node as Element).tagName === "string"
+    typeof node.tagName === "string"
   );
 }
 
