@@ -254,6 +254,12 @@ function makeApp(operations: ApiOperations, productVersion: string) {
             sourceAdapterId: sourceAdapter.id,
             sourceAdapterVersion: sourceAdapter.version,
             extensionsSchema: sourceAdapter.extensionsSchema,
+            ...(sourceAdapter.searchSummaryFields === undefined
+              ? {}
+              : { searchSummaryFields: sourceAdapter.searchSummaryFields }),
+            ...(sourceAdapter.searchRelations === undefined
+              ? {}
+              : { searchRelations: sourceAdapter.searchRelations }),
           }),
           200,
         );

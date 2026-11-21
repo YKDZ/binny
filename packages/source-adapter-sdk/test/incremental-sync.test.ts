@@ -4,14 +4,19 @@ import test from "node:test";
 import {
   computeOngoingDocumentHash,
   createEmptyIncrementalSyncState,
+  feedSyncOutputSchema,
   getIncrementalScopeOngoingDocument,
   hasIncrementalEntryChanged,
   hasOngoingDocumentChanged,
+  incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   isSourceAdapterActionError,
   loadIncrementalSyncState,
   pruneInactiveOngoingDocuments,
+  recordIncrementalArchivedEntry,
+  recordIncrementalBaselineEntry,
+  recordIncrementalBodyGapEntry,
   saveIncrementalSyncState,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
@@ -415,6 +420,186 @@ void test("incremental sync state schema and helpers", async (t) => {
         [],
         "pruning non-existent scope returns empty list",
       );
+    },
+  );
+
+  await t.test(
+    "legacy version 1 state without articleUrl, archivedFingerprint, or bodyGap loads cleanly",
+    async () => {
+      const legacyState = {
+        version: 1,
+        scopes: {
+          "google-ai": {
+            scopeUrl: "https://example.com/feed.xml",
+            initializedAt: "2026-11-01T00:00:00Z",
+            etag: '"legacy-v1"',
+            entries: {
+              "urn:legacy:baseline": {
+                fingerprint: "fp-base",
+                publishedAt: "Mon, 01 Nov 2026 00:00:00 GMT",
+                archivedCompleteness: "baseline",
+              },
+              "urn:legacy:archived": {
+                fingerprint: "fp-arch",
+                updatedAt: "2026-11-02T00:00:00Z",
+                archivedCompleteness: "complete",
+              },
+            },
+          },
+        },
+      };
+
+      const context = createMockContext({
+        async load() {
+          return legacyState;
+        },
+        async save() {},
+      });
+
+      const loaded = await loadIncrementalSyncState(context);
+      assert.deepEqual(loaded, legacyState);
+      assert.equal(incrementalSyncStateSchema.safeParse(loaded).success, true);
+    },
+  );
+
+  await t.test(
+    "recordIncrementalBodyGapEntry separates observed index from archive status and recordIncrementalArchivedEntry clears bodyGap",
+    () => {
+      const baseline = recordIncrementalBaselineEntry({
+        fingerprint: "fp-b-v1",
+        publishedAt: "Mon, 02 Nov 2026 08:00:00 GMT",
+        articleUrl: "https://example.com/b",
+      });
+      assert.equal(baseline.archivedCompleteness, "baseline");
+      assert.equal(baseline.articleUrl, "https://example.com/b");
+      assert.equal(baseline.bodyGap, undefined);
+
+      // First-time discovery failure: never archived
+      const firstGap = recordIncrementalBodyGapEntry(undefined, {
+        fingerprint: "fp-b-v2",
+        publishedAt: "Tue, 03 Nov 2026 09:00:00 GMT",
+        articleUrl: "https://example.com/b",
+        gap: {
+          url: "https://example.com/b",
+          stage: "fetching-article",
+          code: "article_http_error",
+          reason: "Article HTTP request returned status 503.",
+          httpStatus: 503,
+        },
+      });
+      assert.equal(firstGap.fingerprint, "fp-b-v2");
+      assert.equal(firstGap.archivedCompleteness, undefined);
+      assert.equal(firstGap.archivedFingerprint, undefined);
+      assert.equal(firstGap.bodyGap?.httpStatus, 503);
+      assert.equal(
+        hasIncrementalEntryChanged(firstGap, "fp-b-v2"),
+        false,
+        "unchanged index fingerprint skips re-fetch despite bodyGap",
+      );
+      assert.equal(
+        hasIncrementalEntryChanged(firstGap, "fp-b-v3"),
+        true,
+        "updated index fingerprint triggers retry",
+      );
+
+      // Baseline entry failing on subsequent feed change must not pretend to be archived
+      const baselineGap = recordIncrementalBodyGapEntry(baseline, {
+        fingerprint: "fp-b-v2",
+        articleUrl: "https://example.com/b",
+        gap: {
+          url: "https://example.com/b",
+          stage: "extracting-article",
+          code: "article_content_empty",
+          reason: "Article page yielded no extractable article body.",
+        },
+      });
+      assert.equal(baselineGap.archivedCompleteness, undefined);
+      assert.equal(baselineGap.archivedFingerprint, undefined);
+      assert.equal(baselineGap.bodyGap?.code, "article_content_empty");
+
+      // Explicit backfill using existing entry fingerprint clears bodyGap
+      const backfilled = recordIncrementalArchivedEntry(firstGap, {
+        completeness: "complete",
+      });
+      assert.equal(backfilled.fingerprint, "fp-b-v2");
+      assert.equal(backfilled.archivedFingerprint, "fp-b-v2");
+      assert.equal(backfilled.archivedCompleteness, "complete");
+      assert.equal(backfilled.articleUrl, "https://example.com/b");
+      assert.equal(backfilled.bodyGap, undefined);
+
+      // Previously archived legacy entry (without archivedFingerprint) failing on a new feed version preserves prior archived state
+      const legacyArchived = {
+        fingerprint: "fp-c-v1",
+        publishedAt: "Mon, 02 Nov 2026 08:00:00 GMT",
+        archivedCompleteness: "complete" as const,
+      };
+      const updatedVersionGap = recordIncrementalBodyGapEntry(legacyArchived, {
+        fingerprint: "fp-c-v2",
+        articleUrl: "https://example.com/c",
+        gap: {
+          url: "https://example.com/c",
+          stage: "fetching-article",
+          code: "article_fetch_failed",
+          reason: "Request timed out after 20000ms.",
+          abortCause: "source_request_timeout",
+        },
+      });
+      assert.equal(updatedVersionGap.fingerprint, "fp-c-v2");
+      assert.equal(updatedVersionGap.archivedCompleteness, "complete");
+      assert.equal(updatedVersionGap.archivedFingerprint, "fp-c-v1");
+      assert.equal(
+        updatedVersionGap.bodyGap?.abortCause,
+        "source_request_timeout",
+      );
+
+      // Subsequent successful archive updates archivedFingerprint and clears bodyGap
+      const recovered = recordIncrementalArchivedEntry(updatedVersionGap, {
+        fingerprint: "fp-c-v2",
+        articleUrl: "https://example.com/c",
+        completeness: "partial",
+      });
+      assert.equal(recovered.fingerprint, "fp-c-v2");
+      assert.equal(recovered.archivedFingerprint, "fp-c-v2");
+      assert.equal(recovered.archivedCompleteness, "partial");
+      assert.equal(recovered.bodyGap, undefined);
+    },
+  );
+
+  await t.test(
+    "feedSyncOutputSchema validates complete and partial sync outputs",
+    () => {
+      const partial = feedSyncOutputSchema.parse({
+        collectionCompleteness: "partial",
+        completedScopes: [],
+        incompleteScopes: [
+          {
+            scope: "google-ai",
+            reasonCode: "article_body_unavailable",
+            message:
+              "1 of 3 changed feed items had unavailable article body; 2 items were archived.",
+          },
+        ],
+        bodyGaps: [
+          {
+            scope: "google-ai",
+            itemKey: "urn:google:b",
+            url: "https://example.com/b",
+            stage: "fetching-article",
+            code: "article_http_error",
+            reason: "Article HTTP request returned status 503.",
+            httpStatus: 503,
+          },
+        ],
+      });
+      assert.equal(partial.collectionCompleteness, "partial");
+      assert.equal(partial.bodyGaps?.length, 1);
+
+      const complete = feedSyncOutputSchema.parse({
+        collectionCompleteness: "complete",
+        completedScopes: ["blog"],
+        initializedScopes: ["blog"],
+      });
+      assert.equal(complete.collectionCompleteness, "complete");
     },
   );
 });

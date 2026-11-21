@@ -406,7 +406,7 @@ function extractFromJsonLd(
     typeof authorVal === "object" &&
     "name" in authorVal
   ) {
-    const name = (authorVal as { name: unknown }).name;
+    const name = authorVal.name;
     if (typeof name === "string") authors.push(name.trim());
   }
 

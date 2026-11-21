@@ -11,6 +11,7 @@ import {
   isSourceAccessBudgetExceededError,
   isSourceAdapterActionError,
   readFailureDiagnosticContext,
+  searchSummaryField,
   sourceAccessConfigSchema,
   sourceAdapterActionError,
   SourceRequestError,
@@ -516,6 +517,7 @@ const discoursePostSchema = z.looseObject({
   topic_id: topicIdSchema.optional(),
   post_number: postIdSchema,
   title: z.string().nullable().optional(),
+  topic_title: z.string().nullable().optional(),
   cooked: z.string().nullable().optional(),
   username: z.string().optional(),
   name: z.string().nullable().optional(),
@@ -564,7 +566,9 @@ const linuxDoExtensionsSchema = z.strictObject({
   topicId: topicIdSchema.describe(
     "Linux.do topic ID associated with this post.",
   ),
-  postNumber: postIdSchema.describe("Post floor number within the topic."),
+  postNumber: searchSummaryField(
+    postIdSchema.describe("Post floor number within the topic."),
+  ),
   categoryId: topicIdSchema
     .nullable()
     .describe("Topic category ID, or null when the source omitted it."),
@@ -593,7 +597,15 @@ const linuxDoExtensionsSchema = z.strictObject({
     .strictObject({
       slug: z.string().nullable(),
       createdAt: z.string().nullable(),
-      title: z.string().optional(),
+      title: searchSummaryField(
+        z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Topic title explicitly provided by the source when this post revision was captured.",
+          ),
+      ),
     })
     .describe("Additional topic context kept distinct from post facts."),
 });
@@ -4577,7 +4589,7 @@ export async function archivePost(
   const topicTags =
     topic.tags?.map((tag) => (typeof tag === "string" ? tag : tag.name)) ?? [];
   const postTitle = post.title?.trim() || null;
-  const topicTitle = topic.title?.trim() || null;
+  const topicTitle = topic.title?.trim() || post.topic_title?.trim() || null;
   const state = {
     sourceKey: sourceKey(siteNamespace, post.id),
     sourceRef: sourcePostUrl(siteOrigin, topic, post),
@@ -4599,9 +4611,7 @@ export async function archivePost(
       topic: {
         slug: topic.slug ?? null,
         createdAt: topic.created_at ?? null,
-        ...(topicTitle === postTitle || topicTitle === null
-          ? {}
-          : { title: topicTitle }),
+        ...(topicTitle === null ? {} : { title: topicTitle }),
       },
     },
     body: { markdown: body.markdown, text: body.text, searchText },
@@ -6435,6 +6445,14 @@ export const sourceAdapter = defineSourceAdapter({
   },
   configSchema: sourceAdapterConfigSchema,
   extensionsSchema: linuxDoExtensionsSchema,
+  searchRelations: {
+    topicRoot: {
+      relationName: "topic_reply",
+      direction: "incoming",
+      description:
+        "Opening post of the topic linked to a reply via topic_reply.",
+    },
+  },
   stateSchema: syncPersistentStateSchema,
   stateSnapshotSchema: syncPublicStateSchema,
   actions: {

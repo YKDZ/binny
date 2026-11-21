@@ -151,6 +151,40 @@ function fakeService(options: {
             operations: ["has", "hasAny"],
           },
         },
+        summaryFields: [
+          {
+            path: "category",
+            segments: ["category"],
+            type: "string",
+            nullable: false,
+            required: false,
+            description: "The item's category.",
+          },
+          {
+            path: "labels",
+            segments: ["labels"],
+            type: "array",
+            nullable: true,
+            required: false,
+            description: "Labels on the item.",
+            itemType: "string",
+          },
+        ],
+        searchRelations: {
+          topicRoot: {
+            relationName: "topic_reply",
+            direction: "incoming",
+            description: "Opening post of the topic linked to a reply.",
+          },
+        },
+      });
+    if (url.pathname === "/bins/plain-main/extension-fields")
+      return Response.json({
+        sourceAdapterId: "plain",
+        sourceAdapterVersion: "1.0.0",
+        fields: {},
+        summaryFields: [],
+        searchRelations: {},
       });
     if (url.pathname === "/bins") return Response.json({ bins: [] });
     if (
@@ -237,7 +271,13 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v4: \/meta\/query/u);
+    assert.match(
+      result.output,
+      new RegExp(
+        `Archive query v${String(archiveQueryContractVersion)}: \\/meta\\/query`,
+        "u",
+      ),
+    );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
@@ -292,11 +332,304 @@ void describe("查询服务发现", () => {
     assert.match(result.output, /- labels: array \(nullable\)/u);
     assert.match(result.output, /Allowed item values: \["news","release"\]/u);
     assert.match(result.output, /Operations: has, hasAny/u);
+    assert.match(result.output, /Summary fields: category, labels/u);
+    assert.match(result.output, /Search relations:/u);
+    assert.match(
+      result.output,
+      /- topicRoot: incoming topic_reply \(Opening post of the topic linked to a reply\.\)/u,
+    );
     assert.match(
       result.output,
       /Missing and null extension values do not match filters\./u,
     );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
+
+    const plainText = await run(
+      ["bin", "extension-fields", "plain-main", "--output", "text"],
+      service.fetch,
+    );
+    assert.equal(plainText.exitCode, 0, plainText.output);
+    assert.match(plainText.output, /Summary fields: none/u);
+    assert.match(plainText.output, /Search relations: none/u);
+  });
+
+  void it("renders per-view related statuses and deduplicated relatedRevisions in archive search output", async () => {
+    const rootRevId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    const rootItemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
+    const service = fakeService({
+      searchResponse: {
+        snapshot: { asOf: "20", mode: "current" },
+        candidatesIncluded: true,
+        candidateOrder: { field: "observedAt", direction: "desc" },
+        results: [
+          {
+            itemId: "11111111-1111-4111-8111-111111111111",
+            sourceKey: { namespace: "linuxdo", key: "post:102" },
+            title: null,
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            observedAt: "2026-11-10T02:00:00.000Z",
+            matches: [
+              {
+                binId: "linuxdo-main",
+                revisionId: "22222222-2222-4222-8222-222222222222",
+                archiveSeq: "12",
+                observedAt: "2026-11-10T02:00:00.000Z",
+                recordedAt: "2026-11-10T02:00:01.000Z",
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 2,
+                  "topic.title": "Topic One",
+                },
+                related: {
+                  topicRoot: {
+                    status: "readable",
+                    reference: {
+                      itemId: rootItemId,
+                      binId: "linuxdo-main",
+                      revisionId: rootRevId,
+                      archiveSeq: "11",
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          {
+            itemId: "33333333-3333-4333-8333-333333333333",
+            sourceKey: { namespace: "linuxdo", key: "post:103" },
+            title: null,
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            observedAt: "2026-11-10T01:59:00.000Z",
+            matches: [
+              {
+                binId: "linuxdo-main",
+                revisionId: "44444444-4444-4444-8444-444444444444",
+                archiveSeq: "13",
+                observedAt: "2026-11-10T01:59:00.000Z",
+                recordedAt: "2026-11-10T01:59:01.000Z",
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 3,
+                  "topic.title": "Topic One",
+                },
+                related: {
+                  topicRoot: {
+                    status: "readable",
+                    reference: {
+                      itemId: rootItemId,
+                      binId: "linuxdo-main",
+                      revisionId: rootRevId,
+                      archiveSeq: "11",
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          {
+            itemId: "55555555-5555-4555-8555-555555555555",
+            sourceKey: { namespace: "linuxdo", key: "post:202" },
+            title: null,
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            observedAt: "2026-11-10T01:58:00.000Z",
+            matches: [
+              {
+                binId: "linuxdo-main",
+                revisionId: "66666666-6666-4666-8666-666666666666",
+                archiveSeq: "14",
+                observedAt: "2026-11-10T01:58:00.000Z",
+                recordedAt: "2026-11-10T01:58:01.000Z",
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                related: {
+                  topicRoot: {
+                    status: "unreadable",
+                    reason: "deleted",
+                    itemId: "77777777-7777-4777-8777-777777777777",
+                    sourceKey: { namespace: "linuxdo", key: "post:201" },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+        relatedRevisions: {
+          [rootRevId]: {
+            revision: {
+              revisionId: rootRevId,
+              itemId: rootItemId,
+              sourceKey: { namespace: "linuxdo", key: "post:101" },
+              stateHash: "a".repeat(64),
+              state: {
+                title: "Topic One",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                extensions: { postNumber: 1 },
+                body: { text: "Shared opening post full body" },
+                capture: {
+                  scope: { topicId: 101 },
+                  completeness: "complete",
+                  missing: [],
+                },
+              },
+            },
+            resources: [],
+          },
+        },
+        hasMore: false,
+      },
+    });
+
+    const query = JSON.stringify({
+      bins: ["linuxdo-main"],
+      related: {
+        sourceAdapterId: "binny.source-adapter-linuxdo",
+        include: ["topicRoot"],
+      },
+    });
+    const structured = await run(
+      ["archive", "search", "--query", query],
+      service.fetch,
+    );
+    assert.equal(structured.exitCode, 0, structured.output);
+    const wire = JSON.parse(structured.output) as {
+      readonly data: {
+        readonly relatedRevisions?: Record<string, unknown>;
+      };
+    };
+    assert.deepEqual(Object.keys(wire.data.relatedRevisions ?? {}), [
+      rootRevId,
+    ]);
+
+    const textResult = await run(
+      ["archive", "search", "--query", query, "--output", "text"],
+      service.fetch,
+    );
+    assert.equal(textResult.exitCode, 0, textResult.output);
+    assert.match(
+      textResult.output,
+      new RegExp(
+        `  Related topicRoot \\(linuxdo-main\\): readable -> revision ${rootRevId}`,
+        "u",
+      ),
+    );
+    assert.match(
+      textResult.output,
+      /  Related topicRoot \(linuxdo-main\): unreadable \(deleted\) \(linuxdo:post:201\)/u,
+    );
+    assert.match(textResult.output, /Related revisions:/u);
+    assert.equal(
+      textResult.output.split("Shared opening post full body").length - 1,
+      1,
+    );
+  });
+
+  void it("renders per-view summaryExtensions neutrally in structured and text archive search output", async () => {
+    const service = fakeService({
+      searchResponse: {
+        snapshot: { asOf: "12", mode: "current" },
+        candidatesIncluded: true,
+        candidateOrder: { field: "observedAt", direction: "desc" },
+        results: [
+          {
+            itemId: "11111111-1111-4111-8111-111111111111",
+            sourceKey: { namespace: "forum", key: "post:202" },
+            title: "Reply own title",
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            observedAt: "2026-11-10T02:00:00.000Z",
+            matches: [
+              {
+                binId: "bin-one",
+                revisionId: "22222222-2222-4222-8222-222222222222",
+                archiveSeq: "12",
+                observedAt: "2026-11-10T02:00:00.000Z",
+                recordedAt: "2026-11-10T02:00:01.000Z",
+                title: "Reply own title",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 2,
+                  "topic.title": "Topic Title A",
+                  tags: ["alpha", "beta"],
+                },
+              },
+              {
+                binId: "bin-two",
+                revisionId: "33333333-3333-4333-8333-333333333333",
+                archiveSeq: "10",
+                observedAt: "2026-11-10T01:00:00.000Z",
+                recordedAt: "2026-11-10T01:00:01.000Z",
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 2,
+                },
+              },
+            ],
+          },
+        ],
+        hasMore: false,
+      },
+    });
+
+    const structured = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ text: { groups: [["reply"]] } }),
+      ],
+      service.fetch,
+    );
+    assert.equal(structured.exitCode, 0, structured.output);
+    const wire = JSON.parse(structured.output) as {
+      readonly data: {
+        readonly results: readonly {
+          readonly matches: readonly {
+            readonly binId: string;
+            readonly summaryExtensions?: Record<string, unknown>;
+          }[];
+        }[];
+      };
+    };
+    assert.deepEqual(wire.data.results[0]?.matches[0]?.summaryExtensions, {
+      postNumber: 2,
+      "topic.title": "Topic Title A",
+      tags: ["alpha", "beta"],
+    });
+    assert.deepEqual(wire.data.results[0]?.matches[1]?.summaryExtensions, {
+      postNumber: 2,
+    });
+
+    const textResult = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ text: { groups: [["reply"]] } }),
+        "--output",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(textResult.exitCode, 0, textResult.output);
+    assert.match(textResult.output, /- Reply own title/u);
+    assert.match(
+      textResult.output,
+      /  View bin-one: title="Reply own title", postNumber=2, topic\.title="Topic Title A", tags=\["alpha","beta"\]/u,
+    );
+    assert.match(textResult.output, /  View bin-two: postNumber=2/u);
+    assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
   });
 
   void it("returns structured allowed values for a local fixed-search enum failure", async () => {
@@ -495,6 +828,77 @@ void describe("查询服务发现", () => {
     assert.match(result.output, /Path: text\.in/u);
     assert.match(result.output, /Allowed values: "title", "body", "both"/u);
     assert.deepEqual(service.requests, []);
+  });
+
+  void it("passes local and server related search diagnostics cleanly", async () => {
+    const localService = fakeService({});
+    const missingBins = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          related: {
+            sourceAdapterId: "binny.source-adapter-linuxdo",
+            include: ["topicRoot"],
+          },
+        }),
+      ],
+      localService.fetch,
+    );
+    assert.equal(missingBins.exitCode, 1);
+    assert.deepEqual(failureData(missingBins.output), {
+      code: "invalid_input",
+      message: "Related item reads require an explicit bin scope.",
+      path: ["bins"],
+    });
+    assert.deepEqual(localService.requests, []);
+
+    const serverService = fakeService({
+      searchFailure: {
+        status: 400,
+        body: {
+          error: {
+            code: "invalid_input",
+            message:
+              'Source adapter "binny.source-adapter-linuxdo" does not declare search relation "unknownRole".',
+            path: ["related", "include", 0],
+            diagnostic: {
+              allowedItemValues: ["topicRoot"],
+              discovery: {
+                sourceAdapterId: "binny.source-adapter-linuxdo",
+                sourceAdapterVersion: "1.0.1",
+                binId: "linuxdo-main",
+              },
+            },
+          },
+        },
+      },
+    });
+    const invalidRole = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({
+          bins: ["linuxdo-main"],
+          related: {
+            sourceAdapterId: "binny.source-adapter-linuxdo",
+            include: ["unknownRole"],
+          },
+        }),
+        "--output",
+        "text",
+      ],
+      serverService.fetch,
+    );
+    assert.equal(invalidRole.exitCode, 1, invalidRole.output);
+    assert.match(invalidRole.output, /Path: related\.include\[0\]/u);
+    assert.match(invalidRole.output, /Allowed item values: "topicRoot"/u);
+    assert.match(
+      invalidRole.output,
+      /Discover extension fields: binny bin extension-fields linuxdo-main/u,
+    );
   });
 
   void it("labels unresolved extension operations as protocol operations", async () => {
