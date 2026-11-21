@@ -7,6 +7,10 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+import {
+  resolveBakeComposeContexts,
+  type BakeComposeContexts,
+} from "@binny/tooling-config/bake-compose-contexts";
 import type { Browser as PlaywrightBrowser, Page } from "patchright-core";
 
 import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
@@ -184,9 +188,12 @@ let playwrightBrowser: PlaywrightBrowser | undefined;
 let composeStarted = false;
 const builtImages = new Set<string>();
 let processObserverStarted = false;
+let bakeComposeContexts: BakeComposeContexts | undefined;
 
 function environment(): Readonly<Record<string, string>> {
+  bakeComposeContexts ??= resolveBakeComposeContexts(repositoryRoot);
   return {
+    ...bakeComposeContexts,
     BINNY_IMAGE: serverImage,
     BINNY_TEST_BROWSER_IMAGE: activeBrowserImage,
     BINNY_POSTGRES_PASSWORD: password,

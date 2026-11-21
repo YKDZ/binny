@@ -18,6 +18,7 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/docker-bake.hcl",
         "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/pnpm-lock.yaml",
         "$TURBO_ROOT$/pnpm-workspace.yaml",

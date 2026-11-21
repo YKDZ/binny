@@ -15,6 +15,7 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/docker-bake.hcl",
         "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/pnpm-lock.yaml",
         "$TURBO_ROOT$/pnpm-workspace.yaml",
@@ -77,6 +78,7 @@
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/compose.acceptance.yaml",
         "$TURBO_ROOT$/Dockerfile",
+        "$TURBO_ROOT$/docker-bake.hcl",
         "$TURBO_ROOT$/source-adapters/linuxdo/Dockerfile",
         "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser",
         "$TURBO_ROOT$/scripts/binny-e2e-test-clock.ts",

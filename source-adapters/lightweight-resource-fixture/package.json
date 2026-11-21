@@ -29,7 +29,7 @@
     "lint:fix": "oxlint --format=unix . --fix",
     "typecheck": "tsc -p tsconfig.node.json --noEmit --pretty false",
     "build": "rm -rf dist && tsc -p tsconfig.build.json --pretty false",
-    "image:build": "docker build --file \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}/source-adapters/lightweight-resource-fixture/Dockerfile\" --tag \"${BINNY_TEST_LIGHTWEIGHT_RESOURCE_IMAGE:-binny/lightweight-resource-fixture:local}\" \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\""
+    "image:build": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl adapter-lightweight-resource-fixture"
   },
   "dependencies": {
     "@binny/source-adapter-sdk": "workspace:*",

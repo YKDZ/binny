@@ -5,5 +5,10 @@
     "noEmit": true,
     "declarationMap": false
   },
-  "include": ["*.config.ts", "scripts/**/*.ts", "template/**/*.ts"]
+  "include": [
+    "*.config.ts",
+    "scripts/**/*.ts",
+    "template/**/*.ts",
+    "test/**/*.ts"
+  ]
 }

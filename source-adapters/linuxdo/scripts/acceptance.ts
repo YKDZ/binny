@@ -5,7 +5,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
+import {
+  resolveBakeComposeContexts,
+  type BakeComposeContexts,
+} from "@binny/tooling-config/bake-compose-contexts";
 import { type Browser, type Page } from "patchright-core";
 
 import {
@@ -208,6 +213,10 @@ type ArchiveRevision = {
 
 type BrowserSession = LinuxdoBrowserSession;
 
+const repositoryRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../..",
+);
 const composeFile = "compose.acceptance.yaml";
 const clockShimSource = "scripts/binny-e2e-test-clock.ts";
 const suffix = `${process.pid}-${randomUUID().slice(0, 8)}`;
@@ -230,9 +239,12 @@ let viewerBrowser: LinuxdoViewerBrowser | undefined;
 let serverPort = 0;
 let sourcePort = 0;
 let composeStarted = false;
+let bakeComposeContexts: BakeComposeContexts | undefined;
 
 function environment(): Readonly<Record<string, string>> {
+  bakeComposeContexts ??= resolveBakeComposeContexts(repositoryRoot);
   return {
+    ...bakeComposeContexts,
     BINNY_IMAGE: serverImage,
     BINNY_LINUXDO_BIN_ID: "binny-discovery-topic",
     BINNY_LINUXDO_IMAGE: browserImage,
