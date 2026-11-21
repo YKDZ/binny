@@ -30,7 +30,11 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 
 import { validateConfigurationAtRuntime } from "./runtime-configuration-validation.ts";
-import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
+import {
+  canAdapterAutoSleep,
+  readEffectiveIdleTimeoutSeconds,
+  type RuntimeContainerCoordinator,
+} from "./runtime-container.ts";
 
 const binSelection = {
   id: binConfigurations.id,
@@ -281,13 +285,6 @@ export function validateSourceAdapterConfiguration(
   };
 }
 
-function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
-  return (
-    !sourceAdapter.environment.browser.required ||
-    sourceAdapter.environment.browser.profileReuseAfterRestart
-  );
-}
-
 function validateRuntimeSleepIdlePolicy(
   sourceAdapter: SourceAdapterManifest,
   idleTimeoutSeconds: number | null,
@@ -396,20 +393,8 @@ async function selectConfigurationValidationSnapshot(
 
 type BinRow = NonNullable<Awaited<ReturnType<typeof selectBin>>>;
 
-function effectiveIdleTimeoutSeconds(row: {
-  readonly runtimeSleepIdleTimeoutSeconds: number | null;
-  readonly sourceAdapter: unknown;
-}): number | null {
-  if (row.runtimeSleepIdleTimeoutSeconds === null) return null;
-  const parsed = sourceAdapterManifestStoredSchema.safeParse(row.sourceAdapter);
-  if (parsed.success && !canAdapterAutoSleep(parsed.data)) {
-    return null;
-  }
-  return row.runtimeSleepIdleTimeoutSeconds;
-}
-
 function rowToConfiguration(row: BinRow): BinConfiguration {
-  const idleTimeoutSeconds = effectiveIdleTimeoutSeconds(row);
+  const idleTimeoutSeconds = readEffectiveIdleTimeoutSeconds(row);
   return binConfigurationSchema.parse({
     id: row.id,
     sourceAdapter: row.sourceAdapter,
@@ -538,7 +523,7 @@ export function createBinConfigurationStore(
           const config = checked.data.config ?? existing.config;
           const idleTimeoutSeconds =
             requestedIdleTimeout === undefined
-              ? effectiveIdleTimeoutSeconds(previous)
+              ? readEffectiveIdleTimeoutSeconds(previous)
               : requestedIdleTimeout;
           const invalid = validateSourceAdapterConfiguration(
             sourceAdapter,

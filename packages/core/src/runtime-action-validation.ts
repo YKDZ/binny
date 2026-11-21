@@ -230,16 +230,19 @@ export async function checkActionPreflightPreconditions(
     .from(binConfigurations)
     .where(eq(binConfigurations.id, binId));
   if (snapshot === undefined)
-    return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+    return failure(404, "bin_not_found", "Bin not found.", ["binId"]);
   if (snapshot.status === "disabled")
-    return failure(409, "bin_disabled", "这个 bin 已停用，不能接受新动作。", [
-      "binId",
-    ]);
+    return failure(
+      409,
+      "bin_disabled",
+      "Bin is disabled and cannot accept new actions.",
+      ["binId"],
+    );
   if (!snapshot.configNativeValid)
     return failure(
       400,
       "invalid_configuration",
-      "长期配置尚未通过当前运行器的原生校验，请先更新配置。",
+      "Persistent configuration has not passed native validation on the current runtime yet; update the configuration first.",
       ["config"],
     );
   return undefined;
@@ -263,16 +266,19 @@ export async function preflightActionInput(
     },
   );
   if (snapshot === undefined)
-    return failure(404, "bin_not_found", "没有找到这个 bin。", ["binId"]);
+    return failure(404, "bin_not_found", "Bin not found.", ["binId"]);
   if (snapshot.status === "disabled")
-    return failure(409, "bin_disabled", "这个 bin 已停用，不能接受新动作。", [
-      "binId",
-    ]);
+    return failure(
+      409,
+      "bin_disabled",
+      "Bin is disabled and cannot accept new actions.",
+      ["binId"],
+    );
   if (!snapshot.configNativeValid)
     return failure(
       400,
       "invalid_configuration",
-      "长期配置尚未通过当前运行器的原生校验，请先更新配置。",
+      "Persistent configuration has not passed native validation on the current runtime yet; update the configuration first.",
       ["config"],
     );
   if (

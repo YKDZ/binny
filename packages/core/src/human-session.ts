@@ -11,7 +11,6 @@ import {
   humanSessionSchema,
   runtimeHeartbeatTimeoutMs,
   runtimeProtocolVersion,
-  runtimeWakeErrorSchema,
   type HumanSession,
   type HumanSessionApiError,
   type HumanSessionOperation,
@@ -43,7 +42,10 @@ import {
 } from "drizzle-orm";
 
 import { isRuntimeBrowserBusy } from "./manual-run-fencing.ts";
-import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
+import {
+  parseContainerWakeError,
+  type RuntimeContainerCoordinator,
+} from "./runtime-container.ts";
 
 const activeStatuses = ["pending", "opening", "ready", "closing"] as const;
 
@@ -83,12 +85,6 @@ function failure<T>(
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
-}
-
-function parseWakeError(raw: unknown): RuntimeWakeError | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const parsed = runtimeWakeErrorSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
 }
 
 async function rowToSession(
@@ -158,16 +154,16 @@ async function rowToSession(
         container?.lifecyclePhase === "sleeping"
       ) {
         queueReason = "runtime_sleeping";
-        lastWakeError = parseWakeError(container.lastWakeError);
+        lastWakeError = parseContainerWakeError(container.lastWakeError);
       } else if (
         container?.lifecyclePhase === "waking" &&
         (owner === undefined || !owner.online)
       ) {
         queueReason = "runtime_waking";
-        lastWakeError = parseWakeError(container.lastWakeError);
+        lastWakeError = parseContainerWakeError(container.lastWakeError);
       } else if (owner === undefined || !owner.online) {
         queueReason = "runtime_offline";
-        lastWakeError = parseWakeError(container?.lastWakeError);
+        lastWakeError = parseContainerWakeError(container?.lastWakeError);
       } else if (owner.protocolVersion < runtimeProtocolVersion) {
         queueReason = "runtime_protocol_outdated";
       } else if (isRuntimeBrowserBusy(owner.environment)) {

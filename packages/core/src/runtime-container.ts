@@ -1,6 +1,8 @@
 import {
+  runtimeWakeErrorSchema,
   type RuntimeEnvironment,
   type RuntimeExecution,
+  type RuntimeWakeError,
   type SourceAdapterManifest,
   sourceAdapterManifestStoredSchema,
 } from "@binny/contracts";
@@ -126,7 +128,15 @@ type WakeErrorPayload = {
   readonly at: string;
 };
 
-function readEffectiveIdleTimeoutSeconds(bin: {
+export function parseContainerWakeError(
+  raw: unknown,
+): RuntimeWakeError | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  const parsed = runtimeWakeErrorSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function readEffectiveIdleTimeoutSeconds(bin: {
   readonly runtimeSleepIdleTimeoutSeconds: number | null;
   readonly sourceAdapter?: unknown;
 }): number | null {
@@ -142,11 +152,46 @@ function readEffectiveIdleTimeoutSeconds(bin: {
   return bin.runtimeSleepIdleTimeoutSeconds;
 }
 
-function canAdapterAutoSleep(sourceAdapter: SourceAdapterManifest): boolean {
+export function canAdapterAutoSleep(
+  sourceAdapter: SourceAdapterManifest,
+): boolean {
   return (
     !sourceAdapter.environment.browser.required ||
     sourceAdapter.environment.browser.profileReuseAfterRestart
   );
+}
+
+function isExitedContainerStoppedByPolicy(
+  row: {
+    readonly lifecyclePhase: string;
+    readonly containerStartedAt: string | null;
+    readonly stoppedContainerFinishedAt: string | null;
+  },
+  inspected: ManagedContainerInspectResult,
+): boolean {
+  if (
+    inspected.status !== "exited" ||
+    inspected.exitCode !== 0 ||
+    inspected.oomKilled
+  ) {
+    return false;
+  }
+  if (
+    row.containerStartedAt === null ||
+    inspected.startedAt !== row.containerStartedAt
+  ) {
+    return false;
+  }
+  if (row.lifecyclePhase === "stopping") {
+    return true;
+  }
+  if (row.lifecyclePhase === "sleeping" || row.lifecyclePhase === "waking") {
+    return (
+      row.stoppedContainerFinishedAt !== null &&
+      inspected.finishedAt === row.stoppedContainerFinishedAt
+    );
+  }
+  return false;
 }
 
 async function hasBlockingDatabaseWork(
@@ -406,6 +451,7 @@ export function createRuntimeContainerCoordinator(
         .update(runtimeContainers)
         .set({
           lifecyclePhase: "offline",
+          stoppedContainerFinishedAt: null,
           idleSince: null,
           ...(lastWakeError === null ? {} : { lastWakeError }),
           updatedAt: sql`clock_timestamp()`,
@@ -972,14 +1018,7 @@ export function createRuntimeContainerCoordinator(
         );
       }
       const unstartedPolicySleep =
-        inspected !== null &&
-        inspected.status === "exited" &&
-        inspected.exitCode === 0 &&
-        !inspected.oomKilled &&
-        row.containerStartedAt !== null &&
-        inspected.startedAt === row.containerStartedAt &&
-        (row.stoppedContainerFinishedAt === null ||
-          inspected.finishedAt === row.stoppedContainerFinishedAt);
+        inspected !== null && isExitedContainerStoppedByPolicy(row, inspected);
       if (!unstartedPolicySleep) {
         const reason = "Runtime container is no longer running while waking.";
         await markContainerOffline(
@@ -1038,6 +1077,8 @@ export function createRuntimeContainerCoordinator(
         .update(runtimeContainers)
         .set({
           lifecyclePhase: "waking",
+          containerStartedAt: inspected.startedAt,
+          stoppedContainerFinishedAt: null,
           idleSince: null,
           updatedAt: sql`clock_timestamp()`,
         })
@@ -1049,22 +1090,25 @@ export function createRuntimeContainerCoordinator(
       );
     }
 
-    if (
-      inspected.status !== "exited" ||
-      inspected.exitCode !== 0 ||
-      inspected.oomKilled
-    ) {
+    if (!isExitedContainerStoppedByPolicy(row, inspected)) {
+      const exitedOutsidePolicy =
+        inspected.status === "exited" &&
+        inspected.exitCode === 0 &&
+        !inspected.oomKilled;
+      const reason = exitedOutsidePolicy
+        ? "Runtime container exited outside sleep policy and cannot auto-wake."
+        : `Runtime container exited unexpectedly (status=${inspected.status}, exitCode=${inspected.exitCode}).`;
       await markContainerOffline(
         binId,
         wakeErrorPayload(
-          "runtime_unexpected_exit",
-          `Runtime container exited unexpectedly (status=${inspected.status}, exitCode=${inspected.exitCode}).`,
+          exitedOutsidePolicy ? "runtime_offline" : "runtime_unexpected_exit",
+          reason,
         ),
       );
       return {
         ok: false,
-        code: "wake_failed",
-        message: `Runtime container exited unexpectedly (exitCode=${inspected.exitCode}).`,
+        code: exitedOutsidePolicy ? "runtime_offline" : "wake_failed",
+        message: reason,
         retryable: false,
       };
     }
@@ -1101,6 +1145,14 @@ export function createRuntimeContainerCoordinator(
           retryable: false,
         };
       }
+      // Clear finished-at marker once startContainer runs so a subsequent exit before heartbeat is not treated as pre-start policy sleep.
+      await database
+        .update(runtimeContainers)
+        .set({
+          stoppedContainerFinishedAt: null,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(eq(runtimeContainers.binId, binId));
     } catch (error) {
       const message =
         error instanceof Error
@@ -1299,17 +1351,10 @@ export function createRuntimeContainerCoordinator(
         }
 
         if (inspected.status === "exited") {
-          const stoppedByPolicy =
-            (row.lifecyclePhase === "sleeping" ||
-              row.lifecyclePhase === "stopping" ||
-              row.lifecyclePhase === "waking") &&
-            inspected.exitCode === 0 &&
-            !inspected.oomKilled &&
-            (row.containerStartedAt === null ||
-              inspected.startedAt === row.containerStartedAt) &&
-            (row.lifecyclePhase === "stopping" ||
-              row.stoppedContainerFinishedAt === null ||
-              inspected.finishedAt === row.stoppedContainerFinishedAt);
+          const stoppedByPolicy = isExitedContainerStoppedByPolicy(
+            row,
+            inspected,
+          );
 
           await database.transaction(async (transaction) => {
             await transaction
@@ -1502,10 +1547,7 @@ export function createRuntimeContainerCoordinator(
         .from(runtimeContainers)
         .where(eq(runtimeContainers.binId, binId));
       if (row === undefined) return;
-      if (
-        row.lifecyclePhase === "stopping" ||
-        row.lifecyclePhase === "sleeping"
-      ) {
+      if (inFlightStops.has(binId) || row.lifecyclePhase === "stopping") {
         return;
       }
       clearIdleTimer(binId);
@@ -1513,6 +1555,7 @@ export function createRuntimeContainerCoordinator(
         .update(runtimeContainers)
         .set({
           lifecyclePhase: "offline",
+          stoppedContainerFinishedAt: null,
           idleSince: null,
           updatedAt: sql`clock_timestamp()`,
         })

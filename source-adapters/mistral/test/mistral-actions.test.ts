@@ -6,7 +6,9 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import {
+  createActionCancelledReason,
   createSourceAdapterContext,
+  isActionCancelledReason,
   isSourceAdapterActionError,
   type ArchiveCommit,
   type ArchiveResourceMetadata,
@@ -1390,5 +1392,115 @@ void test("Mistral sync persists completed items on mid-run failure and settles 
     assert.equal(fullCollect.remainingItems, 0);
   } finally {
     server.close();
+  }
+});
+
+void test("Mistral actions classify per-request timeouts and propagate user cancellation", async () => {
+  const cancelReason = createActionCancelledReason();
+  const makeContext = (signal: AbortSignal) =>
+    createSourceAdapterContext(
+      {
+        archives: {
+          $post: async () => new Response(JSON.stringify({}), { status: 201 }),
+        },
+        resources: {
+          $post: async () => new Response(JSON.stringify({}), { status: 201 }),
+          resolve: {
+            $post: async () =>
+              new Response(
+                JSON.stringify({ resources: [], items: [], mediaByUrl: {} }),
+                { status: 200 },
+              ),
+          },
+        },
+      } as unknown as SourceAdapterApiClient,
+      {
+        binId: "mistral-abort-bin",
+        identityId: "mistral-abort-identity",
+        runId: randomUUID(),
+        referenceTime: "2026-11-07T12:00:00.000Z",
+        sourceAdapterVersion: sourceAdapter.version,
+        config: { rssUrl: "http://127.0.0.1:1/news/rss" },
+        signal,
+        report: async () => {},
+        persistentState: {
+          async load() {
+            return undefined;
+          },
+          async save() {},
+        },
+      },
+      sourceAdapter.extensionsSchema,
+    );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    // 1. Per-request timeout classification via fetchSourceResponse
+    globalThis.fetch = async () => {
+      throw new DOMException("signal timed out", "TimeoutError");
+    };
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.sync.execute(
+          makeContext(new AbortController().signal),
+          {},
+        ),
+      (err: unknown) => {
+        assert.ok(isSourceAdapterActionError(err));
+        assert.equal(err.failure.abortCause, "source_request_timeout");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(
+          makeContext(new AbortController().signal),
+          {},
+        ),
+      (err: unknown) => {
+        assert.ok(isSourceAdapterActionError(err));
+        assert.equal(err.failure.abortCause, "source_request_timeout");
+        return true;
+      },
+    );
+
+    // 2. Cancellation propagation across check, sync, and collect (including itemUrls branch)
+    globalThis.fetch = async (_input, init) => {
+      const signal = init?.signal;
+      assert.ok(signal !== undefined && signal !== null);
+      if (signal.aborted) throw signal.reason;
+      throw new Error("expected aborted signal");
+    };
+
+    const preAborted = new AbortController();
+    preAborted.abort(cancelReason);
+
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.check.execute(makeContext(preAborted.signal), {}),
+      (err: unknown) => isActionCancelledReason(err),
+    );
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.sync.execute(makeContext(preAborted.signal), {}),
+      (err: unknown) => isActionCancelledReason(err),
+    );
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(makeContext(preAborted.signal), {
+          itemUrls: ["http://127.0.0.1:1/news/item-one"],
+        }),
+      (err: unknown) => isActionCancelledReason(err),
+    );
+    await assert.rejects(
+      () =>
+        sourceAdapter.actions.collect.execute(
+          makeContext(preAborted.signal),
+          {},
+        ),
+      (err: unknown) => isActionCancelledReason(err),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

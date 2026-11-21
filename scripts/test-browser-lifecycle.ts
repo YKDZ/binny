@@ -683,7 +683,7 @@ async function buildNonReusableBrowserImage(
   assert.notEqual(
     updated,
     original,
-    "未能将浏览器夹具适配器改写为 profileReuseAfterRestart: false。",
+    "Failed to rewrite browser fixture adapter to profileReuseAfterRestart: false.",
   );
   await writeFile(adapterPath, updated, "utf8");
 
@@ -1072,7 +1072,7 @@ async function waitForContainerSleeping(
   readonly container: BrowserRuntimeContainer;
 }> {
   const deadline = Date.now() + timeoutMs;
-  let lastState = "尚未查询。";
+  let lastState = "not queried yet.";
   while (Date.now() < deadline) {
     const [bin, container] = await Promise.all([
       readBin(binId),
@@ -1089,7 +1089,9 @@ async function waitForContainerSleeping(
     }
     await delay(150);
   }
-  throw new Error(`等待 ${binId} 进入整桶容器休眠超时：${lastState}`);
+  throw new Error(
+    `Timed out waiting for ${binId} container sleep: ${lastState}`,
+  );
 }
 
 async function waitForContainerPhase(
@@ -1098,14 +1100,16 @@ async function waitForContainerPhase(
   timeoutMs = 30_000,
 ): Promise<Bin> {
   const deadline = Date.now() + timeoutMs;
-  let lastState = "尚未查询。";
+  let lastState = "not queried yet.";
   while (Date.now() < deadline) {
     const bin = await readBin(binId);
     lastState = JSON.stringify(bin.execution);
     if (bin.execution.phase === expectedPhase) return bin;
     await delay(100);
   }
-  throw new Error(`等待 ${binId} 容器阶段 ${expectedPhase} 超时：${lastState}`);
+  throw new Error(
+    `Timed out waiting for ${binId} container phase ${expectedPhase}: ${lastState}`,
+  );
 }
 
 async function waitForBrowserProcessesStopped(
@@ -2047,7 +2051,7 @@ async function main(): Promise<void> {
   assert.equal(
     concurrentBrowserSamples.at(-1),
     2,
-    "两个独立浏览器 bin 必须能同时启动并保持就绪。",
+    "Two independent browser bins must be able to start and stay ready concurrently.",
   );
 
   await compose(["restart", "server"]);
@@ -2081,11 +2085,13 @@ async function main(): Promise<void> {
   await updateBin("binny-browser-one", 30);
   await updateBin("binny-browser-two", "disabled");
   process.stdout.write(
-    `跨 bin 独立浏览器并发与核心重启实测：${JSON.stringify({
-      observedBrowserProcessCounts: concurrentBrowserSamples,
-      bothBinsReadyAcrossServerRestart: true,
-      releasedAfterRealExit: true,
-    })}\n`,
+    `Cross-bin independent browser concurrency and server restart: ${JSON.stringify(
+      {
+        observedBrowserProcessCounts: concurrentBrowserSamples,
+        bothBinsReadyAcrossServerRestart: true,
+        releasedAfterRealExit: true,
+      },
+    )}\n`,
   );
 
   await armHumanOpenResponseGate("binny-browser-one");
@@ -2173,7 +2179,7 @@ async function main(): Promise<void> {
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
-    "关闭尚未开始时禁用空闲休眠，仍触发了整桶休眠。",
+    "Disabling idle sleep before stopping started still triggered container sleep.",
   );
   assert.equal(
     (await browserRuntimeContainerInfo("browser-one")).status,
@@ -2199,7 +2205,7 @@ async function main(): Promise<void> {
   await waitForBrowserProcessesStopped("browser-one");
   assert.equal(await activeBrowserMainProcessCount("browser-one"), 0);
   process.stdout.write(
-    `整桶休眠实测：${JSON.stringify({
+    `Container sleep measurement: ${JSON.stringify({
       browserHostPid: initialBrowserProcess.pid,
       browserStartTime: initialBrowserProcess.startTime,
       sleepingContainerStatus: sleepingContainer.status,
@@ -2214,7 +2220,7 @@ async function main(): Promise<void> {
   assert.ok(
     loginSession.queueReason === "runtime_sleeping" ||
       loginSession.queueReason === "runtime_waking",
-    `期望休眠唤醒排队原因，实际：${String(loginSession.queueReason)}`,
+    `Expected sleep-wake queue reason, got: ${String(loginSession.queueReason)}`,
   );
   const readyLogin = await waitForHuman(
     "binny-browser-one",
@@ -2225,7 +2231,7 @@ async function main(): Promise<void> {
   assert.notEqual(
     humanWakeProcess.startTime,
     initialBrowserProcess.startTime,
-    "人工访问没有从休眠状态唤醒并启动新的浏览器进程。",
+    "Human session did not wake container and start a new browser process.",
   );
   const loginViewerUrl = new URL(loginSession.viewerUrl);
   loginViewerUrl.hostname = publishedHost;
@@ -2236,7 +2242,7 @@ async function main(): Promise<void> {
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
-    "人工操作期间容器休眠误停了浏览器。",
+    "Container sleep stopped browser during an active human session.",
   );
   assert.equal(
     (await readBin("binny-browser-one")).execution.environment?.browser?.power
@@ -2270,7 +2276,7 @@ async function main(): Promise<void> {
   assert.notEqual(
     checkWakeProcess.startTime,
     humanWakeProcess.startTime,
-    "check 没有从休眠状态唤醒并重新启动浏览器。",
+    "check did not wake container and restart browser.",
   );
 
   const adjacentCollect = await triggerRun("binny-browser-one", "collect");
@@ -2435,7 +2441,7 @@ async function main(): Promise<void> {
   assert.notEqual(
     collectWakeProcess.startTime,
     checkWakeProcess.startTime,
-    "collect 没有从休眠状态唤醒并重新启动浏览器。",
+    "collect did not wake container and restart browser.",
   );
 
   await updateBin("binny-browser-one", 4);
@@ -2445,7 +2451,7 @@ async function main(): Promise<void> {
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
-    "关闭尚未开始时延长空闲时限，旧截止时间仍休眠了浏览器。",
+    "Extending idle timeout before stopping started still slept browser on old deadline.",
   );
   await updateBin("binny-browser-one", 4);
   await waitForContainerSleeping("binny-browser-one", "browser-one");
@@ -2590,7 +2596,7 @@ async function main(): Promise<void> {
     assert.deepEqual(
       await browserMainProcess("browser-one"),
       stoppingProcess,
-      "旧容器退出前运行器启动了第二个 profile 使用者。",
+      "Runtime started a second profile consumer before old container exited.",
     );
     await updateBin("binny-browser-one", 30);
   } finally {
@@ -2622,7 +2628,7 @@ async function main(): Promise<void> {
   assert.notEqual(
     (await browserRuntimeContainerInfo("browser-one")).startedAt,
     stoppingContainerBefore.startedAt,
-    "关闭中的需求没有等旧容器退出后重新启动容器。",
+    "Work arriving while stopping did not wait for old container exit before restarting.",
   );
   assert.notDeepEqual(
     await browserMainProcess("browser-one"),
@@ -2861,7 +2867,7 @@ async function main(): Promise<void> {
   assert.equal(
     disabledIdleBin.execution.environment?.browser?.power?.status,
     "ready",
-    "禁用空闲休眠后浏览器仍被自动停掉。",
+    "Browser was still stopped automatically after disabling idle sleep.",
   );
 
   const expiredCheck = await triggerRun("binny-browser-two", "check");
@@ -2907,7 +2913,7 @@ async function main(): Promise<void> {
   assert.equal(
     browserConcurrencySamples.at(-1),
     2,
-    "人工会话期间第二个独立浏览器 bin 必须继续保持就绪。",
+    "Second independent browser bin must remain ready during human session.",
   );
 
   // Same-bin run must still wait behind active human session on binny-browser-one,
@@ -2955,7 +2961,7 @@ async function main(): Promise<void> {
   browserConcurrencySamples.push(await activeBrowserMainProcessCount());
   assert.equal(browserConcurrencySamples.at(-1), 0);
   process.stdout.write(
-    `双桶独立浏览器实测：${JSON.stringify({
+    `Dual-bin independent browsers: ${JSON.stringify({
       observedBrowserProcessCounts: browserConcurrencySamples,
       sameBinRunQueueReason: waitingCollect.queueReason,
       concurrentCheckTwoStatus: concurrentCheckTwoResult.status,

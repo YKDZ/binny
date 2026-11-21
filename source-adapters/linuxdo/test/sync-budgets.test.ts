@@ -789,7 +789,7 @@ void describe("Linux.do sync explicit budgets and source-wait diagnostics", () =
         );
         assert.match(
           rlReport.incompleteScopes[0]?.message ?? "",
-          /429|冷却|Retry-After/u,
+          /429|cooldown|Retry-After/iu,
         );
 
         // B. Explicit maxElapsedMs smaller than active Retry-After cooldown -> wait-exceeds-budget
@@ -813,7 +813,7 @@ void describe("Linux.do sync explicit budgets and source-wait diagnostics", () =
           waitReport.incompleteScopes.some(
             (s) =>
               s.reasonCode === "budget_wait_exceeds_budget" &&
-              /冷却|Retry-After|maxElapsedMs/u.test(s.message),
+              /cooldown|Retry-After|maxElapsedMs/iu.test(s.message),
           ),
           true,
           JSON.stringify(waitReport.incompleteScopes),

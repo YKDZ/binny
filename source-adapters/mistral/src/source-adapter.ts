@@ -5,17 +5,20 @@ import {
   cleanContent,
   defineSourceAdapter,
   defineSourceAdapterAction,
+  fetchSourceResponse,
   hasIncrementalEntryChanged,
   incrementalSyncStateSchema,
   initializeIncrementalScope,
   isIncrementalScopeInitialized,
   loadIncrementalSyncState,
+  readFailureDiagnosticContext,
   saveIncrementalSyncState,
   sourceAdapterActionError,
   sourceTimeFrom,
   submitCleanedArticle,
   updateIncrementalScopeValidators,
   upsertIncrementalScopeEntry,
+  type FailureDiagnosticContext,
   type IncrementalEntryRecord,
   type IncrementalSyncState,
   type SourceAdapterActionError,
@@ -595,16 +598,20 @@ export async function requestFeed(
     headers["if-modified-since"] = validators.lastModified;
   }
 
-  const response = await fetch(rssUrl, {
-    headers,
+  const response = await fetchSourceResponse({
+    url: rssUrl,
     signal,
+    stage: "fetching-feed",
+    headers,
   });
 
   if (response.status === 304) {
+    await response.cancelBody();
     return { status: "not-modified" };
   }
 
   if (response.status < 200 || response.status >= 300) {
+    await response.cancelBody();
     throw new Error(`Feed request returned HTTP ${response.status}`);
   }
 
@@ -664,15 +671,18 @@ export async function fetchArticleHtml(
   url: string,
   signal: AbortSignal,
 ): Promise<string> {
-  const response = await fetch(url, {
+  const response = await fetchSourceResponse({
+    url,
+    signal,
+    stage: "fetching-article",
     headers: {
       accept: "text/html,application/xhtml+xml,*/*",
       "user-agent": "Binny SourceAdapter/1.0",
     },
-    signal,
   });
 
   if (response.status < 200 || response.status >= 300) {
+    await response.cancelBody();
     throw new Error(`Article fetch returned HTTP ${response.status}`);
   }
 
@@ -745,13 +755,19 @@ async function processAndSubmitArticle(
   return { key, submitResult };
 }
 
+type MistralProblemItem = {
+  readonly key?: string;
+  readonly message: string;
+  readonly path?: readonly (string | number)[];
+} & FailureDiagnosticContext;
+
+function problemDiagnostics(error: unknown): FailureDiagnosticContext {
+  return readFailureDiagnosticContext(error);
+}
+
 function failureFromProblems(
   actionName: string,
-  problems: readonly {
-    readonly key?: string;
-    readonly message: string;
-    readonly path?: readonly (string | number)[];
-  }[],
+  problems: readonly MistralProblemItem[],
   completedScopes: readonly string[] = [],
 ): SourceAdapterActionError {
   const examples = problems
@@ -761,6 +777,7 @@ function failureFromProblems(
     problems.length > examples.length
       ? ` (and ${problems.length - examples.length} more)`
       : "";
+  const first = problems[0];
 
   return sourceAdapterActionError(
     {
@@ -771,6 +788,11 @@ function failureFromProblems(
       suggestion:
         "Check network connectivity and article HTML structure, then retry.",
       requiresHuman: false,
+      ...(first?.stage === undefined ? {} : { stage: first.stage }),
+      ...(first?.target === undefined ? {} : { target: first.target }),
+      ...(first?.abortCause === undefined
+        ? {}
+        : { abortCause: first.abortCause }),
     },
     completedScopes,
   );
@@ -784,6 +806,7 @@ async function checkMistralNews(
   try {
     feedResult = await requestFeed(context.config.rssUrl, context.signal);
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     return {
       availability: "unavailable",
       scope: ["news"],
@@ -870,6 +893,7 @@ async function checkMistralNews(
       };
     }
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     return {
       availability: "unavailable",
       scope: ["news"],
@@ -931,9 +955,11 @@ async function syncMistralNews(
         : undefined,
     );
   } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     throw failureFromProblems("sync", [
       {
         message: `RSS feed request failed: ${error instanceof Error ? error.message : String(error)}`,
+        ...problemDiagnostics(error),
       },
     ]);
   }
@@ -1017,7 +1043,7 @@ async function syncMistralNews(
       : changedItems;
   const remainingChangedItems = changedItems.length - itemsToProcess.length;
 
-  const problems: { key?: string; message: string }[] = [];
+  const problems: MistralProblemItem[] = [];
   let processedChangedItems = 0;
 
   for (const entry of itemsToProcess) {
@@ -1039,10 +1065,11 @@ async function syncMistralNews(
       await saveIncrementalSyncState(context, state);
       processedChangedItems += 1;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       problems.push({
         key: entry.key,
         message: error instanceof Error ? error.message : String(error),
+        ...problemDiagnostics(error),
       });
     }
   }
@@ -1102,7 +1129,8 @@ async function collectMistralNews(
       if (feedResult.status === "ok") {
         feedItems = feedResult.items;
       }
-    } catch {
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       // Feed fetch failure is non-fatal when explicit itemUrls are provided
     }
 
@@ -1117,9 +1145,11 @@ async function collectMistralNews(
     try {
       feedResult = await requestFeed(context.config.rssUrl, context.signal);
     } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       throw failureFromProblems("collect", [
         {
           message: `RSS feed request failed: ${error instanceof Error ? error.message : String(error)}`,
+          ...problemDiagnostics(error),
         },
       ]);
     }
@@ -1142,14 +1172,15 @@ async function collectMistralNews(
     }));
   }
 
-  const problems: { key?: string; message: string }[] = [];
+  const problems: MistralProblemItem[] = [];
   let processedItems = 0;
   let state: IncrementalSyncState | undefined;
   try {
     if (context.persistentState !== undefined) {
       state = await loadIncrementalSyncState(context);
     }
-  } catch {
+  } catch (error) {
+    if (context.signal.aborted) throw context.signal.reason ?? error;
     // If state load fails during collect, proceed without updating state
   }
 
@@ -1184,10 +1215,11 @@ async function collectMistralNews(
       }
       processedItems += 1;
     } catch (error) {
-      if (context.signal.aborted) throw error;
+      if (context.signal.aborted) throw context.signal.reason ?? error;
       problems.push({
         key,
         message: error instanceof Error ? error.message : String(error),
+        ...problemDiagnostics(error),
       });
     }
   }

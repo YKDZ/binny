@@ -92,7 +92,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
           sendJson(response, 503, {
             error: {
               code: "runtime_not_ready",
-              message: readiness.reason ?? "运行器尚未就绪。",
+              message: readiness.reason ?? "Runtime is not ready yet.",
             },
           });
           return;
@@ -169,7 +169,7 @@ export function createRuntimeServer(options: RuntimeServerOptions): Server {
           sendJson(response, 503, {
             error: {
               code: "runtime_not_ready",
-              message: readiness.reason ?? "运行器尚未就绪。",
+              message: readiness.reason ?? "Runtime is not ready yet.",
             },
           });
           return;

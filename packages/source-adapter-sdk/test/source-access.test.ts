@@ -1842,7 +1842,7 @@ void test("最早来源准入时刻晚于预算期限时立即停止本轮等待
   }
 });
 
-void test("省略整轮预算维度时不设上限，允许超过旧默认请求与耗时并等待冷却", async () => {
+void test("leaves unconfigured budget dimensions unbounded and waits through cooldown past former defaults", async () => {
   const controlled = createControlledClock();
   const config = sourceAccessConfigSchema.parse({
     groups: {
@@ -1935,7 +1935,7 @@ void test("省略整轮预算维度时不设上限，允许超过旧默认请求
   }
 });
 
-void test("单轮预算仅显式配置单个维度时各自独立生效", async () => {
+void test("enforces single explicitly configured budget dimensions independently", async () => {
   const controlled = createControlledClock();
   const config = sourceAccessConfigSchema.parse({
     groups: {
@@ -2053,7 +2053,7 @@ void test("单轮预算仅显式配置单个维度时各自独立生效", async 
   }
 });
 
-void test("源站冷却超出显式耗时预算时保留冷却等待原因", async () => {
+void test("preserves cooldown wait reason when source cooldown exceeds explicit elapsed budget", async () => {
   const controlled = createControlledClock();
   const config = sourceAccessConfigSchema.parse({
     groups: {

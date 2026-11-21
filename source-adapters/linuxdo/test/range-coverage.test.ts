@@ -344,9 +344,7 @@ function createActionHarness(origin: string) {
               contextBase as unknown as Parameters<
                 typeof sourceAdapter.actions.collect.execute
               >[0],
-              parsed.data as Parameters<
-                typeof sourceAdapter.actions.collect.execute
-              >[1],
+              parsed.data,
             );
       return {
         output: output as Record<string, unknown>,
@@ -718,6 +716,14 @@ void describe("Linux.do range coverage, head verification, and explicit backfill
           maxPages: 20,
         });
         assert.equal(truncatedSync.output.outcome, "partial");
+        assert.equal(truncatedSync.latestReport?.phase, "partial");
+        assert.equal(truncatedSync.latestReport?.discovery, "partial");
+        const truncatedReportScope = (
+          truncatedSync.latestReport as {
+            readonly scopes?: readonly { readonly status?: string }[];
+          }
+        ).scopes?.[0];
+        assert.equal(truncatedReportScope?.status, "partial");
         const skippedGapEntry = (
           truncatedSync.output.incompleteScopes as readonly Record<
             string,

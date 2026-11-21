@@ -232,7 +232,7 @@ const postCreatedRangeSchema = z
       .max(1_000)
       .default(20)
       .describe(
-        "帖子流扫描页数上限，省略时使用公开 schema 中声明的默认值；未确认分页耗尽时结果保留为部分状态，不等于 HTTP 请求总量。",
+        "Maximum number of post-stream pages to scan, defaulting to the value declared in the public schema; when exhaustion is unconfirmed, the outcome stays partial (distinct from total HTTP requests).",
       ),
   })
   .superRefine((range, context) => {
@@ -349,19 +349,23 @@ const syncParamsSchema = z
       .positive()
       .max(100)
       .default(20)
-      .describe("每个已接续范围扫描帖子流的页数上限，默认 20 页。"),
+      .describe(
+        "Maximum number of post-stream pages to scan per resumed scope (default: 20).",
+      ),
     maxRequests: z
       .int()
       .positive()
       .optional()
       .describe(
-        "本轮主动来源请求总数上限，含等待获准的请求；省略时不限制整轮主动请求总数。",
+        "Maximum active source requests for the run, including admitted waits; omit for no run-wide request limit.",
       ),
     maxElapsedMs: z
       .int()
       .positive()
       .optional()
-      .describe("本轮动作执行总时长上限（毫秒）；省略时不限制整轮耗时。"),
+      .describe(
+        "Maximum elapsed wall-clock time for the run in milliseconds; omit for no run-wide elapsed time limit.",
+      ),
   })
   .superRefine((params, context) => {
     if (params.targets?.length === 0) {
@@ -730,19 +734,30 @@ const listCategoriesReportSchema = z.strictObject({
   sourceAccess: sourceAccessReportSchema,
 });
 const syncRangeSchema = z.strictObject({
-  from: z.iso.datetime().describe("本轮接续范围的包含起点。"),
-  to: z.iso.datetime().describe("本轮接续范围的不包含终点。"),
+  from: z.iso.datetime().describe("Inclusive start of the resumed window."),
+  to: z.iso.datetime().describe("Exclusive end of the resumed window."),
 });
 const postRangeCoverageSchema = z.strictObject({
   pagesRead: z
     .int()
     .nonnegative()
-    .describe("本次扫描已读取的帖子流分页数（区别于整轮 HTTP 请求总数）。"),
-  maxPages: z.int().positive().describe("本次扫描允许的帖子流最大页数上限。"),
+    .describe(
+      "Number of post-stream pages read in this scan (distinct from total HTTP requests).",
+    ),
+  maxPages: z
+    .int()
+    .positive()
+    .describe("Maximum number of post-stream pages allowed for this scan."),
   lowerBoundConfirmed: z
     .boolean()
-    .describe("向下历史扫描是否已覆盖所需帖子 ID 下界或穷尽历史分页。"),
-  headVerified: z.boolean().describe("首页复查是否已追上本次扫描起点。"),
+    .describe(
+      "Whether downward historical scanning covered the required post ID lower bound or exhausted history.",
+    ),
+  headVerified: z
+    .boolean()
+    .describe(
+      "Whether the head re-check caught up with the starting point of this scan.",
+    ),
 });
 type PostRangeCoverage = z.output<typeof postRangeCoverageSchema>;
 const collectionTargetSummarySchema = z.discriminatedUnion("kind", [
@@ -763,7 +778,7 @@ const backfillCollectParamsSchema = z.strictObject({
 });
 const syncSkippedGapSchema = z.strictObject({
   range: syncRangeSchema.describe(
-    "被一小时自动接续上限跳过的 [from, to) 时间区间。",
+    "Half-open [from, to) window skipped by the 1-hour automatic sync cap.",
   ),
   message: z.string().min(1),
   backfillCollectParams: backfillCollectParamsSchema,
@@ -775,30 +790,36 @@ const collectionIncompleteScopeSchema = z.strictObject({
   message: z.string().min(1),
   target: collectionTargetSummarySchema
     .optional()
-    .describe("受影响的目标范围。"),
-  range: syncRangeSchema.optional().describe("受影响的 [from, to) 时间区间。"),
+    .describe("Affected target scope."),
+  range: syncRangeSchema
+    .optional()
+    .describe("Affected [from, to) time window."),
   pagesRead: z
     .int()
     .nonnegative()
     .optional()
-    .describe("本次扫描已读取的帖子流分页数。"),
+    .describe("Number of post-stream pages read in this scan."),
   maxPages: z
     .int()
     .positive()
     .optional()
-    .describe("本次扫描允许的帖子流最大页数上限。"),
+    .describe("Maximum number of post-stream pages allowed for this scan."),
   lowerBoundConfirmed: z
     .boolean()
     .optional()
-    .describe("向下历史扫描是否已覆盖所需帖子 ID 下界或穷尽历史分页。"),
+    .describe(
+      "Whether downward historical scanning covered the required post ID lower bound or exhausted history.",
+    ),
   headVerified: z
     .boolean()
     .optional()
-    .describe("首页复查是否已追上本次扫描起点。"),
+    .describe(
+      "Whether the head re-check caught up with the starting point of this scan.",
+    ),
   backfillCollectParams: backfillCollectParamsSchema
     .optional()
     .describe(
-      "可直接用于显式 collect 补采的参数建议（可按流量调大 maxPages）。",
+      "Ready-to-use collect parameters for explicit backfill (increase maxPages if traffic requires).",
     ),
 });
 const collectOutputSchema = z.strictObject({
@@ -836,7 +857,7 @@ const collectReportSchema = z.strictObject({
         .optional()
         .describe("按帖子创建时间筛选的左闭右开区间及有限页数上限。"),
       target: collectionTargetSummarySchema.describe(
-        "触发时请求的主题、可见范围或显式目标。",
+        "Requested topic, all-visible, or explicit targets for this run.",
       ),
       maxTopics: z
         .int()
@@ -871,7 +892,9 @@ const collectReportSchema = z.strictObject({
     .describe("本轮筛选的左闭右开创建时间范围，可按主题日期或帖子日期解释。"),
   discovery: z
     .enum(["not-started", "in-progress", "complete", "partial", "failed"])
-    .describe("目标或帖子流发现状态；页数受限或无推进时保留部分覆盖。"),
+    .describe(
+      "Target or post-stream discovery state; remains partial when page-limited or unconfirmed.",
+    ),
   stage: z.string().min(1).optional(),
   target: z.string().min(1).optional(),
   abortCause: manualRunAbortCauseSchema.optional(),
@@ -929,23 +952,31 @@ const syncBudgetReportSchema = z
       .int()
       .positive()
       .optional()
-      .describe("显式配置的主动请求总数上限；省略表示本轮不限制主动请求总数。"),
+      .describe(
+        "Explicitly configured active request limit; omitted when unbounded.",
+      ),
     maxElapsedMs: z
       .int()
       .positive()
       .optional()
-      .describe("显式配置的整轮耗时上限（毫秒）；省略表示本轮不限制整轮耗时。"),
+      .describe(
+        "Explicitly configured elapsed time limit in milliseconds; omitted when unbounded.",
+      ),
     elapsedMs: z.int().nonnegative(),
     remainingMs: z
       .int()
       .nonnegative()
       .optional()
-      .describe("仅在显式配置 maxElapsedMs 时记录剩余毫秒预算。"),
+      .describe(
+        "Remaining budget in milliseconds, recorded only when maxElapsedMs is explicitly set.",
+      ),
     stopReason: z
       .enum(["request-limit", "elapsed-time-limit", "wait-exceeds-budget"])
       .optional(),
   })
-  .describe("本轮显式配置的请求与耗时预算及执行消耗；未配置的维度省略上限。");
+  .describe(
+    "Explicitly configured request and elapsed budgets and actual usage; unconfigured dimensions omit limits.",
+  );
 const syncReportSchema = z
   .strictObject({
     phase: z.enum([
@@ -1554,10 +1585,10 @@ function rateLimitWaitDetail(
     const retryAfterSuffix =
       rateLimit.retryAfter === undefined
         ? ""
-        : `（Retry-After: ${rateLimit.retryAfter}）`;
-    return `源站返回 HTTP ${String(status)}，要求等待冷却至 ${rateLimit.cooldownUntil}${retryAfterSuffix}。`;
+        : ` (Retry-After: ${rateLimit.retryAfter})`;
+    return `Source returned HTTP ${String(status)} requiring cooldown until ${rateLimit.cooldownUntil}${retryAfterSuffix}.`;
   }
-  return `源站返回 HTTP ${String(status)} 限流/暂不可用响应，需等待后重试。`;
+  return `Source returned HTTP ${String(status)} rate-limit/unavailable response; wait before retrying.`;
 }
 
 async function ensurePageOrigin(
@@ -2020,9 +2051,10 @@ async function readSessionAccess(
       availability: "unknown",
       problem: {
         code: "linuxdo_source_rate_limited",
-        message: `Linux.do 当前会话端点受限：${rateLimitWaitDetail(session.status, session.rateLimit)}`,
-        impact: "本次检查或采集没有确认登录状态。",
-        suggestion: "等待源站冷却结束后重新触发动作。",
+        message: `Linux.do session endpoint rate-limited: ${rateLimitWaitDetail(session.status, session.rateLimit)}`,
+        impact:
+          "Login state could not be confirmed for this check or collection.",
+        suggestion: "Wait for source cooldown to expire and retry the action.",
         requiresHuman: false,
       },
       diagnostic: {
@@ -2137,9 +2169,10 @@ async function readTopic(
   if (isRateLimitedResponse(topicResponse)) {
     return accessProblem(topicId, "unknown", {
       code: "discourse_topic_rate_limited",
-      message: `Linux.do 主题读取受限：${rateLimitWaitDetail(topicResponse.status, topicResponse.rateLimit)}`,
-      impact: "本次检查或采集没有确认主题范围。",
-      suggestion: "等待源站冷却结束后重新运行。",
+      message: `Linux.do topic request rate-limited: ${rateLimitWaitDetail(topicResponse.status, topicResponse.rateLimit)}`,
+      impact:
+        "Topic scope could not be confirmed for this check or collection.",
+      suggestion: "Wait for source cooldown to expire and retry.",
       requiresHuman: false,
     });
   }
@@ -2368,9 +2401,10 @@ async function readTopicListPage(
   if (isRateLimitedResponse(response)) {
     throw sourceAdapterActionError({
       code: "discourse_target_rate_limited",
-      message: `Linux.do 列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
-      impact: "本次没有确认该目标的列表范围。",
-      suggestion: "等待源站冷却结束后重新运行 check 或 collect。",
+      message: `Linux.do topic list request rate-limited: ${rateLimitWaitDetail(response.status, response.rateLimit)}`,
+      impact: "Target list scope could not be confirmed.",
+      suggestion:
+        "Wait for source cooldown to expire and rerun check or collect.",
       requiresHuman: false,
       stage: "reading-topic-list",
       target: url.href,
@@ -2876,7 +2910,7 @@ async function readVisibleCategories(
   if (isRateLimitedResponse(response)) {
     throw categoryListFailure(
       "discourse_category_list_rate_limited",
-      `Linux.do 板块列表请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
+      `Linux.do category list request rate-limited: ${rateLimitWaitDetail(response.status, response.rateLimit)}`,
     );
   }
   if (response.kind !== "json") {
@@ -3280,7 +3314,7 @@ function syncBudgetStopMessage(
   budgetError?: SourceAccessBudgetExceededError,
 ): string {
   if (reason === "request-limit") {
-    return "本轮已达到显式配置的 maxRequests 主动请求数上限；该范围没有确认完成。";
+    return "Reached the explicitly configured maxRequests active request limit for this run; this scope was not confirmed complete.";
   }
   if (reason === "wait-exceeds-budget") {
     const cause = budgetError?.cause;
@@ -3289,11 +3323,11 @@ function syncBudgetStopMessage(
       cause.waitReason === "source_cooldown" &&
       cause.notBeforeEpochMs !== undefined
     ) {
-      return `源站要求等待冷却至 ${new Date(cause.notBeforeEpochMs).toISOString()}（HTTP ${String(cause.cooldownStatus ?? 429)}），超出显式配置的 maxElapsedMs 预算而提前停止；该范围没有确认完成。`;
+      return `Source requested cooldown until ${new Date(cause.notBeforeEpochMs).toISOString()} (HTTP ${String(cause.cooldownStatus ?? 429)}), which exceeds the explicitly configured maxElapsedMs budget; stopped early and scope was not confirmed complete.`;
     }
-    return "来源访问等待（冷却、访问间隔或并发）超出显式配置的 maxElapsedMs 预算而提前停止；该范围没有确认完成。";
+    return "Source access wait (cooldown, pacing interval, or concurrency) exceeded the explicitly configured maxElapsedMs budget; stopped early and scope was not confirmed complete.";
   }
-  return "本轮已达到显式配置的 maxElapsedMs 耗时上限；该范围没有确认完成。";
+  return "Reached the explicitly configured maxElapsedMs time limit for this run; this scope was not confirmed complete.";
 }
 
 function syncScopeName(scope: SyncScopeReference): string {
@@ -3332,7 +3366,7 @@ function buildSyncSkippedGap(plan: SyncScopePlan): SyncSkippedGap | undefined {
   const name = syncScopeName(syncScopeReference(plan.target));
   return {
     range: skippedRange,
-    message: `范围 ${name} 上次接续位置（${plan.skippedBefore}）早于一小时自动接续起点（${plan.range.from}），sync 已跳过 [${skippedRange.from}, ${skippedRange.to})；请使用 collect 的 postCreatedRange 显式补采并按流量调整 maxPages。`,
+    message: `Scope ${name} previous position (${plan.skippedBefore}) is earlier than the 1-hour automatic sync start (${plan.range.from}); sync skipped [${skippedRange.from}, ${skippedRange.to}). Use collect with postCreatedRange and adjust maxPages for traffic to backfill explicitly.`,
     backfillCollectParams: {
       targets: [plan.target],
       postCreatedRange: postCreatedRangeSchema.parse({
@@ -3790,7 +3824,7 @@ async function readPostFeedPage(
       kind: "error",
       issue: {
         reasonCode: "post_range_source_rate_limited",
-        message: `Linux.do 帖子流请求受限：${rateLimitWaitDetail(response.status, response.rateLimit)}`,
+        message: `Linux.do post-stream request rate-limited: ${rateLimitWaitDetail(response.status, response.rateLimit)}`,
         discovery: "failed",
       },
     };
@@ -4058,13 +4092,13 @@ async function scanPostCreatedRange(
   if (issue === undefined && (!historyExhausted || !headVerified)) {
     const detail =
       !historyExhausted && !headVerified
-        ? "历史下界与首页复查均未确认"
+        ? "neither the historical lower bound nor the head re-check was confirmed"
         : !historyExhausted
-          ? "首页复查已追上扫描起点，但历史下界未确认"
-          : "历史下界已确认，但首页复查未追上扫描起点";
+          ? "head re-check caught up with scan start, but historical lower bound was not confirmed"
+          : "historical lower bound was confirmed, but head re-check did not catch up with scan start";
     issue = {
       reasonCode: "post_range_page_limit_reached",
-      message: `帖子流已扫描 ${String(pagesRead)}/${String(maxPages)} 页上限，${detail}。`,
+      message: `Post-stream scan reached ${String(pagesRead)}/${String(maxPages)} pages: ${detail}.`,
       discovery: "partial",
     };
   }
@@ -5368,17 +5402,17 @@ async function collectPostCreatedRange(
         ? `topic:${String(params.topicId)}`
         : params.targets === undefined
           ? "all-visible"
-          : params.targets.map((target) => targetScope(target)).join("、");
+          : params.targets.map((target) => targetScope(target)).join(", ");
     const backfillHint =
       scan.issue.reasonCode === "post_range_page_limit_reached"
         ? scan.maxPages >= 1_000
-          ? `已达到 collect.postCreatedRange.maxPages 上限 1000，请缩小 [${range.from}, ${range.to}) 时间区间或按具体 topicId 调用 collect 显式补采。`
-          : `请使用 collect 的 postCreatedRange [${range.from}, ${range.to}) 并调大 maxPages（建议至少 ${String(suggestedMaxPages)}，上限 1000）显式补采。`
-        : `可使用 collect 的 postCreatedRange [${range.from}, ${range.to}) 显式重试补采该范围。`;
+          ? `Reached the collect.postCreatedRange.maxPages cap of 1000; narrow the [${range.from}, ${range.to}) window or run collect for specific topicIds to backfill explicitly.`
+          : `Run collect with postCreatedRange [${range.from}, ${range.to}) and a higher maxPages (suggest at least ${String(suggestedMaxPages)}, max 1000) to backfill explicitly.`
+        : `Run collect with postCreatedRange [${range.from}, ${range.to}) to retry backfilling this window explicitly.`;
     incompleteScopes.push({
       scope: rangeScope,
       reasonCode: scan.issue.reasonCode,
-      message: `${scan.issue.message} 受影响范围：${targetLabel} [${range.from}, ${range.to})，已读 ${String(scan.pagesRead)}/${String(scan.maxPages)} 页（lowerBoundConfirmed=${String(scan.lowerBoundConfirmed)}，headVerified=${String(scan.headVerified)}）；本轮已保留已确认归档结果，${backfillHint}`,
+      message: `${scan.issue.message} Affected scope: ${targetLabel} [${range.from}, ${range.to}), read ${String(scan.pagesRead)}/${String(scan.maxPages)} pages (lowerBoundConfirmed=${String(scan.lowerBoundConfirmed)}, headVerified=${String(scan.headVerified)}); confirmed archived items from this run were retained. ${backfillHint}`,
       target: affectedTarget,
       range,
       pagesRead: scan.pagesRead,
@@ -6204,8 +6238,8 @@ async function sync(
                   : incomplete.scope,
             });
           }
-          const scopeIncomplete = addedIncomplete.length > 0;
-          if (!scopeIncomplete && result.scan.complete) {
+          const windowIncomplete = addedIncomplete.length > 0;
+          if (!windowIncomplete && result.scan.complete) {
             const candidate = computeSyncScopeCandidateLowerBound(
               result.scan.posts,
               Date.parse(plan.range!.to),
@@ -6247,6 +6281,7 @@ async function sync(
               backfillCollectParams: skippedGap.backfillCollectParams,
             });
           }
+          const scopeIncomplete = windowIncomplete || skippedGap !== undefined;
           const scopeCoverage: PostRangeCoverage = {
             pagesRead: result.scan.pagesRead,
             maxPages: result.scan.maxPages,
@@ -6284,10 +6319,14 @@ async function sync(
     );
 
     const challengeRecovery = browserOutput.challengeRecovery;
-    const hasPartial = [...reportScopes.values()].some(
-      ({ status }) =>
-        status === "partial" || status === "unknown" || status === "unstarted",
-    );
+    const hasPartial =
+      incompleteScopes.length > 0 ||
+      [...reportScopes.values()].some(
+        ({ status }) =>
+          status === "partial" ||
+          status === "unknown" ||
+          status === "unstarted",
+      );
     const phase = hasPartial ? "partial" : "completed";
     await persistIntent(hasPartial ? "partial" : "completed");
     await publishReport({
@@ -6437,7 +6476,7 @@ export const sourceAdapter = defineSourceAdapter({
       linuxDoExtensionsSchema,
       {
         description:
-          "按真实 Linux.do 范围接续归档新增帖子和回复；省略 maxRequests 或 maxElapsedMs 时相应维度不设整轮上限，显式指定时按所选预算执行；已有范围按接续位置从旧到新处理，同一位置沿用原范围顺序。",
+          "Incrementally archive new posts and replies across real Linux.do scopes; omitting maxRequests or maxElapsedMs leaves that dimension unbounded for the run, while explicit values enforce the selected budget. Existing scopes process oldest-first by resumed position.",
         params: syncParamsSchema,
         output: syncOutputSchema,
         report: syncReportSchema,

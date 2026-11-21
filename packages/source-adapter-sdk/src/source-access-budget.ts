@@ -65,8 +65,8 @@ export type SourceAccessBudgetClient = SourceAccessClient & {
 };
 
 /**
- * 为一次动作执行按显式配置的维度限制主动请求数量或总耗时，准入等待仍由原客户端负责。
- * 省略某个维度时该维度不设整轮上限；显式配置 maxElapsedMs 时立即开始耗时预算。
+ * Enforces explicitly configured per-run active request or elapsed-time budgets while delegating admission waits to the underlying client.
+ * Omitted dimensions impose no run-wide cap; configuring maxElapsedMs starts the elapsed timer immediately.
  */
 export function createSourceAccessBudget(input: {
   readonly client: SourceAccessClient;
@@ -167,7 +167,9 @@ export function createSourceAccessBudget(input: {
         deadlineEpochMs = Math.floor(clock.epochNow() + remaining);
         if (!Number.isSafeInteger(deadlineEpochMs) || deadlineEpochMs < 0) {
           reservedRequests--;
-          throw new Error("来源访问预算时钟没有返回有效的 epoch 时间。");
+          throw new Error(
+            "Source access budget clock did not return a valid epoch timestamp.",
+          );
         }
       }
 

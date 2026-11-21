@@ -14,7 +14,6 @@ import {
   manualRunTriggerSchema,
   runtimeHeartbeatTimeoutMs,
   runtimeProtocolVersion,
-  runtimeWakeErrorSchema,
   type ManualRunCommitLocator,
   type ManualRun,
   type ManualRunCompletion,
@@ -54,7 +53,10 @@ import {
   preflightActionInput,
 } from "./runtime-action-validation.ts";
 import { readRuntimeExecution } from "./runtime-connection.ts";
-import type { RuntimeContainerCoordinator } from "./runtime-container.ts";
+import {
+  parseContainerWakeError,
+  type RuntimeContainerCoordinator,
+} from "./runtime-container.ts";
 
 const runSelection = {
   runId: manualRuns.runId,
@@ -328,18 +330,12 @@ async function readRun(
     }
   }
   const lastWakeError = !row.runtimeOnline
-    ? parseWakeError(container?.lastWakeError)
+    ? parseContainerWakeError(container?.lastWakeError)
     : undefined;
   return { ...row, queueReason, lastWakeError };
 }
 
 type QueueReason = ManualRun["queueReason"];
-
-function parseWakeError(raw: unknown): RuntimeWakeError | undefined {
-  if (raw === null || raw === undefined) return undefined;
-  const parsed = runtimeWakeErrorSchema.safeParse(raw);
-  return parsed.success ? parsed.data : undefined;
-}
 
 function deriveQueueReason(input: {
   readonly previousExecutionUnconfirmed: boolean;
@@ -505,7 +501,7 @@ export async function resolveQueuedRunDetails(
       }
     }
     const lastWakeError = !runtimeOnline
-      ? parseWakeError(container?.lastWakeError)
+      ? parseContainerWakeError(container?.lastWakeError)
       : undefined;
     result.set(row.runId, {
       ...(queueReason === null ? {} : { queueReason }),
