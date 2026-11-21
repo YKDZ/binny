@@ -6476,7 +6476,7 @@ export const sourceAdapter = defineSourceAdapter({
       linuxDoExtensionsSchema,
       {
         description:
-          "Incrementally archive new posts and replies across real Linux.do scopes; omitting maxRequests or maxElapsedMs leaves that dimension unbounded for the run, while explicit values enforce the selected budget. Existing scopes process oldest-first by resumed position.",
+          "Incrementally archive new posts and replies across real Linux.do scopes; omitting maxRequests or maxElapsedMs leaves that dimension unbounded for the run, while explicit values enforce the selected budget. Existing scopes process oldest-first by resumed position, preserving original scope order on ties.",
         params: syncParamsSchema,
         output: syncOutputSchema,
         report: syncReportSchema,
