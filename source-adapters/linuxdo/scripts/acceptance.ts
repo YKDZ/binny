@@ -1196,8 +1196,11 @@ async function verifyCategoryActionDiscovery(): Promise<void> {
   assert.ok(sync?.params !== undefined, "动作发现应公开 sync 参数。 ");
   assert.ok(sync.output !== undefined, "动作发现应公开 sync 结果。 ");
   assert.ok(sync.report !== undefined, "sync 应声明可发现的运行报告。 ");
-  assert.match(sync.description ?? "", /已有范围按接续位置从旧到新处理/u);
-  assert.match(sync.description ?? "", /同一位置沿用原范围顺序/u);
+  assert.match(sync.description ?? "", /oldest-first by resumed position/u);
+  assert.match(
+    sync.description ?? "",
+    /preserving original scope order on ties/u,
+  );
   const syncParams = sync.params as {
     readonly properties?: Readonly<
       Record<string, Readonly<Record<string, unknown>>>

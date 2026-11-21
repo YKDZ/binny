@@ -3217,12 +3217,18 @@ async function verifyArchiveSearchWaitCompletion(
   const lock = await holdArchiveTableReadLock("archive_commit");
   const requestBody = {
     bins: ["binny-runs-one", "binny-runs-two"],
-    extensions: {
-      sourceAdapterId: "binny-runs.manual-run-fixture",
-      filters: {
-        labels: { op: "hasAny", values: ["release", "reply"] },
-      },
-    },
+    ...(archiveModelJourney
+      ? {
+          extensions: {
+            sourceAdapterId: "binny-runs.manual-run-fixture",
+            filters: {
+              labels: { op: "hasAny", values: ["release", "reply"] },
+            },
+          },
+        }
+      : {
+          text: { in: "both", groups: [["NEEDLE"]] },
+        }),
     includeCandidates: true,
     distribution: {
       by: "date",
