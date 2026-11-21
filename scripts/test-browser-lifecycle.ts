@@ -885,7 +885,10 @@ async function waitForBinRegistration(
     const result = await cli(["bin", "get", binId]);
     if (result.code === 0) {
       const bin = cliData<Bin>(result, "found");
-      if (bin.sourceAdapterId === expectedManifest.id) {
+      if (
+        bin.sourceAdapterId === expectedManifest.id &&
+        bin.execution.status === "incompatible"
+      ) {
         const schemaResult = await cli(["bin", "config-schema", binId]);
         if (schemaResult.code === 0) {
           const declaration = cliData<BinConfigSchemaDiscovery>(
@@ -904,7 +907,6 @@ async function waitForBinRegistration(
             assert.equal(bin.id, binId);
             assert.equal(bin.identityId, binId);
             assert.deepEqual(bin.config, {});
-            assert.equal(bin.execution.status, "incompatible");
             assert.equal(
               bin.execution.error?.code,
               "runtime_configuration_incompatible",

@@ -456,47 +456,51 @@ async function dockerImageId(image: string): Promise<string> {
   return result.stdout.trim();
 }
 
-async function buildRuntimeImage(
-  task: string,
-  buildContextDirectory: string,
-): Promise<void> {
-  const result = await run("pnpm", ["exec", "turbo", "run", task], {
-    env: {
-      BINNY_IMAGE_BUILD_CONTEXT: buildContextDirectory,
-      ...environment(),
-    },
-  });
-  assert.equal(
-    result.code,
-    0,
-    "Turbo could not build the official lightweight adapter image:\n" +
-      result.stdout +
-      result.stderr,
-  );
-}
-
 async function buildRuntimeImages(): Promise<string> {
   imageBuildContextDirectory = await mkdtemp(
     path.join(tmpdir(), `${projectName}-build-context-`),
   );
   await copyImageBuildContext(repositoryRoot, imageBuildContextDirectory);
-  await buildRuntimeImage(
-    "@binny/source-adapter-runtime#image:build:protocol-fixture",
-    imageBuildContextDirectory,
+  // Build both adapters in one Turbo graph so their shared base is built once.
+  const build = await run(
+    "pnpm",
+    [
+      "exec",
+      "turbo",
+      "run",
+      "@binny/source-adapter-runtime#image:build:protocol-fixture",
+      "@binny/source-adapter-lightweight-resource-fixture#image:build",
+    ],
+    { env: { BINNY_IMAGE_BUILD_CONTEXT: imageBuildContextDirectory } },
   );
-  const baseImageId = await dockerImageId(
-    "binny/source-adapter-runtime:lightweight-v1",
-  );
-  await buildRuntimeImage(
-    "@binny/source-adapter-lightweight-resource-fixture#image:build",
-    imageBuildContextDirectory,
-  );
-  assert.equal(
-    await dockerImageId("binny/source-adapter-runtime:lightweight-v1"),
-    baseImageId,
-    "Building the extra adapter must leave the runtime base image unchanged.",
-  );
-  return baseImageId;
+  assert.equal(build.code, 0, build.stdout + build.stderr);
+
+  const baseImage = "binny/source-adapter-runtime:lightweight-v1";
+  const layers = await run("docker", [
+    "image",
+    "inspect",
+    "--format",
+    "{{json .RootFS.Layers}}",
+    baseImage,
+    runtimeImage,
+    resourceImage,
+  ]);
+  assert.equal(layers.code, 0, layers.stderr);
+  const [baseLayers, ...adapterLayers] = layers.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  assert.ok(baseLayers !== undefined && baseLayers.length > 0);
+  assert.equal(adapterLayers.length, 2);
+  for (const imageLayers of adapterLayers) {
+    assert.ok(imageLayers.length > baseLayers.length);
+    assert.deepEqual(
+      imageLayers.slice(0, baseLayers.length),
+      baseLayers,
+      "Both adapter images must extend the same lightweight runtime base.",
+    );
+  }
+  return await dockerImageId(baseImage);
 }
 
 try {
