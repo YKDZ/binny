@@ -40,6 +40,7 @@ export type DiscourseOpPost = {
   readonly id: number;
   readonly post_number: number;
   readonly title?: string | null | undefined;
+  readonly topic_title?: string | null | undefined;
   readonly created_at?: string | undefined;
   readonly username?: string | undefined;
   readonly name?: string | null | undefined;
@@ -140,8 +141,14 @@ export function isOpUnchanged(
   if (postTitle !== archivedOp.state.title) {
     return false;
   }
-  const archivedTopicTitle = archivedTopic.title ?? postTitle;
-  if ((topic.title?.trim() || null) !== archivedTopicTitle) {
+  const expectedTopicTitle =
+    topic.title?.trim() || post.topic_title?.trim() || undefined;
+  const archivedTopicTitle =
+    typeof archivedTopic.title === "string" &&
+    archivedTopic.title.trim().length > 0
+      ? archivedTopic.title
+      : undefined;
+  if (expectedTopicTitle !== archivedTopicTitle) {
     return false;
   }
 

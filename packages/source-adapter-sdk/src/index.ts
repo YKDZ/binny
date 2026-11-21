@@ -5,6 +5,7 @@ import { createApiClient } from "@binny/api/client";
 import type { JsonObject, SourceAdapterManifest } from "@binny/contracts";
 import {
   manualRunFailureSchema,
+  validateSourceAdapterSummaryFields,
   type ArchiveCommit,
   type ArchiveError,
   type ArchiveResourceMetadata,
@@ -645,6 +646,177 @@ export function defineSourceAdapter<
   return definition;
 }
 
+const searchSummaryMetaKey = "x-binny-search-summary";
+const summarySegmentPattern = /^[A-Za-z0-9_-]+$/u;
+const maxSummaryDepth = 8;
+
+/**
+ * Mark a scalar or scalar-array extension property to be included by default in
+ * archive search match summaries.
+ */
+export function searchSummaryField<TSchema extends z.ZodType>(
+  schema: TSchema,
+): TSchema {
+  return schema.meta({ [searchSummaryMetaKey]: true });
+}
+
+function isPlainSchemaRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasSummaryMarker(node: Record<string, unknown>): boolean {
+  if (node[searchSummaryMetaKey] === true) return true;
+  for (const key of ["anyOf", "oneOf"] as const) {
+    const branches = node[key];
+    if (
+      Array.isArray(branches) &&
+      branches.some(
+        (branch) =>
+          isPlainSchemaRecord(branch) && branch[searchSummaryMetaKey] === true,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function markSummaryNodeConsumed(
+  node: Record<string, unknown>,
+  consumedNodes: WeakSet<object>,
+): void {
+  if (node[searchSummaryMetaKey] === true) {
+    consumedNodes.add(node);
+  }
+  for (const key of ["anyOf", "oneOf"] as const) {
+    const branches = node[key];
+    if (!Array.isArray(branches)) continue;
+    for (const branch of branches) {
+      if (
+        isPlainSchemaRecord(branch) &&
+        branch[searchSummaryMetaKey] === true
+      ) {
+        consumedNodes.add(branch);
+      }
+    }
+  }
+}
+
+function resolveFixedObjectSchemaNode(
+  node: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  if (node.type === "object") return node;
+  if (Array.isArray(node.type)) {
+    const nonNull = node.type.filter((entry) => entry !== "null");
+    if (nonNull.length === 1 && nonNull[0] === "object") return node;
+    return undefined;
+  }
+  const branches = node.anyOf ?? node.oneOf;
+  if (Array.isArray(branches)) {
+    const nonNullBranches = branches.filter(
+      (branch): branch is Record<string, unknown> =>
+        isPlainSchemaRecord(branch) && branch.type !== "null",
+    );
+    if (nonNullBranches.length === 1) {
+      return resolveFixedObjectSchemaNode(nonNullBranches[0]!);
+    }
+  }
+  return undefined;
+}
+
+function collectMarkedSummaryPaths(
+  node: Record<string, unknown>,
+  segments: readonly string[],
+  collected: string[],
+  consumedNodes: WeakSet<object>,
+): void {
+  const objectNode = resolveFixedObjectSchemaNode(node);
+  if (objectNode === undefined || !isPlainSchemaRecord(objectNode.properties)) {
+    return;
+  }
+  for (const [key, property] of Object.entries(objectNode.properties)) {
+    if (!isPlainSchemaRecord(property)) continue;
+    const nextSegments = [...segments, key];
+    if (hasSummaryMarker(property)) {
+      if (
+        nextSegments.length > maxSummaryDepth ||
+        nextSegments.some(
+          (segment) =>
+            segment.length === 0 ||
+            segment.length > 64 ||
+            !summarySegmentPattern.test(segment),
+        )
+      ) {
+        throw new Error(
+          `Invalid search summary field path "${nextSegments.join(".")}".`,
+        );
+      }
+      markSummaryNodeConsumed(property, consumedNodes);
+      collected.push(nextSegments.join("."));
+      continue;
+    }
+    if (nextSegments.length < maxSummaryDepth) {
+      collectMarkedSummaryPaths(
+        property,
+        nextSegments,
+        collected,
+        consumedNodes,
+      );
+    }
+  }
+}
+
+function stripSummaryMarkers(
+  value: unknown,
+  consumedNodes: WeakSet<object>,
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stripSummaryMarkers(entry, consumedNodes));
+  }
+  if (!isPlainSchemaRecord(value)) return value;
+  if (Object.hasOwn(value, searchSummaryMetaKey) && !consumedNodes.has(value)) {
+    throw new Error(
+      "searchSummaryField can only mark scalar or scalar-array properties on a fixed object path up to depth 8.",
+    );
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === searchSummaryMetaKey) continue;
+    result[key] = stripSummaryMarkers(nested, consumedNodes);
+  }
+  return result;
+}
+
+function extractAndStripSearchSummaryFields(
+  rawExtensionsSchema: Record<string, unknown>,
+): {
+  readonly extensionsSchema: Record<string, unknown>;
+  readonly searchSummaryFields: readonly string[];
+} {
+  const searchSummaryFields: string[] = [];
+  const consumedNodes = new WeakSet<object>();
+  collectMarkedSummaryPaths(
+    rawExtensionsSchema,
+    [],
+    searchSummaryFields,
+    consumedNodes,
+  );
+  const extensionsSchema = stripSummaryMarkers(
+    rawExtensionsSchema,
+    consumedNodes,
+  ) as Record<string, unknown>;
+  if (searchSummaryFields.length > 0) {
+    const issues = validateSourceAdapterSummaryFields(
+      extensionsSchema,
+      searchSummaryFields,
+    );
+    if (issues.length > 0) {
+      throw new Error(issues[0]!.message);
+    }
+  }
+  return { extensionsSchema, searchSummaryFields };
+}
+
 export function sourceAdapterManifest(
   definition: SourceAdapterDefinition,
 ): SourceAdapterManifest {
@@ -666,6 +838,12 @@ export function sourceAdapterManifest(
     check: manifestAction(definition.actions.check),
     collect: manifestAction(definition.actions.collect),
   });
+  const rawExtensionsSchema = z.toJSONSchema(
+    definition.extensionsSchema.strict(),
+    { io: "input" },
+  ) as Record<string, unknown>;
+  const { extensionsSchema, searchSummaryFields } =
+    extractAndStripSearchSummaryFields(rawExtensionsSchema);
 
   return {
     id: definition.id,
@@ -675,9 +853,8 @@ export function sourceAdapterManifest(
       : { description: definition.description }),
     environment: definition.environment,
     configSchema: z.toJSONSchema(definition.configSchema, { io: "input" }),
-    extensionsSchema: z.toJSONSchema(definition.extensionsSchema.strict(), {
-      io: "input",
-    }),
+    extensionsSchema,
+    ...(searchSummaryFields.length === 0 ? {} : { searchSummaryFields }),
     ...(definition.stateSchema === undefined
       ? {}
       : {

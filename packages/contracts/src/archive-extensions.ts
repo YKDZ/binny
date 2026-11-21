@@ -1,7 +1,7 @@
 import * as z from "zod";
 
-import { sourceAdapterIdSchema } from "./bin-configuration.ts";
 import { postgresTextSchema } from "./postgres-text.ts";
+import { sourceAdapterIdSchema } from "./source-adapter-id.ts";
 
 /** Scalar JSON values that can be compared with a declared extension field. */
 export const archiveExtensionScalarSchema = z.union([
@@ -58,6 +58,26 @@ export const archiveSearchExtensionsSchema = z
   })
   .strict();
 
+export const archiveExtensionScalarTypeSchema = z.enum([
+  "string",
+  "number",
+  "integer",
+  "boolean",
+]);
+
+export const archiveSearchSummaryFieldSegmentSchema = postgresTextSchema
+  .regex(/^[A-Za-z0-9_-]+$/u)
+  .max(64);
+
+export const archiveSearchSummaryFieldPathSchema = postgresTextSchema
+  .regex(/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,7}$/u)
+  .max(128);
+
+export const archiveExtensionSummaryValueSchema = z.union([
+  archiveExtensionScalarSchema,
+  z.array(archiveExtensionScalarSchema),
+]);
+
 /**
  * Queryable field operations are derived from the property type in the saved
  * adapter extension schema. Optional or nullable fields do not match when the
@@ -78,14 +98,26 @@ export const archiveExtensionFieldDiscoverySchema = z
     nullable: z.boolean(),
     required: z.boolean(),
     description: postgresTextSchema.optional(),
-    itemType: z.enum(["string", "number", "integer", "boolean"]).optional(),
+    itemType: archiveExtensionScalarTypeSchema.optional(),
     allowedValues: z.array(archiveExtensionScalarSchema).optional(),
     allowedItemValues: z.array(archiveExtensionScalarSchema).optional(),
     operations: z.array(archiveExtensionOperationSchema),
   })
   .strict();
 
-/** Return only the selected adapter's declared top-level extension fields. */
+export const archiveExtensionSummaryFieldDiscoverySchema = z
+  .object({
+    path: archiveSearchSummaryFieldPathSchema,
+    segments: z.array(archiveSearchSummaryFieldSegmentSchema).min(1).max(8),
+    type: z.enum(["string", "number", "integer", "boolean", "array"]),
+    nullable: z.boolean(),
+    required: z.boolean(),
+    description: postgresTextSchema.optional(),
+    itemType: archiveExtensionScalarTypeSchema.optional(),
+  })
+  .strict();
+
+/** Return the selected adapter's declared extension fields and default search summary fields. */
 export const sourceAdapterExtensionFieldsDiscoverySchema = z
   .object({
     sourceAdapterId: sourceAdapterIdSchema,
@@ -94,6 +126,7 @@ export const sourceAdapterExtensionFieldsDiscoverySchema = z
       archiveExtensionFieldNameSchema,
       archiveExtensionFieldDiscoverySchema,
     ),
+    summaryFields: z.array(archiveExtensionSummaryFieldDiscoverySchema),
   })
   .strict();
 
@@ -351,6 +384,229 @@ function describeField(
   });
 }
 
+function resolveObjectBranch(
+  root: JsonSchemaObject,
+  input: JsonSchemaObject,
+): JsonSchemaObject | undefined {
+  const schema = resolveJsonSchema(root, input);
+  if (schema.type === "object") return schema;
+  if (Array.isArray(schema.type)) {
+    const nonNull = schema.type.filter((entry) => entry !== "null");
+    if (nonNull.length === 1 && nonNull[0] === "object") return schema;
+    return undefined;
+  }
+  const alternatives = schema.anyOf ?? schema.oneOf;
+  if (Array.isArray(alternatives)) {
+    const nonNullBranches = alternatives
+      .filter(isJsonSchemaObject)
+      .filter((branch) => {
+        const types = declaredSchemaTypes(root, branch);
+        return [...types].some((type) => type !== "null");
+      });
+    if (nonNullBranches.length === 1) {
+      return resolveObjectBranch(root, nonNullBranches[0]!);
+    }
+  }
+  return undefined;
+}
+
+type SummaryFieldResolution =
+  | {
+      readonly ok: true;
+      readonly field: ArchiveExtensionSummaryFieldDiscovery;
+    }
+  | { readonly ok: false; readonly message: string };
+
+function resolveSummaryFieldInSchema(
+  extensionsSchema: JsonSchemaObject,
+  path: string,
+): SummaryFieldResolution {
+  const checkedPath = archiveSearchSummaryFieldPathSchema.safeParse(path);
+  if (!checkedPath.success) {
+    return {
+      ok: false,
+      message: `Search summary field path "${path}" is invalid.`,
+    };
+  }
+  const segments = path.split(".");
+  let currentObject = resolveObjectBranch(extensionsSchema, extensionsSchema);
+  if (currentObject === undefined) {
+    return {
+      ok: false,
+      message: "Adapter extensionsSchema must describe a JSON object.",
+    };
+  }
+  let allRequired = true;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index]!;
+    const properties = currentObject.properties;
+    if (
+      !isJsonSchemaObject(properties) ||
+      !Object.hasOwn(properties, segment)
+    ) {
+      return {
+        ok: false,
+        message: `Search summary field "${path}" does not exist in extensionsSchema.`,
+      };
+    }
+    const property = properties[segment];
+    if (!isJsonSchemaObject(property)) {
+      return {
+        ok: false,
+        message: `Search summary field "${path}" does not resolve to a property schema.`,
+      };
+    }
+    const requiredList = Array.isArray(currentObject.required)
+      ? currentObject.required
+      : [];
+    if (!requiredList.includes(segment)) {
+      allRequired = false;
+    }
+    if (index < segments.length - 1) {
+      const nextObject = resolveObjectBranch(extensionsSchema, property);
+      if (nextObject === undefined) {
+        return {
+          ok: false,
+          message: `Search summary field "${path}" traverses a non-object property "${segment}".`,
+        };
+      }
+      currentObject = nextObject;
+      continue;
+    }
+
+    const described = describeField(extensionsSchema, property, allRequired);
+    const scalarOrScalarArray =
+      described.type === "string" ||
+      described.type === "number" ||
+      described.type === "integer" ||
+      described.type === "boolean" ||
+      (described.type === "array" && described.itemType !== undefined);
+    if (!scalarOrScalarArray) {
+      return {
+        ok: false,
+        message: `Search summary field "${path}" must be a scalar or scalar-array property.`,
+      };
+    }
+    return {
+      ok: true,
+      field: archiveExtensionSummaryFieldDiscoverySchema.parse({
+        path,
+        segments,
+        type: described.type,
+        nullable: described.nullable,
+        required: allRequired,
+        ...(described.description === undefined
+          ? {}
+          : { description: described.description }),
+        ...(described.itemType === undefined
+          ? {}
+          : { itemType: described.itemType }),
+      }),
+    };
+  }
+  return {
+    ok: false,
+    message: `Search summary field "${path}" could not be resolved.`,
+  };
+}
+
+/** Validate declared summary field paths against an adapter's JSON Schema. */
+export function validateSourceAdapterSummaryFields(
+  extensionsSchema: Readonly<Record<string, unknown>>,
+  searchSummaryFields: readonly string[],
+): readonly { readonly index: number; readonly message: string }[] {
+  const issues: { readonly index: number; readonly message: string }[] = [];
+  const seen = new Set<string>();
+  for (const [index, path] of searchSummaryFields.entries()) {
+    if (seen.has(path)) {
+      issues.push({
+        index,
+        message: `Search summary field "${path}" can appear only once.`,
+      });
+      continue;
+    }
+    seen.add(path);
+    const resolved = resolveSummaryFieldInSchema(extensionsSchema, path);
+    if (!resolved.ok) {
+      issues.push({ index, message: resolved.message });
+    }
+  }
+  return issues;
+}
+
+/** Resolve declared summary fields from a stored or live adapter manifest. */
+export function resolveSourceAdapterSummaryFields(manifest: {
+  readonly extensionsSchema: Readonly<Record<string, unknown>>;
+  readonly searchSummaryFields?: readonly string[] | undefined;
+}): ArchiveExtensionSummaryFieldDiscovery[] {
+  if (
+    manifest.searchSummaryFields === undefined ||
+    manifest.searchSummaryFields.length === 0
+  ) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const resolved: ArchiveExtensionSummaryFieldDiscovery[] = [];
+  for (const path of manifest.searchSummaryFields) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const outcome = resolveSummaryFieldInSchema(
+      manifest.extensionsSchema,
+      path,
+    );
+    if (outcome.ok) {
+      resolved.push(outcome.field);
+    }
+  }
+  return resolved;
+}
+
+function isArchiveExtensionScalar(value: unknown): value is ExtensionScalar {
+  if (typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "string") {
+    return postgresTextSchema.safeParse(value).success;
+  }
+  return false;
+}
+
+/**
+ * Extract adapter-declared summary values from a matched revision's stored
+ * extensions object. Absent and null values are omitted rather than guessed.
+ */
+export function extractArchiveSummaryExtensions(
+  extensionsData: unknown,
+  summaryFields: readonly ArchiveExtensionSummaryFieldDiscovery[],
+): Record<string, ArchiveExtensionSummaryValue> | undefined {
+  if (!isJsonSchemaObject(extensionsData) || summaryFields.length === 0) {
+    return undefined;
+  }
+  const entries: [string, ArchiveExtensionSummaryValue][] = [];
+  for (const field of summaryFields) {
+    let current: unknown = extensionsData;
+    let found = true;
+    for (const segment of field.segments) {
+      if (!isJsonSchemaObject(current) || !Object.hasOwn(current, segment)) {
+        found = false;
+        break;
+      }
+      current = current[segment];
+    }
+    if (!found || current === undefined || current === null) continue;
+    if (field.type === "array") {
+      if (Array.isArray(current) && current.every(isArchiveExtensionScalar)) {
+        entries.push([field.path, [...current]]);
+      }
+      continue;
+    }
+    if (isArchiveExtensionScalar(current)) {
+      entries.push([field.path, current]);
+    }
+  }
+  if (entries.length === 0) return undefined;
+  return Object.fromEntries(entries);
+}
+
 /**
  * Project an adapter's authoritative JSON Schema into a concise field catalog.
  * Nested object members stay discoverable as an object field but have no query
@@ -360,6 +616,7 @@ export function discoverSourceAdapterExtensionFields(input: {
   readonly sourceAdapterId: string;
   readonly sourceAdapterVersion: string;
   readonly extensionsSchema: Readonly<Record<string, unknown>>;
+  readonly searchSummaryFields?: readonly string[] | undefined;
 }) {
   const properties = input.extensionsSchema.properties;
   const required = Array.isArray(input.extensionsSchema.required)
@@ -387,15 +644,28 @@ export function discoverSourceAdapterExtensionFields(input: {
         ),
       )
     : {};
+  const summaryFields = resolveSourceAdapterSummaryFields({
+    extensionsSchema: input.extensionsSchema,
+    ...(input.searchSummaryFields === undefined
+      ? {}
+      : { searchSummaryFields: input.searchSummaryFields }),
+  });
   return sourceAdapterExtensionFieldsDiscoverySchema.parse({
     sourceAdapterId: input.sourceAdapterId,
     sourceAdapterVersion: input.sourceAdapterVersion,
     fields,
+    summaryFields,
   });
 }
 
 export type ArchiveExtensionScalar = z.infer<
   typeof archiveExtensionScalarSchema
+>;
+export type ArchiveExtensionSummaryValue = z.infer<
+  typeof archiveExtensionSummaryValueSchema
+>;
+export type ArchiveExtensionSummaryFieldDiscovery = z.infer<
+  typeof archiveExtensionSummaryFieldDiscoverySchema
 >;
 export type ArchiveExtensionOperation = z.infer<
   typeof archiveExtensionOperationSchema

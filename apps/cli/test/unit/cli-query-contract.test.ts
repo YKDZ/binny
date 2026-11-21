@@ -151,6 +151,32 @@ function fakeService(options: {
             operations: ["has", "hasAny"],
           },
         },
+        summaryFields: [
+          {
+            path: "category",
+            segments: ["category"],
+            type: "string",
+            nullable: false,
+            required: false,
+            description: "The item's category.",
+          },
+          {
+            path: "labels",
+            segments: ["labels"],
+            type: "array",
+            nullable: true,
+            required: false,
+            description: "Labels on the item.",
+            itemType: "string",
+          },
+        ],
+      });
+    if (url.pathname === "/bins/plain-main/extension-fields")
+      return Response.json({
+        sourceAdapterId: "plain",
+        sourceAdapterVersion: "1.0.0",
+        fields: {},
+        summaryFields: [],
       });
     if (url.pathname === "/bins") return Response.json({ bins: [] });
     if (
@@ -237,7 +263,13 @@ void describe("查询服务发现", () => {
     assert.equal(result.exitCode, 0, result.output);
     assert.match(result.output, /Product: Binny 1\.2\.3/u);
     assert.match(result.output, /archive\.query-contract/u);
-    assert.match(result.output, /Archive query v4: \/meta\/query/u);
+    assert.match(
+      result.output,
+      new RegExp(
+        `Archive query v${String(archiveQueryContractVersion)}: \\/meta\\/query`,
+        "u",
+      ),
+    );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
   });
 
@@ -292,11 +324,119 @@ void describe("查询服务发现", () => {
     assert.match(result.output, /- labels: array \(nullable\)/u);
     assert.match(result.output, /Allowed item values: \["news","release"\]/u);
     assert.match(result.output, /Operations: has, hasAny/u);
+    assert.match(result.output, /Summary fields: category, labels/u);
     assert.match(
       result.output,
       /Missing and null extension values do not match filters\./u,
     );
     assert.doesNotMatch(result.output, /"kind"\s*:/u);
+
+    const plainText = await run(
+      ["bin", "extension-fields", "plain-main", "--output", "text"],
+      service.fetch,
+    );
+    assert.equal(plainText.exitCode, 0, plainText.output);
+    assert.match(plainText.output, /Summary fields: none/u);
+  });
+
+  void it("renders per-view summaryExtensions neutrally in structured and text archive search output", async () => {
+    const service = fakeService({
+      searchResponse: {
+        snapshot: { asOf: "12", mode: "current" },
+        candidatesIncluded: true,
+        candidateOrder: { field: "observedAt", direction: "desc" },
+        results: [
+          {
+            itemId: "11111111-1111-4111-8111-111111111111",
+            sourceKey: { namespace: "forum", key: "post:202" },
+            title: "Reply own title",
+            sourcePublishedAt: null,
+            sourceModifiedAt: null,
+            observedAt: "2026-11-10T02:00:00.000Z",
+            matches: [
+              {
+                binId: "bin-one",
+                revisionId: "22222222-2222-4222-8222-222222222222",
+                archiveSeq: "12",
+                observedAt: "2026-11-10T02:00:00.000Z",
+                recordedAt: "2026-11-10T02:00:01.000Z",
+                title: "Reply own title",
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 2,
+                  "topic.title": "Topic Title A",
+                  tags: ["alpha", "beta"],
+                },
+              },
+              {
+                binId: "bin-two",
+                revisionId: "33333333-3333-4333-8333-333333333333",
+                archiveSeq: "10",
+                observedAt: "2026-11-10T01:00:00.000Z",
+                recordedAt: "2026-11-10T01:00:01.000Z",
+                title: null,
+                sourcePublishedAt: null,
+                sourceModifiedAt: null,
+                summaryExtensions: {
+                  postNumber: 2,
+                },
+              },
+            ],
+          },
+        ],
+        hasMore: false,
+      },
+    });
+
+    const structured = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ text: { groups: [["reply"]] } }),
+      ],
+      service.fetch,
+    );
+    assert.equal(structured.exitCode, 0, structured.output);
+    const wire = JSON.parse(structured.output) as {
+      readonly data: {
+        readonly results: readonly {
+          readonly matches: readonly {
+            readonly binId: string;
+            readonly summaryExtensions?: Record<string, unknown>;
+          }[];
+        }[];
+      };
+    };
+    assert.deepEqual(wire.data.results[0]?.matches[0]?.summaryExtensions, {
+      postNumber: 2,
+      "topic.title": "Topic Title A",
+      tags: ["alpha", "beta"],
+    });
+    assert.deepEqual(wire.data.results[0]?.matches[1]?.summaryExtensions, {
+      postNumber: 2,
+    });
+
+    const textResult = await run(
+      [
+        "archive",
+        "search",
+        "--query",
+        JSON.stringify({ text: { groups: [["reply"]] } }),
+        "--output",
+        "text",
+      ],
+      service.fetch,
+    );
+    assert.equal(textResult.exitCode, 0, textResult.output);
+    assert.match(textResult.output, /- Reply own title/u);
+    assert.match(
+      textResult.output,
+      /  View bin-one: title="Reply own title", postNumber=2, topic\.title="Topic Title A", tags=\["alpha","beta"\]/u,
+    );
+    assert.match(textResult.output, /  View bin-two: postNumber=2/u);
+    assert.doesNotMatch(textResult.output, /"kind"\s*:/u);
   });
 
   void it("returns structured allowed values for a local fixed-search enum failure", async () => {

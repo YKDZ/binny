@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type {
-  ArchiveResourceMetadata,
-  ArchiveResourceResolveItem,
-  ArchiveResourceResolveRequest,
-  ArchiveResourceResolveResult,
+import {
+  sourceAdapterManifest,
+  type ArchiveResourceMetadata,
+  type ArchiveResourceResolveItem,
+  type ArchiveResourceResolveRequest,
+  type ArchiveResourceResolveResult,
 } from "@binny/source-adapter-sdk";
 import type { APIRequestContext, Page } from "patchright-core";
 
@@ -17,6 +18,7 @@ import {
 import {
   archivePost,
   bindPageSourceAccessForTest,
+  sourceAdapter,
 } from "../src/source-adapter.ts";
 
 const siteOrigin = new URL("https://linux.do");
@@ -118,7 +120,11 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
         postVersion: 1,
         cookedHash: hashContent("<p>主帖正文内容</p>"),
         media: [],
-        topic: { slug: "linuxdo-architecture", createdAt: null },
+        topic: {
+          slug: "linuxdo-architecture",
+          createdAt: null,
+          title: "Linux.do 架构探讨",
+        },
       },
       body: {
         markdown:
@@ -138,6 +144,19 @@ void test("isOpUnchanged detects unchanged and modified OP posts and topic metad
 
   // 1. Matches completely
   assert.equal(isOpUnchanged(topic, post, archivedOp), true);
+
+  // 1b. Legacy OP lacking extensions.topic.title does not reuse when source provides topic title
+  const legacyOpWithoutTopicTitle: ArchiveResourceResolveItem = {
+    ...archivedOp,
+    state: {
+      ...archivedOp.state,
+      extensions: {
+        ...archivedOp.state.extensions,
+        topic: { slug: "linuxdo-architecture", createdAt: null },
+      },
+    },
+  };
+  assert.equal(isOpUnchanged(topic, post, legacyOpWithoutTopicTitle), false);
 
   // 2. Title changed (e.g. topicVersion bump)
   assert.equal(
@@ -323,7 +342,7 @@ void test("Unchanged OP context in sync and collect reuses Core-verified resourc
         media: [
           { url: immutableUrl1, resourceId: verifiedResource.resourceId },
         ],
-        topic: { slug: "test", createdAt: null },
+        topic: { slug: "test", createdAt: null, title: "测试主题" },
       },
       body: {
         markdown: `旧主帖正文：![封面](binny://resource/${verifiedResource.resourceId})`,
@@ -493,7 +512,7 @@ void test("Unchanged OP post with mutable media URL does not skip source downloa
           },
           { url: mutableUrl, resourceId: oldMutableResourceId },
         ],
-        topic: { slug: "test", createdAt: null },
+        topic: { slug: "test", createdAt: null, title: "测试主题" },
       },
       body: {
         markdown: `旧主帖正文：![不可变](binny://resource/${verifiedImmutableResource.resourceId})![可变](binny://resource/${oldMutableResourceId})`,
@@ -908,7 +927,11 @@ void test("Mutable and non-hashed URLs on edited/new posts download normally fro
       `<p>编辑后的可变封面：<img src="${mutableUrl}"></p>`,
     ),
     media: [{ url: mutableUrl, resourceId: uploadedResource.resourceId }],
-    topic: { slug: "mutable-topic", createdAt: "2026-10-28T00:00:00.000Z" },
+    topic: {
+      slug: "mutable-topic",
+      createdAt: "2026-10-28T00:00:00.000Z",
+      title: "可变媒体主题",
+    },
   });
   assert.ok(
     result.state.body?.markdown?.includes(
@@ -1150,4 +1173,109 @@ void test("Cross-origin external media downloads via request.get and uploads to 
   assert.deepEqual(result.state.extensions.media, [
     { url: externalUrl, resourceId: uploadedResource.resourceId },
   ]);
+});
+
+void test("linuxdo manifest declares searchSummaryFields and archivePost stores explicit topic titles faithfully", async () => {
+  const manifest = sourceAdapterManifest(sourceAdapter);
+  assert.deepEqual(manifest.searchSummaryFields, ["postNumber", "topic.title"]);
+  assert.equal(
+    JSON.stringify(manifest.extensionsSchema).includes(
+      "x-binny-search-summary",
+    ),
+    false,
+  );
+
+  const mockContext = {
+    binId: "binny-test-bin",
+    identityId: "test-identity",
+    runId: "test-run",
+    referenceTime: "2026-10-28T00:00:00.000Z",
+    sourceAdapterVersion: "1.0.1",
+    config: { origin: "https://linux.do" },
+    signal: new AbortController().signal,
+    resources: {
+      async resolve() {
+        return { resources: [], items: [], mediaByUrl: {} };
+      },
+      async upload() {
+        throw new Error("Unexpected upload");
+      },
+    },
+    archive: {
+      async submit() {
+        throw new Error("Unexpected submit");
+      },
+    },
+  } as unknown as Parameters<typeof archivePost>[2];
+
+  const mockPage = createMockPage({
+    html: "<p>Reply body</p>",
+    text: "Reply body",
+    media: [],
+  });
+  const mockRequest = {
+    async get() {
+      throw new Error("Unexpected request");
+    },
+  } as unknown as APIRequestContext;
+
+  const replyWithTopicTitleOnPost = await archivePost(
+    mockPage.page,
+    mockRequest,
+    mockContext,
+    siteOrigin,
+    siteNamespace,
+    {
+      id: 701,
+      slug: "topic-title-fallback",
+      post_stream: { posts: [] },
+    },
+    {
+      id: 7002,
+      post_number: 2,
+      topic_title: "  Topic Title From Post Payload  ",
+      cooked: "<p>Reply body</p>",
+      created_at: "2026-10-28T06:00:00.000Z",
+      updated_at: "2026-10-28T06:00:00.000Z",
+      reply_to_post_number: 1,
+    },
+    [],
+    new Map(),
+  );
+  assert.equal(replyWithTopicTitleOnPost.state.title, null);
+  assert.deepEqual(replyWithTopicTitleOnPost.state.extensions.topic, {
+    slug: "topic-title-fallback",
+    createdAt: null,
+    title: "Topic Title From Post Payload",
+  });
+
+  const postWithoutTopicTitle = await archivePost(
+    mockPage.page,
+    mockRequest,
+    mockContext,
+    siteOrigin,
+    siteNamespace,
+    {
+      id: 702,
+      slug: "no-topic-title",
+      post_stream: { posts: [] },
+    },
+    {
+      id: 7003,
+      post_number: 3,
+      title: "Post Own Title",
+      cooked: "<p>Reply body</p>",
+      created_at: "2026-10-28T06:00:00.000Z",
+      updated_at: "2026-10-28T06:00:00.000Z",
+      reply_to_post_number: 1,
+    },
+    [],
+    new Map(),
+  );
+  assert.equal(postWithoutTopicTitle.state.title, "Post Own Title");
+  assert.equal(
+    "title" in
+      (postWithoutTopicTitle.state.extensions.topic as Record<string, unknown>),
+    false,
+  );
 });
