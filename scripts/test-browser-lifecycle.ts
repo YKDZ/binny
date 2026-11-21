@@ -403,7 +403,7 @@ async function createComposeOverlay(): Promise<void> {
       "services:",
       "  server:",
       "    environment:",
-      '      BINNY_HUMAN_SESSION_VIEWER_WAIT_MS: "15000"',
+      '      BINNY_HUMAN_SESSION_VIEWER_WAIT_MS: "10000"',
       "    ports: !override",
       '      - "3000"',
       "  browser-session-source:",
@@ -1584,7 +1584,7 @@ async function assertVncStopped(
     service,
     "node",
     "-e",
-    'const fs = require("node:fs"); const rows = ["/proc/net/tcp", "/proc/net/tcp6"].flatMap(file => fs.readFileSync(file, "utf8").trim().split("\\n").slice(1)); const entries = rows.map(line => line.trim().split(/\\s+/u)).filter(fields => fields[3] === "0A" && fields[1]?.endsWith(":170C")); if (entries.length > 0) process.exit(2);',
+    'const fs = require("node:fs"); const rows = ["/proc/net/tcp", "/proc/net/tcp6"].flatMap(file => fs.readFileSync(file, "utf8").trim().split("\\n").slice(1)); const entries = rows.map(line => line.trim().split(/\\s+/u)).filter(fields => fields[3] === "0A" && fields[1]?.endsWith(":170C")); if (entries.length > 0) process.exit(2); const leftover = fs.readdirSync("/tmp").filter((name) => /^binny-vnc-.*\\.(?:passwd|sock)$/u.test(name)); if (leftover.length > 0) { console.error(leftover.join(",")); process.exit(3); }',
   ]);
   assert.equal(listeners.code, 0, listeners.stderr);
 }
@@ -2134,6 +2134,7 @@ async function main(): Promise<void> {
     port: readyLogin.port,
     password: readyLogin.password,
   });
+  const loginConnectedAt = Date.now();
   await vncViewer.expectRejectedConnection({
     host: readyLogin.host,
     port: readyLogin.port,
@@ -2157,7 +2158,19 @@ async function main(): Promise<void> {
     "Primary TigerVNC viewer disconnected after rejected clients.",
   );
   await enterLoginThroughVnc(loginViewer, 3_600, 0);
-  await delay(5_000);
+
+  // Stay connected past 2 * BINNY_HUMAN_SESSION_VIEWER_WAIT_MS (20s) to prove
+  // connected sessions are not subject to the first-connect expiry timer.
+  const remainingExtendedMs = 21_000 - (Date.now() - loginConnectedAt);
+  if (remainingExtendedMs > 0) await delay(remainingExtendedMs);
+  assert.equal(
+    cliData<HumanSessionStatus>(
+      await cli(["human", "get", "binny-browser-one", readyLogin.sessionId]),
+      "found",
+    ).status,
+    "ready",
+    "Connected TigerVNC session expired after exceeding 2 * viewerWaitMs.",
+  );
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
@@ -2168,20 +2181,40 @@ async function main(): Promise<void> {
       ?.status,
     "ready",
   );
-  await closeHumanSession("binny-browser-one", readyLogin.sessionId);
-  const loginViewerExited = await loginViewer.waitForExit();
-  assert.equal(
-    loginViewerExited.exited,
-    true,
-    `TigerVNC viewer stayed running after close:\n${loginViewerExited.log}`,
+
+  // Interact on the desktop after exceeding 2 * viewerWaitMs and open a gated
+  // page so we can verify SIGKILL tears down x11vnc and unloads human tabs.
+  const sigkillPageGateId = randomUUID();
+  const sigkillPageGate = await createGate(sigkillPageGateId);
+  await loginViewer.navigateTo(
+    `http://browser-session-source:8081/protected?gate=${sigkillPageGateId}`,
   );
+  await waitForGateStarted(sigkillPageGateId, sigkillPageGate);
+  const sigkillQueuedRun = await triggerRun("binny-browser-one", "collect");
+  assert.equal(sigkillQueuedRun.status, "queued");
+  assert.equal(sigkillQueuedRun.queueReason, "human_session_active");
+
+  await loginViewer.killForce();
+  const sigkillClosed = await waitForHuman(
+    "binny-browser-one",
+    readyLogin.sessionId,
+    "closed",
+  );
+  assert.equal(sigkillClosed.status, "closed");
+  await assertVncStopped("browser-one");
+  await waitForGateUnload(sigkillPageGateId, sigkillPageGate);
   await vncViewer.expectRejectedConnection({
     host: readyLogin.host,
     port: readyLogin.port,
     password: readyLogin.password,
   });
-  await assertVncStopped("browser-one");
-  await loginViewer.closeGracefully();
+  const sigkillRunDone = await waitForRun(
+    "binny-browser-one",
+    sigkillQueuedRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(sigkillRunDone.status, "completed");
+  assert.ok((sigkillRunDone.result?.commits.length ?? 0) > 0);
   assert.ok(readyLogin.readyAt !== undefined);
   await waitForContainerSleeping("binny-browser-one", "browser-one");
   await waitForBrowserProcessesStopped("browser-one");
@@ -2202,6 +2235,75 @@ async function main(): Promise<void> {
     humanWakeProcess.startTime,
     "check did not wake container and restart browser.",
   );
+
+  // Verify explicit human close disconnects an online viewer, unloads human
+  // pages, and invalidates the previous password even when reusing the same host port.
+  await updateBin("binny-browser-one", 30);
+  const reuseContainerBefore = await browserRuntimeContainerInfo("browser-one");
+  const reuseSessionA = (await openHumanSessionStream("binny-browser-one"))
+    .ready;
+  const viewerA = await vncViewer.connect({
+    host: reuseSessionA.host,
+    port: reuseSessionA.port,
+    password: reuseSessionA.password,
+  });
+  const closePageGateId = randomUUID();
+  const closePageGate = await createGate(closePageGateId);
+  await viewerA.navigateTo(
+    `http://browser-session-source:8081/protected?gate=${closePageGateId}`,
+  );
+  await waitForGateStarted(closePageGateId, closePageGate);
+  const closeQueuedRun = await triggerRun("binny-browser-one", "collect");
+  assert.equal(closeQueuedRun.status, "queued");
+  assert.equal(closeQueuedRun.queueReason, "human_session_active");
+
+  await closeHumanSession("binny-browser-one", reuseSessionA.sessionId);
+  const viewerAExited = await viewerA.waitForExit();
+  assert.equal(
+    viewerAExited.exited,
+    true,
+    `TigerVNC viewer stayed running after explicit human close:\n${viewerAExited.log}`,
+  );
+  await viewerA.closeGracefully();
+  await waitForGateUnload(closePageGateId, closePageGate);
+  await assertVncStopped("browser-one");
+  const closeRunDone = await waitForRun(
+    "binny-browser-one",
+    closeQueuedRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(closeRunDone.status, "completed");
+  assert.ok((closeRunDone.result?.commits.length ?? 0) > 0);
+
+  const reuseContainerAfterA = await browserRuntimeContainerInfo("browser-one");
+  assert.equal(reuseContainerAfterA.id, reuseContainerBefore.id);
+  assert.equal(reuseContainerAfterA.startedAt, reuseContainerBefore.startedAt);
+
+  const reuseSessionB = (await openHumanSessionStream("binny-browser-one"))
+    .ready;
+  assert.equal(
+    reuseSessionB.port,
+    reuseSessionA.port,
+    "Expected same running container to reuse identical host-mapped VNC port.",
+  );
+  assert.notEqual(reuseSessionB.password, reuseSessionA.password);
+  await vncViewer.expectRejectedConnection({
+    host: reuseSessionB.host,
+    port: reuseSessionB.port,
+    password: reuseSessionA.password,
+  });
+  const viewerB = await vncViewer.connect({
+    host: reuseSessionB.host,
+    port: reuseSessionB.port,
+    password: reuseSessionB.password,
+  });
+  assert.equal(await viewerB.isAlive(), true);
+  await closeHumanSession("binny-browser-one", reuseSessionB.sessionId);
+  const viewerBExited = await viewerB.waitForExit();
+  assert.equal(viewerBExited.exited, true);
+  await viewerB.closeGracefully();
+  await assertVncStopped("browser-one");
+  await updateBin("binny-browser-one", 4);
 
   const adjacentCollect = await triggerRun("binny-browser-one", "collect");
   const adjacentCollectResult = await waitForRun(
@@ -2562,6 +2664,7 @@ async function main(): Promise<void> {
   );
   await updateBin("binny-browser-one", 30);
 
+  await updateBin("binny-browser-one", 5);
   const restartSurvived = (await openHumanSessionStream("binny-browser-one"))
     .ready;
   const restartViewer = await vncViewer.connect({
@@ -2569,14 +2672,39 @@ async function main(): Promise<void> {
     port: restartSurvived.port,
     password: restartSurvived.password,
   });
+  const restartInitialMetrics = await sourceMetrics();
+  const restartFormIndex = restartInitialMetrics.loginFormsReady;
+  const restartSubmissionIndex = restartInitialMetrics.loginSubmissions.length;
+  const restartProtectedIndex =
+    restartInitialMetrics.authenticatedProtectedVisits.length;
+  await restartViewer.navigateTo(
+    "http://browser-session-source:8081/login?lifetime=3600",
+  );
+  await waitForLoginFormReady(restartFormIndex);
+  await restartViewer.typeText("binny-browser-user", 10);
+  await restartViewer.pressKey("Tab");
+
+  const restartQueuedRun = await triggerRun("binny-browser-one", "collect");
+  assert.equal(restartQueuedRun.status, "queued");
+  assert.equal(restartQueuedRun.queueReason, "human_session_active");
+
+  const restartWindowStart = Date.now();
   await compose(["restart", "server"]);
   await waitForApi();
   serverPort = await publishedPort("server", 3000);
   await waitForRuntime("binny-browser-one");
+  if (Date.now() - restartWindowStart < 6_000) {
+    await delay(6_000 - (Date.now() - restartWindowStart));
+  }
   assert.equal(
     await restartViewer.isAlive(),
     true,
     "Active TigerVNC session disconnected during server restart.",
+  );
+  assert.equal(
+    (await readBin("binny-browser-one")).execution.status,
+    "online",
+    "Browser container slept during active human session and server restart.",
   );
   assert.equal(
     (
@@ -2588,17 +2716,77 @@ async function main(): Promise<void> {
     ).status,
     "ready",
   );
-  const restartFormIndex = (await sourceMetrics()).loginFormsReady;
-  await restartViewer.navigateTo(
-    "http://browser-session-source:8081/login?lifetime=3600",
+  const queuedAcrossRestart = await readRun(
+    "binny-browser-one",
+    restartQueuedRun.runId,
   );
-  await waitForLoginFormReady(restartFormIndex);
+  assert.equal(queuedAcrossRestart.status, "queued");
+  assert.equal(queuedAcrossRestart.queueReason, "human_session_active");
+
+  await restartViewer.typeText("browser-session", 10);
+  await restartViewer.pressKey("Tab");
+  await restartViewer.pressKey("Return");
+  await waitForLoginSubmission(restartSubmissionIndex);
+  await waitForAuthenticatedVisit(restartProtectedIndex);
+  assert.equal(
+    (await readRun("binny-browser-one", restartQueuedRun.runId)).status,
+    "queued",
+  );
+
   await closeHumanSession("binny-browser-one", restartSurvived.sessionId);
   const restartViewerExited = await restartViewer.waitForExit();
   assert.equal(restartViewerExited.exited, true);
   await restartViewer.closeGracefully();
   await assertVncStopped("browser-one");
+
+  const restartUnblockedRun = await waitForRun(
+    "binny-browser-one",
+    restartQueuedRun.runId,
+    (run) => run.status === "completed" || run.status === "failed",
+  );
+  assert.equal(restartUnblockedRun.status, "completed");
+  assert.ok((restartUnblockedRun.result?.commits.length ?? 0) > 0);
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
+  await waitForBrowserProcessesStopped("browser-one");
+
+  // Also verify idle sleep countdown with no queued run starts strictly after
+  // close confirmation (even across a server restart while connected).
+  await updateBin("binny-browser-one", 5);
+  const restartSleepSession = (
+    await openHumanSessionStream("binny-browser-one")
+  ).ready;
+  const restartSleepViewer = await vncViewer.connect({
+    host: restartSleepSession.host,
+    port: restartSleepSession.port,
+    password: restartSleepSession.password,
+  });
+  const sleepRestartAt = Date.now();
+  await compose(["restart", "server"]);
+  await waitForApi();
+  serverPort = await publishedPort("server", 3000);
   await waitForRuntime("binny-browser-one");
+  if (Date.now() - sleepRestartAt < 6_000) {
+    await delay(6_000 - (Date.now() - sleepRestartAt));
+  }
+  assert.equal(await restartSleepViewer.isAlive(), true);
+  assert.equal((await readBin("binny-browser-one")).execution.status, "online");
+  await closeHumanSession("binny-browser-one", restartSleepSession.sessionId);
+  const closeConfirmedAt = Date.now();
+  await restartSleepViewer.waitForExit();
+  await restartSleepViewer.closeGracefully();
+  await assertVncStopped("browser-one");
+  await delay(2_500);
+  assert.equal(
+    (await readBin("binny-browser-one")).execution.status,
+    "online",
+    "Idle countdown started before human session close confirmation.",
+  );
+  await waitForContainerSleeping("binny-browser-one", "browser-one");
+  assert.ok(
+    Date.now() - closeConfirmedAt >= 4_500,
+    "Container slept earlier than idleTimeoutSeconds after close confirmation.",
+  );
+  await updateBin("binny-browser-one", 30);
 
   const profileTwoCheck = await triggerRun("binny-browser-two", "check");
   const profileTwoCheckResult = await waitForRun(
@@ -2963,7 +3151,7 @@ async function main(): Promise<void> {
     "--url",
     `http://${publishedHost}:${String(serverPort)}`,
   ]);
-  await delay(6_000);
+  await delay(5_000);
   await releaseGate(independentTimerGateId, independentTimerGate);
   const independentOpen = parseHumanOpenStream(await delayedOpenPromise);
   assert.ok(
@@ -2977,8 +3165,8 @@ async function main(): Promise<void> {
     (run) => run.status === "completed" || run.status === "failed",
   );
   assert.equal(independentRunDone.status, "completed");
-  // Wait 10s after ready (>16s since requestedAt, yet <15s since x11vnc ready).
-  await delay(10_000);
+  // Wait 6s after ready (>11s since requestedAt, yet <10s since x11vnc ready).
+  await delay(6_000);
   const stillReady = cliData<HumanSessionStatus>(
     await cli([
       "human",
