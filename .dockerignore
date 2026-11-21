@@ -13,11 +13,20 @@ GLOSSARY*.md
 **/GLOSSARY*.md
 node_modules
 **/node_modules
+.pnpm-store
+**/.pnpm-store
 **/dist
 **/fixture-dist
 coverage
+**/coverage
 *.log
+**/*.log
+data
+playwright-report
+test-results
+.vitest
 
 .turbo
+**/.turbo
 .env
 .env.*

@@ -211,6 +211,7 @@
         "packages/source-adapter-runtime/Dockerfile.protocol-fixture",
         "scripts/test-runtime-connections.ts",
         "scripts/binny-cli-adapter-discovery.ts",
+        "scripts/binny-image-update-context.ts",
         "packages/api/src/**",
         "apps/cli/src/**",
         "packages/source-adapter-runtime/src/**",

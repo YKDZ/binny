@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { assertBinActionDeclarations } from "./binny-cli-adapter-discovery.ts";
+import { copyImageBuildContext } from "./binny-image-update-context.ts";
 
 type ProcessResult = {
   readonly code: number;
@@ -54,6 +55,7 @@ let runtimeTwoPort = 0;
 let runtimeResourcePort = 0;
 let composeOverlayDirectory: string | undefined;
 let composeOverlayFile: string | undefined;
+let imageBuildContextDirectory: string | undefined;
 
 function environment(): Readonly<Record<string, string>> {
   return {
@@ -454,10 +456,13 @@ async function dockerImageId(image: string): Promise<string> {
   return result.stdout.trim();
 }
 
-async function buildRuntimeImage(task: string): Promise<void> {
+async function buildRuntimeImage(
+  task: string,
+  buildContextDirectory: string,
+): Promise<void> {
   const result = await run("pnpm", ["exec", "turbo", "run", task], {
     env: {
-      BINNY_IMAGE_BUILD_CONTEXT: repositoryRoot,
+      BINNY_IMAGE_BUILD_CONTEXT: buildContextDirectory,
       ...environment(),
     },
   });
@@ -471,14 +476,20 @@ async function buildRuntimeImage(task: string): Promise<void> {
 }
 
 async function buildRuntimeImages(): Promise<string> {
+  imageBuildContextDirectory = await mkdtemp(
+    path.join(tmpdir(), `${projectName}-build-context-`),
+  );
+  await copyImageBuildContext(repositoryRoot, imageBuildContextDirectory);
   await buildRuntimeImage(
     "@binny/source-adapter-runtime#image:build:protocol-fixture",
+    imageBuildContextDirectory,
   );
   const baseImageId = await dockerImageId(
     "binny/source-adapter-runtime:lightweight-v1",
   );
   await buildRuntimeImage(
     "@binny/source-adapter-lightweight-resource-fixture#image:build",
+    imageBuildContextDirectory,
   );
   assert.equal(
     await dockerImageId("binny/source-adapter-runtime:lightweight-v1"),
@@ -786,4 +797,6 @@ try {
   );
   if (composeOverlayDirectory !== undefined)
     await rm(composeOverlayDirectory, { recursive: true, force: true });
+  if (imageBuildContextDirectory !== undefined)
+    await rm(imageBuildContextDirectory, { recursive: true, force: true });
 }

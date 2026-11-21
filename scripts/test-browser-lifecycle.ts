@@ -2172,10 +2172,11 @@ async function main(): Promise<void> {
   assert.match(readyBinText.stdout, /^Runtime connection: online$/mu);
   assert.match(readyBinText.stdout, /^Browser: ready$/mu);
   const initialBrowserProcess = await browserMainProcess("browser-one");
-  await updateBin("binny-browser-one", 4);
+  await updateBin("binny-browser-one", "disabled");
+  await updateBin("binny-browser-one", 12);
   await delay(1_500);
   await updateBin("binny-browser-one", "disabled");
-  await delay(4_000);
+  await delay(12_000);
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
@@ -2444,10 +2445,11 @@ async function main(): Promise<void> {
     "collect did not wake container and restart browser.",
   );
 
-  await updateBin("binny-browser-one", 4);
+  await updateBin("binny-browser-one", "disabled");
+  await updateBin("binny-browser-one", 12);
   await delay(1_500);
-  await updateBin("binny-browser-one", 30);
-  await delay(3_500);
+  await updateBin("binny-browser-one", 60);
+  await delay(12_000);
   assert.equal(
     (await readBin("binny-browser-one")).execution.status,
     "online",
@@ -2690,14 +2692,15 @@ async function main(): Promise<void> {
   await waitForContainerSleeping("binny-browser-two", "browser-two");
   await waitForBrowserProcessesStopped("browser-two");
 
-  await updateBin("binny-browser-one", 4);
+  await updateBin("binny-browser-one", "disabled");
+  await updateBin("binny-browser-one", 10);
   const gateId = randomUUID();
   const gate = await createGate(gateId);
   const gatedRun = await triggerRun("binny-browser-one", "collect", { gateId });
   await waitForGateStarted(gateId, gate);
   await delay(300);
   await refreshGate(gateId, gate);
-  await delay(4_500);
+  await delay(11_000);
   await refreshGate(gateId, gate);
   assert.ok(gate.touches > 0, "受控页面没有保持自动阶段活动状态。");
   assert.equal(
