@@ -483,6 +483,23 @@ function createFakeDatabase(initial: {
                   return [{ ...row }];
                 }
               }
+              if (table === humanSessions) {
+                const sessionId = compiled.params.find(
+                  (param): param is string =>
+                    typeof param === "string" && sessions.has(param),
+                );
+                const updated: HumanSessionRow[] = [];
+                for (const row of sessions.values()) {
+                  if (sessionId !== undefined && row.sessionId !== sessionId)
+                    continue;
+                  if (binId !== undefined && row.binId !== binId) continue;
+                  for (const [k, v] of Object.entries(values)) {
+                    (row as Record<string, unknown>)[k] = resolveValue(v);
+                  }
+                  updated.push({ ...row });
+                }
+                return updated;
+              }
               return [];
             };
             return Object.assign(Promise.resolve().then(applyUpdate), {
@@ -1963,6 +1980,72 @@ void describe("runtime container coordinator", () => {
     assert.equal(single.ok, true);
     if (single.ok) {
       assert.deepEqual(single.value.runtimeSleep, { idleTimeoutSeconds: null });
+    }
+  });
+
+  void it("resolves live container VNC host ports across container recreation and settles disconnected human sessions on startup", async () => {
+    const db = createFakeDatabase({
+      bins: [makeLightweightBin("bin-vnc-live", 300)],
+      connections: [makeOnlineConnection("bin-vnc-live")],
+      containers: [
+        {
+          binId: "bin-vnc-live",
+          composeProject: "binny",
+          composeService: "browser-one",
+          containerId: "cid-old",
+          lifecyclePhase: "running",
+          containerStartedAt: "2026-11-20T00:00:00.000Z",
+          stoppedContainerFinishedAt: null,
+          idleSince: null,
+          lastWakeError: null,
+          updatedAt: new Date(),
+        },
+      ],
+      humanSessions: [
+        {
+          sessionId: "99999999-9999-4999-8999-999999999999",
+          binId: "bin-vnc-live",
+          status: "ready",
+        },
+      ],
+    });
+    const fakeDriver = createFakeDriver([
+      {
+        containerId: "cid-new",
+        composeProject: "binny",
+        composeService: "browser-one",
+        binId: "bin-vnc-live",
+        status: "running",
+        exitCode: 0,
+        oomKilled: false,
+        startedAt: "2026-11-20T01:00:00.000Z",
+        finishedAt: null,
+        healthStatus: "none",
+        vncHostPort: 45_123,
+      },
+    ]);
+    const coordinator = createRuntimeContainerCoordinator({
+      database: db.database,
+      driver: fakeDriver.driver,
+    });
+
+    try {
+      // Resolves live port from replacement container even before reconcile updates containerId.
+      assert.equal(
+        await coordinator.resolveVncHostPort("bin-vnc-live"),
+        45_123,
+      );
+
+      // Simulate crashed container during server downtime.
+      fakeDriver.containers.delete("cid-new");
+      await coordinator.reconcileOnStartup();
+      assert.equal(
+        db.sessions.get("99999999-9999-4999-8999-999999999999")?.status,
+        "failed",
+      );
+      assert.equal(await coordinator.resolveVncHostPort("bin-vnc-live"), null);
+    } finally {
+      await coordinator.close();
     }
   });
 });

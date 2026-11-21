@@ -3,6 +3,7 @@ import { createWriteStream } from "node:fs";
 import { readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { createApiClient } from "@binny/api/client";
 import { validationFailure } from "@binny/api/validation";
@@ -40,9 +41,12 @@ import {
   runtimeSleepIdleTimeoutSecondsSchema,
   sourceAdapterActionNameSchema,
   identityIdSchema,
-  humanSessionCreatedSchema,
+  humanOpenReadyRecordSchema,
+  humanOpenWaitingRecordSchema,
   humanSessionErrorSchema,
+  humanSessionFailureSchema,
   humanSessionSchema,
+  humanSessionStateSchema,
   jsonObjectSchema,
   manualRunErrorSchema,
   manualRunListPageSchema,
@@ -406,6 +410,8 @@ const errorOutputSchema = z.union([
         "incompatible_http_api_protocol",
         "incompatible_archive_query_contract",
         "service_capability_unavailable",
+        "human_session_closed",
+        "human_session_failed",
       ]),
       message: z.string(),
       reason: metadataFailureReasonSchema.optional(),
@@ -413,6 +419,7 @@ const errorOutputSchema = z.union([
       attempts: z.int().positive().optional(),
     })
     .strict(),
+  humanSessionFailureSchema,
 ]);
 type CliApiError = z.infer<typeof errorOutputSchema>;
 
@@ -2307,56 +2314,266 @@ function createCliContract(identity: CliCommandIdentity) {
   });
 
   const humanOpenInputSchema = z.object({ binId: binIdSchema });
-  const humanOpenSuccess = {
-    opened: {
-      description: "人工会话状态和临时入口",
-      exitCode: 0,
-      schema: humanSessionCreatedSchema.extend({
-        viewerUrl: z.url(),
-      }),
-    },
-  } as const;
-  const humanOpenHandler: Handler<
-    "humanOpen",
-    typeof humanOpenInputSchema,
-    typeof humanOpenSuccess,
-    typeof failureSchemas
-  > = async ({ input, dependencies, outcome }) => {
-    const response = await dependencies
-      .createClient()
-      .bins[":binId"]["human-sessions"].$post({
-        param: { binId: input.binId },
-      });
-    if (response.status === 201) {
-      const session = await response.json();
-      return outcome.data.opened({
-        ...session,
-        viewerUrl: new URL(session.viewerPath, dependencies.apiUrl).href,
-      });
-    }
-    if (
-      response.status === 400 ||
-      response.status === 404 ||
-      response.status === 409
-    )
-      return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话状态。");
+  const humanOpenWaitingText = (
+    record: z.infer<typeof humanOpenWaitingRecordSchema>,
+  ) => {
+    const header =
+      record.queueReason === undefined
+        ? `Human session waiting: status=${record.status}`
+        : `Human session waiting: status=${record.status}, reason=${record.queueReason}`;
+    if (record.lastWakeError === undefined) return text.line(header);
+    const wakeError = `Last wake error: ${record.lastWakeError.code}: ${record.lastWakeError.message}${
+      record.lastWakeError.at === undefined
+        ? ""
+        : ` (${record.lastWakeError.at})`
+    }`;
+    return text.fragment(`${header}\n${wakeError}\n`);
   };
-  const humanOpenOutputs = businessOutputs("humanOpen", humanOpenInputSchema, {
-    structuredDescription: "Machine-readable browser session",
-    textDescription: "Readable browser session",
-    success: humanOpenSuccess,
-    failures: failureSchemas,
-    textSuccess: { opened: (session) => outputText("浏览器维护入口", session) },
-    textFailures: failureText,
-    handler: humanOpenHandler,
-  });
+  const humanOpenReadyText = (
+    record: z.infer<typeof humanOpenReadyRecordSchema>,
+  ) =>
+    text.fragment(
+      [
+        "Human session",
+        `ID: ${record.sessionId}`,
+        `Bin: ${record.binId}`,
+        `Status: ${record.status}`,
+        `Host: ${record.host}`,
+        `Port: ${String(record.port)}`,
+        `Password: ${record.password}`,
+        `Requested at: ${record.requestedAt}`,
+        `Ready at: ${record.readyAt}`,
+      ].join("\n") + "\n",
+    );
+  const humanSessionStateText = (
+    heading: string,
+    session: z.infer<typeof humanSessionStateSchema>,
+  ) =>
+    text.lines([
+      heading,
+      `ID: ${session.sessionId}`,
+      `Bin: ${session.binId}`,
+      `Status: ${session.status}`,
+      ...(session.queueReason === undefined
+        ? []
+        : [`Queue reason: ${session.queueReason}`]),
+      ...(session.lastWakeError === undefined
+        ? []
+        : [
+            `Last wake error: ${session.lastWakeError.code}: ${session.lastWakeError.message}${
+              session.lastWakeError.at === undefined
+                ? ""
+                : ` (${session.lastWakeError.at})`
+            }`,
+          ]),
+      `Requested at: ${session.requestedAt}`,
+      `Updated at: ${session.updatedAt}`,
+      ...(session.readyAt === undefined
+        ? []
+        : [`Ready at: ${session.readyAt}`]),
+      ...(session.closedAt === undefined
+        ? []
+        : [`Closed at: ${session.closedAt}`]),
+      ...(session.failure === undefined
+        ? []
+        : [`Failure: ${session.failure.code}: ${session.failure.message}`]),
+    ]);
+  const extractHostFromApiUrl = (apiUrl: string): string => {
+    const { hostname } = new URL(apiUrl);
+    return hostname.startsWith("[") && hostname.endsWith("]")
+      ? hostname.slice(1, -1)
+      : hostname;
+  };
+  const humanOpenExtendedInput = withPostgresJsonSchemaProjection(
+    humanOpenInputSchema.safeExtend({
+      apiUrl: z.string().url().optional(),
+    }),
+  ) as unknown as typeof humanOpenInputSchema;
+  const humanOpenOutputs = define.outputModes(
+    "humanOpen",
+    humanOpenExtendedInput,
+    (mode) => {
+      const records = {
+        waiting: {
+          description: "Waiting status while waking or handing over browser",
+          schema: humanOpenWaitingRecordSchema,
+        },
+        ready: {
+          description: "Ready native VNC connection details",
+          schema: humanOpenReadyRecordSchema,
+        },
+      } as const;
+      const textRecords = {
+        waiting: {
+          ...records.waiting,
+          text: humanOpenWaitingText,
+        },
+        ready: {
+          ...records.ready,
+          text: humanOpenReadyText,
+        },
+      } as const;
+      const streamFailures = {
+        apiError: failureSchemas.apiError,
+      } as const;
+      const textStreamFailures = {
+        apiError: {
+          ...failureSchemas.apiError,
+          text: apiErrorText,
+        },
+      } as const;
+      const handler = async function* (context: {
+        readonly input: Record<string, unknown>;
+        readonly dependencies: CliDependencies;
+        readonly outcome: {
+          readonly record: {
+            readonly waiting: (
+              payload: z.input<typeof humanOpenWaitingRecordSchema>,
+            ) => unknown;
+            readonly ready: (
+              payload: z.input<typeof humanOpenReadyRecordSchema>,
+            ) => unknown;
+          };
+          readonly streamSuccess: () => unknown;
+          readonly failure: {
+            readonly apiError: (payload: CliApiError) => unknown;
+          };
+        };
+      }) {
+        const compatibilityFailure = await httpApiCompatibilityFailure(
+          context.dependencies,
+        );
+        if (compatibilityFailure !== undefined) {
+          return context.outcome.failure.apiError(compatibilityFailure);
+        }
+        const { binId } = context.input as z.output<
+          typeof humanOpenInputSchema
+        >;
+        const host = extractHostFromApiUrl(context.dependencies.apiUrl);
+        const client = context.dependencies.createClient();
+        const createdResponse = await client.bins[":binId"][
+          "human-sessions"
+        ].$post({
+          param: { binId },
+        });
+        if (
+          createdResponse.status === 400 ||
+          createdResponse.status === 404 ||
+          createdResponse.status === 409
+        ) {
+          return context.outcome.failure.apiError(
+            (await createdResponse.json()).error,
+          );
+        }
+        if (createdResponse.status !== 201) {
+          throw new Error(
+            "Service returned an undeclared human-session creation status.",
+          );
+        }
+        const created = await createdResponse.json();
+        const password = created.password;
+        let session: z.infer<typeof humanSessionSchema> = created;
+        let lastWaitingKey: string | undefined;
+        for (;;) {
+          if (session.status === "ready" && session.port !== undefined) {
+            yield context.outcome.record.ready({
+              sessionId: session.sessionId,
+              binId: session.binId,
+              status: "ready",
+              host,
+              port: session.port,
+              password,
+              requestedAt: session.requestedAt,
+              updatedAt: session.updatedAt,
+              readyAt: session.readyAt ?? session.updatedAt,
+            });
+            return context.outcome.streamSuccess();
+          }
+          if (session.status === "failed") {
+            return context.outcome.failure.apiError(
+              session.failure ?? {
+                code: "human_session_failed",
+                message: "Human session failed before becoming ready.",
+              },
+            );
+          }
+          if (session.status === "closed" || session.status === "closing") {
+            return context.outcome.failure.apiError({
+              code: "human_session_closed",
+              message: "Human session closed before becoming ready.",
+            });
+          }
+          if (session.status === "pending" || session.status === "opening") {
+            const waitingKey = `${session.status}:${session.queueReason ?? ""}:${session.lastWakeError?.at ?? ""}`;
+            if (waitingKey !== lastWaitingKey) {
+              lastWaitingKey = waitingKey;
+              yield context.outcome.record.waiting({
+                sessionId: session.sessionId,
+                binId: session.binId,
+                status: session.status,
+                ...(session.queueReason === undefined
+                  ? {}
+                  : { queueReason: session.queueReason }),
+                ...(session.lastWakeError === undefined
+                  ? {}
+                  : { lastWakeError: session.lastWakeError }),
+              });
+            }
+          }
+          await delay(250);
+          const pollResponse = await client.bins[":binId"]["human-sessions"][
+            ":sessionId"
+          ].$get({
+            param: { binId, sessionId: session.sessionId },
+          });
+          if (pollResponse.status === 200) {
+            session = await pollResponse.json();
+          } else if (
+            pollResponse.status === 400 ||
+            pollResponse.status === 404
+          ) {
+            return context.outcome.failure.apiError(
+              (await pollResponse.json()).error,
+            );
+          } else {
+            throw new Error(
+              "Service returned an undeclared human-session status.",
+            );
+          }
+        }
+      };
+      return {
+        default: "structured",
+        modes: {
+          structured: mode.stream({
+            description: "Machine-readable human session stream",
+            format: "structured",
+            success: { kind: "stream", records },
+            failures: streamFailures,
+            handler: handler as never,
+          }),
+          text: mode.stream({
+            description: "Readable human session stream",
+            format: "text",
+            success: {
+              kind: "stream",
+              records: textRecords,
+              text: () => text.silent,
+            },
+            failures: textStreamFailures,
+            handler: handler as never,
+          }),
+        },
+      };
+    },
+  ) as OutputModesDefinition<"humanOpen", typeof humanOpenInputSchema>;
+  outputInputs.set(humanOpenOutputs, humanOpenExtendedInput);
 
   const humanGetSuccess = {
     found: {
-      description: "人工会话状态",
+      description: "Human session state",
       exitCode: 0,
-      schema: humanSessionSchema,
+      schema: humanSessionStateSchema,
     },
   } as const;
   const humanGetHandler: Handler<
@@ -2370,27 +2587,31 @@ function createCliContract(identity: CliCommandIdentity) {
       .bins[":binId"]["human-sessions"][":sessionId"].$get({
         param: { binId: input.binId, sessionId: input.sessionId },
       });
-    if (response.status === 200)
-      return outcome.data.found(await response.json());
+    if (response.status === 200) {
+      const { port: _port, ...state } = await response.json();
+      return outcome.data.found(humanSessionStateSchema.parse(state));
+    }
     if (response.status === 400 || response.status === 404)
       return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话读取状态。");
+    throw new Error("Service returned an undeclared human-session status.");
   };
   const humanGetOutputs = businessOutputs("humanGet", humanSessionInputSchema, {
     structuredDescription: "Machine-readable browser session state",
     textDescription: "Readable browser session state",
     success: humanGetSuccess,
     failures: failureSchemas,
-    textSuccess: { found: (session) => outputText("浏览器会话状态", session) },
+    textSuccess: {
+      found: (session) => humanSessionStateText("Human session", session),
+    },
     textFailures: failureText,
     handler: humanGetHandler,
   });
 
   const humanCloseSuccess = {
     closed: {
-      description: "人工会话关闭状态",
+      description: "Human session closure state",
       exitCode: 0,
-      schema: humanSessionSchema,
+      schema: humanSessionStateSchema,
     },
   } as const;
   const humanCloseHandler: Handler<
@@ -2404,15 +2625,19 @@ function createCliContract(identity: CliCommandIdentity) {
       .bins[":binId"]["human-sessions"][":sessionId"].close.$post({
         param: { binId: input.binId, sessionId: input.sessionId },
       });
-    if (response.status === 200)
-      return outcome.data.closed(await response.json());
+    if (response.status === 200) {
+      const { port: _port, ...state } = await response.json();
+      return outcome.data.closed(humanSessionStateSchema.parse(state));
+    }
     if (
       response.status === 400 ||
       response.status === 404 ||
       response.status === 409
     )
       return outcome.failure.apiError((await response.json()).error);
-    throw new Error("服务返回了未声明的浏览器会话关闭状态。");
+    throw new Error(
+      "Service returned an undeclared human-session closure status.",
+    );
   };
   const humanCloseOutputs = businessOutputs(
     "humanClose",
@@ -2423,7 +2648,7 @@ function createCliContract(identity: CliCommandIdentity) {
       success: humanCloseSuccess,
       failures: failureSchemas,
       textSuccess: {
-        closed: (session) => outputText("浏览器会话关闭状态", session),
+        closed: (session) => humanSessionStateText("Human session", session),
       },
       textFailures: failureText,
       handler: humanCloseHandler,

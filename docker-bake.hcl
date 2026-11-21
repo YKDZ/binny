@@ -35,6 +35,10 @@ variable "BINNY_TEST_BROWSER_IMAGE" {
   default = "binny/source-adapter-browser-session-fixture:browser-v1"
 }
 
+variable "BINNY_TEST_VNC_VIEWER_IMAGE" {
+  default = "binny/vnc-viewer-fixture:local"
+}
+
 variable "BINNY_RSS_IMAGE" {
   default = "binny/rss:local"
 }
@@ -102,6 +106,7 @@ group "default" {
     "runtime-configuration-fixture",
     "runtime-manual-runs-fixture",
     "runtime-schema-fixture",
+    "runtime-vnc-viewer-fixture",
     "adapter-lightweight-resource-fixture",
     "adapter-browser-session-fixture",
     "adapter-rss",
@@ -168,6 +173,12 @@ target "runtime-schema-fixture" {
   inherits   = ["_common"]
   dockerfile = "packages/source-adapter-runtime/Dockerfile.schema-fixture"
   tags       = [BINNY_TEST_RUNNER_SCHEMA_IMAGE]
+}
+
+target "runtime-vnc-viewer-fixture" {
+  inherits   = ["_common"]
+  dockerfile = "packages/source-adapter-runtime/Dockerfile.vnc-viewer-fixture"
+  tags       = [BINNY_TEST_VNC_VIEWER_IMAGE]
 }
 
 target "adapter-lightweight-resource-fixture" {

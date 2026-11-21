@@ -6,8 +6,10 @@ import { postgresTextSchema } from "./postgres-text.ts";
  * Public HTTP route compatibility version, independent of the runtime protocol.
  * Version 12 adds adapter-declared `searchRelations`, on-demand `related` search
  * requests, and deduplicated `relatedRevisions` to archive query and discovery.
+ * Version 13 replaces the noVNC web viewer and WebSocket reverse tunnel with
+ * direct native VNC access (one-time password on create, host port when ready).
  */
-export const publicApiProtocolVersion = 12;
+export const publicApiProtocolVersion = 13;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 6;

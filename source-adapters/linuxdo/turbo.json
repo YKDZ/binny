@@ -67,6 +67,9 @@
       "tags": ["quality:light"]
     },
     "test:acceptance": {
+      "dependsOn": [
+        "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture"
+      ],
       "passThroughEnv": [
         "BINNY_DISCOVERY_PUBLISHED_HOST",
         "BINNY_DISCOVERY_API_SUBNET",
@@ -81,6 +84,7 @@
         "$TURBO_ROOT$/docker-bake.hcl",
         "$TURBO_ROOT$/source-adapters/linuxdo/Dockerfile",
         "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.browser",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.vnc-viewer-fixture",
         "$TURBO_ROOT$/scripts/binny-e2e-test-clock.ts",
         "$TURBO_ROOT$/packages/api/src/**",
         "$TURBO_ROOT$/apps/cli/src/**",

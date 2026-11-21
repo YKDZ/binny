@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { chromium, type Browser, type Page } from "patchright-core";
+import {
+  startVncViewerFixture,
+  type VncViewerFixture,
+  type VncViewerHandle,
+} from "@binny/tooling-config/vnc-viewer-fixture";
 
 export type LinuxdoCliResult = {
   readonly code: number;
@@ -88,8 +91,23 @@ function checkOutput(run: LinuxdoManualRun): LinuxdoCheckOutput {
 
 export type LinuxdoBrowserSession = {
   readonly sessionId: string;
-  readonly viewerUrl: string;
-  readonly status?: string;
+  readonly binId: string;
+  readonly status: string;
+  readonly host: string;
+  readonly port: number;
+  readonly password: string;
+  readonly requestedAt?: string;
+  readonly readyAt?: string;
+};
+
+type LinuxdoHumanSessionState = {
+  readonly sessionId: string;
+  readonly binId: string;
+  readonly status: string;
+  readonly queueReason?: string;
+  readonly host?: unknown;
+  readonly port?: unknown;
+  readonly password?: unknown;
 };
 
 type SourceEvent = {
@@ -103,10 +121,7 @@ type SourceState = {
   readonly events: readonly SourceEvent[];
 };
 
-export type LinuxdoViewerBrowser = {
-  readonly browser: Browser;
-  readonly close: () => Promise<void>;
-};
+export type LinuxdoViewerBrowser = VncViewerFixture;
 
 export type LinuxdoUserJourney = {
   readonly unavailableCheck: LinuxdoManualRun;
@@ -131,72 +146,13 @@ function cliData<T>(result: LinuxdoCliResult, variant: string): T {
 export async function startLinuxdoViewerBrowser(input: {
   readonly projectName: string;
   readonly image: string;
-  readonly publishedHost: string;
   readonly run: LinuxdoCommandRunner;
 }): Promise<LinuxdoViewerBrowser> {
-  const containerName = `${input.projectName}-outer-browser`;
-  const wsPath = `/binny-linuxdo-${randomUUID()}`;
-  const launch = await input.run("docker", [
-    "run",
-    "--detach",
-    "--name",
-    containerName,
-    "--network",
-    "bridge",
-    "--publish",
-    `${input.publishedHost}::9224`,
-    "--workdir",
-    "/app/binny-runtime",
-    "--entrypoint",
-    "node",
-    input.image,
-    "--input-type=module",
-    "--eval",
-    `import { chromium } from "patchright-core"; await chromium.launchServer({ host: "0.0.0.0", port: 9224, wsPath: ${JSON.stringify(wsPath)}, headless: true, channel: "chrome" }); process.stdout.write("BINNY_LINUXDO_OUTER_BROWSER_READY\\n"); setInterval(() => {}, 2147483647);`,
-  ]);
-  assert.equal(launch.code, 0, `外层浏览器启动失败：\n${launch.stderr}`);
-
-  let browser: Browser;
-  try {
-    const deadline = Date.now() + 30_000;
-    let logs = "";
-    while (Date.now() < deadline) {
-      const result = await input.run("docker", ["logs", containerName]);
-      logs = result.stdout + result.stderr;
-      if (logs.includes("BINNY_LINUXDO_OUTER_BROWSER_READY")) break;
-      await delay(100);
-    }
-    assert.ok(logs.includes("BINNY_LINUXDO_OUTER_BROWSER_READY"), logs);
-    const mapping = (
-      await input.run("docker", ["port", containerName, "9224/tcp"])
-    ).stdout.trim();
-    const portText = /:(\d+)$/u.exec(mapping)?.[1];
-    assert.ok(portText !== undefined, `没有外层浏览器端口：${mapping}`);
-    const endpoint = new URL(`ws://127.0.0.1:9224${wsPath}`);
-    endpoint.hostname = input.publishedHost;
-    endpoint.port = portText;
-    browser = await chromium.connect(endpoint.href);
-  } catch (error) {
-    await input.run("docker", ["rm", "--force", containerName]);
-    throw error;
-  }
-
-  return {
-    browser,
-    async close() {
-      await browser.close().catch(() => undefined);
-      const result = await input.run("docker", [
-        "rm",
-        "--force",
-        containerName,
-      ]);
-      if (result.code !== 0 && !result.stderr.includes("No such container")) {
-        throw new Error(
-          `清理外层浏览器失败：\n${result.stdout}${result.stderr}`,
-        );
-      }
-    },
-  };
+  return await startVncViewerFixture({
+    containerName: `${input.projectName}-vnc-viewer`,
+    image: input.image,
+    run: input.run,
+  });
 }
 
 export async function triggerLinuxdoRun(
@@ -238,29 +194,78 @@ export async function triggerLinuxdoRun(
   );
 }
 
+function parseLinuxdoHumanOpenStream(result: LinuxdoCliResult): {
+  readonly waiting: readonly {
+    readonly sessionId: string;
+    readonly status: string;
+    readonly queueReason?: string;
+  }[];
+  readonly ready: LinuxdoBrowserSession;
+} {
+  assert.equal(result.code, 0, result.stderr);
+  const lines = result.stdout
+    .trim()
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          readonly kind: string;
+          readonly variant?: string;
+          readonly data?: unknown;
+        },
+    );
+  assert.ok(
+    lines.length >= 3,
+    `Expected NDJSON stream output:\n${result.stdout}`,
+  );
+  assert.equal(lines[0]?.kind, "stream");
+  assert.equal(lines.at(-1)?.kind, "streamSuccess");
+  const waiting = lines
+    .filter((line) => line.kind === "record" && line.variant === "waiting")
+    .map(
+      (line) =>
+        line.data as {
+          readonly sessionId: string;
+          readonly status: string;
+          readonly queueReason?: string;
+        },
+    );
+  const readyRecords = lines.filter(
+    (line) => line.kind === "record" && line.variant === "ready",
+  );
+  assert.equal(
+    readyRecords.length,
+    1,
+    `Expected 1 ready record:\n${result.stdout}`,
+  );
+  const ready = readyRecords[0]?.data as LinuxdoBrowserSession;
+  assert.equal(ready.status, "ready");
+  assert.ok(typeof ready.host === "string" && ready.host.length > 0);
+  assert.ok(Number.isInteger(ready.port) && ready.port > 0);
+  assert.match(ready.password, /^[A-Za-z0-9]{8}$/u);
+  return { waiting, ready };
+}
+
 export async function openLinuxdoHumanSession(
   cli: LinuxdoCli,
   binId: string,
+  apiUrl?: string,
 ): Promise<LinuxdoBrowserSession> {
-  const opened = cliData<LinuxdoBrowserSession>(
-    await cli(["human", "open", binId]),
-    "opened",
+  const args =
+    apiUrl === undefined
+      ? ["human", "open", binId]
+      : ["human", "open", binId, "--url", apiUrl];
+  const { ready } = parseLinuxdoHumanOpenStream(await cli(args));
+  const current = cliData<LinuxdoHumanSessionState>(
+    await cli(["human", "get", binId, ready.sessionId]),
+    "found",
   );
-  const deadline = Date.now() + 90_000;
-  let latest = opened.status ?? "pending";
-  while (Date.now() < deadline) {
-    const current = cliData<LinuxdoBrowserSession>(
-      await cli(["human", "get", binId, opened.sessionId]),
-      "found",
-    );
-    latest = current.status ?? "unknown";
-    if (latest === "ready") return opened;
-    if (latest === "failed" || latest === "closed") {
-      throw new Error(`浏览器人工会话未就绪：${JSON.stringify(current)}`);
-    }
-    await delay(250);
-  }
-  throw new Error(`等待浏览器人工会话就绪超时：${latest}`);
+  assert.equal(current.status, "ready");
+  assert.equal(current.host, undefined);
+  assert.equal(current.port, undefined);
+  assert.equal(current.password, undefined);
+  return ready;
 }
 
 export async function closeLinuxdoHumanSession(
@@ -268,7 +273,13 @@ export async function closeLinuxdoHumanSession(
   binId: string,
   sessionId: string,
 ): Promise<void> {
-  cliData(await cli(["human", "close", binId, sessionId]), "closed");
+  const closed = cliData<LinuxdoHumanSessionState>(
+    await cli(["human", "close", binId, sessionId]),
+    "closed",
+  );
+  assert.equal(closed.host, undefined);
+  assert.equal(closed.port, undefined);
+  assert.equal(closed.password, undefined);
 }
 
 async function readSourceState(controlUrl: string): Promise<SourceState> {
@@ -300,65 +311,28 @@ async function waitForSourceEvent(
 }
 
 export async function openLinuxdoViewer(
-  browser: Browser,
+  vncViewer: VncViewerFixture,
   session: LinuxdoBrowserSession,
-  publishedHost: string,
-  serverPort: number,
-): Promise<Page> {
-  const viewer = new URL(session.viewerUrl);
-  viewer.hostname = publishedHost;
-  viewer.port = String(serverPort);
-  const page = await browser.newPage();
-  await page.goto(viewer.href);
-  try {
-    await page
-      .locator("#screen canvas")
-      .waitFor({ state: "visible", timeout: 30_000 });
-  } catch (error) {
-    throw new Error(
-      `noVNC 画面没有加载：url=${page.url()} title=${await page.title()} body=${(
-        await page
-          .locator("body")
-          .innerText()
-          .catch(() => "<无法读取>")
-      ).slice(
-        0,
-        2_000,
-      )} 原因=${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    );
-  }
-  await page.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent ===
-      "已连接，可以操作浏览器。",
-    undefined,
-    { timeout: 30_000 },
-  );
-  return page;
+): Promise<VncViewerHandle> {
+  return await vncViewer.connect({
+    host: session.host,
+    port: session.port,
+    password: session.password,
+  });
 }
 
 export async function navigateThroughLinuxdoViewer(
-  page: Page,
+  viewer: VncViewerHandle,
   url: string,
 ): Promise<void> {
-  const canvas = page.locator("#screen canvas");
-  const bounds = await canvas.boundingBox();
-  assert.ok(bounds !== null);
-  await canvas.click({
-    position: { x: bounds.width / 2, y: bounds.height * 0.09 },
-  });
-  await page.keyboard.press("Control+a");
-  await page.keyboard.type(url, { delay: 5 });
-  await page.keyboard.press("Enter");
+  await viewer.navigateTo(url);
 }
 
 type LinuxdoLoginInput = {
   readonly binId: string;
   readonly cli: LinuxdoCli;
-  readonly browser: Browser;
-  readonly publishedHost: string;
-  readonly serverPort: number;
+  readonly vncViewer: VncViewerFixture;
+  readonly apiUrl?: string;
   readonly sourceOrigin: string;
   readonly sourceControlUrl: string;
   readonly username: string;
@@ -377,13 +351,12 @@ export async function loginLinuxdoUser(
       ({ action }) => action === "login-complete",
     ).length,
   };
-  const session = await openLinuxdoHumanSession(input.cli, input.binId);
-  const viewer = await openLinuxdoViewer(
-    input.browser,
-    session,
-    input.publishedHost,
-    input.serverPort,
+  const session = await openLinuxdoHumanSession(
+    input.cli,
+    input.binId,
+    input.apiUrl,
   );
+  const viewer = await openLinuxdoViewer(input.vncViewer, session);
   try {
     let loggedIn = false;
     let priorLoginPage = eventCounts.loginPage;
@@ -399,13 +372,13 @@ export async function loginLinuxdoUser(
         "login-page",
         priorLoginPage + 1,
       );
-      await delay(250);
-      await viewer.keyboard.press("Tab");
-      await viewer.keyboard.type(input.username, { delay: 5 });
-      await viewer.keyboard.press("Tab");
-      await viewer.keyboard.type(input.password, { delay: 5 });
-      await viewer.keyboard.press("Tab");
-      await viewer.keyboard.press("Enter");
+      await delay(300);
+      await viewer.pressKey("Tab");
+      await viewer.typeText(input.username, 5);
+      await viewer.pressKey("Tab");
+      await viewer.typeText(input.password, 5);
+      await viewer.pressKey("Tab");
+      await viewer.pressKey("Return");
       const deadline = Date.now() + 8_000;
       while (Date.now() < deadline) {
         const state = await readSourceState(input.sourceControlUrl);
@@ -429,30 +402,18 @@ export async function loginLinuxdoUser(
     }
   } finally {
     await closeLinuxdoHumanSession(input.cli, input.binId, session.sessionId);
-    const oldViewerUrl = viewer.url();
-    await viewer.waitForFunction(
-      () =>
-        document.querySelector("#status")?.textContent ===
-        "连接已结束，请回到终端查看会话状态。",
-      undefined,
-      { timeout: 15_000 },
+    const exited = await viewer.waitForExit(15_000);
+    assert.equal(
+      exited.exited,
+      true,
+      `TigerVNC viewer stayed running after human session close:\n${exited.log}`,
     );
-    assert.equal(await viewer.locator("#screen canvas").count(), 0);
-    const rejectedViewer = await input.browser.newPage();
-    try {
-      await rejectedViewer.goto(oldViewerUrl);
-      await rejectedViewer.waitForFunction(
-        () =>
-          document.querySelector("#status")?.textContent ===
-          "连接已结束，请回到终端查看会话状态。",
-        undefined,
-        { timeout: 15_000 },
-      );
-      assert.equal(await rejectedViewer.locator("#screen canvas").count(), 0);
-    } finally {
-      await rejectedViewer.close();
-      await viewer.close();
-    }
+    await input.vncViewer.expectRejectedConnection({
+      host: session.host,
+      port: session.port,
+      password: session.password,
+    });
+    await viewer.closeGracefully();
   }
 }
 
@@ -460,9 +421,8 @@ export async function linuxdoUserJourney(input: {
   readonly binId: string;
   readonly topicId: number;
   readonly cli: LinuxdoCli;
-  readonly browser: Browser;
-  readonly publishedHost: string;
-  readonly serverPort: number;
+  readonly vncViewer: VncViewerFixture;
+  readonly apiUrl?: string;
   readonly sourceOrigin: string;
   readonly sourceControlUrl: string;
   readonly username: string;

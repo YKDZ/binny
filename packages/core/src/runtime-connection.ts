@@ -426,9 +426,13 @@ export async function readRuntimeExecution(
 
 export function createRuntimeConnectionStore(
   database: Database,
-  options?: { readonly containerCoordinator?: RuntimeContainerCoordinator },
+  options?: {
+    readonly containerCoordinator?: RuntimeContainerCoordinator;
+    readonly humanSessionConnectTimeoutMs?: number;
+  },
 ): RuntimeConnectionOperations {
   const containerCoordinator = options?.containerCoordinator;
+  const humanSessionConnectTimeoutMs = options?.humanSessionConnectTimeoutMs;
   return {
     async getExecution(binId) {
       return await readRuntimeExecution(database, binId);
@@ -852,6 +856,12 @@ export function createRuntimeConnectionStore(
               ownerConfirmed:
                 ownerState === "confirmed" && execution.status === "online",
               runtimeEnvironment: checked.data.environment,
+              ...(humanSessionConnectTimeoutMs === undefined
+                ? {}
+                : { connectTimeoutMs: humanSessionConnectTimeoutMs }),
+              ...(checked.data.activeHumanSession === undefined
+                ? {}
+                : { activeHumanSession: checked.data.activeHumanSession }),
               ...(checked.data.humanSessionEvent === undefined
                 ? {}
                 : { event: checked.data.humanSessionEvent }),

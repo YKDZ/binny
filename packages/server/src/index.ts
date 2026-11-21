@@ -1,14 +1,9 @@
-import { readFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 
-import {
-  createApiRoutes,
-  type HumanSessionOperations,
-  type RuntimeConnectionOperations,
-} from "@binny/api/routes";
+import { createApiRoutes } from "@binny/api/routes";
 import {
   createArchiveStore,
   createBinConfigurationStore,
@@ -27,8 +22,6 @@ import { serve } from "@hono/node-server";
 import type { ServerType } from "@hono/node-server";
 
 import { createDockerEngineContainerDriver } from "./docker-engine.ts";
-import { HumanSessionGateway } from "./human-session-gateway.ts";
-import { humanSessionViewerPage } from "./human-session-viewer.ts";
 
 const require = createRequire(import.meta.url);
 const serverPackageVersion = (
@@ -38,7 +31,6 @@ const serverPackageVersion = (
 export type ServerRuntime = {
   readonly app: ReturnType<typeof createApiRoutes>;
   readonly fetch: (request: Request) => Promise<Response>;
-  readonly attachUpgradeHandler: (server: ServerType) => () => void;
   readonly stopBackgroundWork: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -99,8 +91,14 @@ export async function createServerRuntime(options: {
       50,
     ),
   });
+  const viewerWaitMs = environmentMilliseconds(
+    "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
+    60_000,
+    1_000,
+  );
   const runtime = createRuntimeConnectionStore(database, {
     containerCoordinator,
+    humanSessionConnectTimeoutMs: viewerWaitMs,
   });
   const runs = createManualRunStore(database, { containerCoordinator });
   const runListings = createManualRunListStore(database);
@@ -108,20 +106,8 @@ export async function createServerRuntime(options: {
   const scheduleListings = createScheduleListStore(database);
   const humanSessions = createHumanSessionStore(database, {
     containerCoordinator,
-  });
-  const viewerWaitMs = environmentMilliseconds(
-    "BINNY_HUMAN_SESSION_VIEWER_WAIT_MS",
-    60_000,
-    1_000,
-  );
-  const gateway = new HumanSessionGateway({
-    sessions: humanSessions,
-    viewerWaitMs,
-    onUnexpectedClose: async (binId, sessionId) => {
-      const result = await humanSessions.closeHumanSession(binId, sessionId);
-      if (!result.ok && result.error.code !== "human_session_not_found")
-        throw new Error(result.error.message);
-    },
+    resolveRuntimeVncHostPort: (binId) =>
+      containerCoordinator.resolveVncHostPort(binId),
   });
   let pendingTimeout: NodeJS.Timeout | undefined;
   let containerSweepTimer: NodeJS.Timeout | undefined;
@@ -132,7 +118,6 @@ export async function createServerRuntime(options: {
   try {
     await migrateDatabase(database);
     await archives.initializeResourceStorage();
-    await humanSessions.reconcileHumanSessionsAfterGatewayRestart();
     await containerCoordinator.reconcileOnStartup();
     scheduleDispatcher = await startScheduleDispatcher(
       schedules,
@@ -205,55 +190,16 @@ export async function createServerRuntime(options: {
   schedulePoll = setInterval(pollSchedules, schedulePollIntervalMs);
   schedulePoll.unref();
   pollSchedules();
-  const humanOperations: HumanSessionOperations = {
-    requestHumanSession: (binId) => humanSessions.requestHumanSession(binId),
-    getHumanSession: (binId, sessionId) =>
-      humanSessions.getHumanSession(binId, sessionId),
-    closeHumanSession: async (binId, sessionId) => {
-      const result = await humanSessions.closeHumanSession(binId, sessionId);
-      if (!result.ok) return result;
-      try {
-        await gateway.closeSession(sessionId);
-        const updated = await humanSessions.getHumanSession(binId, sessionId);
-        return updated.ok ? updated : result;
-      } catch (error) {
-        process.stderr.write(
-          `浏览器会话通道回收仍在进行：session=${sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
-        );
-        return result;
-      }
-    },
-  };
-  const runtimeOperations: RuntimeConnectionOperations = {
-    getExecution: (binId) => runtime.getExecution(binId),
-    disconnect: (binId, input) => runtime.disconnect(binId, input),
-    claimOwnership: (binId, input) => runtime.claimOwnership(binId, input),
-    getState: (binId, query) => runtime.getState(binId, query),
-    putState: (binId, input) => runtime.putState(binId, input),
-    heartbeat: async (binId, input) => {
-      const result = await runtime.heartbeat(binId, input);
-      if (result.ok && result.value.humanSession?.action === "close") {
-        try {
-          await gateway.closeSession(result.value.humanSession.sessionId);
-        } catch (error) {
-          process.stderr.write(
-            `浏览器会话通道仍未确认关闭：session=${result.value.humanSession.sessionId} ${error instanceof Error ? error.message : String(error)}\n`,
-          );
-        }
-      }
-      return result;
-    },
-  };
   const app = createApiRoutes(
     {
       bins: createBinConfigurationStore(database, { containerCoordinator }),
-      runtime: runtimeOperations,
+      runtime,
       runs,
       runListings,
       schedules,
       scheduleListings,
       archives,
-      humanSessions: humanOperations,
+      humanSessions,
     },
     {
       productVersion:
@@ -278,67 +224,23 @@ export async function createServerRuntime(options: {
       try {
         await containerCoordinator.close();
       } finally {
-        try {
-          await activeScheduleDispatcher.close();
-        } finally {
-          await humanSessions.beginHumanGatewayShutdown();
-        }
+        await activeScheduleDispatcher.close();
       }
     })();
     return backgroundWorkStop;
   };
-  const viewerBundlePath = fileURLToPath(
-    new URL(
-      import.meta.url.endsWith(".ts")
-        ? "../dist/human-viewer.js"
-        : "./human-viewer.js",
-      import.meta.url,
-    ),
-  );
   return {
     app,
-    fetch: async (request: Request) => {
-      const url = new URL(request.url);
-      if (
-        request.method === "GET" &&
-        /^\/human-sessions\/[0-9a-f-]+$/iu.test(url.pathname)
-      ) {
-        return new Response(humanSessionViewerPage(), {
-          headers: {
-            "cache-control": "no-store",
-            "content-security-policy":
-              "default-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
-            "content-type": "text/html; charset=utf-8",
-            "referrer-policy": "no-referrer",
-          },
-        });
-      }
-      if (request.method === "GET" && url.pathname === "/human-viewer.js") {
-        return new Response(await readFile(viewerBundlePath), {
-          headers: {
-            "cache-control": "no-store",
-            "content-type": "text/javascript; charset=utf-8",
-            "referrer-policy": "no-referrer",
-          },
-        });
-      }
-      return await app.fetch(request);
-    },
-    attachUpgradeHandler: (server) =>
-      gateway.attach(server as import("node:http").Server),
+    fetch: async (request: Request) => await app.fetch(request),
     stopBackgroundWork,
     close: async () => {
       try {
         await stopBackgroundWork();
       } finally {
         try {
-          await gateway.close();
+          await archives.close();
         } finally {
-          try {
-            await archives.close();
-          } finally {
-            await connection.close();
-          }
+          await connection.close();
         }
       }
     },
@@ -368,7 +270,6 @@ export async function startServer(options: {
     hostname: "0.0.0.0",
     port: options.port,
   });
-  const detachUpgradeHandler = runtime.attachUpgradeHandler(server);
   const activeHttpResponses = new Set<ServerResponse>();
   server.on("request", (_request, response) => {
     activeHttpResponses.add(response);
@@ -387,7 +288,6 @@ export async function startServer(options: {
         response.shouldKeepAlive = false;
         if (!response.headersSent) response.setHeader("connection", "close");
       }
-      detachUpgradeHandler();
       const serverClosed = new Promise<void>((resolveClose, reject) => {
         server.close((error) =>
           error === undefined ? resolveClose() : reject(error),
