@@ -81,7 +81,7 @@ export type FeedBodyGap = z.infer<typeof feedBodyGapSchema>;
 export const feedIncompleteScopeSchema = z
   .object({
     scope: z.string().min(1),
-    reasonCode: z.enum(["article_body_unavailable", "max_items_reached"]),
+    reasonCode: z.enum(["article_body_unavailable"]),
     message: z.string().min(1),
   })
   .strict();

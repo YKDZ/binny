@@ -117,7 +117,7 @@ try {
     throw new Error(`${String(error)}\n${logs}`, { cause: error });
   }
   assert.deepStrictEqual(manifest, {
-    protocolVersion: 9,
+    protocolVersion: 10,
     sourceAdapter: {
       id: "binny-runtime.configuration-validation-fixture",
       version: "1.0.0",

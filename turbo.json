@@ -36,6 +36,18 @@
       "outputs": [],
       "tags": ["quality:light"]
     },
+    "//#test": {
+      "dependsOn": [],
+      "inputs": [
+        "package.json",
+        "docker-bake.hcl",
+        "compose.acceptance.yaml",
+        "scripts/*.test.ts",
+        "packages/tooling-config/**"
+      ],
+      "outputs": [],
+      "tags": ["quality:light"]
+    },
     "//#test:binny:e2e": {
       "dependsOn": [
         "@binny/api#build",

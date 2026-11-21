@@ -4360,7 +4360,8 @@ export async function runCli(runtime: CliRuntime): Promise<number> {
     try {
       await runtime.write({
         destination: "stderr",
-        chunk: "命令执行因未预期内部异常中止。\n",
+        chunk:
+          "Command execution aborted due to an unexpected internal error.\n",
       });
     } catch {
       // 诊断通道故障不能改变原定退出类别。

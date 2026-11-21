@@ -476,7 +476,7 @@ export function createScheduleStore(
             return failure(
               409,
               "action_input_changed",
-              "长期配置或运行器在计划参数原生校验期间发生变化，本次计划未保存。",
+              "Persistent configuration or runtime changed during native schedule parameter validation; schedule was not saved.",
               ["params"],
             );
           }
@@ -621,7 +621,7 @@ export function createScheduleStore(
             return failure(
               409,
               "action_input_changed",
-              "计划参数、长期配置或运行器在原生校验期间发生变化，本次计划未保存。",
+              "Schedule parameters, persistent configuration, or runtime changed during native validation; schedule was not saved.",
               ["params"],
             );
           }

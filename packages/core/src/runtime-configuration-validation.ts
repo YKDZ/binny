@@ -77,7 +77,9 @@ export async function validateConfigurationAtRuntime(
       },
     };
   } catch {
-    return unavailable("无法连接当前运行器验证长期配置。");
+    return unavailable(
+      "Unable to connect to the current runtime to validate persistent configuration.",
+    );
   }
 }
 

@@ -570,7 +570,7 @@ export function createBinConfigurationStore(
               return failure(
                 409,
                 "configuration_changed",
-                "配置或运行器声明在原生校验期间发生变化，本次更新未保存。",
+                "Configuration or runtime declaration changed during native validation; update was not saved.",
                 ["config"],
               );
             }
