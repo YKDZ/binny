@@ -29,6 +29,8 @@ RUN apt-get update \
     && pnpm config set store-dir /pnpm/store/root --global \
     && su -s /bin/sh node -c 'pnpm config set store-dir /pnpm/store/node --global'
 
+RUN curl -fsSL https://turborepo.dev/install | sh -s -- --install-dir /usr/local/bin --no-modify-path
+
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
