@@ -788,8 +788,14 @@ function createCliContract(identity: CliCommandIdentity) {
       : String(value);
   const archiveSearchPageText = (
     page: z.infer<typeof archiveSearchPageSchema>,
-  ) =>
-    text.lines([
+  ) => {
+    const relatedRevisionEntries =
+      page.relatedRevisions === undefined
+        ? []
+        : Object.entries(page.relatedRevisions).toSorted(([left], [right]) =>
+            left.localeCompare(right),
+          );
+    return text.lines([
       `Snapshot: ${page.snapshot.asOf}`,
       ...(page.timeWindow === undefined
         ? []
@@ -857,6 +863,25 @@ function createCliContract(identity: CliCommandIdentity) {
                             }`,
                           ],
                     ),
+                    ...result.matches.flatMap(({ binId, related }) =>
+                      related === undefined
+                        ? []
+                        : Object.entries(related).map(([role, relation]) => {
+                            if (relation.status === "readable") {
+                              return `  Related ${role} (${binId}): readable -> revision ${relation.reference.revisionId}`;
+                            }
+                            if (relation.status === "unreadable") {
+                              const identityDetail =
+                                relation.sourceKey !== undefined
+                                  ? ` (${relation.sourceKey.namespace}:${relation.sourceKey.key})`
+                                  : relation.sourceRef !== undefined
+                                    ? ` (${relation.sourceRef})`
+                                    : "";
+                              return `  Related ${role} (${binId}): unreadable (${relation.reason})${identityDetail}`;
+                            }
+                            return `  Related ${role} (${binId}): none`;
+                          }),
+                    ),
                   ];
                 })),
           ]
@@ -874,6 +899,38 @@ function createCliContract(identity: CliCommandIdentity) {
             ]
           : ["End of results."]
         : []),
+      ...(relatedRevisionEntries.length === 0
+        ? []
+        : [
+            "Related revisions:",
+            ...relatedRevisionEntries.flatMap(([revisionId, entry]) => {
+              const { revision, resources } = entry;
+              const body = revision.state.body;
+              return [
+                `- Revision: ${revisionId}`,
+                `  Item: ${revision.itemId}`,
+                `  Source: ${revision.sourceKey.namespace}:${revision.sourceKey.key}`,
+                `  Title: ${revision.state.title ?? "(none)"}`,
+                ...(body === undefined
+                  ? ["  Body: no body representation was stored."]
+                  : Object.entries(body).flatMap(([format, content]) => [
+                      `  Body ${format}:`,
+                      ...String(content)
+                        .split("\n")
+                        .map((line) => `    ${line}`),
+                    ])),
+                ...(resources.length === 0
+                  ? ["  Resources: none"]
+                  : [
+                      "  Resources:",
+                      ...resources.map(
+                        ({ resourceId, status }) =>
+                          `    ${resourceId}: ${status}`,
+                      ),
+                    ]),
+              ];
+            }),
+          ]),
       ...(page.distribution === undefined
         ? []
         : [
@@ -902,6 +959,7 @@ function createCliContract(identity: CliCommandIdentity) {
               : ["End of distribution."]),
           ]),
     ]);
+  };
   const archiveBatchReadText = (
     response: z.infer<typeof archiveBatchReadResponseSchema>,
   ) =>
@@ -1183,6 +1241,7 @@ function createCliContract(identity: CliCommandIdentity) {
     discovery: z.infer<typeof sourceAdapterExtensionFieldsDiscoverySchema>,
   ) => {
     const fields = Object.entries(discovery.fields);
+    const searchRelations = Object.entries(discovery.searchRelations);
     return text.lines([
       `Source adapter: ${discovery.sourceAdapterId}@${discovery.sourceAdapterVersion}`,
       ...(fields.length === 0
@@ -1212,6 +1271,19 @@ function createCliContract(identity: CliCommandIdentity) {
         ? ["Summary fields: none"]
         : [
             `Summary fields: ${discovery.summaryFields.map(({ path }) => path).join(", ")}`,
+          ]),
+      ...(searchRelations.length === 0
+        ? ["Search relations: none"]
+        : [
+            "Search relations:",
+            ...searchRelations.map(
+              ([role, declaration]) =>
+                `- ${role}: ${declaration.direction} ${declaration.relationName}${
+                  declaration.description === undefined
+                    ? ""
+                    : ` (${declaration.description})`
+                }`,
+            ),
           ]),
       "Missing and null extension values do not match filters.",
     ]);
@@ -3227,13 +3299,14 @@ function createCliContract(identity: CliCommandIdentity) {
         parent: "archive",
         name: "search",
         description:
-          "Search archived items with literal text groups and optional bin, extension, time-window, and distribution filters.",
+          "Search archived items with literal text groups and optional bin, extension, time-window, distribution, and related-item options.",
         helpSupplement: text.lines([
           "Provide exactly one request source: --query <json>, --query-file <path>, or --query-stdin.",
           "Examples validate the CLI input contract only; the service still validates the search request JSON.",
           "File and stdin examples expect a request prepared as described in the README; native examples do not carry file contents or stdin bytes.",
           "Text matching is case-insensitive and literal. Values in one group use OR; multiple groups use AND.",
           "Extension filters require an explicit bin and the sourceAdapterId declared by bin extension-fields <bin-id>. String, number, integer, and boolean fields use eq/in; scalar arrays use has/hasAny. All filters combine with AND; missing and null extension values do not match.",
+          "Optional related reads ({ sourceAdapterId, include }) resolve adapter-declared searchRelations in each matched bin view and snapshot without changing matches, order, counts, or cursors, returning deduplicated full revisions in relatedRevisions.",
           "A timeWindow uses a half-open [from, until) range (inclusive from, exclusive until) in either form: local calendar dates (YYYY-MM-DD) interpreted at local midnight in a required timeZone, or exact instants with an explicit Z or ±HH:MM offset without timeZone.",
           'Time membership uses stored source precision and zone; timeSummary counts distinct certain and undetermined items, and review="undetermined" with the same snapshot.asOf inspects undetermined views.',
           "Without timeWindow, candidates sort by observedAt descending (itemId ascending breaks ties); with timeWindow, candidates sort by timeWindow.field descending (nulls last, itemId ascending breaks ties).",
@@ -3286,7 +3359,7 @@ function createCliContract(identity: CliCommandIdentity) {
             kind: "valueOption",
             longOption: "--query",
             description:
-              'Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Distribution groups sort by key ascending ("key", default) or numeric itemCount descending ("count"). Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.',
+              'Fixed search request JSON. Time windows use [from, until) bounds (local calendar dates with timeZone, or explicit-offset instants without timeZone); candidates sort by observedAt descending without a timeWindow or by timeWindow.field descending with one. Distribution groups sort by key ascending ("key", default) or numeric itemCount descending ("count"). Optional related reads ({ sourceAdapterId, include }) resolve adapter-declared searchRelations within matched bin views and return deduplicated full revisions in relatedRevisions. Reuse snapshot.asOf for a consistent cut; use top-level nextCursor for candidate pages or distribution.nextCursor for distribution pages.',
           },
           queryFile: {
             kind: "valueOption",

@@ -1175,9 +1175,17 @@ void test("Cross-origin external media downloads via request.get and uploads to 
   ]);
 });
 
-void test("linuxdo manifest declares searchSummaryFields and archivePost stores explicit topic titles faithfully", async () => {
+void test("linuxdo manifest declares searchSummaryFields and searchRelations and archivePost stores explicit topic titles faithfully", async () => {
   const manifest = sourceAdapterManifest(sourceAdapter);
   assert.deepEqual(manifest.searchSummaryFields, ["postNumber", "topic.title"]);
+  assert.deepEqual(manifest.searchRelations, {
+    topicRoot: {
+      relationName: "topic_reply",
+      direction: "incoming",
+      description:
+        "Opening post of the topic linked to a reply via topic_reply.",
+    },
+  });
   assert.equal(
     JSON.stringify(manifest.extensionsSchema).includes(
       "x-binny-search-summary",

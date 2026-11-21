@@ -836,6 +836,40 @@ async function checkPublicArchiveContract(): Promise<void> {
     },
   });
 
+  const relatedSearch = await client.archives.search.$post({
+    json: {
+      bins: ["linuxdo-main"],
+      text: { in: "body", groups: [["reply"]] },
+      related: {
+        sourceAdapterId: "binny.source-adapter-linuxdo",
+        include: ["topicRoot"],
+      },
+    },
+  });
+  if (relatedSearch.status === 200) {
+    const page = await relatedSearch.json();
+    const relatedMatch = page.results[0]?.matches[0]?.related?.topicRoot;
+    if (relatedMatch?.status === "readable") {
+      const rev = page.relatedRevisions?.[relatedMatch.reference.revisionId];
+      void rev?.revision.state.body?.text;
+      void rev?.resources[0]?.status;
+    } else if (relatedMatch?.status === "unreadable") {
+      void relatedMatch.reason;
+    }
+  }
+
+  void client.archives.search.$post({
+    json: {
+      bins: ["linuxdo-main"],
+      related: {
+        sourceAdapterId: "binny.source-adapter-linuxdo",
+        include: ["topicRoot"],
+        // @ts-expect-error Related search requests reject undeclared fields.
+        extra: true,
+      },
+    },
+  });
+
   const relationOnly = await client.archives.$post({
     json: {
       requestId: "rss:relation-only",

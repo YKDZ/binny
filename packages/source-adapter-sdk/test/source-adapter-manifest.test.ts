@@ -80,6 +80,93 @@ void test("adapter manifest publishes extension and state JSON Schemas", () => {
   };
   assert.equal(unavailable.properties?.status?.const, "unavailable");
   assert.equal("searchSummaryFields" in manifest, false);
+  assert.equal("searchRelations" in manifest, false);
+});
+
+void test("adapter manifest preserves declared searchRelations and rejects invalid declarations", () => {
+  const withRelations = defineSourceAdapter({
+    id: "test.search-relations",
+    version: "1.0.0",
+    configSchema,
+    extensionsSchema,
+    searchRelations: {
+      topicRoot: {
+        relationName: "topic_reply",
+        direction: "incoming",
+        description: "Opening post of the topic linked to a reply.",
+      },
+    },
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    actions: { check: action, collect: action },
+  });
+
+  const manifest = sourceAdapterManifest(withRelations);
+  assert.deepEqual(manifest.searchRelations, {
+    topicRoot: {
+      relationName: "topic_reply",
+      direction: "incoming",
+      description: "Opening post of the topic linked to a reply.",
+    },
+  });
+
+  const withEmptyRelations = defineSourceAdapter({
+    id: "test.empty-search-relations",
+    version: "1.0.0",
+    configSchema,
+    extensionsSchema,
+    searchRelations: {},
+    environment: {
+      browser: { required: false, profileReuseAfterRestart: false },
+    },
+    actions: { check: action, collect: action },
+  });
+  assert.equal(
+    "searchRelations" in sourceAdapterManifest(withEmptyRelations),
+    false,
+  );
+
+  assert.throws(() =>
+    sourceAdapterManifest(
+      defineSourceAdapter({
+        id: "test.invalid-search-relations",
+        version: "1.0.0",
+        configSchema,
+        extensionsSchema,
+        searchRelations: {
+          "bad role": {
+            relationName: "topic_reply",
+            direction: "incoming",
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+        actions: { check: action, collect: action },
+      }),
+    ),
+  );
+  assert.throws(() =>
+    sourceAdapterManifest(
+      defineSourceAdapter({
+        id: "test.invalid-relation-name",
+        version: "1.0.0",
+        configSchema,
+        extensionsSchema,
+        searchRelations: {
+          topicRoot: {
+            relationName: "",
+            direction: "incoming",
+          },
+        },
+        environment: {
+          browser: { required: false, profileReuseAfterRestart: false },
+        },
+        actions: { check: action, collect: action },
+      }),
+    ),
+  );
 });
 
 function hasKeywordAnywhere(node: unknown, keyword: string): boolean {

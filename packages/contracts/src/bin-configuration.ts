@@ -3,6 +3,7 @@ import * as z from "zod";
 
 import {
   archiveSearchSummaryFieldPathSchema,
+  sourceAdapterSearchRelationsMapSchema,
   validateSourceAdapterSummaryFields,
 } from "./archive-extensions.ts";
 import {
@@ -137,6 +138,7 @@ const sourceAdapterManifestStoredFieldsSchema = z.object({
     .max(32)
     .readonly()
     .optional(),
+  searchRelations: sourceAdapterSearchRelationsMapSchema.optional(),
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,
@@ -160,6 +162,7 @@ const sourceAdapterManifestInputFieldsSchema = z.object({
     .max(32)
     .readonly()
     .optional(),
+  searchRelations: sourceAdapterSearchRelationsMapSchema.optional(),
   stateSchema: jsonSchemaDocumentSchema.optional(),
   stateSnapshotSchema: jsonSchemaDocumentSchema.optional(),
   actions: sourceAdapterManifestActionsSchema,

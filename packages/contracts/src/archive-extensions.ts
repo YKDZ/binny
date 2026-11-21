@@ -117,7 +117,24 @@ export const archiveExtensionSummaryFieldDiscoverySchema = z
   })
   .strict();
 
-/** Return the selected adapter's declared extension fields and default search summary fields. */
+export const archiveSearchRelationRoleSchema = postgresTextSchema.regex(
+  /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
+);
+
+export const sourceAdapterSearchRelationSchema = z
+  .object({
+    relationName: postgresTextSchema.min(1).max(128),
+    direction: z.enum(["incoming", "outgoing"]),
+    description: postgresTextSchema.min(1).optional(),
+  })
+  .strict();
+
+export const sourceAdapterSearchRelationsMapSchema = z.record(
+  archiveSearchRelationRoleSchema,
+  sourceAdapterSearchRelationSchema,
+);
+
+/** Return the selected adapter's declared extension fields, summary fields, and search relations. */
 export const sourceAdapterExtensionFieldsDiscoverySchema = z
   .object({
     sourceAdapterId: sourceAdapterIdSchema,
@@ -127,6 +144,7 @@ export const sourceAdapterExtensionFieldsDiscoverySchema = z
       archiveExtensionFieldDiscoverySchema,
     ),
     summaryFields: z.array(archiveExtensionSummaryFieldDiscoverySchema),
+    searchRelations: sourceAdapterSearchRelationsMapSchema,
   })
   .strict();
 
@@ -617,6 +635,7 @@ export function discoverSourceAdapterExtensionFields(input: {
   readonly sourceAdapterVersion: string;
   readonly extensionsSchema: Readonly<Record<string, unknown>>;
   readonly searchSummaryFields?: readonly string[] | undefined;
+  readonly searchRelations?: SourceAdapterSearchRelationsMap | undefined;
 }) {
   const properties = input.extensionsSchema.properties;
   const required = Array.isArray(input.extensionsSchema.required)
@@ -655,9 +674,16 @@ export function discoverSourceAdapterExtensionFields(input: {
     sourceAdapterVersion: input.sourceAdapterVersion,
     fields,
     summaryFields,
+    searchRelations: input.searchRelations ?? {},
   });
 }
 
+export type SourceAdapterSearchRelation = z.infer<
+  typeof sourceAdapterSearchRelationSchema
+>;
+export type SourceAdapterSearchRelationsMap = z.infer<
+  typeof sourceAdapterSearchRelationsMapSchema
+>;
 export type ArchiveExtensionScalar = z.infer<
   typeof archiveExtensionScalarSchema
 >;

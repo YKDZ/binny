@@ -21,6 +21,7 @@ import {
   type ArchiveSearchOperation,
   type ArchiveSearchRequest,
   type SourceAdapterManifest,
+  type SourceAdapterSearchRelation,
 } from "@binny/contracts";
 import {
   archiveCommits,
@@ -54,6 +55,10 @@ import {
   assertArchiveQueryActive,
   executeCancellableArchiveQuery,
 } from "./archive-query-cancellation.ts";
+import {
+  resolveSearchRelatedItems,
+  type ArchiveSearchResourceInspector,
+} from "./archive-search-related.ts";
 import {
   canonicalizeArchiveTimeZone,
   archiveTimeZoneAliases,
@@ -1017,111 +1022,194 @@ function extensionFilterValueMatches(
 function validateExtensionScope(
   input: SearchInput,
   value: unknown,
-): ArchiveSearchOperation<never> | undefined {
+):
+  | { readonly ok: false; readonly failure: ArchiveSearchOperation<never> }
+  | {
+      readonly ok: true;
+      readonly requestedRelations: ReadonlyMap<
+        string,
+        SourceAdapterSearchRelation
+      >;
+    } {
   const extensions = input.extensions;
   const distribution =
     input.distribution?.by === "extension" ? input.distribution : undefined;
+  const related = input.related;
   const sourceAdapterId =
-    extensions?.sourceAdapterId ?? distribution?.sourceAdapterId;
-  if (sourceAdapterId === undefined) return undefined;
+    extensions?.sourceAdapterId ??
+    distribution?.sourceAdapterId ??
+    related?.sourceAdapterId;
+  if (sourceAdapterId === undefined) {
+    return { ok: true, requestedRelations: new Map() };
+  }
   const adapterPath =
-    extensions === undefined
-      ? (["distribution", "sourceAdapterId"] as const)
-      : (["extensions", "sourceAdapterId"] as const);
+    extensions !== undefined
+      ? (["extensions", "sourceAdapterId"] as const)
+      : distribution !== undefined
+        ? (["distribution", "sourceAdapterId"] as const)
+        : (["related", "sourceAdapterId"] as const);
   const bins = extensionScopeBins(value);
   if (bins.length === 0) {
-    return invalidInput("No configured bin uses the selected source adapter.", [
-      ...adapterPath,
-    ]);
+    return {
+      ok: false,
+      failure: invalidInput(
+        "No configured bin uses the selected source adapter.",
+        [...adapterPath],
+      ),
+    };
   }
   if (input.bins !== undefined && bins.length !== input.bins.length) {
-    return invalidInput(
-      "Every selected bin must exist and use the declared source adapter.",
-      ["bins"],
-    );
+    return {
+      ok: false,
+      failure: invalidInput(
+        "Every selected bin must exist and use the declared source adapter.",
+        ["bins"],
+      ),
+    };
   }
 
+  const firstRelatedDeclarations = new Map<
+    string,
+    SourceAdapterSearchRelation
+  >();
   for (const bin of bins) {
     if (bin.sourceAdapter.id !== sourceAdapterId) {
-      return invalidInput(
-        "Extension operations require bins from the declared source adapter only.",
-        ["bins"],
-      );
+      return {
+        ok: false,
+        failure: invalidInput(
+          "Extension operations require bins from the declared source adapter only.",
+          ["bins"],
+        ),
+      };
     }
     const discovery = {
       sourceAdapterId: bin.sourceAdapter.id,
       sourceAdapterVersion: bin.sourceAdapter.version,
       binId: bin.binId,
     };
-    const fields = discoverSourceAdapterExtensionFields({
-      sourceAdapterId: bin.sourceAdapter.id,
-      sourceAdapterVersion: bin.sourceAdapter.version,
-      extensionsSchema: bin.sourceAdapter.extensionsSchema,
-    }).fields;
-    if (extensions !== undefined) {
-      for (const [fieldName, filter] of Object.entries(extensions.filters)) {
-        const path = ["extensions", "filters", fieldName] as const;
-        const field = fields[fieldName];
-        if (field === undefined) {
-          return invalidInput(
-            `The selected adapter does not declare the top-level extension field "${fieldName}".`,
-            path,
-            { discovery },
-          );
-        }
-        if (!field.operations.includes(filter.op)) {
-          return invalidInput(
-            `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
-            [...path, "op"],
-            { allowedOperations: [...field.operations], discovery },
-          );
-        }
-        const itemOperation = filter.op === "has" || filter.op === "hasAny";
-        const type = itemOperation ? field.itemType : field.type;
-        const allowedValues = itemOperation
-          ? field.allowedItemValues
-          : field.allowedValues;
-        for (const candidate of extensionFilterValues(filter)) {
-          if (
-            !extensionFilterValueMatches(candidate.value, type, allowedValues)
-          ) {
-            return invalidInput(
-              `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
-              [...path, ...candidate.path],
-              {
-                ...(allowedValues === undefined
-                  ? {}
-                  : itemOperation
-                    ? { allowedItemValues: [...allowedValues] }
-                    : { allowedValues: [...allowedValues] }),
-                allowedOperations: [...field.operations],
-                discovery,
-              },
-            );
+    if (extensions !== undefined || distribution !== undefined) {
+      const fields = discoverSourceAdapterExtensionFields({
+        sourceAdapterId: bin.sourceAdapter.id,
+        sourceAdapterVersion: bin.sourceAdapter.version,
+        extensionsSchema: bin.sourceAdapter.extensionsSchema,
+      }).fields;
+      if (extensions !== undefined) {
+        for (const [fieldName, filter] of Object.entries(extensions.filters)) {
+          const path = ["extensions", "filters", fieldName] as const;
+          const field = fields[fieldName];
+          if (field === undefined) {
+            return {
+              ok: false,
+              failure: invalidInput(
+                `The selected adapter does not declare the top-level extension field "${fieldName}".`,
+                path,
+                { discovery },
+              ),
+            };
+          }
+          if (!field.operations.includes(filter.op)) {
+            return {
+              ok: false,
+              failure: invalidInput(
+                `The extension field "${fieldName}" does not support "${filter.op}"; allowed operations: ${field.operations.join(", ") || "none"}.`,
+                [...path, "op"],
+                { allowedOperations: [...field.operations], discovery },
+              ),
+            };
+          }
+          const itemOperation = filter.op === "has" || filter.op === "hasAny";
+          const type = itemOperation ? field.itemType : field.type;
+          const allowedValues = itemOperation
+            ? field.allowedItemValues
+            : field.allowedValues;
+          for (const candidate of extensionFilterValues(filter)) {
+            if (
+              !extensionFilterValueMatches(candidate.value, type, allowedValues)
+            ) {
+              return {
+                ok: false,
+                failure: invalidInput(
+                  `The value for extension field "${fieldName}" must match its declared ${type ?? "scalar"} type${allowedValues === undefined ? "" : ` and allowed values ${JSON.stringify(allowedValues)}`}.`,
+                  [...path, ...candidate.path],
+                  {
+                    ...(allowedValues === undefined
+                      ? {}
+                      : itemOperation
+                        ? { allowedItemValues: [...allowedValues] }
+                        : { allowedValues: [...allowedValues] }),
+                    allowedOperations: [...field.operations],
+                    discovery,
+                  },
+                ),
+              };
+            }
           }
         }
       }
-    }
-    if (distribution !== undefined) {
-      const path = ["distribution", "field"] as const;
-      const field = fields[distribution.field];
-      if (field === undefined) {
-        return invalidInput(
-          `The selected adapter does not declare the top-level extension field "${distribution.field}".`,
-          path,
-          { discovery },
-        );
+      if (distribution !== undefined) {
+        const path = ["distribution", "field"] as const;
+        const field = fields[distribution.field];
+        if (field === undefined) {
+          return {
+            ok: false,
+            failure: invalidInput(
+              `The selected adapter does not declare the top-level extension field "${distribution.field}".`,
+              path,
+              { discovery },
+            ),
+          };
+        }
+        if (field.operations.length === 0) {
+          return {
+            ok: false,
+            failure: invalidInput(
+              `The extension field "${distribution.field}" is not a scalar or scalar list.`,
+              path,
+              { discovery },
+            ),
+          };
+        }
       }
-      if (field.operations.length === 0) {
-        return invalidInput(
-          `The extension field "${distribution.field}" is not a scalar or scalar list.`,
-          path,
-          { discovery },
-        );
+    }
+    if (related !== undefined) {
+      const declaredRelations = bin.sourceAdapter.searchRelations ?? {};
+      const allowedRoles = Object.keys(declaredRelations).sort();
+      for (const [index, role] of related.include.entries()) {
+        const declaration = declaredRelations[role];
+        if (declaration === undefined) {
+          return {
+            ok: false,
+            failure: invalidInput(
+              `Source adapter "${sourceAdapterId}" does not declare search relation "${role}".`,
+              ["related", "include", index],
+              {
+                ...(allowedRoles.length > 0
+                  ? { allowedItemValues: allowedRoles }
+                  : {}),
+                discovery,
+              },
+            ),
+          };
+        }
+        const firstDeclaration = firstRelatedDeclarations.get(role);
+        if (firstDeclaration === undefined) {
+          firstRelatedDeclarations.set(role, declaration);
+        } else if (
+          firstDeclaration.relationName !== declaration.relationName ||
+          firstDeclaration.direction !== declaration.direction
+        ) {
+          return {
+            ok: false,
+            failure: invalidInput(
+              `Bin "${bin.binId}" declares an incompatible search relation "${role}" for source adapter "${sourceAdapterId}".`,
+              ["bins"],
+            ),
+          };
+        }
       }
     }
   }
-  return undefined;
+  return { ok: true, requestedRelations: firstRelatedDeclarations };
 }
 
 /**
@@ -1163,9 +1251,11 @@ function pageQuery(
       })
       .from(clock),
   );
+  const hasExplicitBinScope =
+    input.distribution?.by === "extension" || input.related !== undefined;
   const extensionScopeBinFilter =
     input.extensions === undefined
-      ? input.distribution?.by === "extension"
+      ? hasExplicitBinScope
         ? inArray(binConfigurations.id, input.bins!)
         : sql`false`
       : input.bins === undefined
@@ -1759,6 +1849,7 @@ function projectSearchMatch(
 export function createArchiveSearchOperation(
   database: Database,
   executeQuery: CancellableQueryExecutor,
+  resourceStorage?: ArchiveSearchResourceInspector,
 ): Pick<ArchiveOperations, "searchArchive"> {
   return {
     async searchArchive(
@@ -1917,11 +2008,13 @@ export function createArchiveSearchOperation(
             [cursor === undefined ? "asOf" : "cursor"],
           );
         }
-        const extensionScopeFailure = validateExtensionScope(
+        const extensionScopeValidation = validateExtensionScope(
           input,
           row.extensionBins,
         );
-        if (extensionScopeFailure !== undefined) return extensionScopeFailure;
+        if (!extensionScopeValidation.ok) {
+          return extensionScopeValidation.failure;
+        }
         const resolvedSnapshot = archiveSnapshotSchema.parse({
           asOf: row.snapshotAsOf,
           mode: row.snapshotMode,
@@ -1974,7 +2067,7 @@ export function createArchiveSearchOperation(
               }
             : publicResult;
         });
-        const page = archiveSearchPageSchema.parse({
+        const basePage = archiveSearchPageSchema.parse({
           snapshot: resolvedSnapshot,
           candidatesIncluded: input.includeCandidates,
           ...(input.includeCandidates
@@ -1999,6 +2092,34 @@ export function createArchiveSearchOperation(
               }),
           hasMore: candidateHasMore,
         });
+        let enrichedResults = basePage.results;
+        let relatedRevisions:
+          | Awaited<
+              ReturnType<typeof resolveSearchRelatedItems>
+            >["relatedRevisions"]
+          | undefined;
+        if (input.related !== undefined) {
+          if (resourceStorage === undefined) {
+            throw new Error(
+              "Archive search related item resolution requires resourceStorage.",
+            );
+          }
+          const resolvedRelated = await resolveSearchRelatedItems({
+            database,
+            executeQuery,
+            resourceStorage,
+            signal,
+            asOf: BigInt(resolvedSnapshot.asOf),
+            requestedRelations: extensionScopeValidation.requestedRelations,
+            results: basePage.results,
+          });
+          enrichedResults = resolvedRelated.results as typeof basePage.results;
+          relatedRevisions = resolvedRelated.relatedRevisions;
+        }
+        const page = {
+          ...basePage,
+          results: enrichedResults,
+        };
         const last = page.results.at(-1);
         const nextCursor =
           candidateHasMore && last !== undefined
@@ -2102,6 +2223,7 @@ export function createArchiveSearchOperation(
           ...(completedDistribution === undefined
             ? {}
             : { distribution: completedDistribution }),
+          ...(relatedRevisions === undefined ? {} : { relatedRevisions }),
         });
         assertArchiveQueryActive(signal);
         return { ok: true, value: completedPage };

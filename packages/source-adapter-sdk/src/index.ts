@@ -5,6 +5,7 @@ import { createApiClient } from "@binny/api/client";
 import type { JsonObject, SourceAdapterManifest } from "@binny/contracts";
 import {
   manualRunFailureSchema,
+  sourceAdapterSearchRelationsMapSchema,
   validateSourceAdapterSummaryFields,
   type ArchiveCommit,
   type ArchiveError,
@@ -569,6 +570,13 @@ export function createSourceAdapterContext<
   } as SourceAdapterContext<TConfig, TReport, z.output<TExtensionsSchema>>;
 }
 
+/** Adapter-declared relation role exposed for on-demand archive search expansion. */
+export type SourceAdapterSearchRelationDeclaration = {
+  readonly relationName: string;
+  readonly direction: "incoming" | "outgoing";
+  readonly description?: string;
+};
+
 export interface SourceAdapterDefinition<
   TConfig extends z.ZodType = z.ZodType,
   TExtensionsSchema extends z.ZodObject = z.ZodObject,
@@ -591,6 +599,9 @@ export interface SourceAdapterDefinition<
   readonly configSchema: TConfig;
   /** Owns extension values accepted by every action's archive context. */
   readonly extensionsSchema: TExtensionsSchema;
+  readonly searchRelations?: Readonly<
+    Record<string, SourceAdapterSearchRelationDeclaration>
+  >;
   readonly stateSchema?: z.ZodType;
   readonly stateSnapshotSchema?: z.ZodType;
   readonly actions: TActions;
@@ -645,6 +656,9 @@ export function defineSourceAdapter<
   readonly configSchema: TConfig;
   /** This strict object schema owns the values accepted under `extensions`. */
   readonly extensionsSchema: TExtensionsSchema;
+  readonly searchRelations?: Readonly<
+    Record<string, SourceAdapterSearchRelationDeclaration>
+  >;
   readonly stateSchema?: z.ZodType;
   readonly stateSnapshotSchema?: z.ZodType;
   readonly actions: TActions &
@@ -855,6 +869,11 @@ export function sourceAdapterManifest(
   ) as Record<string, unknown>;
   const { extensionsSchema, searchSummaryFields } =
     extractAndStripSearchSummaryFields(rawExtensionsSchema);
+  const searchRelations =
+    definition.searchRelations !== undefined &&
+    Object.keys(definition.searchRelations).length > 0
+      ? sourceAdapterSearchRelationsMapSchema.parse(definition.searchRelations)
+      : undefined;
 
   return {
     id: definition.id,
@@ -866,6 +885,7 @@ export function sourceAdapterManifest(
     configSchema: z.toJSONSchema(definition.configSchema, { io: "input" }),
     extensionsSchema,
     ...(searchSummaryFields.length === 0 ? {} : { searchSummaryFields }),
+    ...(searchRelations === undefined ? {} : { searchRelations }),
     ...(definition.stateSchema === undefined
       ? {}
       : {
