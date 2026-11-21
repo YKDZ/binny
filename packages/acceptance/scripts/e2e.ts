@@ -8469,7 +8469,7 @@ async function scheduledRunsStep(
       "create",
       binId,
       "--expression",
-      "*/30 * * * * *",
+      "0 * * * * *",
       "--time-zone",
       "UTC",
       "--action",
@@ -8635,7 +8635,9 @@ async function scheduledRunsStep(
   await wait(Math.max(0, nextCollectDueAt - Date.now() - 15_000));
   assert.ok(nextCollectDueAt - Date.now() > 10_000);
   await compose(["stop", "server"]);
-  await wait(65_000);
+  assert.ok(Date.now() < nextCollectDueAt);
+  await wait(nextCollectDueAt - Date.now() + 1_000);
+  const serverRestartStartedAt = Date.now();
   await compose(["start", "server"]);
   const apiUrlBeforeRestart = baseUrl;
   composePort = await publishedPort("server", 3000);
@@ -8659,10 +8661,26 @@ async function scheduledRunsStep(
     await cli(baseUrl, ["schedule", "get", binId, checkSchedule.scheduleId]),
     "found",
   );
-  assert.ok(Date.parse(resumedCollectSchedule.nextDueAt) > Date.now());
-  assert.ok(Date.parse(resumedCheckSchedule.nextDueAt) > Date.now());
+  assert.ok(serverRestartStartedAt > nextCollectDueAt);
+  assert.ok(
+    Date.parse(resumedCollectSchedule.nextDueAt) > serverRestartStartedAt,
+  );
+  assert.ok(
+    Date.parse(resumedCheckSchedule.nextDueAt) > serverRestartStartedAt,
+  );
   assert.equal(resumedCollectSchedule.lastRunId, collectQueuedRun.runId);
   assert.equal(resumedCheckSchedule.lastRunId, checkQueuedRun.runId);
+
+  // Freeze new triggers while the runtime drains the runs queued before the outage.
+  for (const scheduleId of [
+    collectSchedule.scheduleId,
+    checkSchedule.scheduleId,
+  ]) {
+    cliData(
+      await cli(baseUrl, ["schedule", "disable", binId, scheduleId]),
+      "disabled",
+    );
+  }
   assert.equal(
     cliData<ManualRunCliState>(
       await cli(baseUrl, ["run", "get", binId, collectQueuedRun.runId]),
@@ -8728,9 +8746,6 @@ async function scheduledRunsStep(
     assert.equal(firstRun.referenceTime, firstRun.trigger.scheduledFor);
   }
 
-  assert.ok(Date.parse(resumedCollectSchedule.nextDueAt) > Date.now());
-  assert.ok(Date.parse(resumedCheckSchedule.nextDueAt) > Date.now());
-
   assert.equal(
     await countSourceArrivals(sourceControlUrl, secondGateKey, binId),
     0,
@@ -8740,16 +8755,6 @@ async function scheduledRunsStep(
     await countSourceArrivals(sourceControlUrl, secondGateKey, binId),
     0,
   );
-
-  for (const scheduleId of [
-    collectSchedule.scheduleId,
-    checkSchedule.scheduleId,
-  ]) {
-    cliData(
-      await cli(baseUrl, ["schedule", "disable", binId, scheduleId]),
-      "disabled",
-    );
-  }
 
   const firstDisposition =
     firstArrival.gateKey === collectGateKey ? "material" : "available";

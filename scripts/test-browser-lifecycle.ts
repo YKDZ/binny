@@ -141,7 +141,7 @@ type SourceMetrics = {
     readonly maxAge: number;
     readonly at: number;
   }[];
-  readonly loginPageViews: readonly number[];
+  readonly loginFormsReady: number;
   readonly authenticatedProtectedVisits: readonly number[];
   readonly gates: Readonly<Record<string, SourceGate>>;
 };
@@ -1265,16 +1265,16 @@ async function waitForLoginSubmission(
   throw new Error("外层浏览器通过 noVNC 输入后，受控站点没有收到登录表单。");
 }
 
-async function waitForLoginPage(
+async function waitForLoginFormReady(
   index: number,
   timeoutMs = 30_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if ((await sourceMetrics()).loginPageViews.length > index) return;
+    if ((await sourceMetrics()).loginFormsReady > index) return;
     await delay(100);
   }
-  throw new Error("外层浏览器输入的地址没有打开受控登录页。");
+  throw new Error("The controlled login form did not receive keyboard focus.");
 }
 
 async function waitForAuthenticatedVisit(
@@ -1367,7 +1367,7 @@ async function enterLoginThroughCanvas(
   frames: ViewerFrameStats,
 ): Promise<void> {
   const initialMetrics = await sourceMetrics();
-  const loginPageIndex = initialMetrics.loginPageViews.length;
+  const loginFormIndex = initialMetrics.loginFormsReady;
   const protectedVisitIndex =
     initialMetrics.authenticatedProtectedVisits.length;
   const canvas = page.locator("#screen canvas");
@@ -1445,7 +1445,7 @@ async function enterLoginThroughCanvas(
   );
   await page.keyboard.press("Enter");
   try {
-    await waitForLoginPage(loginPageIndex);
+    await waitForLoginFormReady(loginFormIndex);
   } catch (error) {
     const afterInputState = await readViewerState();
     const beforeScreenshotPath = path.join(
@@ -1459,7 +1459,7 @@ async function enterLoginThroughCanvas(
     await writeFile(beforeScreenshotPath, beforeInputScreenshot);
     await page.screenshot({ path: afterScreenshotPath });
     throw new Error(
-      `外层浏览器输入后没有打开受控登录页：${JSON.stringify({ beforeInputState, afterInputState, loginPageViews: (await sourceMetrics()).loginPageViews.length })}；输入前画面：${beforeScreenshotPath}；输入后画面：${afterScreenshotPath}；${String(error)}`,
+      `The controlled login form was not ready after navigating through noVNC: ${JSON.stringify({ beforeInputState, afterInputState, loginFormsReady: (await sourceMetrics()).loginFormsReady })}. Screenshots: ${beforeScreenshotPath}, ${afterScreenshotPath}. ${String(error)}`,
       { cause: error },
     );
   }

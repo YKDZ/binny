@@ -14,7 +14,7 @@ type GateState = {
 
 const port = Number(process.env.BINNY_BROWSER_SOURCE_PORT ?? "8081");
 const loginSubmissions: { readonly maxAge: number; readonly at: number }[] = [];
-const loginPageViews: number[] = [];
+let loginFormsReady = 0;
 const authenticatedProtectedVisits: number[] = [];
 const gates = new Map<string, GateState>();
 
@@ -53,7 +53,7 @@ const server = createServer(async (request, response) => {
         "application/json; charset=utf-8",
         JSON.stringify({
           loginSubmissions,
-          loginPageViews,
+          loginFormsReady,
           authenticatedProtectedVisits,
           gates: Object.fromEntries(gates),
         }),
@@ -81,14 +81,29 @@ const server = createServer(async (request, response) => {
       send(response, 204, "text/plain; charset=utf-8", "");
       return;
     }
+    if (
+      url.pathname === "/__control/login-ready" &&
+      request.method === "POST"
+    ) {
+      loginFormsReady += 1;
+      send(response, 204, "text/plain; charset=utf-8", "");
+      return;
+    }
     if (url.pathname === "/login" && request.method === "GET") {
       const maxAge = Number(url.searchParams.get("lifetime") ?? "600");
-      loginPageViews.push(Date.now());
       send(
         response,
         200,
         "text/html; charset=utf-8",
-        `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>受控登录</title><body><h1>受控登录</h1><form action="/login" method="post"><label>用户名<input name="username" autocomplete="off" autofocus></label><label>密码<input name="password" type="password" autocomplete="off"></label><input type="hidden" name="lifetime" value="${String(maxAge)}"><button type="submit">登录</button></form></body></html>`,
+        `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>受控登录</title><body><h1>受控登录</h1><form action="/login" method="post"><label>用户名<input name="username" autocomplete="off"></label><label>密码<input name="password" type="password" autocomplete="off"></label><input type="hidden" name="lifetime" value="${String(maxAge)}"><button type="submit">登录</button></form><script>
+          window.addEventListener("load", () => {
+            const username = document.querySelector('input[name="username"]');
+            username.focus();
+            if (document.activeElement === username) {
+              void fetch("/__control/login-ready", { method: "POST" });
+            }
+          }, { once: true });
+        </script></body></html>`,
       );
       return;
     }
