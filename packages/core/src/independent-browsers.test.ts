@@ -122,12 +122,10 @@ type RunRow = {
 type HumanSessionRow = {
   sessionId: string;
   binId: string;
-  accessTokenHash: string;
   status: "pending" | "opening" | "ready" | "closing" | "closed" | "failed";
   runtimeId: string | null;
   ownerGeneration: bigint | null;
-  runtimeTokenHash: string | null;
-  gatewayClosed: boolean;
+  vncPasswordPending: string | null;
   runtimeClosed: boolean;
   failure: unknown;
   requestedAt: Date;
@@ -188,6 +186,14 @@ function createInMemoryDatabase(initial: {
     if (table === archiveCommits) return [];
 
     if (table === binConfigurations) {
+      if (compiled.sql.includes("in (")) {
+        return compiled.params
+          .filter(
+            (param): param is string =>
+              typeof param === "string" && bins.has(param),
+          )
+          .map((id) => ({ ...bins.get(id)! }));
+      }
       const binId = findBinId(compiled.params);
       const bin = binId === undefined ? undefined : bins.get(binId);
       if (bin === undefined) return [];
@@ -413,22 +419,38 @@ function createInMemoryDatabase(initial: {
         (param): param is string =>
           typeof param === "string" && sessions.has(param),
       );
+      const binId = findBinId(compiled.params);
       const updated: HumanSessionRow[] = [];
       for (const row of sessions.values()) {
         if (sessionId !== undefined && row.sessionId !== sessionId) continue;
+        if (binId !== undefined && row.binId !== binId) continue;
+        if (
+          compiled.sql.includes('"status" = $') &&
+          compiled.params.includes("pending") &&
+          row.status !== "pending"
+        ) {
+          continue;
+        }
+        if (
+          compiled.sql.includes('"status" = $') &&
+          compiled.params.includes("opening") &&
+          row.status !== "opening"
+        ) {
+          continue;
+        }
         if ("status" in values)
           row.status = values.status as HumanSessionRow["status"];
         if ("runtimeId" in values)
           row.runtimeId = values.runtimeId as string | null;
         if ("ownerGeneration" in values)
           row.ownerGeneration = values.ownerGeneration as bigint | null;
-        if ("runtimeTokenHash" in values)
-          row.runtimeTokenHash = values.runtimeTokenHash as string | null;
-        if ("gatewayClosed" in values)
-          row.gatewayClosed = Boolean(values.gatewayClosed);
+        if ("vncPasswordPending" in values)
+          row.vncPasswordPending = values.vncPasswordPending as string | null;
         if ("runtimeClosed" in values)
           row.runtimeClosed = Boolean(values.runtimeClosed);
         if ("failure" in values) row.failure = values.failure;
+        if ("readyAt" in values) row.readyAt = new Date();
+        if ("closedAt" in values) row.closedAt = new Date();
         row.updatedAt = new Date();
         updated.push({ ...row });
       }
@@ -470,12 +492,11 @@ function createInMemoryDatabase(initial: {
       const created: HumanSessionRow = {
         sessionId: values.sessionId as string,
         binId: values.binId as string,
-        accessTokenHash: values.accessTokenHash as string,
         status: (values.status as HumanSessionRow["status"]) ?? "pending",
         runtimeId: null,
         ownerGeneration: null,
-        runtimeTokenHash: null,
-        gatewayClosed: false,
+        vncPasswordPending:
+          (values.vncPasswordPending as string | null | undefined) ?? null,
         runtimeClosed: false,
         failure: null,
         requestedAt: now,
@@ -700,12 +721,10 @@ function makeHumanSession(
   return {
     sessionId,
     binId,
-    accessTokenHash: `hash-${sessionId}`,
     status,
     runtimeId: null,
     ownerGeneration: null,
-    runtimeTokenHash: null,
-    gatewayClosed: false,
+    vncPasswordPending: null,
     runtimeClosed: false,
     failure: null,
     requestedAt: now,
@@ -750,7 +769,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
 
     const runtimeStore = createRuntimeConnectionStore(mock.database);
     const heartbeatPayload = (runtimeId: string, binId: string) => ({
-      protocolVersion: runtimeProtocolVersion as 9,
+      protocolVersion: runtimeProtocolVersion as typeof runtimeProtocolVersion,
       runtimeId,
       ownerGeneration: "1",
       ownerLockAcquired: true as const,
@@ -973,7 +992,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
     assert.equal(residentAccepted.ok, true);
   });
 
-  void it("wakes sleeping containers on human open and waits for double close confirmation before marking work completed", async () => {
+  void it("wakes sleeping containers on human open, injects host port on ready, and marks work completed after runtime close confirmation", async () => {
     const mock = createInMemoryDatabase({
       bins: [makeBin("bin-human")],
       connections: [
@@ -1002,6 +1021,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
 
     const wakeCalls: string[] = [];
     const workCompletedCalls: string[] = [];
+    let liveHostPort: number | null = 32_768;
     const coordinatorStub = {
       requestWake(binId: string) {
         wakeCalls.push(binId);
@@ -1009,6 +1029,9 @@ void describe("independent browser bins without cross-bin capacity", () => {
       async onRuntimeHeartbeat() {},
       async markWorkCompleted(binId: string) {
         workCompletedCalls.push(binId);
+      },
+      async resolveVncHostPort() {
+        return liveHostPort;
       },
     };
 
@@ -1036,6 +1059,8 @@ void describe("independent browser bins without cross-bin capacity", () => {
     if (!opened.ok) return;
     assert.equal(opened.value.status, "pending");
     assert.equal(opened.value.queueReason, "runtime_sleeping");
+    assert.equal("port" in opened.value, false);
+    assert.match(opened.value.password, /^[A-Za-z0-9]{8}$/u);
     assert.deepEqual(wakeCalls, ["bin-human"]);
 
     mock.containers.get("bin-human")!.lifecyclePhase = "waking";
@@ -1047,6 +1072,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
     if (whileWaking.ok) {
       assert.equal(whileWaking.value.status, "pending");
       assert.equal(whileWaking.value.queueReason, "runtime_waking");
+      assert.equal(whileWaking.value.port, undefined);
     }
 
     // Woken runtime reconnects with a new runtimeId + generation and promotes pending -> opening.
@@ -1058,6 +1084,7 @@ void describe("independent browser bins without cross-bin capacity", () => {
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
+      activeHumanSession: null,
       runtimeControlUrl: "http://bin-human:8080",
       sourceAdapter: browserAdapter,
       environment: {
@@ -1071,8 +1098,41 @@ void describe("independent browser bins without cross-bin capacity", () => {
     });
     assert.equal(hbOpen.ok, true);
     if (!hbOpen.ok) return;
-    assert.equal(hbOpen.value.humanSession?.action, "open");
-    assert.equal(hbOpen.value.humanSession?.sessionId, opened.value.sessionId);
+    assert.deepEqual(hbOpen.value.humanSession, {
+      sessionId: opened.value.sessionId,
+      action: "open",
+      password: opened.value.password,
+      connectTimeoutMs: 60_000,
+    });
+
+    // If the heartbeat response is lost, a retry heartbeat re-delivers the exact same password.
+    const hbOpenRetry = await runtimeStore.heartbeat("bin-human", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-new",
+      ownerGeneration: "2",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      activeHumanSession: null,
+      runtimeControlUrl: "http://bin-human:8080",
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbOpenRetry.ok, true);
+    if (!hbOpenRetry.ok) return;
+    assert.deepEqual(hbOpenRetry.value.humanSession, {
+      sessionId: opened.value.sessionId,
+      action: "open",
+      password: opened.value.password,
+      connectTimeoutMs: 60_000,
+    });
 
     // Runtime reports ready.
     const hbReady = await runtimeStore.heartbeat("bin-human", {
@@ -1082,11 +1142,16 @@ void describe("independent browser bins without cross-bin capacity", () => {
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
-      runtimeControlUrl: "http://bin-human:8080",
+      activeHumanSession: {
+        sessionId: opened.value.sessionId,
+        phase: "ready",
+        clientConnected: false,
+      },
       humanSessionEvent: {
         sessionId: opened.value.sessionId,
         event: "ready",
       },
+      runtimeControlUrl: "http://bin-human:8080",
       sourceAdapter: browserAdapter,
       environment: {
         kind: "browser",
@@ -1100,16 +1165,41 @@ void describe("independent browser bins without cross-bin capacity", () => {
     assert.equal(hbReady.ok, true);
     assert.deepEqual(workCompletedCalls, []);
 
-    // Close requested: gateway closes first -> runtimeClosed is still false, so work is NOT completed yet.
+    const readyLookup = await humanStore.getHumanSession(
+      "bin-human",
+      opened.value.sessionId,
+    );
+    assert.equal(readyLookup.ok, true);
+    if (readyLookup.ok) {
+      assert.equal(readyLookup.value.status, "ready");
+      assert.equal(readyLookup.value.port, 32_768);
+      assert.equal("password" in readyLookup.value, false);
+    }
+
+    // Updated host port after container recreation is reflected dynamically.
+    liveHostPort = 41_234;
+    const refreshedLookup = await humanStore.getHumanSession(
+      "bin-human",
+      opened.value.sessionId,
+    );
+    assert.equal(refreshedLookup.ok, true);
+    if (refreshedLookup.ok) {
+      assert.equal(refreshedLookup.value.port, 41_234);
+    }
+
+    // Close requested: remains closing until runtime confirms VNC teardown.
     const closing = await humanStore.closeHumanSession(
       "bin-human",
       opened.value.sessionId,
     );
     assert.equal(closing.ok, true);
-    await humanStore.markHumanGatewayClosed(opened.value.sessionId);
+    if (closing.ok) {
+      assert.equal(closing.value.status, "closing");
+      assert.equal(closing.value.port, undefined);
+    }
     assert.deepEqual(workCompletedCalls, []);
 
-    // Runtime confirms closed -> both gatewayClosed and runtimeClosed are true -> markWorkCompleted fires once.
+    // Runtime confirms closed -> marks work completed once.
     const hbClosed = await runtimeStore.heartbeat("bin-human", {
       protocolVersion: runtimeProtocolVersion,
       runtimeId: "rt-new",
@@ -1117,11 +1207,12 @@ void describe("independent browser bins without cross-bin capacity", () => {
       ownerLockAcquired: true,
       activeRunId: null,
       claimInFlight: false,
-      runtimeControlUrl: "http://bin-human:8080",
+      activeHumanSession: null,
       humanSessionEvent: {
         sessionId: opened.value.sessionId,
         event: "closed",
       },
+      runtimeControlUrl: "http://bin-human:8080",
       sourceAdapter: browserAdapter,
       environment: {
         kind: "browser",
@@ -1134,6 +1225,176 @@ void describe("independent browser bins without cross-bin capacity", () => {
     });
     assert.equal(hbClosed.ok, true);
     assert.deepEqual(workCompletedCalls, ["bin-human"]);
+  });
+
+  void it("reconciles active and terminated human sessions across server restart via activeHumanSession", async () => {
+    const mock = createInMemoryDatabase({
+      bins: [makeBin("bin-reconcile")],
+      connections: [makeConnection("bin-reconcile", "rt-1", "ready")],
+      runs: [],
+      humanSessions: [
+        {
+          ...makeHumanSession(
+            "55555555-5555-4555-8555-555555555555",
+            "bin-reconcile",
+            "ready",
+          ),
+          runtimeId: "rt-1",
+          ownerGeneration: 1n,
+          readyAt: new Date(1000),
+        },
+      ],
+    });
+    const workCompletedCalls: string[] = [];
+    const coordinatorStub = {
+      requestWake() {},
+      async onRuntimeHeartbeat() {},
+      async markWorkCompleted(binId: string) {
+        workCompletedCalls.push(binId);
+      },
+      async resolveVncHostPort() {
+        return 39_001;
+      },
+    };
+    const runtimeStore = createRuntimeConnectionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createRuntimeConnectionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+    const humanStore = createHumanSessionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createHumanSessionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+
+    // Situation A: runtime still holds the connected VNC session after server restart.
+    const hbStillActive = await runtimeStore.heartbeat("bin-reconcile", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-1",
+      ownerGeneration: "1",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      activeHumanSession: {
+        sessionId: "55555555-5555-4555-8555-555555555555",
+        phase: "ready",
+        clientConnected: true,
+      },
+      runtimeControlUrl: "http://bin-reconcile:8080",
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbStillActive.ok, true);
+    if (hbStillActive.ok) {
+      assert.equal(hbStillActive.value.humanSession, undefined);
+    }
+    assert.deepEqual(workCompletedCalls, []);
+
+    // Situation B: runtime reports no active human session (client disconnected while server was down).
+    const hbGone = await runtimeStore.heartbeat("bin-reconcile", {
+      protocolVersion: runtimeProtocolVersion,
+      runtimeId: "rt-1",
+      ownerGeneration: "1",
+      ownerLockAcquired: true,
+      activeRunId: null,
+      claimInFlight: false,
+      activeHumanSession: null,
+      runtimeControlUrl: "http://bin-reconcile:8080",
+      sourceAdapter: browserAdapter,
+      environment: {
+        kind: "browser",
+        browser: {
+          available: true,
+          profileReuseAfterRestart: true,
+          power: { status: "ready" },
+        },
+      },
+    });
+    assert.equal(hbGone.ok, true);
+    assert.deepEqual(workCompletedCalls, ["bin-reconcile"]);
+
+    const finalState = await humanStore.getHumanSession(
+      "bin-reconcile",
+      "55555555-5555-4555-8555-555555555555",
+    );
+    assert.equal(finalState.ok, true);
+    if (finalState.ok) {
+      assert.equal(finalState.value.status, "closed");
+      assert.equal(finalState.value.port, undefined);
+    }
+  });
+
+  void it("expires queued pending and unready opening sessions without disturbing in-flight runs", async () => {
+    const activeRunId = "66666666-6666-4666-8666-666666666666";
+    const pendingSessionId = "77777777-7777-4777-8777-777777777777";
+    const openingSessionId = "88888888-8888-4888-8888-888888888888";
+    const mock = createInMemoryDatabase({
+      bins: [makeBin("bin-expire-a"), makeBin("bin-expire-b")],
+      connections: [
+        makeConnection("bin-expire-a", "rt-a", "ready"),
+        makeConnection("bin-expire-b", "rt-b", "ready"),
+      ],
+      runs: [
+        {
+          ...makeQueuedRun(activeRunId, "bin-expire-a", new Date(1000)),
+          status: "executing",
+          runtimeId: "rt-a",
+          startedAt: new Date(1000),
+        },
+      ],
+      humanSessions: [
+        makeHumanSession(pendingSessionId, "bin-expire-a", "pending"),
+        {
+          ...makeHumanSession(openingSessionId, "bin-expire-b", "opening"),
+          runtimeId: "rt-b",
+          ownerGeneration: 1n,
+          vncPasswordPending: "Ab12Cd34",
+        },
+      ],
+    });
+    const workCompletedCalls: string[] = [];
+    const coordinatorStub = {
+      requestWake() {},
+      async onRuntimeHeartbeat() {},
+      async markWorkCompleted(binId: string) {
+        workCompletedCalls.push(binId);
+      },
+      async resolveVncHostPort() {
+        return null;
+      },
+    };
+    const humanStore = createHumanSessionStore(mock.database, {
+      containerCoordinator: coordinatorStub as unknown as Parameters<
+        typeof createHumanSessionStore
+      >[1] extends infer O
+        ? O extends { readonly containerCoordinator?: infer C }
+          ? C
+          : never
+        : never,
+    });
+
+    const expiredCount = await humanStore.expirePendingHumanSessions(60_000);
+    assert.equal(expiredCount, 2);
+    assert.equal(mock.sessions.get(pendingSessionId)?.status, "closed");
+    assert.equal(mock.sessions.get(openingSessionId)?.status, "closing");
+    assert.equal(mock.sessions.get(openingSessionId)?.vncPasswordPending, null);
+    assert.equal(mock.runs.get(activeRunId)?.status, "executing");
+    assert.deepEqual(workCompletedCalls, ["bin-expire-a"]);
   });
 
   void it("reports runtime_sleeping when human open arrives while container is stopping before disconnect", async () => {

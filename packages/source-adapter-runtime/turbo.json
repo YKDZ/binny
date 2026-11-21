@@ -167,6 +167,22 @@
       "cache": false,
       "tags": ["work:preparation"]
     },
+    "image:build:vnc-viewer-fixture": {
+      "passThroughEnv": [
+        "BINNY_IMAGE_BUILD_CONTEXT",
+        "BINNY_TEST_VNC_VIEWER_IMAGE"
+      ],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/.dockerignore",
+        "$TURBO_ROOT$/packages/source-adapter-runtime/Dockerfile.vnc-viewer-fixture",
+        "$TURBO_ROOT$/docker-bake.hcl",
+        "$TURBO_ROOT$/package.json"
+      ],
+      "outputs": [],
+      "cache": false,
+      "tags": ["work:preparation"]
+    },
     "format:check": {
       "inputs": [],
       "outputs": [],

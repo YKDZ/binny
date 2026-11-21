@@ -1,39 +1,94 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir, unlink } from "node:fs/promises";
-import { connect, type Socket } from "node:net";
+import { access, chmod, mkdir, rm, unlink } from "node:fs/promises";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import type { BrowserPower } from "@binny/contracts";
+import {
+  vncPasswordSchema,
+  type BrowserPower,
+  type RuntimeActiveHumanSession,
+} from "@binny/contracts";
 import type { SourceAdapterBrowserConnection } from "@binny/source-adapter-sdk";
 import { chromium, type Browser, type BrowserContext } from "patchright-core";
-import WebSocket from "ws";
 
 type BrowserOptions = {
-  readonly apiUrl: string;
+  readonly apiUrl?: string;
   readonly binId: string;
-  readonly runtimeId: string;
-  readonly ownerGeneration: string | (() => string);
+  readonly runtimeId?: string;
+  readonly ownerGeneration?: string | (() => string);
   readonly profileDirectory: string;
   readonly display?: string;
   readonly onPowerChange: (power: BrowserPower) => Promise<void> | void;
 };
 
 type HumanSessionEnd = {
+  readonly reason: "closed" | "expired" | "failed";
   readonly failure?: { readonly code: string; readonly message: string };
 };
 
 type HumanConnection = {
   readonly sessionId: string;
   readonly process: ChildProcess;
-  readonly tunnel: WebSocket;
+  readonly passwdFile: string;
+  readonly socketPath: string;
+  readonly eventServer: Server;
   readonly ended: Promise<HumanSessionEnd>;
   resolveEnded(result: HumanSessionEnd): void;
-  heartbeat: NodeJS.Timeout | undefined;
-  vncSocket: Socket | undefined;
+  phase: "opening" | "ready";
+  clientConnected: boolean;
+  acceptedClientId: string | undefined;
+  firstConnectTimer: NodeJS.Timeout | undefined;
   stopPromise: Promise<void> | undefined;
   stopping: boolean;
 };
+
+function quoteShellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function buildVncHookCommand(
+  socketPath: string,
+  kind: "accepted" | "gone",
+): string {
+  const script = [
+    'const net = require("node:net");',
+    `const sock = net.connect(${JSON.stringify(socketPath)});`,
+    'sock.on("error", () => {});',
+    `sock.on("connect", () => sock.end(${JSON.stringify(`${kind}:`)} + (process.env.RFB_CLIENT_ID ?? "") + "\\n"));`,
+  ].join("");
+  return `${quoteShellArgument(process.execPath)} -e ${quoteShellArgument(script)}`;
+}
+
+async function createVncPasswordFile(
+  password: string,
+  passwdFile: string,
+): Promise<void> {
+  await rm(passwdFile, { force: true });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("x11vnc", ["-storepasswd", password, passwdFile], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `x11vnc -storepasswd failed (${String(code ?? signal ?? "unknown")}): ${stderr.trim()}`,
+        ),
+      );
+    });
+  });
+  await chmod(passwdFile, 0o600);
+}
 
 function childExited(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null)
@@ -54,15 +109,6 @@ async function terminateChild(child: ChildProcess): Promise<void> {
   ]);
   if (!graceful) child.kill("SIGKILL");
   await exited;
-}
-
-function websocketUrl(apiUrl: string, path: string): URL {
-  const endpoint = new URL(apiUrl);
-  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
-  endpoint.pathname = path;
-  endpoint.search = "";
-  endpoint.hash = "";
-  return endpoint;
 }
 
 function openTcpConnection(port: number): Promise<Socket> {
@@ -89,7 +135,7 @@ async function waitForTcpListener(
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) {
       await exited;
-      throw new Error("浏览器画面进程在启动期间退出。");
+      throw new Error("x11vnc process exited before listening on port 5900.");
     }
     try {
       const socket = await openTcpConnection(port);
@@ -102,30 +148,7 @@ async function waitForTcpListener(
       await delay(25);
     }
   }
-  throw new Error("浏览器画面服务没有在期限内就绪。");
-}
-
-function waitForWebSocketOpen(socket: WebSocket): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onOpen = () => {
-      socket.off("error", onError);
-      socket.off("close", onClose);
-      resolve();
-    };
-    const onError = (error: Error) => {
-      socket.off("open", onOpen);
-      socket.off("close", onClose);
-      reject(error);
-    };
-    const onClose = () => {
-      socket.off("open", onOpen);
-      socket.off("error", onError);
-      reject(new Error("浏览器人工通道在连接完成前关闭。"));
-    };
-    socket.once("open", onOpen);
-    socket.once("error", onError);
-    socket.once("close", onClose);
-  });
+  throw new Error("x11vnc listener on port 5900 did not become ready.");
 }
 
 /** 持有唯一 persistent context，并在 run 与人工会话之间复用它。 */
@@ -328,19 +351,105 @@ export class BrowserLifecycle {
     }
   }
 
-  async openHumanSession(
-    sessionId: string,
-    tunnelToken: string,
-  ): Promise<{ readonly ended: Promise<HumanSessionEnd> }> {
+  getActiveHumanSessionSnapshot(): RuntimeActiveHumanSession | null {
+    const human = this.human;
+    if (human === undefined || human.stopping) return null;
+    return {
+      sessionId: human.sessionId,
+      phase: human.phase,
+      clientConnected: human.clientConnected,
+    };
+  }
+
+  async openHumanSession(input: {
+    readonly sessionId: string;
+    readonly password: string;
+    readonly connectTimeoutMs: number;
+  }): Promise<{ readonly ended: Promise<HumanSessionEnd> }> {
+    const password = vncPasswordSchema.parse(input.password);
+    if (
+      !Number.isSafeInteger(input.connectTimeoutMs) ||
+      input.connectTimeoutMs < 1
+    ) {
+      throw new Error(
+        "Human session connectTimeoutMs must be a positive integer.",
+      );
+    }
     await this.ensureReady();
     if (this.human !== undefined)
-      throw new Error("另一个浏览器人工通道仍在清理。");
+      throw new Error("Another human browser session is still cleaning up.");
     await this.cleanAutomaticPages();
     await this.ensureReady();
     const context = this.context;
-    if (context === undefined) throw new Error("浏览器尚未就绪。");
+    if (context === undefined) throw new Error("Browser is not ready.");
     const page = await context.newPage();
     await page.bringToFront();
+
+    const passwdFile = path.join("/tmp", `binny-vnc-${input.sessionId}.passwd`);
+    const socketPath = path.join("/tmp", `binny-vnc-${input.sessionId}.sock`);
+    await createVncPasswordFile(password, passwdFile);
+    await rm(socketPath, { force: true });
+
+    let resolveEnded!: (result: HumanSessionEnd) => void;
+    const ended = new Promise<HumanSessionEnd>((resolve) => {
+      resolveEnded = resolve;
+    });
+
+    let human!: HumanConnection;
+    const eventServer = createServer((connection) => {
+      let buffer = "";
+      connection.setEncoding("utf8");
+      connection.on("data", (chunk: string) => {
+        buffer += chunk;
+        for (;;) {
+          const newline = buffer.indexOf("\n");
+          if (newline === -1) break;
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (line.startsWith("accepted:")) {
+            const clientId = line.slice("accepted:".length).trim();
+            if (
+              !human.stopping &&
+              human.acceptedClientId === undefined &&
+              clientId.length > 0
+            ) {
+              human.acceptedClientId = clientId;
+              human.clientConnected = true;
+              if (human.firstConnectTimer !== undefined) {
+                clearTimeout(human.firstConnectTimer);
+                human.firstConnectTimer = undefined;
+              }
+            }
+          } else if (line.startsWith("gone:")) {
+            const clientId = line.slice("gone:".length).trim();
+            // Only tear down when the first authenticated client disconnects;
+            // rejected second clients and bad-password probes do not match.
+            if (
+              !human.stopping &&
+              human.acceptedClientId !== undefined &&
+              clientId === human.acceptedClientId
+            ) {
+              void this.stopHuman(human, { reason: "closed" });
+            }
+          }
+        }
+      });
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        eventServer.once("error", reject);
+        eventServer.listen(socketPath, () => {
+          eventServer.off("error", reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      await rm(passwdFile, { force: true });
+      await rm(socketPath, { force: true });
+      await this.cleanAutomaticPages();
+      throw error;
+    }
 
     const child = spawn(
       "x11vnc",
@@ -348,108 +457,86 @@ export class BrowserLifecycle {
         "-norc",
         "-display",
         this.display,
-        "-localhost",
-        "-nopw",
-        "-forever",
         "-rfbport",
         "5900",
+        "-rfbauth",
+        passwdFile,
+        "-forever",
+        "-nevershared",
+        "-dontdisconnect",
         "-nolookup",
         "-noxdamage",
+        "-afteraccept",
+        buildVncHookCommand(socketPath, "accepted"),
+        "-gone",
+        buildVncHookCommand(socketPath, "gone"),
       ],
       { stdio: "ignore" },
     );
-    try {
-      await waitForTcpListener(5900, child);
-    } catch (error) {
-      await terminateChild(child);
-      throw error;
-    }
-    const tunnelEndpoint = websocketUrl(
-      this.options.apiUrl,
-      `/__runtime/human-sessions/${sessionId}/tunnel`,
-    );
-    tunnelEndpoint.searchParams.set("binId", this.options.binId);
-    tunnelEndpoint.searchParams.set("runtimeId", this.options.runtimeId);
-    tunnelEndpoint.searchParams.set(
-      "ownerGeneration",
-      typeof this.options.ownerGeneration === "function"
-        ? this.options.ownerGeneration()
-        : this.options.ownerGeneration,
-    );
-    tunnelEndpoint.searchParams.set("token", tunnelToken);
-    const tunnel = new WebSocket(tunnelEndpoint, {
-      handshakeTimeout: 10_000,
-      maxPayload: 4 * 1024 * 1024,
-      perMessageDeflate: false,
-    });
-    tunnel.binaryType = "nodebuffer";
-    let resolveEnded!: (result: HumanSessionEnd) => void;
-    const ended = new Promise<HumanSessionEnd>((resolve) => {
-      resolveEnded = resolve;
-    });
-    const human: HumanConnection = {
-      sessionId,
+
+    human = {
+      sessionId: input.sessionId,
       process: child,
-      tunnel,
+      passwdFile,
+      socketPath,
+      eventServer,
       ended,
       resolveEnded,
-      heartbeat: undefined,
-      vncSocket: undefined,
+      phase: "opening",
+      clientConnected: false,
+      acceptedClientId: undefined,
+      firstConnectTimer: undefined,
       stopPromise: undefined,
       stopping: false,
     };
     this.human = human;
+
     child.once("error", () => {
       void this.stopHuman(human, {
+        reason: "failed",
         failure: {
           code: "browser_vnc_failed",
-          message: "浏览器画面没有正常启动。",
+          message: "Failed to start x11vnc process.",
         },
       });
     });
     child.once("close", (code, signal) => {
       if (!human.stopping) {
         void this.stopHuman(human, {
+          reason: "failed",
           failure: {
             code: "browser_vnc_exited",
-            message: `浏览器画面意外退出（${String(code ?? signal ?? "unknown")}）。`,
+            message: `x11vnc exited unexpectedly (${String(code ?? signal ?? "unknown")}).`,
           },
         });
       }
     });
-    tunnel.on("message", (data, isBinary) => {
-      const payload = Buffer.isBuffer(data)
-        ? data
-        : Array.isArray(data)
-          ? Buffer.concat(data)
-          : Buffer.from(data);
-      if (!isBinary) {
-        if (payload.toString("utf8") === "connect") void this.connectVnc(human);
-        return;
-      }
-      if (human.vncSocket?.writable === true) human.vncSocket.write(payload);
-    });
-    tunnel.once("close", () => {
-      void this.stopHuman(human);
-    });
-    let tunnelAlive = true;
-    tunnel.on("pong", () => {
-      tunnelAlive = true;
-    });
-    human.heartbeat = setInterval(() => {
-      if (!tunnelAlive) {
-        tunnel.terminate();
-        return;
-      }
-      tunnelAlive = false;
-      tunnel.ping();
-    }, 5_000);
-    human.heartbeat.unref();
+
     try {
-      await waitForWebSocketOpen(tunnel);
+      await waitForTcpListener(5900, child);
     } catch (error) {
-      await this.stopHuman(human);
+      await this.stopHuman(human, {
+        reason: "failed",
+        failure: {
+          code: "browser_vnc_unavailable",
+          message:
+            error instanceof Error
+              ? error.message
+              : "x11vnc listener did not become ready.",
+        },
+      });
       throw error;
+    }
+
+    if (!human.stopping) {
+      human.phase = "ready";
+      human.firstConnectTimer = setTimeout(() => {
+        human.firstConnectTimer = undefined;
+        if (!human.stopping && human.acceptedClientId === undefined) {
+          void this.stopHuman(human, { reason: "expired" });
+        }
+      }, input.connectTimeoutMs);
+      human.firstConnectTimer.unref();
     }
     return { ended };
   }
@@ -661,73 +748,27 @@ export class BrowserLifecycle {
     throw new Error("虚拟显示器没有在期限内就绪。");
   }
 
-  private async connectVnc(human: HumanConnection): Promise<void> {
-    if (
-      human.stopping ||
-      human.vncSocket !== undefined ||
-      human.tunnel.readyState !== WebSocket.OPEN
-    )
-      return;
-    try {
-      const socket = await openTcpConnection(5900);
-      if (human.stopping) {
-        socket.destroy();
-        return;
-      }
-      human.vncSocket = socket;
-      socket.on("data", (data) => {
-        if (human.tunnel.readyState === WebSocket.OPEN)
-          human.tunnel.send(data, { binary: true });
-      });
-      socket.once("error", () => {
-        if (!human.stopping) {
-          void this.stopHuman(human, {
-            failure: {
-              code: "browser_vnc_connection_failed",
-              message: "浏览器画面连接已意外中断。",
-            },
-          });
-        }
-      });
-      socket.once("close", () => {
-        if (!human.stopping) void this.stopHuman(human);
-      });
-    } catch {
-      await this.stopHuman(human, {
-        failure: {
-          code: "browser_vnc_unavailable",
-          message: "浏览器画面连接没有就绪。",
-        },
-      });
-    }
-  }
-
   private stopHuman(
     human: HumanConnection,
-    result: HumanSessionEnd = {},
+    result: HumanSessionEnd = { reason: "closed" },
   ): Promise<void> {
     if (human.stopPromise !== undefined) return human.stopPromise;
     human.stopping = true;
     const stopPromise = (async () => {
-      if (human.heartbeat !== undefined) clearInterval(human.heartbeat);
-      human.heartbeat = undefined;
-      if (human.vncSocket !== undefined) {
-        const socket = human.vncSocket;
-        human.vncSocket = undefined;
-        if (!socket.destroyed) {
-          await new Promise<void>((resolve) => {
-            socket.once("close", resolve);
-            socket.destroy();
-          });
-        }
-      }
-      if (human.tunnel.readyState !== WebSocket.CLOSED) {
-        await new Promise<void>((resolve) => {
-          human.tunnel.once("close", () => resolve());
-          human.tunnel.terminate();
-        });
+      if (human.firstConnectTimer !== undefined) {
+        clearTimeout(human.firstConnectTimer);
+        human.firstConnectTimer = undefined;
       }
       await terminateChild(human.process);
+      await new Promise<void>((resolve) => {
+        if (!human.eventServer.listening) {
+          resolve();
+          return;
+        }
+        human.eventServer.close(() => resolve());
+      });
+      await rm(human.passwdFile, { force: true });
+      await rm(human.socketPath, { force: true });
       await this.cleanAutomaticPages();
       this.human = this.human === human ? undefined : this.human;
       human.resolveEnded(result);

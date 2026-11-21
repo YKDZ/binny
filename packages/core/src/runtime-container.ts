@@ -17,6 +17,8 @@ import {
 } from "@binny/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 
+import { settleDisconnectedRuntimeHumanSessions } from "./human-session.ts";
+
 export type ManagedContainerStatus =
   | "created"
   | "running"
@@ -43,6 +45,7 @@ export type ManagedContainerInspectResult = {
   readonly startedAt: string | null;
   readonly finishedAt: string | null;
   readonly healthStatus: ManagedContainerHealthStatus;
+  readonly vncHostPort?: number | null;
 };
 
 /** Platform-agnostic container driver boundary implemented by Docker Engine in `@binny/server`. */
@@ -91,6 +94,7 @@ export type RuntimeContainerCoordinator = {
     idleTimeoutSeconds: number | null,
   ): Promise<void>;
   markWorkCompleted(binId: string): Promise<void>;
+  resolveVncHostPort(binId: string): Promise<number | null>;
   onBinRemoved(binId: string): void;
   sweepIdleContainers(): Promise<void>;
   close(): Promise<void>;
@@ -461,6 +465,7 @@ export function createRuntimeContainerCoordinator(
         .update(runtimeConnections)
         .set({ disconnected: true })
         .where(eq(runtimeConnections.binId, binId));
+      await settleDisconnectedRuntimeHumanSessions(transaction, binId);
     });
   }
 
@@ -1372,6 +1377,10 @@ export function createRuntimeContainerCoordinator(
               .update(runtimeConnections)
               .set({ disconnected: true })
               .where(eq(runtimeConnections.binId, row.binId));
+            await settleDisconnectedRuntimeHumanSessions(
+              transaction,
+              row.binId,
+            );
           });
           continue;
         }
@@ -1623,6 +1632,25 @@ export function createRuntimeContainerCoordinator(
       if (bin === undefined) return;
       const idleTimeoutSeconds = readEffectiveIdleTimeoutSeconds(bin);
       await refreshIdleScheduling(binId, idleTimeoutSeconds, true);
+    },
+
+    async resolveVncHostPort(binId) {
+      if (driver === undefined) return null;
+      const [row] = await database
+        .select({ containerId: runtimeContainers.containerId })
+        .from(runtimeContainers)
+        .where(eq(runtimeContainers.binId, binId));
+      if (row !== undefined) {
+        const inspected = await driver.inspectContainer(row.containerId);
+        if (inspected !== null && inspected.status === "running") {
+          return inspected.vncHostPort ?? null;
+        }
+      }
+      const discovered = await discoverManagedContainerForBin(binId);
+      if (discovered !== undefined && discovered.status === "running") {
+        return discovered.vncHostPort ?? null;
+      }
+      return null;
     },
 
     onBinRemoved(binId) {

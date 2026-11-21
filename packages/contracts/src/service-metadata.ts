@@ -4,11 +4,10 @@ import { postgresTextSchema } from "./postgres-text.ts";
 
 /**
  * Public HTTP route compatibility version, independent of the runtime protocol.
- * Version 10 removes the deprecated `browserIdleTimeoutSeconds` request/response
- * fields in favor of `runtimeSleep.idleTimeoutSeconds` and adds container sleep
- * queue reasons and wake error details to human sessions.
+ * Version 11 replaces the noVNC web viewer and WebSocket reverse tunnel with
+ * direct native VNC access (one-time password on create, host port when ready).
  */
-export const publicApiProtocolVersion = 10;
+export const publicApiProtocolVersion = 11;
 
 /** Archive search and batch-read contract version. */
 export const archiveQueryContractVersion = 4;

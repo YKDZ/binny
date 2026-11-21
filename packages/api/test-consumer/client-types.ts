@@ -942,3 +942,55 @@ async function checkPublicServiceDiscoveryContract(): Promise<void> {
 }
 
 void checkPublicServiceDiscoveryContract;
+
+async function checkPublicHumanSessionContract(): Promise<void> {
+  const client = createApiClient("http://127.0.0.1:3000");
+  const binId = "browser-main";
+  const sessionId = "650e8400-e29b-41d4-a716-446655440000";
+
+  const opened = await client.bins[":binId"]["human-sessions"].$post({
+    param: { binId },
+  });
+  if (opened.status === 201) {
+    const created = await opened.json();
+    const password: string = created.password;
+    const status = created.status;
+    void password;
+    void status;
+    // @ts-expect-error Native VNC creation response does not include legacy viewerPath.
+    void created.viewerPath;
+    // @ts-expect-error Native VNC creation response does not expose host port before ready.
+    void created.port;
+  } else if (opened.status === 404 || opened.status === 409) {
+    void (await opened.json()).error.code;
+  }
+
+  const fetched = await client.bins[":binId"]["human-sessions"][
+    ":sessionId"
+  ].$get({
+    param: { binId, sessionId },
+  });
+  if (fetched.status === 200) {
+    const session = await fetched.json();
+    const port: number | undefined = session.port;
+    void port;
+    // @ts-expect-error Human session GET must never expose the one-time VNC password.
+    void session.password;
+  } else if (fetched.status === 404) {
+    void (await fetched.json()).error.code;
+  }
+
+  const closed = await client.bins[":binId"]["human-sessions"][
+    ":sessionId"
+  ].close.$post({
+    param: { binId, sessionId },
+  });
+  if (closed.status === 200) {
+    const state = await closed.json();
+    void state.status;
+    // @ts-expect-error Human session close does not expose VNC password.
+    void state.password;
+  }
+}
+
+void checkPublicHumanSessionContract;

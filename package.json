@@ -27,7 +27,6 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "patchright-core": "1.64.2",
     "turbo": "catalog:",
     "typescript-7": "catalog:"
   },

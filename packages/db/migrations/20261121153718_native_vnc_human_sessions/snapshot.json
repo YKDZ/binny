@@ -1,0 +1,120 @@
+{
+  "type": "diff",
+  "version": "9",
+  "dialect": "postgres",
+  "id": "b1e5d096-b188-4e46-97bc-a6d4aeaa58e1",
+  "prevIds": ["319df593-6d36-4e1d-8b5d-daba63154071"],
+  "footprints": [
+    {
+      "statementType": "drop_unique",
+      "statementTarget": ["table", "public", "human_sessions"],
+      "writes": [
+        "s|uq|public.human_sessions.human_sessions_access_token_hash_key",
+        "n|uq|public.human_sessions.human_sessions_access_token_hash_key",
+        "e|uq|public.human_sessions.human_sessions_access_token_hash_key",
+        "n|con|public.human_sessions.human_sessions_access_token_hash_key",
+        "n|rel|public.human_sessions_access_token_hash_key"
+      ],
+      "reads": [
+        "n|tbl|public.human_sessions",
+        "n|sch|public",
+        "e|col|public.human_sessions.access_token_hash"
+      ],
+      "sharedWrites": ["e|uniqueness|public.human_sessions.access_token_hash"]
+    },
+    {
+      "statementType": "add_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "human_sessions",
+        "vnc_password_pending"
+      ],
+      "writes": [
+        "s|col|public.human_sessions.vnc_password_pending",
+        "n|col|public.human_sessions.vnc_password_pending",
+        "e|col|public.human_sessions.vnc_password_pending"
+      ],
+      "reads": ["n|tbl|public.human_sessions", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "human_sessions",
+        "access_token_hash"
+      ],
+      "writes": [
+        "s|col|public.human_sessions.access_token_hash",
+        "n|col|public.human_sessions.access_token_hash",
+        "e|col|public.human_sessions.access_token_hash"
+      ],
+      "reads": ["n|tbl|public.human_sessions", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "human_sessions",
+        "runtime_token_hash"
+      ],
+      "writes": [
+        "s|col|public.human_sessions.runtime_token_hash",
+        "n|col|public.human_sessions.runtime_token_hash",
+        "e|col|public.human_sessions.runtime_token_hash"
+      ],
+      "reads": ["n|tbl|public.human_sessions", "n|sch|public"]
+    },
+    {
+      "statementType": "drop_column",
+      "statementTarget": [
+        "column",
+        "public",
+        "human_sessions",
+        "gateway_closed"
+      ],
+      "writes": [
+        "s|col|public.human_sessions.gateway_closed",
+        "n|col|public.human_sessions.gateway_closed",
+        "e|col|public.human_sessions.gateway_closed"
+      ],
+      "reads": ["n|tbl|public.human_sessions", "n|sch|public"]
+    }
+  ],
+  "deltas": [
+    {
+      "op": "create",
+      "row": {
+        "schema": "public",
+        "table": "human_sessions",
+        "name": "vnc_password_pending",
+        "type": "text",
+        "typeSchema": null,
+        "notNull": false,
+        "dimensions": 0,
+        "default": null,
+        "generated": null,
+        "identity": null,
+        "entityType": "columns"
+      }
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"human_sessions\",\"access_token_hash\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"human_sessions\",\"runtime_token_hash\"]"
+    },
+    {
+      "op": "drop",
+      "key": "columns\u0000[\"public\",\"human_sessions\",\"gateway_closed\"]"
+    },
+    {
+      "op": "drop",
+      "key": "uniques\u0000[\"public\",\"human_sessions\",\"human_sessions_access_token_hash_key\"]"
+    }
+  ]
+}

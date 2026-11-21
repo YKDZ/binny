@@ -445,6 +445,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
+    ports:
+      - "5900"
     volumes:
       - browser-one-owner:/var/lib/binny/browser-profile
     labels:
@@ -464,6 +466,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
+    ports:
+      - "5900"
     volumes:
       - browser-two-owner:/var/lib/binny/browser-profile
     labels:
@@ -500,6 +504,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
+    ports:
+      - "5900"
     volumes:
       - linuxdo-runtime-owner:/var/lib/binny/browser-profile
     labels:
@@ -521,6 +527,8 @@ services:
       BINNY_RUNTIME_PORT: 8080
       BINNY_RUNTIME_ENVIRONMENT: browser
       BINNY_BROWSER_PROFILE_REUSE: "true"
+    ports:
+      - "5900"
     volumes:
       - linuxdo-runtime-two-owner:/var/lib/binny/browser-profile
     labels:

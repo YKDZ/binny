@@ -9,6 +9,7 @@ import {
   withPostgresJsonSchemaProjection,
 } from "./postgres-text.ts";
 import {
+  runtimeActiveHumanSessionSchema,
   runtimeHumanSessionControlSchema,
   runtimeHumanSessionEventSchema,
 } from "./runtime-human-session.ts";
@@ -307,7 +308,7 @@ export const binStatusSchema = z.enum(["active", "disabled"]);
 
 export const runtimeHeartbeatIntervalMs = 2_000;
 export const runtimeHeartbeatTimeoutMs = 8_000;
-export const runtimeProtocolVersion = 9;
+export const runtimeProtocolVersion = 10;
 
 const sourceAccessSnapshotGroupSchema = z
   .object({
@@ -495,6 +496,7 @@ const runtimeHeartbeatFieldsSchema = z.object({
   activeRunId: z.string().uuid().nullable(),
   claimInFlight: z.boolean(),
   stoppedRunId: z.string().uuid().optional(),
+  activeHumanSession: runtimeActiveHumanSessionSchema.nullable().optional(),
   humanSessionEvent: runtimeHumanSessionEventSchema.optional(),
   sourceAdapter: sourceAdapterManifestStoredSchema,
   environment: runtimeEnvironmentSchema,

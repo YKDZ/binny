@@ -172,14 +172,12 @@ export const humanSessions = pgTable(
     binId: text("bin_id")
       .notNull()
       .references(() => binConfigurations.id, { onDelete: "cascade" }),
-    accessTokenHash: text("access_token_hash").notNull().unique(),
     status: text("status", { enum: humanSessionStatuses })
       .notNull()
       .default("pending"),
     runtimeId: text("runtime_id"),
     ownerGeneration: bigint("owner_generation", { mode: "bigint" }),
-    runtimeTokenHash: text("runtime_token_hash"),
-    gatewayClosed: boolean("gateway_closed").notNull().default(false),
+    vncPasswordPending: text("vnc_password_pending"),
     runtimeClosed: boolean("runtime_closed").notNull().default(false),
     failure: jsonb("failure"),
     requestedAt: timestamp("requested_at", { withTimezone: true, mode: "date" })

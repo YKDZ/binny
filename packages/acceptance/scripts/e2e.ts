@@ -190,6 +190,7 @@ const schemaVariantRuntimeImageName =
 const rssRuntimeImageName = projectName + "-rss:local";
 const rssCandidateRuntimeImageName = projectName + "-rss-candidate:local";
 const linuxdoRuntimeImageName = projectName + "-linuxdo:local";
+const vncViewerImageName = projectName + "-vnc-viewer:local";
 const rssBaselineRuntimeImageName = projectName + "-rss-baseline:local";
 const linuxdoBaselineRuntimeImageName = projectName + "-linuxdo-baseline:local";
 const articleAdapterRuntimeImageNames = {
@@ -13952,12 +13953,20 @@ async function main(): Promise<void> {
       builtImages.add(schemaVariantRuntimeImageName);
     }
     if (runFunctionalJourney) {
-      lightweightImageTasks.push({
-        task: "@binny/source-adapter-linuxdo#image:build",
-        imageVariable: "BINNY_LINUXDO_IMAGE",
-        image: linuxdoRuntimeImageName,
-      });
+      lightweightImageTasks.push(
+        {
+          task: "@binny/source-adapter-linuxdo#image:build",
+          imageVariable: "BINNY_LINUXDO_IMAGE",
+          image: linuxdoRuntimeImageName,
+        },
+        {
+          task: "@binny/source-adapter-runtime#image:build:vnc-viewer-fixture",
+          imageVariable: "BINNY_TEST_VNC_VIEWER_IMAGE",
+          image: vncViewerImageName,
+        },
+      );
       builtImages.add(linuxdoRuntimeImageName);
+      builtImages.add(vncViewerImageName);
     }
     if (articleAdaptersOnly || (runFunctionalJourney && !rssLinuxdoOnly)) {
       lightweightImageTasks.push(
@@ -14390,11 +14399,9 @@ async function main(): Promise<void> {
       );
       linuxdoViewerBrowser = await startLinuxdoViewerBrowser({
         projectName,
-        image: linuxdoRuntimeImageName,
-        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
+        image: vncViewerImageName,
         run,
       });
-      const outerBrowser = linuxdoViewerBrowser.browser;
       const linuxdoSourceControlUrl =
         "http://" +
         (process.env.BINNY_E2E_HOST ?? "172.17.0.1") +
@@ -14405,9 +14412,8 @@ async function main(): Promise<void> {
         binId: "binny-integration-linuxdo",
         topicId: 2401,
         cli: (args) => cli(baseUrl, args),
-        browser: outerBrowser,
-        publishedHost: process.env.BINNY_E2E_HOST ?? "172.17.0.1",
-        serverPort: composePort,
+        vncViewer: linuxdoViewerBrowser,
+        apiUrl: baseUrl,
         sourceOrigin: "http://linuxdo-e2e-source:8081",
         sourceControlUrl: linuxdoSourceControlUrl,
         username: "binny-discovery-user",

@@ -31,6 +31,15 @@ type DockerContainerInspectPayload = {
       readonly Status?: unknown;
     };
   };
+  readonly NetworkSettings?: {
+    readonly Ports?: Record<
+      string,
+      ReadonlyArray<{
+        readonly HostIp?: unknown;
+        readonly HostPort?: unknown;
+      }> | null
+    >;
+  };
 };
 
 type DockerContainerListItem = {
@@ -144,6 +153,33 @@ function normalizeTimestamp(raw: unknown): string | null {
   return raw;
 }
 
+function parseVncHostPort(
+  payload: DockerContainerInspectPayload,
+  status: ManagedContainerStatus,
+): number | null {
+  if (status !== "running") return null;
+  const bindings = payload.NetworkSettings?.Ports?.["5900/tcp"];
+  if (!Array.isArray(bindings) || bindings.length === 0) return null;
+  const preferred =
+    bindings.find(
+      (entry) =>
+        entry.HostIp === "0.0.0.0" &&
+        typeof entry.HostPort === "string" &&
+        entry.HostPort.length > 0,
+    ) ??
+    bindings.find(
+      (entry) =>
+        typeof entry.HostPort === "string" && entry.HostPort.length > 0,
+    );
+  if (preferred === undefined || typeof preferred.HostPort !== "string") {
+    return null;
+  }
+  const parsed = Number(preferred.HostPort);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65_535
+    ? parsed
+    : null;
+}
+
 function parseManagedInspectResult(
   payload: DockerContainerInspectPayload,
   expectedComposeProject: string,
@@ -161,17 +197,19 @@ function parseManagedInspectResult(
   if (binId === undefined) return null;
 
   const state = payload.State ?? {};
+  const status = normalizeContainerStatus(state.Status);
   return {
     containerId: payload.Id,
     composeProject: expectedComposeProject,
     composeService,
     binId,
-    status: normalizeContainerStatus(state.Status),
+    status,
     exitCode: typeof state.ExitCode === "number" ? state.ExitCode : 0,
     oomKilled: state.OOMKilled === true,
     startedAt: normalizeTimestamp(state.StartedAt),
     finishedAt: normalizeTimestamp(state.FinishedAt),
     healthStatus: normalizeHealthStatus(state.Health?.Status),
+    vncHostPort: parseVncHostPort(payload, status),
   };
 }
 

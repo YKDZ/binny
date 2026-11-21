@@ -35,20 +35,19 @@
     "image:build:protocol-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-protocol-fixture",
     "image:build:configuration-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-configuration-fixture",
     "image:build:manual-runs-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-manual-runs-fixture",
-    "image:build:schema-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-schema-fixture"
+    "image:build:schema-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-schema-fixture",
+    "image:build:vnc-viewer-fixture": "cd \"${BINNY_IMAGE_BUILD_CONTEXT:-../..}\" && docker buildx bake --load --file package.json --file docker-bake.hcl runtime-vnc-viewer-fixture"
   },
   "dependencies": {
     "@binny/api": "workspace:*",
     "@binny/contracts": "workspace:*",
     "@binny/source-adapter-sdk": "workspace:*",
     "patchright-core": "1.64.2",
-    "ws": "8.18.3",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@binny/tooling-config": "workspace:*",
     "@types/node": "catalog:",
-    "@types/ws": "8.18.1",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
