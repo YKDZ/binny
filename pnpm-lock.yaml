@@ -371,8 +371,8 @@ importers:
         specifier: ^3.0.1
         version: 3.0.1(ajv@8.17.1)
       cron-parser:
-        specifier: 5.10.2
-        version: 5.10.2
+        specifier: 5.10.4
+        version: 5.10.4
       drizzle-orm:
         specifier: 1.0.0-rc.5
         version: 1.0.0-rc.5(postgres@3.4.9(patch_hash=bec0a3ba3c760c4c49d953f929e3d94e89366d7277029e55c2cffe8561d17c1e))(zod@4.6.7)
@@ -1752,8 +1752,8 @@ packages:
     resolution: {integrity: sha512-LMDU/U2yA4IPIY8KT0NsNPWEYZvAMkbgyspxJ6btJaYV+WMDOHAZCmB0lsTObiHaRS1V/ztKAl7+TSkTqXyeoA==}
     engines: {node: '>=20.19.0'}
 
-  cron-parser@5.10.2:
-    resolution: {integrity: sha512-JfAYMY0LZaWQTuict8PhtF/ksSnq8xefSDmQUnnoqvkPYkU/y3UP0DTWzJKFBz0P1IXsDG8q0vY3zHkoFZOhvw==}
+  cron-parser@5.10.4:
+    resolution: {integrity: sha512-TagNqYzoV/C7Ty7VAQjrQg+57WsEOuQEUh0tWT5Dc+l/GOuoAdWVIzFU0CqYdQswqdjUalrdmOvaMtQhErYZTA==}
     engines: {node: '>=18'}
 
   drizzle-kit@1.0.0-rc.5:
@@ -2590,7 +2590,7 @@ snapshots:
 
   cac@7.1.0: {}
 
-  cron-parser@5.10.2:
+  cron-parser@5.10.4:
     dependencies:
       luxon: 3.7.2
 
