@@ -1,5 +1,16 @@
 # 更新日志
 
+## 0.4.0
+
+### Minor Changes
+
+- 发布 0.4.0。
+
+  - 公开 HTTP API 协议版本由 10 升至 14，`/meta/query` 归档查询契约版本由 4 升至 7。
+  - 人工操作会话迁移至原生 VNC 直连：`human open` 改为流式输出（`delivery: "stream"`），等待期间输出 `waiting` 记录（包含 `runtime_sleeping`、`runtime_waking`、`bin_busy` 等排队原因及 `lastWakeError`），入口就绪后一次输出 `ready` 记录（提取自调用 API 地址的 `host`、Docker 实际映射的 `port` 与 8 位一次性 VNC `password`），移除旧 `viewerUrl` / `viewerPath`；`human get` 与 `human close` 仅返回纯会话状态。
+  - 扩展归档搜索摘要展示与按需关联读取：`bin extension-fields` 新增适配器声明的 `summaryFields` 与 `searchRelations`；`archive search` 响应 `matches[]` 新增可选 `summaryExtensions`，请求新增可选 `related`（`{ sourceAdapterId, include }`），在同一次归档快照与命中垃圾桶视图下解析关联版本，逐项返回 `readable` / `unreadable` / `none` 并在顶层 `relatedRevisions` 同页去重共享正文与资源状态；`--output text` 同步展示视图摘要、关联状态与去重关联版本。
+  - 全仓业务输出、错误与文本模式统一为中立、可组合的事实：移除 `suggestion` 字段与内嵌命令或操作教程（`service info`、`run list`、`schedule list`、扩展字段诊断及分页游标文本）；`run get` 补充输出 `sessionState` 与已知 `humanSession` 状态；`archive batch-read` 超出引用数或 16 MiB 响应上限时在 `error.diagnostic` 返回 `maxReferences`、`requestedReferences`、`maxResponseBytes`、`references` 及单条确证超限时的 `oversizedRevisionId`。
+
 ## 0.3.0
 
 ### Minor Changes
