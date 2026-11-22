@@ -470,8 +470,8 @@ importers:
         specifier: workspace:*
         version: link:../source-adapter-sdk
       patchright-core:
-        specifier: 1.64.2
-        version: 1.64.2
+        specifier: 1.64.3
+        version: 1.64.3
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -587,8 +587,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/source-adapter-sdk
       patchright-core:
-        specifier: 1.64.2
-        version: 1.64.2
+        specifier: 1.64.3
+        version: 1.64.3
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -785,8 +785,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/source-adapter-sdk
       patchright-core:
-        specifier: 1.64.2
-        version: 1.64.2
+        specifier: 1.64.3
+        version: 1.64.3
       zod:
         specifier: 'catalog:'
         version: 4.6.7
@@ -2005,8 +2005,8 @@ packages:
   parse5@8.0.1:
     resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
 
-  patchright-core@1.64.2:
-    resolution: {integrity: sha512-j7Hsw8XThZfiGlNPGJZtX4ERLLi4cval4ihCdOScwBgWqElCT4MWQSDmV/Tuuartgy9/a8DColg4gTAtJ27nPQ==}
+  patchright-core@1.64.3:
+    resolution: {integrity: sha512-AikBjQ6CcsEtk7pJGlZ7ITxIInVd0a8HWPtuGjx2Y0Ogb88sj1wqICiYFz4du6fbaLQStLNEnWCmYm5uODsEzQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2706,7 +2706,7 @@ snapshots:
     dependencies:
       entities: 8.1.0
 
-  patchright-core@1.64.2: {}
+  patchright-core@1.64.3: {}
 
   path-expression-matcher@1.6.2: {}
 

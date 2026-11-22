@@ -42,7 +42,7 @@
     "@binny/api": "workspace:*",
     "@binny/contracts": "workspace:*",
     "@binny/source-adapter-sdk": "workspace:*",
-    "patchright-core": "1.64.2",
+    "patchright-core": "1.64.3",
     "zod": "catalog:"
   },
   "devDependencies": {
